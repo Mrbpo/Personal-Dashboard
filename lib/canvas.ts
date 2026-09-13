@@ -102,16 +102,20 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
   const end = new Date(now.getTime() + 180 * 86400000).toISOString().slice(0, 10);
   const encodedContext = encodeURIComponent("course_" + courseId);
 
-  const [announcements, assignments, modules, planner] = await Promise.all([
+  const [announcements, assignments, modules, quizzes, discussions, planner] = await Promise.all([
     allPages<JsonObject>("/api/v1/announcements?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/assignments?include[]=submission&include[]=all_dates&order_by=due_at&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/modules?include[]=items&include[]=content_details&per_page=100"),
+    allPages<JsonObject>("/api/v1/courses/" + courseId + "/quizzes?per_page=100").catch(() => []),
+    allPages<JsonObject>("/api/v1/courses/" + courseId + "/discussion_topics?per_page=100").catch(() => []),
     allPages<JsonObject>("/api/v1/planner/items?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100").catch(() => []),
   ]);
 
   const sources = [
     ...announcements.map((item) => sourceFromObject(courseId, "announcement", item)),
     ...assignments.map((item) => sourceFromObject(courseId, "assignment", item)),
+    ...quizzes.map((item) => sourceFromObject(courseId, "quiz", item)),
+    ...discussions.map((item) => sourceFromObject(courseId, "discussion", item)),
     ...planner.map((item) => sourceFromObject(courseId, "planner", item.plannable ?? item)),
   ];
   const seen = new Set(sources.map((source) => source.id));
@@ -127,6 +131,13 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
         detail = await canvasRequest<JsonObject>(item.url).then((result) => result.data).catch(() => item);
       }
       const source = sourceFromObject(courseId, type, { ...detail, title: item.title ?? detail.title, html_url: item.html_url ?? detail.html_url });
+      const moduleContext = [
+        courseModule.name ? "所属 Module：" + courseModule.name : "",
+        item.completion_requirement ? "完成要求：" + JSON.stringify(item.completion_requirement) : "",
+        courseModule.prerequisite_module_ids?.length ? "先修 Module ID：" + courseModule.prerequisite_module_ids.join(", ") : "",
+        item.locked_for_user ? "当前状态：因先修条件尚未满足而锁定" : "",
+      ].filter(Boolean).join("\n");
+      if (moduleContext) source.body = moduleContext + (source.body ? "\n" + source.body : "");
       if (type === "file") {
         source.file = {
           url: detail.url ?? "",

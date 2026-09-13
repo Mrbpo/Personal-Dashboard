@@ -1,7 +1,8 @@
 import { PageFrame } from "@/components/page-frame";
 import { SettingsForm } from "@/components/settings-form";
+import { CourseSettings } from "@/components/course-settings";
 import { requireOwnerPage } from "@/lib/authz";
-import { getSettings } from "@/lib/repository";
+import { getSettings, listCourseSettings } from "@/lib/repository";
 import { env } from "cloudflare:workers";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,7 @@ export default async function SettingsPage() {
   const { user, authorized } = await requireOwnerPage("/settings");
   if (!authorized) return <PageFrame eyebrow="PRIVATE" title="无法访问">请使用网站所有者账号登录。</PageFrame>;
   const settings = await getSettings(user.userId).catch(() => ({ timezone: "America/Toronto", dailyMinutes: 150 }));
+  const courses = await listCourseSettings().catch(() => []);
   const services = [
     { name: "Quercus", ready: Boolean(env.CANVAS_TOKEN), detail: env.CANVAS_BASE_URL || "https://q.utoronto.ca" },
     { name: "AI 分析", ready: Boolean(env.OPENAI_API_KEY), detail: env.OPENAI_MODEL || "gpt-5-mini" },
@@ -18,6 +20,10 @@ export default async function SettingsPage() {
   return (
     <PageFrame eyebrow="PREFERENCES" title="学习计划设置" description="控制截止时间显示和每日任务容量。">
       <SettingsForm initial={settings} />
+      <section className="mt-6 rounded-3xl border bg-card p-6 shadow-sm">
+        <h2 className="font-semibold">纳入计划的课程</h2>
+        <div className="mt-4"><CourseSettings initial={courses} /></div>
+      </section>
       <section className="mt-6 rounded-3xl border bg-card p-6 shadow-sm">
         <h2 className="font-semibold">连接状态</h2>
         <div className="mt-4 grid gap-3 sm:grid-cols-3">

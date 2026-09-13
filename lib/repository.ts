@@ -288,3 +288,13 @@ export async function saveSettings(ownerId: string, timezone: string, dailyMinut
      ON CONFLICT(owner_id) DO UPDATE SET timezone=excluded.timezone, daily_minutes=excluded.daily_minutes, updated_at=excluded.updated_at`
   ).bind(ownerId, timezone, dailyMinutes, new Date().toISOString()).run();
 }
+
+export async function listCourseSettings() {
+  const result = await getDatabase().prepare("SELECT id, code, name, enabled FROM courses ORDER BY code").all<D1Row>();
+  return result.results.map((row) => ({ id: row.id, code: row.code, name: row.name, enabled: Boolean(row.enabled) }));
+}
+
+export async function setCourseEnabled(courseId: string, enabled: boolean) {
+  await getDatabase().prepare("UPDATE courses SET enabled=?, updated_at=? WHERE id=?")
+    .bind(enabled ? 1 : 0, new Date().toISOString(), courseId).run();
+}

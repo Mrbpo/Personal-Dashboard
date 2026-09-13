@@ -68,6 +68,7 @@ const syncErrors: Record<string, string> = {
   CANVAS_TOKEN_NOT_CONFIGURED: "Canvas Token 尚未在服务器端配置",
   CANVAS_AUTH_FAILED: "Canvas Token 无效或已过期",
   CANVAS_RATE_LIMITED: "Canvas 暂时限制了请求，请稍后再试",
+  CANVAS_REQUEST_FAILED_403: "Quercus 拒绝了这次云端连接；请检查学校的访问限制",
 };
 
 export function DashboardShell({ displayName }: { displayName: string }) {
