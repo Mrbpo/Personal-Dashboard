@@ -1,0 +1,10 @@
+[Unit]
+Description=Study Cabinet encrypted backup and isolated restore verification
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /srv/study/daily-backup.sh
+User=root
+UMask=0077

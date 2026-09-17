@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="260" viewBox="0 0 640 260">
+ <defs>
+  <g id="frond" fill="#72816a" stroke="#72816a" stroke-width="1.4">
+   <path d="M0 0Q-12-95 10-180" fill="none"/>
+   <path d="M-2-18Q-60-21-62-56Q-23-53-2-18M-4-39Q42-43 48-76Q13-72-4-39M-5-62Q-53-66-51-99Q-18-92-5-62M-4-86Q34-94 37-124Q9-114-4-86M-1-108Q-39-118-33-146Q-7-135-1-108M3-133Q29-143 29-164Q10-157 3-133M7-153Q-14-164-9-181Q5-178 7-153" stroke="none"/>
+  </g>
+  <g id="ginkgo" fill="#a39164" stroke="#a39164" stroke-width="1.2">
+   <path d="M0 0L0-38" fill="none"/>
+   <path d="M0-31Q-38-40-39-67Q-23-80-4-67L0-58 4-67Q23-80 39-67Q38-40 0-31Z"/>
+   <path d="M0-33L-27-65M0-33L-14-67M0-33L14-67M0-33L27-65" fill="none" stroke="#f5f0e3"/>
+  </g>
+ </defs>
+ <g opacity=".78">
+  <use href="#frond" transform="translate(82 273) rotate(-29)"/>
+  <use href="#frond" transform="translate(120 275) rotate(16) scale(.84)"/>
+  <use href="#frond" transform="translate(510 280) rotate(27) scale(1.13)"/>
+  <use href="#frond" transform="translate(558 285) rotate(-13) scale(.77)"/>
+ </g>
+ <g fill="none" stroke="#a39164" stroke-width="2">
+  <path d="M160 268Q233 218 263 143M419 267Q368 224 358 175"/>
+ </g>
+ <use href="#ginkgo" transform="translate(202 237) rotate(-41) scale(.72)"/>
+ <use href="#ginkgo" transform="translate(236 206) rotate(24) scale(.62)"/>
+ <use href="#ginkgo" transform="translate(260 163) rotate(13) scale(.56)"/>
+ <use href="#ginkgo" transform="translate(387 239) rotate(35) scale(.8)"/>
+ <use href="#ginkgo" transform="translate(360 192) rotate(-18) scale(.59)"/>
+</svg>

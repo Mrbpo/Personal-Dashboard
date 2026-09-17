@@ -6,8 +6,9 @@ type ModelContext = {
   registerTool(tool: Record<string, unknown>, options?: { signal?: AbortSignal }): void | Promise<void>;
 };
 
-function todayToronto() {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Toronto" });
+async function todayForSettings() {
+  const settings = await jsonOrThrow(await fetch("/api/settings"));
+  return new Date().toLocaleDateString("en-CA", { timeZone: settings.timezone || "America/Toronto" });
 }
 
 async function jsonOrThrow(response: Response) {
@@ -32,7 +33,7 @@ export function WebMcpTools() {
       description: "读取网站中今天的跨课程学习任务、紧急事项和需要确认的内容。",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, untrustedContentHint: true },
-      execute: async () => jsonOrThrow(await fetch("/api/dashboard?date=" + todayToronto())),
+      execute: async () => jsonOrThrow(await fetch("/api/dashboard?date=" + await todayForSettings())),
     });
 
     register({
@@ -66,7 +67,7 @@ export function WebMcpTools() {
           const response = await fetch("/api/sync/courses/" + course.id + "?runId=" + start.runId, { method: "POST" });
           results.push(await response.json());
         }
-        await jsonOrThrow(await fetch("/api/plans/" + todayToronto() + "/generate", { method: "POST" }));
+        await jsonOrThrow(await fetch("/api/plans/" + await todayForSettings() + "/generate", { method: "POST" }));
         window.dispatchEvent(new Event("canvas-sync-complete"));
         return { runId: start.runId, courses: results };
       },

@@ -44,3 +44,8 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+/data/
+/.tmp-vic3-ui/
+*.db-shm
+*.db-wal
+*.tsbuildinfo

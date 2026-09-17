@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import "./globals.css";
+import "./theme.css";
 import { WebMcpTools } from "@/components/webmcp-tools";
 
 export const metadata: Metadata = {
-  title: "Course Radar · Canvas 学习助手",
-  description: "私人 Quercus 课程分析、截止日期追踪与每日学习清单。",
+  title: "Study Cabinet · 个人学习总览",
+  description: "私人课程资料、日程、任务与 AI 服务总览。",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

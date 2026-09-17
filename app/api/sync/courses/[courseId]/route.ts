@@ -6,7 +6,8 @@ import {
   hashSource,
   markCourseSynced,
   saveAssignment,
-  saveCourseSummary,
+  rebuildCourseSummary,
+  reconcileCourseSources,
   saveSource,
   touchSource,
   updateSyncCourse,
@@ -16,7 +17,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
   const denied = await requireOwnerApi();
   if (denied) return denied;
   const { courseId } = await params;
-  const runId = new URL(request.url).searchParams.get("runId");
+  const searchParams = new URL(request.url).searchParams;
+  const runId = searchParams.get("runId");
+  const analysisLimit = searchParams.get("mode") === "automatic" ? 6 : 30;
   if (!runId) return Response.json({ error: "缺少 runId" }, { status: 400 });
 
   await updateSyncCourse(runId, courseId, "running");
@@ -25,13 +28,18 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
     for (const assignment of assignments) await saveAssignment(courseId, assignment);
 
     let analyzed = 0;
+    let attempted = 0;
     let unchanged = 0;
     let aiFailures = 0;
-    const summaryLines: string[] = [];
-    for (const source of sources) {
+    const orderedSources = [...sources].sort((a, b) => {
+      if (Boolean(a.dueAt) !== Boolean(b.dueAt)) return a.dueAt ? -1 : 1;
+      if (a.dueAt && b.dueAt) return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
+      return a.sourceType === "assignment" ? -1 : b.sourceType === "assignment" ? 1 : 0;
+    });
+    for (const source of orderedSources) {
       const hash = await hashSource(source);
       const stored = await getStoredSource(source.id);
-      if (stored?.content_hash === hash) {
+      if (stored?.content_hash === hash && stored.extraction_version >= 5 && (stored.analysis_status === "complete" || !hasOpenAI())) {
         unchanged += 1;
         await touchSource(source.id);
         continue;
@@ -39,27 +47,27 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
 
       let analysis = null;
       const eligible = source.body.length >= 24 || Boolean(source.file);
-      if (eligible && hasOpenAI() && analyzed < 30) {
+      let analysisStatus = eligible ? (hasOpenAI() ? "pending" : "ai_unavailable") : "rule_only";
+      if (eligible && hasOpenAI() && attempted < analysisLimit) {
+        attempted += 1;
         try {
           analysis = source.file ? await analyzeSourceFile(source) : await analyzeSource(source);
+          analysisStatus = "complete";
           analyzed += 1;
-          if (analysis.summary) summaryLines.push(analysis.summary);
-        } catch {
+        } catch (error) {
           aiFailures += 1;
+          const code = error instanceof Error ? error.message : "AI_ANALYSIS_FAILED";
+          analysisStatus = code === "FILE_TOO_LARGE" ? "file_too_large" : code === "FILE_ANALYSIS_UNAVAILABLE" ? "unsupported_file" : "ai_failed";
         }
       }
-      await saveSource(source, analysis, hash);
+      if (["externaltool", "externalurl"].includes(source.sourceType)) analysisStatus = "external_unreadable";
+      await saveSource(source, analysis, hash, analysisStatus);
     }
+    const missing = await reconcileCourseSources(courseId, sources.map((source) => source.id));
     await markCourseSynced(courseId);
-    await saveCourseSummary(
-      courseId,
-      summaryLines.slice(0, 6).join(" ") || "已同步课程结构和确定的截止任务；暂无可用的 AI 摘要。",
-      summaryLines.slice(0, 4),
-      aiFailures ? ["部分内容暂时无法完成 AI 分析，请查看来源。"] : [],
-      hasOpenAI() && analyzed > 0,
-    );
+    await rebuildCourseSummary(courseId);
     await updateSyncCourse(runId, courseId, "complete");
-    return Response.json({ courseId, sourceCount: sources.length, analyzed, unchanged, aiFailures });
+    return Response.json({ courseId, sourceCount: sources.length, analyzed, attempted, unchanged, aiFailures, missing });
   } catch (error) {
     const message = error instanceof Error ? error.message : "COURSE_SYNC_FAILED";
     await updateSyncCourse(runId, courseId, "failed", message);

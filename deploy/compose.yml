@@ -1,0 +1,46 @@
+services:
+  web:
+    image: study-cabinet:${APP_VERSION:?APP_VERSION required}
+    restart: unless-stopped
+    env_file: /srv/study/runtime.env
+    environment:
+      CLOUD_MODE: 'true'
+      LOCAL_DEV_BYPASS_AUTH: 'false'
+      DATABASE_URL: file:/app/data/course-radar-v2.db
+      LIBRARY_DIR: /app/data/library
+      SERVICE_VAULT_DIR: /app/data/private
+    volumes:
+      - /srv/study/data:/app/data
+      - /srv/study/assets:/app/public/assets/vic3-theme:ro
+      - /srv/study/status:/app/deploy-status:ro
+    ports: ['127.0.0.1:3000:3000']
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+  worker:
+    image: study-cabinet:${APP_VERSION:?APP_VERSION required}
+    command: [npm, run, worker]
+    restart: unless-stopped
+    stop_grace_period: 180s
+    env_file: /srv/study/runtime.env
+    environment:
+      CLOUD_MODE: 'true'
+      SYNC_PRIMARY: 'true'
+      LOCAL_OCR: 'true'
+      DATABASE_URL: file:/app/data/course-radar-v2.db
+      LIBRARY_DIR: /app/data/library
+      SERVICE_VAULT_DIR: /app/data/private
+    volumes: [/srv/study/data:/app/data]
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: /srv/study/runtime.env
+    ports: ['80:80','443:443']
+    volumes:
+      - /srv/study/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

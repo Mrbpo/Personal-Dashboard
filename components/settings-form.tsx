@@ -1,11 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 
-export function SettingsForm({ initial }: { initial: { timezone: string; dailyMinutes: number } }) {
+export function SettingsForm({ initial }: { initial: { timezone: string; dailyMinutes: number; displayName?: string } }) {
+  const router = useRouter();
+  const [displayName, setDisplayName] = useState(initial.displayName || "");
   const [timezone, setTimezone] = useState(initial.timezone);
   const [dailyMinutes, setDailyMinutes] = useState(initial.dailyMinutes);
   const [message, setMessage] = useState("");
@@ -16,13 +19,19 @@ export function SettingsForm({ initial }: { initial: { timezone: string; dailyMi
     const response = await fetch("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ timezone, dailyMinutes }),
+      body: JSON.stringify({ timezone, dailyMinutes, displayName }),
     });
     setMessage(response.ok ? "设置已保存" : "保存失败，请稍后再试");
+    if (response.ok) router.refresh();
   }
 
   return (
     <form onSubmit={save} className="max-w-xl space-y-6 rounded-3xl border bg-card p-6 shadow-sm">
+      <div className="space-y-2">
+        <Label htmlFor="display-name">显示姓名</Label>
+        <Input id="display-name" autoComplete="nickname" maxLength={40} placeholder="你希望网站怎么称呼你" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+        <p className="text-sm text-muted-foreground">用于首页简报和侧栏，可填写昵称。留空使用默认称呼。</p>
+      </div>
       <div className="space-y-2">
         <Label htmlFor="timezone">时区</Label>
         <Input id="timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)} />

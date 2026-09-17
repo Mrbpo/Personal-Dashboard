@@ -21,6 +21,7 @@ export type LearningTask = {
   title: string;
   action: string;
   requirements: string[];
+  startAt: string | null;
   dueAt: string | null;
   unlockAt: string | null;
   lockAt: string | null;
@@ -28,8 +29,12 @@ export type LearningTask = {
   localStatus: "active" | "completed" | "ignored";
   urgency: Urgency;
   confidence: "certain" | "inferred";
+  analysisStatus?: string;
   evidence: string;
   estimatedMinutes: number | null;
+  pointsPossible: number | null;
+  prerequisiteBlocked: boolean;
+  priorityScore: number;
   updatedAt: string;
 };
 
@@ -48,6 +53,8 @@ export type CanvasSource = {
   submissionState?: string | null;
   submittedAt?: string | null;
   pointsPossible?: number | null;
+  prerequisiteBlocked?: boolean;
+  moduleName?: string | null;
   file?: { url: string; name: string; size: number; contentType: string } | null;
 };
 
@@ -57,6 +64,7 @@ export type ExtractedAnalysis = {
     title: string;
     action: string;
     requirements: string[];
+    recommendedStartAt: string | null;
     inferredDueAt: string | null;
     confidence: "certain" | "inferred";
     evidence: string;

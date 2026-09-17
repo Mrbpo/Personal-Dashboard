@@ -1,0 +1,23 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ':memory:'
+      SERVICE_VAULT_DIR: /tmp/study-ci-vault
+      CHATGPT_AUTO: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npx tsc --noEmit
+      - run: node scripts/check-migrations.mjs
+      - run: npm run build
+      - run: node --experimental-strip-types scripts/smoke-production.mjs

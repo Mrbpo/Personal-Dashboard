@@ -1,0 +1,7 @@
+import {apiOwner,apiError,boundedForm} from '@/lib/api-guard';
+import {listDocuments,saveDocument} from '@/lib/library';
+import {validateAttachment} from '@/lib/tutor';
+import {enqueue} from '@/lib/jobs';
+import {listCourseSettings} from '@/lib/repository';
+export async function GET(r:Request){try{return Response.json(await listDocuments(await apiOwner(r)),{headers:{'Cache-Control':'no-store'}});}catch(e){return apiError(e);}}
+export async function POST(r:Request){try{const owner=await apiOwner(r),f=await boundedForm(r),file=f.get('file');if(!(file instanceof File))throw new Error('请选择文件');const course=String(f.get('courseId')||'');if(course&&!(await listCourseSettings()).some(c=>c.id===course&&c.enabled))throw new Error('课程无效');const bytes=new Uint8Array(await file.arrayBuffer()),a=validateAttachment(file.name,bytes);const id=await saveDocument(owner,course,'upload',String(f.get('originKey')||a.name).slice(0,500),a.name,a.mime,bytes);await enqueue('index',{owner,id});return Response.json({id});}catch(e){return apiError(e);}}

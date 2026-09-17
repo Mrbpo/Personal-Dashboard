@@ -1,11 +1,11 @@
-import { env } from "cloudflare:workers";
-import type { CanvasSource } from "./domain";
+import { serviceValue } from "./service-vault.ts";
+import type { CanvasSource } from "./domain.ts";
 
 type JsonObject = Record<string, any>;
 
 function config() {
-  const baseUrl = (env.CANVAS_BASE_URL || "https://q.utoronto.ca").replace(/\/$/, "");
-  const token = env.CANVAS_TOKEN;
+  const baseUrl = (process.env.CANVAS_BASE_URL || "https://q.utoronto.ca").replace(/\/$/, "");
+  const token = serviceValue("CANVAS_TOKEN");
   if (!token) throw new Error("CANVAS_TOKEN_NOT_CONFIGURED");
   return { baseUrl, token };
 }
@@ -17,9 +17,11 @@ async function canvasRequest<T>(pathOrUrl: string): Promise<{ data: T; headers: 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const response = await fetch(url, {
       headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+      signal: AbortSignal.timeout(25000),
     });
     if (response.status === 429 && attempt < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+      const retryAfter = Number(response.headers.get("retry-after") || 0);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2500, retryAfter ? retryAfter * 1000 : 350 * 2 ** attempt)));
       continue;
     }
     if (!response.ok) {
@@ -31,7 +33,38 @@ async function canvasRequest<T>(pathOrUrl: string): Promise<{ data: T; headers: 
   throw new Error("CANVAS_RATE_LIMITED");
 }
 
-function nextLink(value: string | null): string | null {
+async function canvasMutation<T>(path: string, method: "POST" | "PUT", values: Record<string, string>) {
+  const { baseUrl, token } = config();
+  const response = await fetch(baseUrl + path, {
+    method,
+    headers: { Authorization: "Bearer " + token, Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(values),
+    signal: AbortSignal.timeout(25000),
+  });
+  if (!response.ok) {
+    if (response.status === 401) throw new Error("CANVAS_AUTH_FAILED");
+    if (response.status === 403) throw new Error("CANVAS_PLANNER_WRITE_FORBIDDEN");
+    throw new Error("CANVAS_PLANNER_WRITE_FAILED_" + response.status);
+  }
+  return await response.json() as T;
+}
+
+export async function setCanvasPlannerComplete(sourceType: string, sourceId: string, completed: boolean) {
+  const typeMap: Record<string, string> = { announcement: "announcement", assignment: "assignment", discussion: "discussion_topic", quiz: "quiz", page: "wiki_page" };
+  const plannableType = typeMap[sourceType];
+  if (!plannableType || !/^\d+$/.test(sourceId)) return { supported: false, synced: false };
+  const overrides = await allPages<JsonObject>("/api/v1/planner/overrides?per_page=100");
+  const existing = overrides.find((item) => String(item.plannable_id) === sourceId && String(item.plannable_type).toLowerCase() === plannableType);
+  if (existing) {
+    await canvasMutation(`/api/v1/planner/overrides/${existing.id}`, "PUT", { marked_complete: String(completed) });
+    return { supported: true, synced: true };
+  }
+  if (!completed) return { supported: true, synced: true };
+  await canvasMutation("/api/v1/planner/overrides", "POST", { plannable_type: plannableType, plannable_id: sourceId, marked_complete: "true" });
+  return { supported: true, synced: true };
+}
+
+export function nextLink(value: string | null): string | null {
   if (!value) return null;
   for (const part of value.split(",")) {
     const match = part.match(/<([^>]+)>;\s*rel="([^"]+)"/);
@@ -40,7 +73,7 @@ function nextLink(value: string | null): string | null {
   return null;
 }
 
-async function allPages<T>(path: string): Promise<T[]> {
+export async function allPages<T>(path: string): Promise<T[]> {
   let next: string | null = path;
   const items: T[] = [];
   while (next) {
@@ -51,7 +84,7 @@ async function allPages<T>(path: string): Promise<T[]> {
   return items;
 }
 
-function textFromHtml(html: string | null | undefined): string {
+export function textFromHtml(html: string | null | undefined): string {
   return (html || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -87,6 +120,8 @@ function sourceFromObject(courseId: string, type: string, item: JsonObject): Can
     submissionState: item.submission?.workflow_state ?? null,
     submittedAt: item.submission?.submitted_at ?? null,
     pointsPossible: typeof item.points_possible === "number" ? item.points_possible : null,
+    prerequisiteBlocked: Boolean(item.locked_for_user),
+    moduleName: item.module_name ?? null,
     file: null,
   };
 }
@@ -102,22 +137,49 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
   const end = new Date(now.getTime() + 180 * 86400000).toISOString().slice(0, 10);
   const encodedContext = encodeURIComponent("course_" + courseId);
 
-  const [announcements, assignments, modules, quizzes, discussions, planner] = await Promise.all([
+  const [announcements, assignments, modules, quizzes, discussions, pageIndex, courseFiles, planner] = await Promise.all([
     allPages<JsonObject>("/api/v1/announcements?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/assignments?include[]=submission&include[]=all_dates&order_by=due_at&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/modules?include[]=items&include[]=content_details&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/quizzes?per_page=100").catch(() => []),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/discussion_topics?per_page=100").catch(() => []),
+    allPages<JsonObject>("/api/v1/courses/" + courseId + "/pages?per_page=100").catch(() => []),
+    allPages<JsonObject>("/api/v1/courses/" + courseId + "/files?per_page=100").catch(() => []),
     allPages<JsonObject>("/api/v1/planner/items?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100").catch(() => []),
   ]);
+  const pages = await Promise.all(pageIndex.map((page) => canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "/pages/" + encodeURIComponent(page.url)).then((result) => result.data).catch(() => page)));
+  const plannerCompletion = new Map(planner.map((item) => [`${String(item.plannable_type || "").toLowerCase()}:${String(item.plannable_id ?? item.plannable?.id ?? "")}`, Boolean(item.planner_override?.marked_complete)]));
+
+  const canvasSource = (type: string, item: JsonObject) => {
+    const source = sourceFromObject(courseId, type, item);
+    const plannerType = type === "discussion" ? "discussion_topic" : type === "page" ? "wiki_page" : type;
+    if (plannerCompletion.get(`${plannerType}:${source.sourceId}`)) source.submissionState = "completed";
+    return source;
+  };
 
   const sources = [
-    ...announcements.map((item) => sourceFromObject(courseId, "announcement", item)),
-    ...assignments.map((item) => sourceFromObject(courseId, "assignment", item)),
-    ...quizzes.map((item) => sourceFromObject(courseId, "quiz", item)),
-    ...discussions.map((item) => sourceFromObject(courseId, "discussion", item)),
+    ...announcements.map((item) => canvasSource("announcement", item)),
+    ...assignments.map((item) => canvasSource("assignment", item)),
+    ...quizzes.map((item) => canvasSource("quiz", item)),
+    ...discussions.map((item) => canvasSource("discussion", item)),
+    ...pages.map((item) => canvasSource("page", item)),
+    ...courseFiles.map((item) => {
+      const source = sourceFromObject(courseId, "file", item);
+      source.file = { url: item.url ?? "", name: item.display_name ?? item.filename ?? "file", size: Number(item.size ?? 0), contentType: item["content-type"] ?? item.content_type ?? "application/octet-stream" };
+      return source;
+    }),
     ...planner.map((item) => sourceFromObject(courseId, "planner", item.plannable ?? item)),
   ];
+  for (const courseModule of modules) {
+    const source = sourceFromObject(courseId, "module", {
+      id: courseModule.id,
+      name: courseModule.name,
+      body: [courseModule.state ? "Module 状态：" + courseModule.state : "", courseModule.completed_at ? "完成时间：" + courseModule.completed_at : "", courseModule.prerequisite_module_ids?.length ? "先修 Module ID：" + courseModule.prerequisite_module_ids.join(", ") : ""].filter(Boolean).join("\n"),
+      html_url: baseUrl + "/courses/" + courseId + "/modules",
+      updated_at: courseModule.updated_at,
+    });
+    sources.push(source);
+  }
   const seen = new Set(sources.map((source) => source.id));
 
   for (const courseModule of modules) {
@@ -130,7 +192,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       if (item.url && typeof item.url === "string" && item.url.startsWith(baseUrl + "/api/")) {
         detail = await canvasRequest<JsonObject>(item.url).then((result) => result.data).catch(() => item);
       }
-      const source = sourceFromObject(courseId, type, { ...detail, title: item.title ?? detail.title, html_url: item.html_url ?? detail.html_url });
+      const source = sourceFromObject(courseId, type, { ...(item.content_details || {}), ...detail, title: item.title ?? detail.title, html_url: item.html_url ?? detail.html_url, locked_for_user: item.locked_for_user, module_name: courseModule.name });
       const moduleContext = [
         courseModule.name ? "所属 Module：" + courseModule.name : "",
         item.completion_requirement ? "完成要求：" + JSON.stringify(item.completion_requirement) : "",
@@ -138,6 +200,8 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
         item.locked_for_user ? "当前状态：因先修条件尚未满足而锁定" : "",
       ].filter(Boolean).join("\n");
       if (moduleContext) source.body = moduleContext + (source.body ? "\n" + source.body : "");
+      source.prerequisiteBlocked = Boolean(item.locked_for_user);
+      source.moduleName = courseModule.name ?? null;
       if (type === "file") {
         source.file = {
           url: detail.url ?? "",
@@ -152,6 +216,13 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       }
     }
   }
+  for (const parent of [...announcements, ...assignments]) {
+    for (const attachment of parent.attachments || []) {
+      const source = sourceFromObject(courseId, "file", { ...attachment, title: attachment.display_name ?? attachment.filename, html_url: parent.html_url });
+      source.file = { url: attachment.url ?? "", name: attachment.display_name ?? attachment.filename ?? "file", size: Number(attachment.size ?? 0), contentType: attachment["content-type"] ?? attachment.content_type ?? "application/octet-stream" };
+      if (!seen.has(source.id)) { seen.add(source.id); sources.push(source); }
+    }
+  }
   return { sources, assignments };
 }
 
@@ -160,9 +231,8 @@ export async function downloadCanvasFile(url: string): Promise<Response> {
   const parsed = new URL(url);
   if (parsed.protocol !== "https:") throw new Error("UNTRUSTED_CANVAS_FILE_URL");
   const isCanvasUrl = url.startsWith(baseUrl + "/");
-  // Canvas metadata can return a short-lived signed CDN URL. Never forward the
-  // Canvas bearer token outside the configured Canvas origin.
-  const response = await fetch(url, isCanvasUrl ? { headers: { Authorization: "Bearer " + token } } : undefined);
+  if (!isCanvasUrl) throw new Error("UNTRUSTED_CANVAS_FILE_URL");
+  const response = await fetch(url, { headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(30000) });
   if (!response.ok) throw new Error("CANVAS_FILE_DOWNLOAD_FAILED_" + response.status);
   return response;
 }

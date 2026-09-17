@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Toronto backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 America/Toronto
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
