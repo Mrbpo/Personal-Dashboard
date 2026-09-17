@@ -66,7 +66,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Upload failed." }
 
     Write-Host "`nApplying safe ownership and permissions..." -ForegroundColor Cyan
-    $remoteCommand = "chown root:root /srv/study/Caddyfile /srv/study/compose.yml /srv/study/*.sh /srv/study/study-backup.* && chmod 644 /srv/study/Caddyfile /srv/study/compose.yml /srv/study/study-backup.* && chmod 700 /srv/study/*.sh && find /srv/study/assets -type f -exec chmod 644 {} + && printf 'deployment_files=' && find /srv/study -maxdepth 1 -type f | wc -l && printf 'assets=' && find /srv/study/assets -type f | wc -l"
+    $remoteCommand = "chown root:root /srv/study/Caddyfile /srv/study/compose.yml /srv/study/*.sh /srv/study/study-backup.* && chmod 644 /srv/study/Caddyfile /srv/study/compose.yml /srv/study/study-backup.* && chmod 700 /srv/study/*.sh && find /srv/study/assets -type d -exec chmod 755 {} + && find /srv/study/assets -type f -exec chmod 644 {} + && printf 'deployment_files=' && find /srv/study -maxdepth 1 -type f | wc -l && printf 'assets=' && find /srv/study/assets -type f | wc -l"
     & $ssh "${User}@${Server}" $remoteCommand
     if ($LASTEXITCODE -ne 0) { throw "Files uploaded, but the permission check failed." }
 
