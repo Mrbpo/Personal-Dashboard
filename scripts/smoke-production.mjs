@@ -22,12 +22,25 @@ try{
  const form=new FormData();form.set('file',new Blob(['isolated smoke document']),'smoke.txt');
   const upload=await fetch(origin+'/api/library',{method:'POST',headers,body:form});assert.equal(upload.status,200);const {id}=await upload.json();
   worker=spawn(process.execPath,['--experimental-strip-types','scripts/worker.ts'],{env:{...env,SYNC_PRIMARY:'false'},stdio:'ignore'});
-  let parsed=false;for(let i=0;i<30;i++){const docs=await (await fetch(origin+'/api/library',{headers})).json();if(docs.find(d=>d.id===id)?.status==='ready'){parsed=true;break;}await new Promise(r=>setTimeout(r,500));}assert.ok(parsed,'independent worker parsed queued document');
+  let parsed=false;
+  for(let i=0;i<30;i++){
+    const response=await fetch(origin+'/api/library',{headers});
+    const body=await response.text();
+    assert.equal(response.status,200,`library polling failed: ${body}`);
+    const docs=JSON.parse(body);
+    assert.ok(Array.isArray(docs),`library polling returned a non-list response: ${body}`);
+    if(docs.find(d=>d.id===id)?.status==='ready'){parsed=true;break;}
+    await new Promise(r=>setTimeout(r,500));
+  }
+  assert.ok(parsed,'independent worker parsed queued document');
  assert.equal((await fetch(origin+'/api/library/'+id)).status,401);
  const download=await fetch(origin+'/api/library/'+id,{headers});assert.equal(download.status,200);assert.equal(await download.text(),'isolated smoke document');
  assert.equal((await fetch(origin+'/api/library/'+id,{method:'DELETE',headers})).status,200);
  assert.notEqual((await fetch(origin+'/api/library/'+id,{headers})).status,200);
  console.log('Production smoke passed: authentication, CSRF, pages, independent worker, private upload/download and deletion. No provider calls.');
+}catch(error){
+ process.stderr.write(`\n--- isolated production server log ---\n${log}\n--- end server log ---\n`);
+ throw error;
 }finally{
  if(worker){worker.kill();await Promise.race([new Promise(r=>worker.once('exit',r)),new Promise(r=>setTimeout(r,5000))]);if(worker.exitCode===null)worker.kill('SIGKILL');}
  child.kill();await Promise.race([new Promise(r=>child.once('exit',r)),new Promise(r=>setTimeout(r,5000))]);

@@ -69,6 +69,9 @@ function getClient() {
 
 async function ready() {
   if (!initialized) initialized = (async () => {
+    // The web and worker are separate processes sharing one SQLite file.
+    // Wait briefly for startup migrations/writes instead of surfacing a transient lock as an API error.
+    await getClient().execute("PRAGMA busy_timeout=10000");
     await getClient().batch(schema.map((sql) => ({ sql })), "write");
     const columns = await getClient().execute("PRAGMA table_info(source_items)");
     if (!columns.rows.some((row) => row.name === "extraction_version")) {
