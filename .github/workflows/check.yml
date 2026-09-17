@@ -20,4 +20,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: node scripts/check-migrations.mjs
       - run: npm run build
-      - run: node --experimental-strip-types scripts/smoke-production.mjs
+      - name: Build and smoke-test the production container
+        run: |
+          docker build --build-arg APP_VERSION="$GITHUB_SHA" -t "study-cabinet:$GITHUB_SHA" .
+          docker run --rm --network none "study-cabinet:$GITHUB_SHA" node --experimental-strip-types scripts/smoke-production.mjs

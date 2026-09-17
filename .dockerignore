@@ -5,6 +5,10 @@
 !components/**
 !lib/
 !lib/**
+!hooks/
+!hooks/**
+!vendor/
+!vendor/**
 !scripts/
 !scripts/**
 !public/
