@@ -13,7 +13,7 @@ let log='';child.stdout.on('data',b=>{log+=b.toString();});child.stderr.on('data
 let worker;
 try{
  let ready=false;for(let i=0;i<60;i++){if(child.exitCode!==null)throw new Error('Isolated server exited');try{if((await fetch(origin+'/api/health/live')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,500));}assert.ok(ready,'server startup');
- for(const path of ['/api/tutor','/api/library','/api/mail','/api/deployments','/api/deployments/check','/api/jobs'])assert.equal((await fetch(origin+path)).status,401,path);
+ for(const path of ['/api/tutor','/api/library','/api/library/search?q=smoke','/api/mail','/api/deployments','/api/deployments/check','/api/jobs'])assert.equal((await fetch(origin+path)).status,401,path);
  const login=await fetch(origin+'/api/auth/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({accessKey:env.OWNER_ACCESS_KEY})});assert.equal(login.status,200);
  const cookie=login.headers.get('set-cookie').split(';')[0],headers={Cookie:cookie,Origin:origin};
  assert.equal((await fetch(origin+'/api/tutor',{method:'POST',headers:{...headers,Origin:'https://wrong.invalid','Content-Type':'application/json'},body:'{}'})).status,403);
@@ -33,6 +33,7 @@ try{
     await new Promise(r=>setTimeout(r,500));
   }
   assert.ok(parsed,'independent worker parsed queued document');
+ const search=await fetch(origin+'/api/library/search?q=isolated',{headers});assert.equal(search.status,200);assert.equal((await search.json()).matches[0].document_id,id);
  assert.equal((await fetch(origin+'/api/library/'+id)).status,401);
  const download=await fetch(origin+'/api/library/'+id,{headers});assert.equal(download.status,200);assert.equal(await download.text(),'isolated smoke document');
  assert.equal((await fetch(origin+'/api/library/'+id,{method:'DELETE',headers})).status,200);

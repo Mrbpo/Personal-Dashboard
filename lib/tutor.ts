@@ -28,8 +28,8 @@ const outputSchema = { type: 'object', additionalProperties: false, properties: 
   citationRefs: { type: 'array', items: string },
 }, required: ['answer', 'valuable', 'takeaway', 'topic', 'assessment', 'evidence', 'vocabulary', 'citationRefs'] };
 
-export function validateAttachment(name: string, bytes: Uint8Array): Attachment {
-  if (!bytes.length || bytes.length > 8 * 1024 * 1024) throw new Error('附件须非空且每份不超过 8 MB');
+export function validateAttachment(name: string, bytes: Uint8Array, maxBytes=8*1024*1024): Attachment {
+  if (!bytes.length || bytes.length > maxBytes) throw new Error(`附件须非空且每份不超过 ${Math.floor(maxBytes/1024/1024)} MB`);
   const ext = name.split('.').pop()?.toLowerCase();
   const types: Record<string, string> = { pdf: 'application/pdf', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', txt: 'text/plain', md: 'text/markdown', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
   const mime = types[ext || ''];

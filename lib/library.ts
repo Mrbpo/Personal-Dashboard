@@ -5,17 +5,25 @@ import { database as db } from './database.ts';
 import { paidOpenAI } from './ai-budget.ts';
 import { serviceValue } from './service-vault.ts';
 import { acquireLease,releaseLease } from './jobs.ts';
-import {parsePdfPages} from './document-parser.ts';
+import {parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
 export const EMBED_MODEL='text-embedding-3-small';
+export const MAX_LIBRARY_BYTES=50*1024*1024;
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR || './data/library');
 export const digest=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
 export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;name:string;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
 export async function saveBlob(bytes:Uint8Array) {const hash=digest(bytes);await mkdir(root(),{recursive:true,mode:0o700});try{await writeFile(resolve(root(),hash),bytes,{flag:'wx',mode:0o600});}catch(e:any){if(e.code!=='EEXIST')throw e;await utimes(resolve(root(),hash),new Date(),new Date());}return hash;}
 export async function readBlob(hash:string){if(!/^[a-f0-9]{64}$/.test(hash))throw new Error('文件标识无效');return readFile(/* turbopackIgnore: true */ resolve(root(),hash));}
+export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
+  const b=Buffer.from(bytes),ext=name.split('.').pop()?.toLowerCase();
+  if(b.subarray(0,5).toString()==='%PDF-')return 'application/pdf';
+  if(mime&&mime!=='application/octet-stream')return mime;
+  return ({txt:'text/plain',md:'text/markdown',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
+}
 export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array) {
-  if(bytes.length>12*1024*1024)throw new Error('单份文件超过 12 MB');
+  if(!bytes.length||bytes.length>MAX_LIBRARY_BYTES)throw new Error('资料须非空且单份不超过 50 MB');
   // Same filenames in different courses are distinct sources.
   key=JSON.stringify([course,key]);
+  mime=canonicalDocumentMime(name,mime,bytes);
   const hash=await saveBlob(bytes),id=digest([owner,origin,key,hash].join('\0'));
   await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,name.slice(0,200),mime,hash,bytes.length,new Date().toISOString()).run();
   return id;
@@ -25,7 +33,12 @@ export async function getDocument(owner:string,id:string) {const row=await db.pr
 export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id)]);}
 export function splitText(text:string) {const out:string[]=[];for(let i=0;i<text.length;i+=1400){out.push(text.slice(i,i+1600));if(i+1600>=text.length)break;}return out;}
 export async function indexDocument(owner:string,id:string) {
-  const d=await getDocument(owner,id);if(d.status==='ready')return;
+  const d=await getDocument(owner,id);
+  if(d.status==='ready'){
+    if(d.mime!=='application/pdf')return;
+    const current=await db.prepare('SELECT 1 ok FROM library_parse_pages WHERE document_id=? AND parser=? LIMIT 1').bind(id,PDF_PARSER_VERSION).first();
+    if(current)return;
+  }
   try {
     const bytes=await readBlob(d.hash);let pages:Array<{locator:string;text:string}>=[];
     if(d.mime.startsWith('text/')) pages=[{locator:'正文',text:bytes.toString('utf8')}];

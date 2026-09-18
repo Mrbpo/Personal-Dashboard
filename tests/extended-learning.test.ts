@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {PDFDocument} from 'pdf-lib';
 process.env.DATABASE_URL=':memory:';process.env.LOCAL_OCR='false';
 const {database:db}=await import('../lib/database.ts');
-const {saveDocument,indexDocument}=await import('../lib/library.ts');
+const {saveDocument,indexDocument,searchLibrary,canonicalDocumentMime}=await import('../lib/library.ts');
 const {rollingMemory,relevantMemory}=await import('../lib/tutor-memory.ts');
 const {tutorWeb,validatedPublicQuery}=await import('../lib/tutor-web.ts');
 test('PDF page checkpoints resume after failure without reparsing completed pages',async()=>{
@@ -11,6 +11,14 @@ test('PDF page checkpoints resume after failure without reparsing completed page
  const original=globalThis.fetch;let calls=0;
  globalThis.fetch=async()=>{calls++;if(calls===2)return new Response(null,{status:503});return Response.json({output_text:JSON.stringify({text:'page text '+calls,complete:true})});};
  try{await assert.rejects(indexDocument('alice',id));await indexDocument('alice',id);assert.equal(calls,3);const pages=(await db.prepare('SELECT * FROM library_parse_pages WHERE document_id=? ORDER BY page').bind(id).all()).results;assert.equal(pages.length,2);assert.equal(pages[0].body,'page text 1');}finally{globalThis.fetch=original;}
+});
+test('PDF magic is normalized and archived text is searchable with a page locator',async()=>{
+ const pdf=await PDFDocument.create();pdf.addPage();const bytes=await pdf.save();
+ assert.equal(canonicalDocumentMime('slides.pdf','application/octet-stream',bytes),'application/pdf');
+ const id=await saveDocument('search-owner','chem','upload','notes.txt','notes.txt','text/plain',Buffer.from('The limiting reagent determines the theoretical yield.'));
+ await indexDocument('search-owner',id);
+ const matches=await searchLibrary('search-owner','limiting reagent','chem',false);
+ assert.equal(matches[0].document_id,id);assert.equal(matches[0].locator,'正文');
 });
 test('rolling memory advances incrementally and repeated reads reuse saved summary',async()=>{
  const history=Array.from({length:40},(_,i)=>({id:String(i),role:i%2?'assistant':'user',body:'message '+i,meta_json:'{}'}));const original=globalThis.fetch;let calls=0;
