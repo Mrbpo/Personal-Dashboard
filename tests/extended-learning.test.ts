@@ -12,6 +12,11 @@ test('PDF page checkpoints resume after failure without reparsing completed page
  globalThis.fetch=async()=>{calls++;if(calls===2)return new Response(null,{status:503});return Response.json({output_text:JSON.stringify({text:'page text '+calls,complete:true})});};
  try{await assert.rejects(indexDocument('alice',id));await indexDocument('alice',id);assert.equal(calls,3);const pages=(await db.prepare('SELECT * FROM library_parse_pages WHERE document_id=? ORDER BY page').bind(id).all()).results;assert.equal(pages.length,2);assert.equal(pages[0].body,'page text 1');}finally{globalThis.fetch=original;}
 });
+test('an uncertain PDF page remains searchable with an explicit original-page warning',async()=>{
+ const doc=await PDFDocument.create();doc.addPage();const id=await saveDocument('partial-owner','chem','upload','scan.pdf','scan.pdf','application/pdf',await doc.save());
+ const original=globalThis.fetch;globalThis.fetch=async()=>Response.json({output_text:JSON.stringify({text:'faint handwritten titration result',complete:false})});
+ try{await indexDocument('partial-owner',id);const hit=(await searchLibrary('partial-owner','titration result','chem',false))[0];assert.equal(hit.locator,'第 1 页');assert.match(hit.body,/核对原 PDF/);const row=await db.prepare('SELECT status,error FROM library_documents WHERE id=?').bind(id).first<any>();assert.equal(row.status,'ready');assert.match(row.error,/部分内容/);}finally{globalThis.fetch=original;}
+});
 test('PDF magic is normalized and archived text is searchable with a page locator',async()=>{
  const pdf=await PDFDocument.create();pdf.addPage();const bytes=await pdf.save();
  assert.equal(canonicalDocumentMime('slides.pdf','application/octet-stream',bytes),'application/pdf');
