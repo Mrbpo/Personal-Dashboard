@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { explicitArchiveCourse, inferArchiveCourse, mergeArchiveSources, preferStrongDocumentMatches } from '../lib/archive-search.ts';
+import { explicitArchiveCourse, inferActivityCourse, inferArchiveCourse, mergeArchiveSources, preferStrongDocumentMatches } from '../lib/archive-search.ts';
 import type { CourseSearchResult } from '../lib/repository.ts';
 
 const courses = [
@@ -21,6 +21,10 @@ test('archive search recognizes an explicit course code without manual setup',()
 
 test('archive search infers one course from repeated top directory matches',()=>{
   assert.equal(inferArchiveCourse([source('stats','STAB22TUT1.pdf'),source('stats','STAB22TUT1Notes.pdf'),source('math','Tutorial')],[hit('math','other.pdf')]),'stats');
+});
+
+test('a numbered activity document outranks generic tutorial announcements when inferring course',()=>{
+  assert.equal(inferActivityCourse('tutorial 1 用 RStudio 还是 Excel',[{...hit('chem','CHMA tutorial scheduling.txt'),score:4.2},{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','STAB22TUT1Notes.pdf'),score:2.5}]),'stats');
 });
 
 test('parsed document text replaces a filename-only Canvas directory record',()=>{

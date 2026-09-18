@@ -8,6 +8,13 @@ function compact(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9\u3400-\u9fff]/g, '');
 }
 
+function activityMarker(value: string) {
+  const match = compact(value).match(/(TUTORIAL|TUT|ASSIGNMENT|ASSIGN|HOMEWORK|HW|QUIZ|LAB)(\d{1,3})/);
+  if (!match) return '';
+  const kind = ({ TUTORIAL: 'TUT', TUT: 'TUT', ASSIGNMENT: 'ASSIGN', ASSIGN: 'ASSIGN', HOMEWORK: 'HW' } as Record<string, string>)[match[1]] || match[1];
+  return `${kind}${match[2]}`;
+}
+
 export function explicitArchiveCourse(question: string, courses: CourseOption[]) {
   const query = compact(question);
   return courses.find((course) => {
@@ -25,6 +32,15 @@ export function inferArchiveCourse(structured: CourseSearchResult[], library: Li
   library.slice(0, 5).forEach((item, index) => counts.set(item.course_id, (counts.get(item.course_id) || 0) + 4 - Math.min(index, 3)));
   const ranked = [...counts].sort((a, b) => b[1] - a[1]);
   return ranked[0] && ranked[0][1] >= 6 && ranked[0][1] - (ranked[1]?.[1] || 0) >= 3 ? ranked[0][0] : '';
+}
+
+export function inferActivityCourse(question: string, library: LibraryHit[]) {
+  const requested = activityMarker(question);
+  if (!requested) return '';
+  const scores = new Map<string, number>();
+  for (const hit of library) if (activityMarker(hit.name) === requested) scores.set(hit.course_id, (scores.get(hit.course_id) || 0) + hit.score);
+  const ranked = [...scores].sort((a, b) => b[1] - a[1]);
+  return ranked[0] && (ranked.length === 1 || ranked[0][1] - ranked[1][1] >= 1.5) ? ranked[0][0] : '';
 }
 
 function normalizeName(value: string) {
@@ -47,15 +63,9 @@ export function mergeArchiveSources(structured: CourseSearchResult[], library: L
 export function preferStrongDocumentMatches(question: string, structured: CourseSearchResult[], library: LibraryHit[]) {
   const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
   const strong = library.filter((hit) => hit.score >= 3);
-  const marker = (value: string) => {
-    const match = compact(value).match(/(TUTORIAL|TUT|ASSIGNMENT|ASSIGN|HOMEWORK|HW|QUIZ|LAB)(\d{1,3})/);
-    if (!match) return '';
-    const kind = ({ TUTORIAL: 'TUT', TUT: 'TUT', ASSIGNMENT: 'ASSIGN', ASSIGN: 'ASSIGN', HOMEWORK: 'HW' } as Record<string, string>)[match[1]] || match[1];
-    return `${kind}${match[2]}`;
-  };
-  const requestedMarker = marker(question);
-  const inferredMarker = requestedMarker || (/\btut\b/i.test(question) ? marker(strong[0]?.name || '') : '');
-  const focused = inferredMarker ? library.filter((hit) => marker(hit.name) === inferredMarker) : strong;
+  const requestedMarker = activityMarker(question);
+  const inferredMarker = requestedMarker || (/\btut\b/i.test(question) ? activityMarker(strong[0]?.name || '') : '');
+  const focused = inferredMarker ? library.filter((hit) => activityMarker(hit.name) === inferredMarker) : strong;
   return !summary && focused.length ? { structured: [] as CourseSearchResult[], library: focused.slice(0, 4) } : { structured, library };
 }
 
@@ -68,7 +78,7 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
     piazzaOnly ? Promise.resolve([]) : searchLibrary(owner, question, scope, true),
   ]);
   if (!scope) {
-    scope = inferArchiveCourse(structured, library);
+    scope = inferActivityCourse(question, library) || inferArchiveCourse(structured, library);
     if (scope) [structured, library] = await Promise.all([
       searchCourseContent(question, scope, limit),
       piazzaOnly ? Promise.resolve([]) : searchLibrary(owner, question, scope, true),
