@@ -49,7 +49,8 @@ export async function indexDocument(owner:string,id:string) {
     if(current)return;
   }
   try {
-    const bytes=await readBlob(d.hash);let pages:Array<{locator:string;text:string}>=[];
+    const bytes=await readBlob(d.hash),detectedMime=canonicalDocumentMime(d.name,d.mime,bytes);let pages:Array<{locator:string;text:string}>=[];
+    if(detectedMime!==d.mime){d.mime=detectedMime;await db.prepare('UPDATE library_documents SET mime=? WHERE id=? AND owner_id=?').bind(d.mime,id,owner).run();}
     if(d.mime.startsWith('text/')) pages=[{locator:'正文',text:bytes.toString('utf8')}];
     else if(d.mime==='application/pdf')pages=await parsePdfPages(id,bytes);
     else {

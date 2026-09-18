@@ -25,6 +25,12 @@ test('PDF magic is normalized and archived text is searchable with a page locato
  const matches=await searchLibrary('search-owner','limiting reagent','chem',false);
  assert.equal(matches[0].document_id,id);assert.equal(matches[0].locator,'正文');
 });
+test('legacy octet-stream archives are re-detected as PDF during retry',async()=>{
+ const pdf=await PDFDocument.create();pdf.addPage();const bytes=await pdf.save(),hash=await (await import('../lib/library.ts')).saveBlob(bytes),id='legacy-pdf';
+ await db.prepare("INSERT INTO library_documents (id,owner_id,course_id,origin,origin_key,name,mime,hash,size,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,'error',?)").bind(id,'legacy-owner','chem','canvas','legacy','Article without extension','application/octet-stream',hash,bytes.length,new Date().toISOString()).run();
+ const original=globalThis.fetch;globalThis.fetch=async()=>Response.json({output_text:JSON.stringify({text:'intercultural conflict framework',complete:true})});
+ try{await indexDocument('legacy-owner',id);const row=await db.prepare('SELECT mime,status FROM library_documents WHERE id=?').bind(id).first<any>();assert.equal(row.mime,'application/pdf');assert.equal(row.status,'ready');}finally{globalThis.fetch=original;}
+});
 test('one unavailable remote file is recorded without hiding other archives',async()=>{
  await recordSourceFailure('failure-owner','canvas','remote-1','chem','missing.pdf','Canvas 未提供可下载地址');
  assert.equal((await listSourceFailures('failure-owner')).length,1);
