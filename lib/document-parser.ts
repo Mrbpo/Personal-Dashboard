@@ -3,7 +3,12 @@ import {database as db} from './database.ts';
 import {paidOpenAI} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {localPageOcr,localPdfPageText} from './local-ocr.ts';
+import mammoth from 'mammoth';
 export const PDF_PARSER_VERSION='pdf-page-v2';
+export async function extractDocxText(bytes:Uint8Array){
+ const result=await mammoth.extractRawText({buffer:Buffer.from(bytes)});
+ return result.value.replace(/\r\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+}
 export async function parsePdfPages(id:string,bytes:Uint8Array){
  const pdf=await PDFDocument.load(bytes),count=pdf.getPageCount();if(count>500)throw new Error('PDF 超过 500 页，请分册导入');
  const parser=PDF_PARSER_VERSION,pages:{locator:string;text:string}[]=[];
