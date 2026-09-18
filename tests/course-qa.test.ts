@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.OPENAI_API_KEY = "test-key";
-const { answerCourseQuestion } = await import("../lib/course-qa.ts");
+const { answerCourseQuestion, cleanActionAnswer } = await import("../lib/course-qa.ts");
+
+test("short task answers remove setup detours, speculation and offers", () => {
+  const answer = cleanActionAnswer("直接完成两项。\n1. 做频率表。[S1]\n2. 在 workspace 建立资料夹并新建 tutorial1.R。[S2]\n3. 未列出的事项（需你确认）：请确认提交平台与文件命名。\n4. 画条形图。[S1]\n5. 如果你愿意我还可以继续帮助。", "tutorial 1 要做什么");
+  assert.equal(answer, "直接完成两项。\n1. 做频率表。[S1]\n2. 画条形图。[S1]");
+});
 
 test("course Q&A retries a truncated structured response", async () => {
   const original = globalThis.fetch;

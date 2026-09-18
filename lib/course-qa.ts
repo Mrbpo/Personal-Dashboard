@@ -18,6 +18,17 @@ function extractOutputText(payload: any): string {
   throw new Error("OPENAI_EMPTY_OUTPUT");
 }
 
+export function cleanActionAnswer(answer: string, question: string) {
+  const wantsSetup = /(?:如何|怎么|怎样).{0,12}(?:登录|登入|打开|启动|配置|设置)|\b(?:login|sign in|setup|configure|launch)\b/i.test(question);
+  let number = 0;
+  return answer.split(/\r?\n/).filter((line) => {
+    if (/如果你愿意|需要我(?:再|帮|把)|我还可以/i.test(line)) return false;
+    if (/未列出的事项|需你确认|请确认提交平台|在哪里\/?如何提交|文件命名|打包.*要求/i.test(line)) return false;
+    if (!wantsSetup && /datatools\.utoronto|\bworkspace\b|tutorial1\.R|\bUTORid\b|\bSSO\b|RStudio[（(](?:网页版|web)|建立.*(?:资料夹|資料夾|文件夹|脚本|script)/i.test(line)) return false;
+    return true;
+  }).map((line) => line.replace(/^(\s*)\d+([.)、])/, (_match, space, punctuation) => `${space}${++number}${punctuation}`)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 export async function answerCourseQuestion(question: string, sources: CourseSearchResult[]): Promise<CourseAnswer> {
   if (!hasAI()) return {
     answer: sources.length ? "我找到了相关课程资料，但 AI 分析当前不可用。请查看下面的原始来源。" : "本地课程资料中没有找到足够相关的内容。",
@@ -40,7 +51,7 @@ export async function answerCourseQuestion(question: string, sources: CourseSear
   const materials = sources.map((source) => `[${source.ref}] 课程：${source.courseCode}\n标题：${source.title}\n类型：${source.sourceType}\n内容：\n${(source.body || source.excerpt).slice(0, 6000)}`).join("\n\n---\n\n");
 
   const actionQuestion=/(?:要|需|应该|具体)?做什么|怎么做|如何做|要求|截止|提交|完成|\b(?:what (?:do|should)|how (?:do|should)|due|submit|complete)\b/i.test(question);
-  const answerMode=actionQuestion?`这是简短的任务问题。直接给出学生现在该做的内容，优先顺序是：截止时间、必须交付的项目、数据或题目、允许使用的工具、明确的格式限制。只写资料直接支持的事实，控制在 120–500 个中文字、最多 6 个编号。禁止术语词典、检索过程、来源清单、免责声明、复述文件名和“如果你愿意我还可以”等结尾。除非原文明确分阶段，否则不得套用“课前/课上/课后”模板。忽略与当前任务无关的旧公告、通用 syllabus 和其他周次。`:`根据用户要求组织答案。简短问题用 120–500 个中文字；真正的多资料总结才可用 800–1600 个中文字。禁止输出检索过程、来源清单、免责声明或无关延伸建议。`;
+  const answerMode=actionQuestion?`这是简短的任务问题。只回答用户明确问到的内容，直接给出现在该做什么，优先顺序是：截止时间、必须交付的项目、数据或题目、允许使用的工具、明确的格式限制。控制在 100–350 个中文字、最多 5 个编号。若用户没有明确问登录、启动或环境配置，不得写 RStudio 登录、目录、脚本建立步骤。资料未说明的提交平台、文件类型或命名要求直接省略，不得猜测、提醒确认或追问。followUps 必须为空数组。禁止术语词典、检索过程、来源清单、免责声明、复述文件名和“如果你愿意我还可以”等结尾。除非原文明确分阶段，否则不得套用“课前/课上/课后”模板。忽略与当前任务无关的旧公告、通用 syllabus 和其他周次。`:`根据用户要求组织答案。简短问题用 120–500 个中文字；真正的多资料总结才可用 800–1600 个中文字。禁止输出检索过程、来源清单、免责声明或无关延伸建议。`;
   async function requestAnswer(maxOutputTokens: number) {
     const response = await aiResponse("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -75,7 +86,7 @@ ${materials}` }] }],
     try {
       const parsed = JSON.parse(extractOutputText(payload));
       if (typeof parsed.answer !== "string" || !Array.isArray(parsed.citationRefs)) throw new Error("OPENAI_INVALID_OUTPUT");
-      return { ...parsed, aiAvailable: true } as CourseAnswer;
+      return { ...parsed, answer: actionQuestion ? cleanActionAnswer(parsed.answer, question) : parsed.answer, followUps: actionQuestion ? [] : parsed.followUps, aiAvailable: true } as CourseAnswer;
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("OPENAI_")) throw error;
       throw new Error("OPENAI_INVALID_JSON");
@@ -83,7 +94,7 @@ ${materials}` }] }],
   }
 
   try {
-    return await requestAnswer(actionQuestion?1600:3200);
+    return await requestAnswer(actionQuestion?900:3200);
   } catch (error) {
     const code = error instanceof Error ? error.message : "";
     if (!["OPENAI_INCOMPLETE_OUTPUT", "OPENAI_EMPTY_OUTPUT", "OPENAI_INVALID_OUTPUT", "OPENAI_INVALID_JSON"].includes(code)) throw error;
