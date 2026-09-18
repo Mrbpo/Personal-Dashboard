@@ -33,7 +33,12 @@ test('parsed document text replaces a filename-only Canvas directory record',()=
 });
 
 test('a strong filename match excludes generic syllabus and stale announcements for a short task question',()=>{
-  const selected=preferStrongDocumentMatches('统计 tut 我要做什么',[source('stats','Old tutorial announcement','announcement')],[{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','Syllabus.pdf'),score:1.4}]);
+  const selected=preferStrongDocumentMatches('统计 tut 我要做什么',[source('stats','Old tutorial announcement','announcement')],[{...hit('stats','STAB22TUT1Notes.pdf'),score:3.5},{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','No tutorial sessions this week.txt'),score:3.3},{...hit('stats','TUTORIAL ACTIVITIES.txt'),score:3.2},{...hit('stats','Syllabus.pdf'),score:1.4}]);
   assert.equal(selected.structured.length,0);
-  assert.deepEqual(selected.library.map((item)=>item.name),['STAB22TUT1.pdf']);
+  assert.deepEqual(selected.library.map((item)=>item.name),['STAB22TUT1Notes.pdf','STAB22TUT1.pdf']);
+});
+
+test('an explicit tutorial number keeps only documents for that tutorial',()=>{
+  const selected=preferStrongDocumentMatches('tutorial 1 要完成哪些图表',[],[{...hit('stats','STAB22TUT1Notes.pdf'),score:3.5},{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','Tutorial registration.txt'),score:3.3},{...hit('stats','STAB22TUT2.pdf'),score:3.2}]);
+  assert.deepEqual(selected.library.map((item)=>item.name),['STAB22TUT1Notes.pdf','STAB22TUT1.pdf']);
 });

@@ -47,7 +47,16 @@ export function mergeArchiveSources(structured: CourseSearchResult[], library: L
 export function preferStrongDocumentMatches(question: string, structured: CourseSearchResult[], library: LibraryHit[]) {
   const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
   const strong = library.filter((hit) => hit.score >= 3);
-  return !summary && strong.length ? { structured: [] as CourseSearchResult[], library: strong.slice(0, 4) } : { structured, library };
+  const marker = (value: string) => {
+    const match = compact(value).match(/(TUTORIAL|TUT|ASSIGNMENT|ASSIGN|HOMEWORK|HW|QUIZ|LAB)(\d{1,3})/);
+    if (!match) return '';
+    const kind = ({ TUTORIAL: 'TUT', TUT: 'TUT', ASSIGNMENT: 'ASSIGN', ASSIGN: 'ASSIGN', HOMEWORK: 'HW' } as Record<string, string>)[match[1]] || match[1];
+    return `${kind}${match[2]}`;
+  };
+  const requestedMarker = marker(question);
+  const inferredMarker = requestedMarker || (/\btut\b/i.test(question) ? marker(strong[0]?.name || '') : '');
+  const focused = inferredMarker ? library.filter((hit) => marker(hit.name) === inferredMarker) : strong;
+  return !summary && focused.length ? { structured: [] as CourseSearchResult[], library: focused.slice(0, 4) } : { structured, library };
 }
 
 export async function searchArchiveForAnswer(owner: string, question: string, requestedCourse = '', limit = 12) {
