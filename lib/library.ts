@@ -17,7 +17,7 @@ export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
   const b=Buffer.from(bytes),ext=name.split('.').pop()?.toLowerCase();
   if(b.subarray(0,5).toString()==='%PDF-')return 'application/pdf';
   if(mime&&mime!=='application/octet-stream')return mime;
-  return ({txt:'text/plain',md:'text/markdown',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
+  return ({txt:'text/plain',md:'text/markdown',csv:'text/csv',tsv:'text/tab-separated-values',meg:'text/plain',fa:'text/plain',fas:'text/plain',fasta:'text/plain',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
 }
 export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array) {
   if(!bytes.length||bytes.length>MAX_LIBRARY_BYTES)throw new Error('资料须非空且单份不超过 50 MB');

@@ -20,6 +20,7 @@ test('an uncertain PDF page remains searchable with an explicit original-page wa
 test('PDF magic is normalized and archived text is searchable with a page locator',async()=>{
  const pdf=await PDFDocument.create();pdf.addPage();const bytes=await pdf.save();
  assert.equal(canonicalDocumentMime('slides.pdf','application/octet-stream',bytes),'application/pdf');
+ assert.equal(canonicalDocumentMime('alignment.meg','application/octet-stream',Buffer.from('#mega\n')),'text/plain');
  const id=await saveDocument('search-owner','chem','upload','notes.txt','notes.txt','text/plain',Buffer.from('The limiting reagent determines the theoretical yield.'));
  await indexDocument('search-owner',id);
  const matches=await searchLibrary('search-owner','limiting reagent','chem',false);
