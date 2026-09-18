@@ -11,6 +11,7 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS mail_thread_summaries (account TEXT NOT NULL, thread_id TEXT NOT NULL, fingerprint TEXT NOT NULL, summary_json TEXT NOT NULL, PRIMARY KEY(account,thread_id))`,
   `CREATE TABLE IF NOT EXISTS service_leases (id TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS library_remote_versions (owner_id TEXT NOT NULL, origin_key TEXT NOT NULL, fingerprint TEXT NOT NULL, document_id TEXT NOT NULL, PRIMARY KEY(owner_id,origin_key))`,
+  `CREATE TABLE IF NOT EXISTS library_source_failures (owner_id TEXT NOT NULL, origin TEXT NOT NULL, origin_key TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, error TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner_id,origin,origin_key))`,
   `CREATE TABLE IF NOT EXISTS library_documents (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL, origin_key TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, hash TEXT NOT NULL, size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, created_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_id, origin, origin_key, hash))`,
   `CREATE TABLE IF NOT EXISTS library_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, position INTEGER NOT NULL, locator TEXT NOT NULL, body TEXT NOT NULL, hash TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(document_id)`,

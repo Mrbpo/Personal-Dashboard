@@ -5,18 +5,20 @@ import {Button} from './ui/button';
 type Course={id:string;code:string};
 type DocumentRow={id:string;course_id:string;name:string;origin:string;status:string;size:number;created_at:string;error?:string};
 type SearchMatch={id:string;document_id:string;name:string;course_id:string;locator:string;body:string;score:number};
+type SourceFailure={origin:string;origin_key:string;course_id:string;name:string;error:string;updated_at:string};
 
 export function LibraryCenter({courses}:{courses:Course[]}){
   const [docs,setDocs]=useState<DocumentRow[]>([]),[status,setStatus]=useState<any>({jobs:[]});
   const [course,setCourse]=useState(''),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
   const [query,setQuery]=useState(''),[matches,setMatches]=useState<SearchMatch[]>([]),[searching,setSearching]=useState(false);
+  const [failures,setFailures]=useState<SourceFailure[]>([]);
   const [checkedAt,setCheckedAt]=useState(0);
   const file=useRef<HTMLInputElement>(null);
 
   async function load(){
-    const [a,b]=await Promise.all([fetch('/api/library'),fetch('/api/jobs')]);
-    if(!a.ok||!b.ok)throw new Error('读取资料状态失败');
-    setDocs(await a.json());setStatus(await b.json());setCheckedAt(Date.now());
+    const [a,b,c]=await Promise.all([fetch('/api/library'),fetch('/api/jobs'),fetch('/api/library/failures')]);
+    if(!a.ok||!b.ok||!c.ok)throw new Error('读取资料状态失败');
+    setDocs(await a.json());setStatus(await b.json());setFailures((await c.json()).failures||[]);setCheckedAt(Date.now());
   }
   useEffect(()=>{void load().catch(e=>setMessage(e.message));const timer=setInterval(()=>void load().catch(()=>{}),15000);return()=>clearInterval(timer);},[]);
 
@@ -61,6 +63,7 @@ export function LibraryCenter({courses}:{courses:Course[]}){
       <p className="mt-3 text-xs text-muted-foreground">单份最多 50 MB。PDF 优先读取原生文字层，扫描页自动 OCR；原件、页码和版本均私有保存。既有 Canvas 下载目录可用本机导入脚本上传，不扫描其他目录。</p>
     </section>
     {message&&<p role="status" className="rounded border p-3 text-sm">{message}</p>}
+    {failures.length>0&&<details className="rounded-xl border border-amber-700/40 bg-amber-50/40 p-4"><summary>{failures.length} 个来源暂时无法完整归档</summary><p className="my-2 text-xs text-muted-foreground">其他资料仍会继续同步；Canvas 恢复下载地址或文件缩小后会自动重试。</p>{failures.map(f=><div key={f.origin+f.origin_key} className="border-t py-2 text-sm"><strong>{f.name}</strong><span className="ml-2 text-xs text-muted-foreground">{courses.find(c=>c.id===f.course_id)?.code||f.course_id}</span><p>{f.error}</p></div>)}</details>}
     <section className="rounded-2xl border bg-card p-5"><div className="flex flex-wrap gap-2"><Button variant="outline" onClick={()=>job('canvas')}>立即同步 Canvas 全部资料</Button><Button variant="outline" onClick={()=>job('piazza')}>同步 Piazza</Button><Button variant="outline" onClick={()=>job('night')}>补齐 PDF 与语义索引</Button><Button variant="outline" onClick={()=>load().catch(e=>setMessage(e.message))}>刷新</Button></div><p className="mt-3 text-sm">后台：{status.worker&&checkedAt-status.worker.heartbeat<90000?'运行中':'未运行或心跳超时'} · AI 月度已用／预留 ${Number(status.budget?.used||0).toFixed(3)} / ${status.budget?.limit??30}</p><p className="mt-2 text-xs text-muted-foreground">Canvas 每 15 分钟自动检查；Piazza 每 30 分钟检查；每天 03:00 补齐失败页与向量索引。无变化不会重复处理或计费。</p></section>
     <div className="grid gap-3 md:grid-cols-2">{docs.filter(d=>!course||d.course_id===course).map(d=><article key={d.id} className="min-w-0 rounded-xl border bg-card p-4"><a href={'/api/library/'+d.id} className="break-words font-semibold underline">{d.name}</a><p className="mt-2 text-xs text-muted-foreground">{d.origin} · {d.status} · {Math.round(d.size/1024)} KB · {d.created_at}</p>{d.error&&<p className="mt-2 text-sm text-amber-800">{d.error}</p>}<button className="mt-3 text-xs underline" onClick={async()=>{if(!confirm('从资料库移除此版本？它将立即退出检索；备份与共享原件按保留策略清理。'))return;await fetch('/api/library/'+d.id,{method:'DELETE'});await load();}}>移除此版本</button></article>)}</div>
     <details className="rounded-xl border bg-card p-4"><summary>后台任务记录</summary>{status.jobs.map((j:any)=><div key={j.id} className="border-b py-2 text-xs">{j.kind} · {j.status} · 尝试 {j.attempts}{j.error&&<p>{j.error}</p>}{j.status==='failed'&&<button className="underline" onClick={async()=>{await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({retry:j.id})});await load();}}>重试</button>}</div>)}</details>

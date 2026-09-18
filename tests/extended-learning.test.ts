@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {PDFDocument} from 'pdf-lib';
 process.env.DATABASE_URL=':memory:';process.env.LOCAL_OCR='false';
 const {database:db}=await import('../lib/database.ts');
-const {saveDocument,indexDocument,searchLibrary,canonicalDocumentMime}=await import('../lib/library.ts');
+const {saveDocument,indexDocument,searchLibrary,canonicalDocumentMime,recordSourceFailure,listSourceFailures,clearSourceFailure}=await import('../lib/library.ts');
 const {rollingMemory,relevantMemory}=await import('../lib/tutor-memory.ts');
 const {tutorWeb,validatedPublicQuery}=await import('../lib/tutor-web.ts');
 test('PDF page checkpoints resume after failure without reparsing completed pages',async()=>{
@@ -19,6 +19,12 @@ test('PDF magic is normalized and archived text is searchable with a page locato
  await indexDocument('search-owner',id);
  const matches=await searchLibrary('search-owner','limiting reagent','chem',false);
  assert.equal(matches[0].document_id,id);assert.equal(matches[0].locator,'正文');
+});
+test('one unavailable remote file is recorded without hiding other archives',async()=>{
+ await recordSourceFailure('failure-owner','canvas','remote-1','chem','missing.pdf','Canvas 未提供可下载地址');
+ assert.equal((await listSourceFailures('failure-owner')).length,1);
+ await clearSourceFailure('failure-owner','canvas','remote-1');
+ assert.equal((await listSourceFailures('failure-owner')).length,0);
 });
 test('rolling memory advances incrementally and repeated reads reuse saved summary',async()=>{
  const history=Array.from({length:40},(_,i)=>({id:String(i),role:i%2?'assistant':'user',body:'message '+i,meta_json:'{}'}));const original=globalThis.fetch;let calls=0;
