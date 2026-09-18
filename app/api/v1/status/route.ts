@@ -19,5 +19,10 @@ export async function GET() {
     courseCount: data.courses.length,
     taskCount: data.tasks.length,
     lastSync: data.lastSync,
+    capabilities: {
+      courseSearch: "/api/v1/library/search?q=...&courseId=...",
+      study: "/api/v1/study",
+      authentication: "Authorization: Bearer <MOBILE_API_TOKEN>",
+    },
   });
 }

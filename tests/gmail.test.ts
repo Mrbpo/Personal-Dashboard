@@ -10,6 +10,14 @@ test('Gmail MIME parsing prefers text and does not render tracking images',()=>{
  const p=gmail.decodeMail({parts:[{mimeType:'text/html',body:{data:Buffer.from('<p>Hello</p><img src="https://tracking.test/x">').toString('base64url')}},{mimeType:'text/plain',body:{data:Buffer.from('Plain version').toString('base64url')}},{filename:'lab.pdf',mimeType:'application/pdf',body:{attachmentId:'a',size:30}}]});
  assert.equal(p.body,'Plain version');assert.equal(p.attachments.length,1);assert.equal(p.attachments[0].id,'a');
 });
+test('mail intelligence separates learning, service and junk while exposing nearby verification codes',()=>{
+ const learning=gmail.mailSignals('CHMA10 Lab assignment due Friday','Quercus <no-reply@utoronto.ca>','Please submit your lab report before Friday');
+ assert.equal(learning.category,'学习');assert.equal(learning.actionRequired,true);assert.match(learning.deadlineText,/due/i);
+ const service=gmail.mailSignals('Your verification code is 482913','Accounts','Use verification code 482913 to confirm sign-in');
+ assert.equal(service.category,'服务');assert.deepEqual(service.verificationCodes,['482913']);
+ const junk=gmail.mailSignals('Claim your prize now','promo@example.test','Guaranteed income and crypto giveaway');
+ assert.equal(junk.category,'垃圾');assert.equal(junk.actionRequired,false);
+});
 test('Gmail initial pagination, incremental cursor expiry and revoked auth keep archives and make no mail mutations',async()=>{
  await saveIntegrationConnection('gmail',seal({refresh:'test-refresh'}),{owner:'alice',email:'example@test.invalid'});
  await db.prepare('INSERT INTO mail_sync (account,since_epoch) VALUES (?,?)').bind('example@test.invalid',1700000000).run();

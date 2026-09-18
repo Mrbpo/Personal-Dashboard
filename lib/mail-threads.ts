@@ -4,6 +4,7 @@ import {paidOpenAI} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {digest} from './library.ts';
 import {acquireLease,releaseLease} from './jobs.ts';
+import {mailSignals} from './gmail.ts';
 export async function mailPage(owner:string,options:{before?:string;query?:string;thread?:string}={}){
  const c=await getIntegrationConnection('gmail');if(c?.metadata.owner!==owner)return {messages:[],next:null};
  const params:any[]=[String(c.metadata.email)],filters=['account=?'];
@@ -12,7 +13,7 @@ export async function mailPage(owner:string,options:{before?:string;query?:strin
  if(options.before){let cursor:any;try{cursor=JSON.parse(Buffer.from(options.before,'base64url').toString());}catch{throw new Error('邮件分页标识无效');}if(!Array.isArray(cursor)||cursor.length!==2||cursor.some(x=>typeof x!=='string'||x.length>200))throw new Error('邮件分页标识无效');filters.push('(received_at<? OR (received_at=? AND id<?))');params.push(cursor[0],cursor[0],cursor[1]);}
  const limit=options.thread?1000:100;
  const rows=(await db.prepare(`SELECT * FROM mail_messages WHERE ${filters.join(' AND ')} ORDER BY received_at DESC,id DESC LIMIT ?`).bind(...params,limit+1).all<any>()).results;
- const messages=rows.slice(0,limit),last=messages.at(-1);return {messages,next:rows.length>limit?Buffer.from(JSON.stringify([last.received_at,last.id])).toString('base64url'):null};
+ const messages=rows.slice(0,limit).map(message=>({...message,signals:mailSignals(message.subject,message.sender,message.body)})),last=messages.at(-1);return {messages,next:rows.length>limit?Buffer.from(JSON.stringify([last.received_at,last.id])).toString('base64url'):null};
 }
 export async function analyzeMailThread(owner:string,thread:string){
  const c=await getIntegrationConnection('gmail');if(c?.metadata.owner!==owner)throw new Error('邮箱未连接');const account=String(c.metadata.email);

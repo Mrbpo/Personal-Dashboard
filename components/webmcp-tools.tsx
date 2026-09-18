@@ -73,6 +73,38 @@ export function WebMcpTools() {
       },
     });
 
+    register({
+      name: "search_course_library",
+      title: "搜索课程资料库",
+      description: "搜索已经归档的 Canvas、Piazza、邮件和上传资料，返回文件名、课程与页码引用。提供 courseId 可严格限制课程。",
+      inputSchema: {
+        type: "object",
+        properties: { query: { type: "string" }, courseId: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: async (input: unknown) => {
+        const value=input as {query?:string;courseId?:string};
+        if(!value.query?.trim())throw new Error("query 必填");
+        return jsonOrThrow(await fetch("/api/v1/library/search?"+new URLSearchParams({q:value.query,...(value.courseId?{courseId:value.courseId}:{})})));
+      },
+    });
+
+    register({
+      name: "ask_course_tutor",
+      title: "询问课程学习助手",
+      description: "基于归档课程资料提问并返回带引用的回答。首次可给 courseId；未给时会自动识别，但不会混用不同课程。threadId 用于连续追问。",
+      inputSchema: {
+        type: "object",
+        properties: { question: { type: "string" }, courseId: { type: "string" }, threadId: { type: "string" }, online: { type: "boolean" } },
+        required: ["question"],
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
+      execute: async (input: unknown) => jsonOrThrow(await fetch("/api/v1/study",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)})),
+    });
+
     return () => lifecycle.abort();
   }, []);
 

@@ -6,6 +6,7 @@ export const serviceFields = [
   { key: 'GMAIL_REDIRECT_URI', label: 'Gmail 回调地址（网站地址/api/mail/callback）', group: 'Gmail', secret: false },
   { key: 'GITHUB_REPOSITORY', label: '仓库（owner/repo）', group: '系统更新', secret: false },
   { key: 'GITHUB_ACTIONS_TOKEN', label: '限定该仓库的 Actions 令牌', group: '系统更新', secret: true },
+  { key: 'MOBILE_API_TOKEN', label: '手机 App / API 访问令牌（建议至少 32 位随机字符）', group: '通信接口', secret: true },
   { key: 'CHATGPT_AUTO', label: 'ChatGPT 自动切换（true 开启，false 关闭）', group: 'ChatGPT / Codex', secret: false },
   { key: 'CHATGPT_MODEL', label: 'Codex 模型（留空使用账号默认模型）', group: 'ChatGPT / Codex', secret: false },
   { key: 'CODEX_BINARY', label: 'Codex 程序路径（通常无需填写）', group: 'ChatGPT / Codex', secret: false },

@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cookies, headers } from "next/headers";
+import { serviceValue } from "./service-vault.ts";
 
 export type Owner = { userId: string; email: string; fullName: string };
 
@@ -23,7 +24,8 @@ export async function getCurrentOwner(): Promise<Owner | null> {
   if (process.env.NODE_ENV !== "production" && process.env.LOCAL_DEV_BYPASS_AUTH !== "false") return localOwner();
   const requestHeaders = await headers();
   const bearer = requestHeaders.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (bearer && process.env.DASHBOARD_API_TOKEN && same(bearer, process.env.DASHBOARD_API_TOKEN)) return localOwner();
+  const apiToken = serviceValue("MOBILE_API_TOKEN") || process.env.DASHBOARD_API_TOKEN;
+  if (bearer && apiToken && same(bearer, apiToken)) return localOwner();
   const expected = sessionValue();
   const actual = (await cookies()).get("course_radar_session")?.value;
   return expected && actual && same(actual, expected) ? localOwner() : null;
