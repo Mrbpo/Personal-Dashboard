@@ -20,8 +20,10 @@ function extractOutputText(payload: any): string {
 
 export function cleanActionAnswer(answer: string, question: string) {
   const wantsSetup = /(?:如何|怎么|怎样).{0,12}(?:登录|登入|打开|启动|配置|设置)|\b(?:login|sign in|setup|configure|launch)\b/i.test(question);
+  const wantsDefinition = /什么意思|含义|定义|解释|\b(?:meaning|define|definition)\b/i.test(question);
   let number = 0;
-  return answer.split(/\r?\n/).filter((line) => {
+  return answer.split(/\r?\n/).map((line) => wantsDefinition ? line : line.replace(/^释义[:：].*?(?=\s*\d+[.)、])\s*/, '')).filter((line) => {
+    if (!line.trim() || !wantsDefinition && /^释义[:：]/.test(line)) return false;
     if (/如果你愿意|需要我(?:再|帮|把)|我还可以/i.test(line)) return false;
     if (/未列出的事项|需你确认|请确认提交平台|在哪里\/?如何提交|文件命名|打包.*要求/i.test(line)) return false;
     if (!wantsSetup && /datatools\.utoronto|\bworkspace\b|tutorial1\.R|\bUTORid\b|\bSSO\b|RStudio[（(](?:网页版|web)|建立.*(?:资料夹|資料夾|文件夹|脚本|script)/i.test(line)) return false;
