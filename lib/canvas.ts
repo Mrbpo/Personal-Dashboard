@@ -228,11 +228,10 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
 
 export async function downloadCanvasFile(url: string): Promise<Response> {
   const { baseUrl, token } = config();
-  const parsed = new URL(url);
+  const parsed = new URL(url, baseUrl + "/");
   if (parsed.protocol !== "https:") throw new Error("UNTRUSTED_CANVAS_FILE_URL");
-  const isCanvasUrl = url.startsWith(baseUrl + "/");
-  if (!isCanvasUrl) throw new Error("UNTRUSTED_CANVAS_FILE_URL");
-  const response = await fetch(url, { headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(30000) });
+  if (parsed.origin !== new URL(baseUrl).origin) throw new Error("UNTRUSTED_CANVAS_FILE_URL");
+  const response = await fetch(parsed, { headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(30000) });
   if (!response.ok) throw new Error("CANVAS_FILE_DOWNLOAD_FAILED_" + response.status);
   return response;
 }

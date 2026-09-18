@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 process.env.CANVAS_BASE_URL = "https://canvas.example.test";
 process.env.CANVAS_TOKEN = "test-token";
-const { allPages, setCanvasPlannerComplete, textFromHtml } = await import("../lib/canvas.ts");
+const { allPages, downloadCanvasFile, setCanvasPlannerComplete, textFromHtml } = await import("../lib/canvas.ts");
 
 test("Canvas pagination follows the next link and keeps bearer auth", async () => {
   const original = globalThis.fetch;
@@ -23,6 +23,16 @@ test("Canvas pagination follows the next link and keeps bearer auth", async () =
 
 test("Canvas HTML is cleaned into readable text", () => {
   assert.equal(textFromHtml("<p>Hello &amp; welcome</p><script>bad()</script><ul><li>Read this</li></ul>"), "Hello & welcome\n Read this");
+});
+
+test("Canvas file downloads resolve relative URLs but reject another origin", async () => {
+  const original = globalThis.fetch; let requested = "";
+  globalThis.fetch = (async (input: string | URL | Request) => { requested=String(input);return new Response("pdf"); }) as typeof fetch;
+  try {
+    assert.equal((await downloadCanvasFile("/files/42/download")).status,200);
+    assert.equal(requested,"https://canvas.example.test/files/42/download");
+    await assert.rejects(downloadCanvasFile("https://evil.example/files/42"),/UNTRUSTED_CANVAS_FILE_URL/);
+  } finally { globalThis.fetch=original; }
 });
 
 test("Canvas planner completion creates a personal override", async () => {
