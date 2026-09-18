@@ -17,11 +17,21 @@ function activityMarker(value: string) {
 
 export function explicitArchiveCourse(question: string, courses: CourseOption[]) {
   const query = compact(question);
-  return courses.find((course) => {
+  const exact = courses.find((course) => {
     const code = compact(course.code);
     const base = course.code.toUpperCase().replace(/\s/g, '').match(/[A-Z]{2,}\d+/)?.[0] || '';
     return course.enabled && Boolean(code && query.includes(code) || base.length >= 5 && query.includes(base));
-  })?.id || '';
+  })?.id;
+  if (exact) return exact;
+  const text = question.toLocaleLowerCase();
+  const semantic = courses.filter((course) => {
+    const identity = compact(`${course.code} ${course.name}`);
+    if (/STAB|STATISTICS|STATISTICAL/.test(identity)) return /统计|\bstat(?:s|istics?)?\b/i.test(text);
+    if (/MATA|CALCULUS/.test(identity)) return /微积分|\bcalculus\b/i.test(text);
+    if (/CHMA|CHEMISTRY/.test(identity)) return /化学|\bchem(?:istry)?\b/i.test(text);
+    return false;
+  });
+  return semantic.length === 1 ? semantic[0].id : '';
 }
 
 export function inferArchiveCourse(structured: CourseSearchResult[], library: LibraryHit[]) {

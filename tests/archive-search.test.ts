@@ -19,6 +19,11 @@ test('archive search recognizes an explicit course code without manual setup',()
   assert.equal(explicitArchiveCourse('STAB22 tut 我要做什么', courses),'stats');
 });
 
+test('archive search recognizes an unambiguous subject name before generic tutorial matches',()=>{
+  assert.equal(explicitArchiveCourse('统计 tut 我要做什么', courses),'stats');
+  assert.equal(explicitArchiveCourse('微积分 tutorial 的要求', courses),'math');
+});
+
 test('archive search infers one course from repeated top directory matches',()=>{
   assert.equal(inferArchiveCourse([source('stats','STAB22TUT1.pdf'),source('stats','STAB22TUT1Notes.pdf'),source('math','Tutorial')],[hit('math','other.pdf')]),'stats');
 });
