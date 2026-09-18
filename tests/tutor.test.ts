@@ -11,7 +11,7 @@ test('asking alone is not evidence of weakness or strength',()=>{
  assert.equal(tutor.evidenceAssessment('我不理解摩尔浓度','weakness','fabricated').assessment,'explored');
 });
 test('automatic course scoping recognizes explicit codes and refuses weak mixed evidence',()=>{
- const courses=[{id:'chem',code:'CHMA10H3',name:'General Chemistry'},{id:'stats',code:'STAB22H3',name:'Statistics'}];
+ const courses=[{id:'chem',code:'CHMA10H3 F 20269 All Sections',name:'General Chemistry'},{id:'stats',code:'STAB22H3',name:'Statistics'}];
  assert.equal(tutor.explicitCourseFromQuestion('CHMA10 的 lab notebook 要写什么？',courses),'chem');
  assert.equal(tutor.explicitCourseFromQuestion('统计课 Statistics 的作业',courses),'stats');
  assert.equal(tutor.dominantCourse(['chem','chem','chem','stats']),'chem');

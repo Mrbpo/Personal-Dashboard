@@ -111,7 +111,7 @@ function compactCourse(value:string){return value.toUpperCase().replace(/[^A-Z0-
 export function explicitCourseFromQuestion(question:string,courses:CourseOption[]){
  const compact=compactCourse(question);
  return courses.find(course=>{
-  const code=compactCourse(course.code),baseCode=code.replace(/H\d$/,''),name=compactCourse(course.name);
+  const code=compactCourse(course.code),baseCode=course.code.toUpperCase().replace(/\s/g,'').match(/[A-Z]{2,}\d+/)?.[0]||'',name=compactCourse(course.name);
   return Boolean(code&&compact.includes(code)||baseCode.length>=5&&compact.includes(baseCode)||name.length>=4&&compact.includes(name));
  })?.id||'';
 }
