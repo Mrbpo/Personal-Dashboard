@@ -23,6 +23,10 @@ compose=(docker compose -f /srv/study/compose.yml)
 printf '{"version":"%s","status":"deploying"}\n' "$sha" > /srv/study/status/current.json
 rollback() {
   "${compose[@]}" stop worker web || true
+  # The stopped worker can leave its short-lived primary lease behind when npm
+  # receives SIGTERM before the Node child. No executor is running here, so the
+  # lease is safe to clear before restoring the previous worker.
+  "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();" || true
   if [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then APP_VERSION="$previous" "${compose[@]}" up -d web worker proxy; fi
   printf '{"version":"%s","previous":"%s","status":"failed"}\n' "$sha" "$previous" > /srv/study/status/current.json
 }
@@ -30,6 +34,9 @@ trap 'rollback' ERR
 if test -n "$previous"; then APP_VERSION="$previous" "${compose[@]}" stop worker web; fi
 bash /srv/study/backup.sh
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
+# All old executors are stopped. Clear only the executor lease so the new
+# worker can become primary immediately; job leases and progress are retained.
+"${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
 started=$(date +%s%3N)
 "${compose[@]}" up -d web worker proxy
 healthy=0
