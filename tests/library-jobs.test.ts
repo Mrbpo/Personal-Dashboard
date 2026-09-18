@@ -39,6 +39,14 @@ test('library versions isolate owners and courses, deduplicate and hide deletion
  assert.ok(!(await lib.searchLibrary('alice','molarity','chem',false)).some(h=>h.document_id===second));
  await assert.rejects(lib.getDocument('alice',second));
 });
+test('a source removed upstream hides every archived version immediately',async()=>{
+ const old=await lib.saveDocument('remote-owner','chem','canvas','canvas:file:9','old.pdf.txt','text/plain',Buffer.from('obsolete remote content'));
+ const current=await lib.saveDocument('remote-owner','chem','canvas','canvas:file:9','new.pdf.txt','text/plain',Buffer.from('obsolete remote content revised'));
+ await lib.indexDocument('remote-owner',old);await lib.indexDocument('remote-owner',current);
+ assert.ok((await lib.searchLibrary('remote-owner','obsolete','chem',false)).length>0);
+ assert.equal(await lib.hideRemoteDocuments('remote-owner','chem','canvas','canvas:file:9'),2);
+ assert.equal((await lib.searchLibrary('remote-owner','obsolete','chem',false)).length,0);
+});
 test('embedding unchanged chunks avoids duplicate calls, including concurrent requests',async()=>{
  let calls=0;const original=globalThis.fetch;
  globalThis.fetch=async(_u,init)=>{calls++;const b=JSON.parse(String(init?.body));return Response.json({data:b.input.map((_:unknown,index:number)=>({index,embedding:Array(768).fill(0.1)}))});};
