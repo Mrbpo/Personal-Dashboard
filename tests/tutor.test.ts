@@ -31,6 +31,9 @@ test('tutor persists context and attachments privately and deduplicates complete
   await tutor.sendTutor('alice',id,'second-request-0002','Give an example',[],false);
   assert.ok(last.input.some((m:any)=>m.role==='assistant'&&m.content[0].text==='A concentration explanation'));
   assert.ok(last.input.at(-1).content.some((p:any)=>p.type==='input_file'));
+  assert.equal(last.reasoning.effort,'low');
+  assert.equal(last.text.verbosity,'low');
+  assert.equal(last.max_output_tokens,3000);
   assert.equal((await tutor.tutorState('alice',id)).messages.length,4);
  }finally{globalThis.fetch=original;}
 });

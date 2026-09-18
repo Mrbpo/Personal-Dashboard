@@ -25,7 +25,11 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   if(!serviceValue('OPENAI_API_KEY')) throw new Error('请先配置 OpenAI API Key');
   const maxOutput=endpoint==='embeddings'?0:Number(body.max_output_tokens);
   if(!Number.isFinite(maxOutput) || maxOutput<0 || maxOutput>128000) throw new Error('回答长度上限无效');
-  const tokens=endpoint==='embeddings'?Buffer.byteLength(JSON.stringify(body.input)):rate.context;
+  // Reserve against a conservative estimate of this request, not the model's
+  // entire context window. Successful calls are settled with provider usage;
+  // ambiguous timeouts retain this bounded reservation.
+  const inputBytes=Buffer.byteLength(JSON.stringify(body.input??body));
+  const tokens=endpoint==='embeddings'?inputBytes:Math.min(rate.context,Math.max(1000,Math.ceil(inputBytes/2)));
   const toolMax=body.tools?.length ? Math.max(1,body.max_tool_calls || 1) * 0.02 : 0;
   const reserved=Math.max(0.000001,(tokens*rate.input+maxOutput*rate.output)/1e6+toolMax);
   const id=await reserveBudget(reserved,endpoint);
