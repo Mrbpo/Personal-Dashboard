@@ -44,6 +44,12 @@ export function mergeArchiveSources(structured: CourseSearchResult[], library: L
   return [...documents, ...directoryWithoutParsedDuplicate].slice(0, limit).map((source, index) => ({ ...source, ref: `S${index + 1}` }));
 }
 
+export function preferStrongDocumentMatches(question: string, structured: CourseSearchResult[], library: LibraryHit[]) {
+  const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
+  const strong = library.filter((hit) => hit.score >= 3);
+  return !summary && strong.length ? { structured: [] as CourseSearchResult[], library: strong.slice(0, 4) } : { structured, library };
+}
+
 export async function searchArchiveForAnswer(owner: string, question: string, requestedCourse = '', limit = 12) {
   const courses = (await listCourseSettings()).filter((course) => course.enabled);
   let scope = requestedCourse || explicitArchiveCourse(question, courses);
@@ -59,5 +65,6 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
       piazzaOnly ? Promise.resolve([]) : searchLibrary(owner, question, scope, true),
     ]);
   }
+  ({ structured, library } = preferStrongDocumentMatches(question, structured, library));
   return { sources: mergeArchiveSources(structured, library, courses, limit), inferredCourseId: scope || null };
 }

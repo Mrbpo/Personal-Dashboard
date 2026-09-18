@@ -109,5 +109,5 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   let vector:number[]|null=null;
   if(semantic&&rows.length&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768});if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
   const vectors=vector?(await db.prepare('SELECT chunk_id,vector FROM library_vectors WHERE model=?').bind(EMBED_MODEL).all<{chunk_id:string;vector:string}>()).results:[];const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
-  return rows.map(r=>({...r,score:words.filter(w=>(r.name+' '+r.body).toLowerCase().includes(w)).length+(vector&&map.has(r.id)?cosine(vector,JSON.parse(map.get(r.id)!)):0)})).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score).slice(0,8);
+  return rows.map(r=>{const title=r.name.toLowerCase(),body=r.body.toLowerCase();const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&map.has(r.id)?cosine(vector,JSON.parse(map.get(r.id)!)):0)};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score).slice(0,8);
 }

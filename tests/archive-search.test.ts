@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { explicitArchiveCourse, inferArchiveCourse, mergeArchiveSources } from '../lib/archive-search.ts';
+import { explicitArchiveCourse, inferArchiveCourse, mergeArchiveSources, preferStrongDocumentMatches } from '../lib/archive-search.ts';
 import type { CourseSearchResult } from '../lib/repository.ts';
 
 const courses = [
@@ -30,4 +30,10 @@ test('parsed document text replaces a filename-only Canvas directory record',()=
   assert.match(merged[0].body,/frequency table/);
   assert.ok(!merged.some((item)=>item.sourceType==='file'&&item.title==='STAB22TUT1.pdf'));
   assert.deepEqual(merged.map((item)=>item.ref),['S1','S2']);
+});
+
+test('a strong filename match excludes generic syllabus and stale announcements for a short task question',()=>{
+  const selected=preferStrongDocumentMatches('统计 tut 我要做什么',[source('stats','Old tutorial announcement','announcement')],[{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','Syllabus.pdf'),score:1.4}]);
+  assert.equal(selected.structured.length,0);
+  assert.deepEqual(selected.library.map((item)=>item.name),['STAB22TUT1.pdf']);
 });
