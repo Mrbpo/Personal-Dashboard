@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { database as db } from './database.ts';
 import { paidOpenAI } from './ai-budget.ts';
 import { serviceValue } from './service-vault.ts';
-import { acquireLease,releaseLease } from './jobs.ts';
+import { acquireLease,enqueue,releaseLease } from './jobs.ts';
 import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
 export const EMBED_MODEL='text-embedding-3-small';
 export const MAX_LIBRARY_BYTES=50*1024*1024;
@@ -35,13 +35,18 @@ export async function clearSourceFailure(owner:string,origin:string,key:string){
 export async function getDocument(owner:string,id:string) {const row=await db.prepare('SELECT * FROM library_documents WHERE id=? AND owner_id=? AND deleted=0').bind(id,owner).first<DocumentRow>();if(!row)throw new Error('资料不存在');return row;}
 export async function previewDocument(owner:string,id:string) {
   const document=await getDocument(owner,id);
-  let text='';
+  let text='',pages:Array<{page:number;locator:string;text:string}>=[];
   if(document.mime.startsWith('text/')) text=(await readBlob(document.hash)).toString('utf8');
+  else if(document.mime==='application/pdf'){
+    const parsed=(await db.prepare('SELECT page,body FROM library_parse_pages WHERE document_id=? AND parser=? ORDER BY page LIMIT 500').bind(id,PDF_PARSER_VERSION).all<{page:number;body:string}>()).results;
+    pages=parsed.map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
+    if(document.status!=='ready'||!pages.length)await enqueue('index',{owner,id},`index:${id}`,true);
+  }
   else if(!document.mime.startsWith('image/')&&document.mime!=='application/pdf'){
     const chunks=(await db.prepare('SELECT locator,body FROM library_chunks WHERE document_id=? ORDER BY position LIMIT 500').bind(id).all<{locator:string;body:string}>()).results;
     text=chunks.map((chunk,index)=>`${index===0||chunks[index-1]?.locator!==chunk.locator?`\n${chunk.locator}\n`:''}${chunk.body}`).join('\n').trim();
   }
-  return {document,text};
+  return {document,text,pages};
 }
 export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id)]);}
 export async function hideRemoteDocuments(owner:string,course:string,origin:string,remoteKey:string){

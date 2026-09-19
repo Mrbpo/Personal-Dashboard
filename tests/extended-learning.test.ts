@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import {PDFDocument} from 'pdf-lib';
 process.env.DATABASE_URL=':memory:';process.env.LOCAL_OCR='false';
 const {database:db}=await import('../lib/database.ts');
-const {saveDocument,indexDocument,searchLibrary,canonicalDocumentMime,recordSourceFailure,listSourceFailures,clearSourceFailure}=await import('../lib/library.ts');
+const {saveDocument,indexDocument,searchLibrary,previewDocument,canonicalDocumentMime,recordSourceFailure,listSourceFailures,clearSourceFailure}=await import('../lib/library.ts');
 const {rollingMemory,relevantMemory}=await import('../lib/tutor-memory.ts');
 const {tutorWeb,validatedPublicQuery}=await import('../lib/tutor-web.ts');
 test('PDF page checkpoints resume after failure without reparsing completed pages',async()=>{
  const doc=await PDFDocument.create();doc.addPage();doc.addPage();const id=await saveDocument('alice','chem','upload','long.pdf','long.pdf','application/pdf',await doc.save());
  const original=globalThis.fetch;let calls=0;
  globalThis.fetch=async()=>{calls++;if(calls===2)return new Response(null,{status:503});return Response.json({output_text:JSON.stringify({text:'page text '+calls,complete:true})});};
- try{await assert.rejects(indexDocument('alice',id));await indexDocument('alice',id);assert.equal(calls,3);const pages=(await db.prepare('SELECT * FROM library_parse_pages WHERE document_id=? ORDER BY page').bind(id).all()).results;assert.equal(pages.length,2);assert.equal(pages[0].body,'page text 1');}finally{globalThis.fetch=original;}
+ try{await assert.rejects(indexDocument('alice',id));await indexDocument('alice',id);assert.equal(calls,3);const pages=(await db.prepare('SELECT * FROM library_parse_pages WHERE document_id=? ORDER BY page').bind(id).all()).results;assert.equal(pages.length,2);assert.equal(pages[0].body,'page text 1');const preview=await previewDocument('alice',id);assert.deepEqual(preview.pages.map(page=>[page.locator,page.text]),[['第 1 页','page text 1'],['第 2 页','page text 3']]);}finally{globalThis.fetch=original;}
 });
 test('an uncertain PDF page remains searchable with an explicit original-page warning',async()=>{
  const doc=await PDFDocument.create();doc.addPage();const id=await saveDocument('partial-owner','chem','upload','scan.pdf','scan.pdf','application/pdf',await doc.save());
