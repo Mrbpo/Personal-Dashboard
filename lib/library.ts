@@ -33,6 +33,16 @@ export async function listSourceFailures(owner:string){return (await db.prepare(
 export async function recordSourceFailure(owner:string,origin:string,key:string,course:string,name:string,error:string){await db.prepare('INSERT INTO library_source_failures VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,origin,origin_key) DO UPDATE SET course_id=excluded.course_id,name=excluded.name,error=excluded.error,updated_at=excluded.updated_at').bind(owner,origin,key,course,name.slice(0,200),error,new Date().toISOString()).run();}
 export async function clearSourceFailure(owner:string,origin:string,key:string){await db.prepare('DELETE FROM library_source_failures WHERE owner_id=? AND origin=? AND origin_key=?').bind(owner,origin,key).run();}
 export async function getDocument(owner:string,id:string) {const row=await db.prepare('SELECT * FROM library_documents WHERE id=? AND owner_id=? AND deleted=0').bind(id,owner).first<DocumentRow>();if(!row)throw new Error('资料不存在');return row;}
+export async function previewDocument(owner:string,id:string) {
+  const document=await getDocument(owner,id);
+  let text='';
+  if(document.mime.startsWith('text/')) text=(await readBlob(document.hash)).toString('utf8');
+  else if(!document.mime.startsWith('image/')&&document.mime!=='application/pdf'){
+    const chunks=(await db.prepare('SELECT locator,body FROM library_chunks WHERE document_id=? ORDER BY position LIMIT 500').bind(id).all<{locator:string;body:string}>()).results;
+    text=chunks.map((chunk,index)=>`${index===0||chunks[index-1]?.locator!==chunk.locator?`\n${chunk.locator}\n`:''}${chunk.body}`).join('\n').trim();
+  }
+  return {document,text};
+}
 export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id)]);}
 export async function hideRemoteDocuments(owner:string,course:string,origin:string,remoteKey:string){
  const key=JSON.stringify([course,remoteKey]);
