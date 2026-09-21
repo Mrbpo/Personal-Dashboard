@@ -24,7 +24,7 @@ export async function POST(request: Request) {
     const result = await answerCourseQuestion(question, sources);
     const used = new Set(result.citationRefs);
     const citations = sources.filter((source) => used.has(source.ref)).map(publicSource);
-    return Response.json({ ...result, inferredCourseId, coverage: `基于本地 ${sources.length} 条目录、帖子或文档正文${summary ? '（单次最多 100 条；长内容按相关片段读取）' : ''}；未读取未归档内容。`, citations: citations.length ? citations : sources.slice(0, 3).map(publicSource) });
+    return Response.json({ ...result, feedbackId: crypto.randomUUID(), inferredCourseId, coverage: `基于本地 ${sources.length} 条目录、帖子或文档正文${summary ? '（单次最多 100 条；长内容按相关片段读取）' : ''}；未读取未归档内容。`, citations: citations.length ? citations : sources.slice(0, 3).map(publicSource) });
   } catch (error) {
     const message = error instanceof Error ? error.message : "COURSE_QUESTION_FAILED";
     return Response.json({ error: message.startsWith("OPENAI_") ? "AI 回答没有完整生成，请重新试一次" : "全站检索暂时不可用，请稍后重试" }, { status: 502 });

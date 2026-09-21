@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { ArrowUp, BookOpen, LibraryBig, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MiniAiFeedback } from '@/components/mini-ai-feedback';
 
 type Citation = {
   ref: string;
@@ -20,6 +21,7 @@ type Answer = {
   followUps: string[];
   citations: Citation[];
   aiAvailable: boolean;
+  feedbackId: string;
 };
 
 const examples = ["帮我总结一下 CHMA10 Piazza", "第一节 Lab 的课前 notebook 怎么做？", "老师最近改了哪些要求？"];
@@ -70,6 +72,7 @@ export function CourseAssistant() {
               <p className="whitespace-pre-wrap text-sm leading-7">{answer.answer}</p>
               {answer.coverage && <p className="mt-3 text-xs opacity-65">{answer.coverage}</p>}
               {answer.followUps?.length > 0 && <div className="mt-4 border-t border-[#c7bda5] pt-3 text-sm"><p className="font-semibold">{answer.needsClarification ? "还缺少这项信息：" : "继续追问"}</p>{answer.followUps.map((item) => <button key={item} type="button" onClick={() => void ask(undefined, item)} className="mt-1 block text-left text-[#315e53] hover:underline">· {item}</button>)}</div>}
+              {answer.aiAvailable&&answer.feedbackId&&<MiniAiFeedback sourceType="course-analysis" sourceId={answer.feedbackId} metadata={{question}}/>}
             </div>
             <div className="space-y-2">
               <p className="px-1 text-[10px] font-semibold uppercase tracking-[.16em] text-[#c6aa6b]">Sources · 回答依据</p>

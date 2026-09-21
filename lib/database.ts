@@ -19,8 +19,28 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS background_jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, lease_until INTEGER, lease_token TEXT, error TEXT, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS worker_state (id TEXT PRIMARY KEY, heartbeat INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS ai_ledger (id TEXT PRIMARY KEY, month TEXT NOT NULL, kind TEXT NOT NULL, reserved REAL NOT NULL, charged REAL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS mail_messages (id TEXT PRIMARY KEY, account TEXT NOT NULL, thread_id TEXT NOT NULL, subject TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, received_at TEXT NOT NULL, category TEXT NOT NULL, attachments_json TEXT NOT NULL, analysis_json TEXT, hash TEXT NOT NULL, removed INTEGER NOT NULL DEFAULT 0)`,
-  `CREATE TABLE IF NOT EXISTS mail_sync (account TEXT PRIMARY KEY, history_id TEXT, page_token TEXT, since_epoch INTEGER NOT NULL, pending_history TEXT)`,
+  `CREATE TABLE IF NOT EXISTS ai_content_feedback (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL, rating INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_id,source_type,source_id))`,
+  `CREATE INDEX IF NOT EXISTS idx_ai_feedback_source ON ai_content_feedback(source_type,rating,updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS mail_messages (id TEXT PRIMARY KEY, account TEXT NOT NULL, thread_id TEXT NOT NULL, subject TEXT NOT NULL, sender TEXT NOT NULL, body TEXT NOT NULL, received_at TEXT NOT NULL, category TEXT NOT NULL, category_source TEXT NOT NULL DEFAULT 'heuristic', category_confidence REAL NOT NULL DEFAULT 0.5, category_reason TEXT NOT NULL DEFAULT '', attachments_json TEXT NOT NULL, analysis_json TEXT, hash TEXT NOT NULL, removed INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_messages_account_date ON mail_messages(account,received_at DESC,id DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_messages_account_thread ON mail_messages(account,thread_id,received_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_messages_account_sender ON mail_messages(account,sender,received_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS mail_sync (account TEXT PRIMARY KEY, history_id TEXT, page_token TEXT, since_epoch INTEGER NOT NULL, pending_history TEXT, import_status TEXT NOT NULL DEFAULT 'idle', imported_count INTEGER NOT NULL DEFAULT 0, estimated_total INTEGER, import_started_at TEXT, import_completed_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS mail_category_feedback (account TEXT NOT NULL, sender_key TEXT NOT NULL, category TEXT NOT NULL, corrections INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL, PRIMARY KEY(account,sender_key))`,
+  `CREATE TABLE IF NOT EXISTS mail_intelligence (email_id TEXT PRIMARY KEY, account TEXT NOT NULL, one_line_summary TEXT NOT NULL, detailed_summary TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT NOT NULL DEFAULT '', importance_score REAL NOT NULL, urgency_score REAL NOT NULL, confidence REAL NOT NULL, requires_action INTEGER NOT NULL, action_items_json TEXT NOT NULL DEFAULT '[]', deadlines_json TEXT NOT NULL DEFAULT '[]', events_json TEXT NOT NULL DEFAULT '[]', people_json TEXT NOT NULL DEFAULT '[]', organizations_json TEXT NOT NULL DEFAULT '[]', courses_json TEXT NOT NULL DEFAULT '[]', projects_json TEXT NOT NULL DEFAULT '[]', topics_json TEXT NOT NULL DEFAULT '[]', keywords_json TEXT NOT NULL DEFAULT '[]', referenced_documents_json TEXT NOT NULL DEFAULT '[]', referenced_urls_json TEXT NOT NULL DEFAULT '[]', why_important_json TEXT NOT NULL DEFAULT '[]', model TEXT NOT NULL, prompt_version TEXT NOT NULL, analysis_version INTEGER NOT NULL, input_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'complete', error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_intelligence_account_category ON mail_intelligence(account,category)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_intelligence_account_importance ON mail_intelligence(account,importance_score DESC)`,
+  `CREATE TABLE IF NOT EXISTS mail_processing (email_id TEXT PRIMARY KEY, account TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL, analysis_version INTEGER NOT NULL DEFAULT 0, embedding_version TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, error TEXT, updated_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_processing_status ON mail_processing(account,status,updated_at)`,
+  `CREATE TABLE IF NOT EXISTS mail_embeddings (email_id TEXT NOT NULL, model TEXT NOT NULL, input_hash TEXT NOT NULL, vector TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(email_id,model))`,
+  `CREATE TABLE IF NOT EXISTS mail_feedback (id TEXT PRIMARY KEY, account TEXT NOT NULL, email_id TEXT NOT NULL, field TEXT NOT NULL, predicted_json TEXT NOT NULL, corrected_json TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', model_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_feedback_lookup ON mail_feedback(account,field,created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_feedback_email ON mail_feedback(email_id,created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS mail_sender_profiles (account TEXT NOT NULL, sender_key TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0, action_count INTEGER NOT NULL DEFAULT 0, correction_count INTEGER NOT NULL DEFAULT 0, common_category TEXT NOT NULL DEFAULT '', typical_importance REAL NOT NULL DEFAULT 0, topics_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(account,sender_key))`,
+  `CREATE TABLE IF NOT EXISTS mail_entities (id TEXT PRIMARY KEY, account TEXT NOT NULL, entity_type TEXT NOT NULL, canonical_name TEXT NOT NULL, aliases_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}', confidence REAL NOT NULL, evidence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, UNIQUE(account,entity_type,canonical_name))`,
+  `CREATE INDEX IF NOT EXISTS idx_mail_entities_lookup ON mail_entities(account,entity_type,canonical_name)`,
+  `CREATE TABLE IF NOT EXISTS mail_entity_relationships (account TEXT NOT NULL, source_entity TEXT NOT NULL, relation_type TEXT NOT NULL, target_entity TEXT NOT NULL, confidence REAL NOT NULL, evidence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(account,source_entity,relation_type,target_entity))`,
+  `CREATE TABLE IF NOT EXISTS mail_recurring_patterns (account TEXT NOT NULL, sender_key TEXT NOT NULL, subject_pattern TEXT NOT NULL, pattern_type TEXT NOT NULL, typical_interval_days REAL, typical_importance REAL NOT NULL DEFAULT 0, confidence REAL NOT NULL, evidence_count INTEGER NOT NULL DEFAULT 1, last_seen TEXT NOT NULL, PRIMARY KEY(account,sender_key,subject_pattern))`,
   `CREATE TABLE IF NOT EXISTS tutor_threads (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS tutor_messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', meta_json TEXT NOT NULL DEFAULT '{}', starred INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_tutor_messages_thread ON tutor_messages(thread_id, created_at)`,
@@ -80,6 +100,30 @@ async function ready() {
     }
     const taskColumns = await getClient().execute("PRAGMA table_info(tasks)");
     const settingsColumns = await getClient().execute("PRAGMA table_info(settings)");
+    const mailColumns = await getClient().execute("PRAGMA table_info(mail_messages)");
+    const mailSyncColumns = await getClient().execute("PRAGMA table_info(mail_sync)");
+    const addMailColumn = async (name: string, sql: string) => {
+      if (!mailColumns.rows.some((row) => row.name === name)) await getClient().execute(sql);
+    };
+    await addMailColumn("category_source", "ALTER TABLE mail_messages ADD COLUMN category_source TEXT NOT NULL DEFAULT 'heuristic'");
+    await addMailColumn("category_confidence", "ALTER TABLE mail_messages ADD COLUMN category_confidence REAL NOT NULL DEFAULT 0.5");
+    await addMailColumn("category_reason", "ALTER TABLE mail_messages ADD COLUMN category_reason TEXT NOT NULL DEFAULT ''");
+    await addMailColumn("recipients_json", "ALTER TABLE mail_messages ADD COLUMN recipients_json TEXT NOT NULL DEFAULT '[]'");
+    await addMailColumn("cc_json", "ALTER TABLE mail_messages ADD COLUMN cc_json TEXT NOT NULL DEFAULT '[]'");
+    await addMailColumn("bcc_json", "ALTER TABLE mail_messages ADD COLUMN bcc_json TEXT NOT NULL DEFAULT '[]'");
+    await addMailColumn("body_html", "ALTER TABLE mail_messages ADD COLUMN body_html TEXT NOT NULL DEFAULT ''");
+    await addMailColumn("sent_at", "ALTER TABLE mail_messages ADD COLUMN sent_at TEXT");
+    await addMailColumn("labels_json", "ALTER TABLE mail_messages ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'");
+    await addMailColumn("headers_json", "ALTER TABLE mail_messages ADD COLUMN headers_json TEXT NOT NULL DEFAULT '{}'");
+    await addMailColumn("raw_metadata_json", "ALTER TABLE mail_messages ADD COLUMN raw_metadata_json TEXT NOT NULL DEFAULT '{}'");
+    const addMailSyncColumn = async (name: string, sql: string) => {
+      if (!mailSyncColumns.rows.some((row) => row.name === name)) await getClient().execute(sql);
+    };
+    await addMailSyncColumn("import_status", "ALTER TABLE mail_sync ADD COLUMN import_status TEXT NOT NULL DEFAULT 'idle'");
+    await addMailSyncColumn("imported_count", "ALTER TABLE mail_sync ADD COLUMN imported_count INTEGER NOT NULL DEFAULT 0");
+    await addMailSyncColumn("estimated_total", "ALTER TABLE mail_sync ADD COLUMN estimated_total INTEGER");
+    await addMailSyncColumn("import_started_at", "ALTER TABLE mail_sync ADD COLUMN import_started_at TEXT");
+    await addMailSyncColumn("import_completed_at", "ALTER TABLE mail_sync ADD COLUMN import_completed_at TEXT");
     if (!settingsColumns.rows.some((row) => row.name === "display_name")) {
       await getClient().execute("ALTER TABLE settings ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
     }

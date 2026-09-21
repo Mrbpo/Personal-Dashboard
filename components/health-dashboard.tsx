@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import type { HealthDay } from '@/lib/health-data';
+import {MiniAiFeedback} from '@/components/mini-ai-feedback';
 type Status = { configured: boolean; connected: boolean; aiConfigured: boolean; lastSyncedAt: string | null; days: HealthDay[]; errors: string[]; error: string | null; analysis: { text: string; generatedAt: string; model: string } | null };
 export function HealthDashboard() {
   const [data, setData] = useState<Status | null>(null);
@@ -53,6 +54,6 @@ export function HealthDashboard() {
       <p className="mt-3 text-xs text-muted-foreground">最近成功同步：{data?.lastSyncedAt ? new Date(data.lastSyncedAt).toLocaleString('zh-CN') : '尚未同步'}</p>
     </section>
     <section className="parchment-panel p-5"><h2 className="text-lg font-semibold">近七天记录</h2>{!data?.days.length ? <p className="mt-3 text-muted-foreground">授权并同步后显示真实记录。</p> : <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{data.days.map(day => <div key={day.date} className="rounded-lg border p-3 text-sm"><p className="font-semibold">{day.date}</p><p className="mt-2">步数：{format(day.steps, ' 步')}</p><p>睡眠：{format(day.sleepMinutes, ' 分钟')}</p><p>静息心率：{format(day.restingHeartRate, ' 次/分')}</p><p>运动：{format(day.exerciseMinutes, ' 分钟')}</p></div>)}</div>}</section>
-    <section className="parchment-panel botanical-answer p-5"><h2 className="text-lg font-semibold">AI 健康观察</h2><p className="mt-2 text-sm text-muted-foreground">点击分析会将近七天日汇总发送给你配置的 OpenAI 服务，不发送授权令牌或账号信息。解读用于生活记录，不作医学诊断。</p><Button className="mt-4" disabled={busy || !data?.aiConfigured || !data?.days.length} onClick={() => action('analyze')}>{busy ? '处理中…' : '分析近七天数据'}</Button>{!data?.aiConfigured && <p className="mt-2 text-sm">请先在服务配置中添加 OpenAI API Key。</p>}{data?.analysis && <><p className="mt-4 whitespace-pre-wrap text-sm leading-7">{data.analysis.text}</p><p className="mt-3 text-xs text-muted-foreground">{data.analysis.model} · {new Date(data.analysis.generatedAt).toLocaleString('zh-CN')} · 分析基于生成时的数据，更新后请重新分析。</p></>}</section>
+    <section className="parchment-panel botanical-answer p-5"><h2 className="text-lg font-semibold">AI 健康观察</h2><p className="mt-2 text-sm text-muted-foreground">点击分析会将近七天日汇总发送给你配置的 OpenAI 服务，不发送授权令牌或账号信息。解读用于生活记录，不作医学诊断。</p><Button className="mt-4" disabled={busy || !data?.aiConfigured || !data?.days.length} onClick={() => action('analyze')}>{busy ? '处理中…' : '分析近七天数据'}</Button>{!data?.aiConfigured && <p className="mt-2 text-sm">请先在服务配置中添加 OpenAI API Key。</p>}{data?.analysis && <><p className="mt-4 whitespace-pre-wrap text-sm leading-7">{data.analysis.text}</p><p className="mt-3 text-xs text-muted-foreground">{data.analysis.model} · {new Date(data.analysis.generatedAt).toLocaleString('zh-CN')} · 分析基于生成时的数据，更新后请重新分析。</p><MiniAiFeedback sourceType="health" sourceId={data.analysis.generatedAt} metadata={{model:data.analysis.model}}/></>}</section>
   </div>;
 }

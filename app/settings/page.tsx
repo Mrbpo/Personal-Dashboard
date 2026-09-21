@@ -6,6 +6,8 @@ import { PiazzaSettings } from "@/components/piazza-settings";
 import { ServiceSettings } from "@/components/service-settings";
 import { DeploymentSettings } from '@/components/deployment-settings';
 import { AccessPasswordSettings } from '@/components/access-password-settings';
+import { GmailImportSettings } from '@/components/gmail-import-settings';
+import { AiFeedbackSettings } from '@/components/ai-feedback-settings';
 import { requireOwnerPage } from "@/lib/authz";
 import { hasCustomOwnerPassword } from '@/lib/owner-password';
 import { getSettings, listCourseSettings } from "@/lib/repository";
@@ -31,6 +33,8 @@ export default async function SettingsPage() {
       <SettingsForm initial={settings} />
       <AccessPasswordSettings configured={hasCustomOwnerPassword()} />
       <ServiceSettings />
+      <GmailImportSettings />
+      <AiFeedbackSettings />
       <DeploymentSettings />
       <section className="mt-6 rounded-3xl border bg-card p-6 shadow-sm">
         <h2 className="font-semibold">纳入计划的课程</h2>

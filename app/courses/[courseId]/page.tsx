@@ -9,6 +9,7 @@ import { getCourseDetail, getSettings } from "@/lib/repository";
 import { statusLabels } from "@/lib/task-rules";
 import { conciseRequirement, conciseTaskAction } from "@/lib/task-presentation";
 import type { LearningTask } from "@/lib/domain";
+import {MiniAiFeedback} from '@/components/mini-ai-feedback';
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +45,7 @@ function TaskRow({ task, timezone }: { task: LearningTask; timezone: string }) {
         <div className="mt-4 grid gap-2 border border-[#c1b69d] bg-muted/60 p-3 text-sm sm:grid-cols-3"><span>建议开始：{formatDate(task.startAt, timezone)}</span><span>截止：{formatDate(task.dueAt, timezone)}</span><span>关闭：{formatDate(task.lockAt, timezone)}</span></div>
         {task.evidence && <blockquote className="mt-4 border-l-2 border-primary/30 pl-3 text-sm leading-6 text-muted-foreground">分析依据：{task.evidence}</blockquote>}
         <div className="mt-4 flex flex-wrap items-center gap-3">{task.sourceUrl && <a className="text-sm font-medium text-primary hover:underline" href={task.sourceUrl} target="_blank" rel="noreferrer">打开 Canvas 原文</a>}{task.localStatus === "completed" && <TaskStatusButton taskId={task.id} />}</div>
+        {task.analysisStatus==='complete'&&task.confidence!=='certain'&&<MiniAiFeedback sourceType="course-analysis" sourceId={task.id} metadata={{courseId:task.courseId}}/>}
       </div>
     </details>
   );
@@ -81,7 +83,7 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
       </section>
 
       {(brief || priorities.length || risks.length) && <section className="instrument-panel instrument-purple mb-6 grid gap-4 p-4 md:p-5 lg:grid-cols-[minmax(0,1.5fr)_minmax(18rem,1fr)]">
-        <div className="relative"><p className="text-[10px] font-bold uppercase tracking-[.17em] text-[#c6aa6b]">COURSE BRIEF</p><h2 className="mt-1 text-lg font-semibold">这门课目前的重点</h2><p className="mt-2 text-sm leading-7 text-white/70">{brief || "没有需要重复提醒的课程级事项；请直接查看下方任务和资料。"}</p></div>
+        <div className="relative"><p className="text-[10px] font-bold uppercase tracking-[.17em] text-[#c6aa6b]">COURSE BRIEF</p><h2 className="mt-1 text-lg font-semibold">这门课目前的重点</h2><p className="mt-2 text-sm leading-7 text-white/70">{brief || "没有需要重复提醒的课程级事项；请直接查看下方任务和资料。"}</p>{detail.summary?.aiAvailable&&<MiniAiFeedback sourceType="course-summary" sourceId={detail.course.id} metadata={{updatedAt:detail.summary.updatedAt}}/>}</div>
         <div className="relative grid gap-3 sm:grid-cols-2 lg:grid-cols-1"><div className="border border-white/10 bg-black/10 p-3"><p className="text-sm font-semibold">优先事项</p><ul className="mt-2 space-y-1.5 text-sm leading-6 text-white/65">{priorities.length ? priorities.map((item) => <li key={item}>• {item}</li>) : <li>暂无额外优先事项</li>}</ul></div>{risks.length > 0 && <div className="border border-amber-300/20 bg-amber-950/15 p-3"><p className="text-sm font-semibold text-[#dcc483]">需要留意</p><ul className="mt-2 space-y-1.5 text-sm leading-6 text-white/65">{risks.map((item) => <li key={item}>• {item}</li>)}</ul></div>}</div>
       </section>}
 
