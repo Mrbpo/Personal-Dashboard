@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { daysEnding, normalizeHealth } from '../lib/health-data.ts';
 import { seal, unseal, saveServiceValues, serviceStatus, serviceValue, sameOrigin } from '../lib/service-vault.ts';
+import { saveOwnerPassword, verifyCustomOwnerPassword } from '../lib/owner-password.ts';
 
 test('health maps civil dates, retains missing values and does not duplicate sleep', () => {
   const days = daysEnding('2026-09-14');
@@ -26,6 +27,8 @@ test('service vault encrypts secrets, redacts status, persists and can disable e
   const dir = mkdtempSync(join(tmpdir(), 'health-vault-test-'));
   const previous = process.env.SERVICE_VAULT_DIR;
   const previousKey = process.env.OPENAI_API_KEY;
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousSiteDomain = process.env.SITE_DOMAIN;
   process.env.SERVICE_VAULT_DIR = dir;
   process.env.OPENAI_API_KEY = 'environment-test-value';
   try {
@@ -41,10 +44,20 @@ test('service vault encrypts secrets, redacts status, persists and can disable e
     saveServiceValues({ OPENAI_API_KEY: '' });
     assert.equal(serviceValue('OPENAI_API_KEY'), '');
     assert.throws(() => saveServiceValues({ SESSION_SECRET: 'forbidden' }));
+    assert.throws(() => saveOwnerPassword('short'));
+    saveOwnerPassword('correct horse battery staple');
+    assert.equal(verifyCustomOwnerPassword('correct horse battery staple'), true);
+    assert.equal(verifyCustomOwnerPassword('wrong password value'), false);
+    assert.ok(!readFileSync(join(dir, 'services.enc'), 'utf8').includes('correct horse battery staple'));
+    (process.env as Record<string, string | undefined>).NODE_ENV = 'production'; process.env.SITE_DOMAIN = 'baipiao.fun';
+    saveServiceValues({ GOOGLE_HEALTH_REDIRECT_URI: 'http://localhost:3000/api/health/callback' });
+    assert.equal(serviceValue('GOOGLE_HEALTH_REDIRECT_URI'), 'https://baipiao.fun/api/health/callback');
     assert.equal(sameOrigin(new Request('http://localhost:3000/api/services', { headers: { origin: 'https://elsewhere.test' } })), false);
   } finally {
     if (previous === undefined) delete process.env.SERVICE_VAULT_DIR; else process.env.SERVICE_VAULT_DIR = previous;
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previousKey;
+    if (previousNodeEnv === undefined) delete (process.env as Record<string, string | undefined>).NODE_ENV; else (process.env as Record<string, string | undefined>).NODE_ENV = previousNodeEnv;
+    if (previousSiteDomain === undefined) delete process.env.SITE_DOMAIN; else process.env.SITE_DOMAIN = previousSiteDomain;
     rmSync(dir, { recursive: true });
   }
 });

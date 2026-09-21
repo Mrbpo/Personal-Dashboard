@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cookies, headers } from "next/headers";
 import { serviceValue } from "./service-vault.ts";
+import { verifyCustomOwnerPassword } from './owner-password.ts';
 
 export type Owner = { userId: string; email: string; fullName: string };
 
@@ -43,5 +44,7 @@ export async function requireOwnerApi(): Promise<Response | null> {
 
 export function createOwnerSession() { return sessionValue(); }
 export function verifyOwnerAccessKey(value: string) {
-  return Boolean(process.env.OWNER_ACCESS_KEY && same(value, process.env.OWNER_ACCESS_KEY));
+  if (!value || value.length > 256) return false;
+  const generatedKeyMatches = Boolean(process.env.OWNER_ACCESS_KEY && same(value, process.env.OWNER_ACCESS_KEY));
+  return verifyCustomOwnerPassword(value) || generatedKeyMatches;
 }

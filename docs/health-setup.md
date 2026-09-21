@@ -5,7 +5,7 @@ The health module uses Google Health API v4 (the legacy Fitbit API is being reti
 ## Connect
 
 1. Follow https://developers.google.com/health/setup to enable Google Health API in a Google Cloud project and configure its OAuth consent screen. If the application is in testing, add your Google account as a test user.
-2. Create a Web application OAuth client. Register `http://localhost:3000/api/health/callback` exactly as an authorized redirect URI. Use the corresponding HTTPS URL when this server is hosted elsewhere.
+2. Create a Web application OAuth client. Register `http://localhost:3000/api/health/callback` for local development, and `https://baipiao.fun/api/health/callback` for the deployed site, exactly as authorized redirect URIs.
 3. Open `/settings#services` and enter Google OAuth Client ID and Client Secret. The default redirect URI is the localhost URL above. No `.env` edit is necessary.
 4. Open `/health`, choose Connect Fitbit, and authorize the Google account linked to your Fitbit records.
 5. The module requests only activity/fitness, sleep, and health metrics read-only scopes. It requests records from `users/me/dataSourceFamilies/google-wearables`.

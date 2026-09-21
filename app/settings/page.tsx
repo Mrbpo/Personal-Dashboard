@@ -5,7 +5,9 @@ import { CourseSettings } from "@/components/course-settings";
 import { PiazzaSettings } from "@/components/piazza-settings";
 import { ServiceSettings } from "@/components/service-settings";
 import { DeploymentSettings } from '@/components/deployment-settings';
+import { AccessPasswordSettings } from '@/components/access-password-settings';
 import { requireOwnerPage } from "@/lib/authz";
+import { hasCustomOwnerPassword } from '@/lib/owner-password';
 import { getSettings, listCourseSettings } from "@/lib/repository";
 import { getPiazzaStatus } from "@/lib/piazza-sync";
 
@@ -22,11 +24,12 @@ export default async function SettingsPage() {
     { name: "AI 分析", ready: Boolean(serviceValue("OPENAI_API_KEY")), detail: serviceValue("OPENAI_MODEL") || "gpt-5-mini" },
     { name: "DeepSeek", ready: Boolean(serviceValue("DEEPSEEK_API_KEY")), detail: "余额与服务状态" },
     { name: "xAI", ready: Boolean(serviceValue("XAI_API_KEY") || serviceValue("XAI_MANAGEMENT_KEY")), detail: serviceValue("XAI_MANAGEMENT_KEY") ? "Management 用量已启用" : "推理 API" },
-    { name: "私人访问", ready: Boolean(process.env.OWNER_ACCESS_KEY) || process.env.NODE_ENV !== "production", detail: process.env.NODE_ENV === "production" ? "密码与 API Token 已启用" : "本地开发模式" },
+    { name: "私人访问", ready: hasCustomOwnerPassword() || Boolean(process.env.OWNER_ACCESS_KEY) || process.env.NODE_ENV !== "production", detail: hasCustomOwnerPassword() ? "自定义密码与恢复密钥已启用" : process.env.NODE_ENV === "production" ? "生成的访问密钥已启用" : "本地开发模式" },
   ];
   return (
     <PageFrame eyebrow="PREFERENCES" title="个人与学习设置" description="设置显示姓名、时区和每日学习时间。">
       <SettingsForm initial={settings} />
+      <AccessPasswordSettings configured={hasCustomOwnerPassword()} />
       <ServiceSettings />
       <DeploymentSettings />
       <section className="mt-6 rounded-3xl border bg-card p-6 shadow-sm">
