@@ -2,13 +2,13 @@ import { cookies } from 'next/headers';
 import { timingSafeEqual } from 'node:crypto';
 import { requireOwnerApi } from '@/lib/authz';
 import { connectHealth } from '@/lib/health';
-import { unseal } from '@/lib/service-vault';
+import { publicSiteOrigin, unseal } from '@/lib/service-vault';
 export async function GET(request: Request) {
   const denied = await requireOwnerApi(); if (denied) return denied;
   const jar = await cookies(); const saved = jar.get('health_oauth')?.value;
   jar.set('health_oauth', '', { httpOnly: true, sameSite: 'lax', path: '/api/health', maxAge: 0 });
   const url = new URL(request.url);
-  const destination = new URL('/health', url.origin);
+  const destination = new URL('/health', publicSiteOrigin(request));
   try {
     if (!saved || url.searchParams.has('error')) throw new Error();
     const pending = unseal<{ state: string; verifier: string; expires: number }>(saved);

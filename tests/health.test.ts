@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { daysEnding, normalizeHealth } from '../lib/health-data.ts';
-import { seal, unseal, saveServiceValues, serviceStatus, serviceValue, sameOrigin } from '../lib/service-vault.ts';
+import { publicSiteOrigin, seal, unseal, saveServiceValues, serviceStatus, serviceValue, sameOrigin } from '../lib/service-vault.ts';
 import { saveOwnerPassword, verifyCustomOwnerPassword } from '../lib/owner-password.ts';
 
 test('health maps civil dates, retains missing values and does not duplicate sleep', () => {
@@ -52,6 +52,7 @@ test('service vault encrypts secrets, redacts status, persists and can disable e
     (process.env as Record<string, string | undefined>).NODE_ENV = 'production'; process.env.SITE_DOMAIN = 'baipiao.fun';
     saveServiceValues({ GOOGLE_HEALTH_REDIRECT_URI: 'http://localhost:3000/api/health/callback' });
     assert.equal(serviceValue('GOOGLE_HEALTH_REDIRECT_URI'), 'https://baipiao.fun/api/health/callback');
+    assert.equal(publicSiteOrigin(new Request('https://localhost:3000/api/mail/callback')), 'https://baipiao.fun');
     assert.equal(sameOrigin(new Request('http://localhost:3000/api/services', { headers: { origin: 'https://elsewhere.test' } })), false);
   } finally {
     if (previous === undefined) delete process.env.SERVICE_VAULT_DIR; else process.env.SERVICE_VAULT_DIR = previous;

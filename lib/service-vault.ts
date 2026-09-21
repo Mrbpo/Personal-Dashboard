@@ -69,10 +69,17 @@ export function savePrivateServiceValue(name: 'OWNER_PASSWORD_HASH', value: stri
   write(saved);
 }
 
+export function publicSiteOrigin(request?: Request) {
+  const configured = process.env.APP_ORIGIN || (process.env.SITE_DOMAIN ? `https://${process.env.SITE_DOMAIN}` : '');
+  if (configured) return new URL(configured).origin;
+  if (process.env.NODE_ENV === 'production') throw new Error('PUBLIC_ORIGIN_NOT_CONFIGURED');
+  return request ? new URL(request.url).origin : 'http://localhost:3000';
+}
+
 export function sameOrigin(request: Request) {
   const origin = request.headers.get('origin');
   const configured=process.env.APP_ORIGIN || (process.env.SITE_DOMAIN ? `https://${process.env.SITE_DOMAIN}` : '');
-  if(configured){try{return origin===new URL(configured).origin;}catch{return false;}}
+  if(configured){try{return origin===publicSiteOrigin();}catch{return false;}}
   if(process.env.NODE_ENV==='production')return false;
   const url=new URL(request.url),host=request.headers.get('host');
   return Boolean(origin && (origin===url.origin || (host&&origin===`${url.protocol}//${host}`)));
