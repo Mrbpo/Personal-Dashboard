@@ -13,7 +13,7 @@ let log='';child.stdout.on('data',b=>{log+=b.toString();});child.stderr.on('data
 let worker,workerLog='';
 try{
  let ready=false;for(let i=0;i<60;i++){if(child.exitCode!==null)throw new Error('Isolated server exited');try{if((await fetch(origin+'/api/health/live')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,500));}assert.ok(ready,'server startup');
- for(const path of ['/api/tutor','/api/library','/api/library/search?q=smoke','/api/library/failures','/api/mail','/api/deployments','/api/deployments/check','/api/jobs'])assert.equal((await fetch(origin+path)).status,401,path);
+ for(const path of ['/api/tutor','/api/library','/api/library/search?q=smoke','/api/library/failures','/api/mail','/api/codex-maintenance','/api/deployments','/api/deployments/check','/api/jobs'])assert.equal((await fetch(origin+path)).status,401,path);
  const login=await fetch(origin+'/api/auth/login',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({accessKey:env.OWNER_ACCESS_KEY})});assert.equal(login.status,200);
  const cookie=login.headers.get('set-cookie').split(';')[0],headers={Cookie:cookie,Origin:origin};
  assert.equal((await fetch(origin+'/api/tutor',{method:'POST',headers:{...headers,Origin:'https://wrong.invalid','Content-Type':'application/json'},body:'{}'})).status,403);

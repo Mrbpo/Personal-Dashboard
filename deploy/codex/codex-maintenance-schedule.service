@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule queued Codex work for tonight
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/codex-maintenance-schedule
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/study/data/codex-queue /run/systemd/transient
+
+[Install]
+WantedBy=multi-user.target
