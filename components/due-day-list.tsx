@@ -35,7 +35,7 @@ export function DueDayList({ tasks, timezone }: { tasks: Task[]; timezone: strin
   };
 
   return (
-    <section className="parchment-panel mt-5 min-w-0 p-4 md:p-6">
+    <section className="parchment-panel min-w-0 p-4 md:p-6">
       <div className="flex items-start gap-3">
         <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><CalendarClock className="size-5" /></span>
         <div>

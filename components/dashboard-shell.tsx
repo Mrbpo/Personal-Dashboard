@@ -217,7 +217,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
         <header className="top-beam sticky top-0 z-30 flex h-16 items-center justify-between px-4 md:px-7"><div className="flex items-center gap-3"><SidebarTrigger className="md:hidden" /><div><p className="text-[9px] font-semibold uppercase tracking-[.17em] text-[#bca66f]">{timezone.replace("_", " ")}</p><p className="text-sm font-medium text-[#f3ecdd]">个人总览台</p></div></div><div className="flex items-center gap-2"><span className="hidden text-xs text-[#d7cbae] sm:inline">● 每 15 分钟同步</span><Button onClick={previewSync} disabled={syncing} variant="outline" className="border-[#9f8755] bg-[#eee5d2] text-[#273a34]" size="sm"><RefreshCw className={syncing ? "animate-spin" : ""} />{syncing ? "同步中" : "立即同步"}</Button></div></header>
         {syncMessage && <div aria-live="polite" className="border-b border-[#9b8151] bg-[#efe5ce] px-4 py-2 text-center text-xs text-[#5d5036]">{syncMessage}</div>}
 
-        <main className="mx-auto w-full max-w-[1580px] px-3 py-4 sm:px-5 md:px-7 md:py-5">
+        <main className="w-full px-3 py-4 sm:px-5 md:px-7 md:py-5 2xl:px-[clamp(2rem,3vw,6rem)]">
           <section className="grand-overview mb-5">
             <div className="relative z-10 grid gap-4 px-4 py-4 md:grid-cols-[minmax(0,1fr)_minmax(28rem,.8fr)] md:items-center md:px-6">
               <div><div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className="border-[#b79e66] bg-black/10 text-[#e5d8b8]">{!loaded ? "读取中" : data?.courses?.length ? (data.lastSync?.status === "complete" ? "Canvas 已同步" : "Canvas 准备就绪") : "等待首次同步"}</Badge>{data?.aiAvailable === false && <Badge variant="outline" className="border-amber-300/35 text-amber-100">AI 未配置</Badge>}</div><h1 className="mt-2 text-2xl font-semibold text-[#fff8e8] sm:text-3xl">{displayName} 的今日简报</h1><p className="mt-1 text-sm text-white/62">优先 {visibleTasks.filter((task: any) => ["urgent", "soon"].includes(task.tone)).length} 项 · 待核对 {reviewCount} 项 · 可用课程 {visibleCourses.length} 门</p></div>
@@ -229,7 +229,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
           {loaded && !loadError && visibleCourses.length === 0 && <section className="parchment-panel mb-5 p-5"><p className="section-kicker">FIRST SYNC</p><h2 className="text-xl font-semibold">把 Quercus 课程读进本地数据库</h2><p className="mt-2 text-sm text-muted-foreground">读取课程、公告、Modules、作业、截止日期和提交状态；Token 仅留在服务器。</p><Button onClick={previewSync} disabled={syncing} className="mt-4"><RefreshCw className={syncing ? "animate-spin" : ""} />开始同步</Button></section>}
           {loaded && !loadError && visibleCourses.length > 0 && <div id="global-search" className="scroll-mt-20"><CourseAssistant /></div>}
 
-          <div id="learning" className="grid scroll-mt-20 grid-cols-[minmax(0,1fr)] gap-5 xl:grid-cols-[minmax(0,1fr)_330px]">
+          <div id="learning" className="grid scroll-mt-20 grid-cols-[minmax(0,1fr)] items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(330px,24%)]">
             <section className="min-w-0 space-y-4" aria-labelledby="must-do-title">
               <div className="ornate-section-heading flex items-center justify-between">
                 <div><p className="section-kicker">ACTION QUEUE</p><h2 id="must-do-title" className="text-xl font-semibold">现在要做</h2></div>
@@ -271,6 +271,8 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
                 );
               })}</div></details> : null)}
               {loaded && visibleTasks.length === 0 && visibleCourses.length > 0 && <div className="rounded-3xl border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">当前没有未忽略的任务。你可以进入课程页查看所有已读取内容。</div>}
+              {loaded && !loadError && <DueDayList tasks={data?.tasks || []} timezone={timezone} />}
+              <AiUsagePanel />
             </section>
 
             <aside className="space-y-5">
@@ -314,11 +316,9 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
                   {coursesDueSoon.length === 0 && <p className="text-sm text-muted-foreground">未来 7 天没有确定截止事项。</p>}
                 </div>
               </section>
+              <ShortcutPanel />
             </aside>
           </div>
-
-          {loaded && !loadError && <DueDayList tasks={data?.tasks || []} timezone={timezone} />}
-          <div className="grid items-stretch gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(22rem,.85fr)]"><AiUsagePanel /><ShortcutPanel /></div>
         </main>
       </SidebarInset>
     </SidebarProvider>
