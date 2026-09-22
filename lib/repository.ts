@@ -18,6 +18,7 @@ export async function hashSource(source: CanvasSource): Promise<string> {
     pointsPossible: source.pointsPossible,
     prerequisiteBlocked: source.prerequisiteBlocked,
     file: source.file ? { name: source.file.name, size: source.file.size } : null,
+    folderPath: source.folderPath ?? null,
   });
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -35,11 +36,11 @@ export async function upsertCourses(items: D1Row[]) {
   const db = getDatabase();
   const now = new Date().toISOString();
   const statements = items.map((course) => db.prepare(
-    `INSERT INTO courses (id, name, code, term_name, enabled, updated_at)
-     VALUES (?, ?, ?, ?, 1, ?)
+    `INSERT INTO courses (id, name, code, term_name, start_at, end_at, enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?)
      ON CONFLICT(id) DO UPDATE SET name=excluded.name, code=excluded.code,
-       term_name=excluded.term_name, updated_at=excluded.updated_at`
-  ).bind(String(course.id), course.name || course.course_code || "未命名课程", course.course_code || course.name || String(course.id), course.term?.name ?? null, now));
+       term_name=excluded.term_name, start_at=excluded.start_at, end_at=excluded.end_at, updated_at=excluded.updated_at`
+  ).bind(String(course.id), course.name || course.course_code || "未命名课程", course.course_code || course.name || String(course.id), course.term?.name ?? null, course.start_at ?? course.term?.start_at ?? null, course.end_at ?? course.term?.end_at ?? null, now));
   if (statements.length) await db.batch(statements);
 }
 

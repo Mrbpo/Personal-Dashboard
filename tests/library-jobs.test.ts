@@ -47,6 +47,25 @@ test('a source removed upstream hides every archived version immediately',async(
  assert.equal(await lib.hideRemoteDocuments('remote-owner','chem','canvas','canvas:file:9'),2);
  assert.equal((await lib.searchLibrary('remote-owner','obsolete','chem',false)).length,0);
 });
+test('strict library search requires every filename keyword and respects course and folder scope',async()=>{
+ const good=await lib.saveDocument('strict-owner','math','upload','week3-blank','Week3_Notes_Blank.pdf','application/pdf',Buffer.from('%PDF-1.4 strict'),'Lectures/Week 3');
+ await lib.saveDocument('strict-owner','math','upload','week3-answer','Week 3 Notes Answers.pdf','application/pdf',Buffer.from('%PDF-1.4 answer'),'Lectures/Week 3');
+ await lib.saveDocument('strict-owner','physics','upload','week3-blank','Week3_Notes_Blank.pdf','application/pdf',Buffer.from('%PDF-1.4 other'),'Lectures/Week 3');
+ const hits=await lib.searchLibrary('strict-owner','Week 3 Note Blank','math',false,{strict:true,metadataFirst:true});
+ assert.deepEqual(hits.map(hit=>hit.document_id),[good]);
+ assert.equal(hits[0].match_reason,'文件名包含全部关键词');
+ assert.equal((await lib.searchLibrary('strict-owner','Week 3 Note Blank','math',false,{strict:true,path:'Tutorials'})).length,0);
+});
+test('syllabus dates identify the current week and recommend matching classroom files',async()=>{
+ const now=new Date('2026-09-21T14:00:00-04:00');
+ assert.equal(lib.syllabusWeekForDate('Week 1 — Sep 7\nWeek 2 — Sep 14\nWeek 3 — Sep 21',now)?.week,3);
+ await db.prepare("INSERT INTO courses (id,name,code,start_at,updated_at) VALUES ('math-rec','Calculus','MATA29','2026-09-07T12:00:00Z','now')").run();
+ await db.prepare("INSERT INTO source_items (id,course_id,source_type,source_id,title,body,source_url,content_hash,remote_updated_at,dates_json,analysis_json,analysis_status,extraction_version,first_seen_at,last_seen_at,is_active,missing_at) VALUES ('math-rec:syllabus','math-rec','syllabus','syllabus','Course Syllabus','Week 1 — Sep 7\nWeek 2 — Sep 14\nWeek 3 — Sep 21',NULL,'hash',NULL,'{}',NULL,'rule_only',1,'now','now',1,NULL)").run();
+ const blank=await lib.saveDocument('recommend-owner','math-rec','canvas','blank','Week 3 Lecture Notes Blank.pdf','application/pdf',Buffer.from('%PDF-1.4 blank'),'Modules/Week 3');
+ await lib.saveDocument('recommend-owner','math-rec','canvas','answers','Week 3 Answer Key.pdf','application/pdf',Buffer.from('%PDF-1.4 answers'),'Modules/Week 3');
+ const result=await lib.recommendLibraryForNow('recommend-owner','math-rec',now);
+ assert.equal(result.week,3);assert.equal(result.confidence,'high');assert.equal(result.recommendations[0]?.document_id,blank);assert.match(result.recommendations[0]?.reason||'',/Week 3/);
+});
 test('embedding unchanged chunks avoids duplicate calls, including concurrent requests',async()=>{
  let calls=0;const original=globalThis.fetch;
  globalThis.fetch=async(_u,init)=>{calls++;const b=JSON.parse(String(init?.body));return Response.json({data:b.input.map((_:unknown,index:number)=>({index,embedding:Array(768).fill(0.1)}))});};

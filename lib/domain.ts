@@ -55,6 +55,7 @@ export type CanvasSource = {
   pointsPossible?: number | null;
   prerequisiteBlocked?: boolean;
   moduleName?: string | null;
+  folderPath?: string | null;
   file?: { url: string; name: string; size: number; contentType: string } | null;
 };
 

@@ -122,8 +122,16 @@ function sourceFromObject(courseId: string, type: string, item: JsonObject): Can
     pointsPossible: typeof item.points_possible === "number" ? item.points_possible : null,
     prerequisiteBlocked: Boolean(item.locked_for_user),
     moduleName: item.module_name ?? null,
+    folderPath: item.folder_path ?? null,
     file: null,
   };
+}
+
+function canvasFolderPath(folder: JsonObject | undefined) {
+  const full = String(folder?.full_name || folder?.name || "").replaceAll("\\", "/");
+  const parts = full.split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length && /^(course files|files|课程文件)$/i.test(parts[0])) parts.shift();
+  return ["Canvas 文件", ...parts].join("/");
 }
 
 export async function listActiveCourses() {
@@ -137,7 +145,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
   const end = new Date(now.getTime() + 180 * 86400000).toISOString().slice(0, 10);
   const encodedContext = encodeURIComponent("course_" + courseId);
 
-  const [announcements, assignments, modules, quizzes, discussions, pageIndex, courseFiles, planner] = await Promise.all([
+  const [announcements, assignments, modules, quizzes, discussions, pageIndex, courseFiles, courseFolders, planner, courseDetail] = await Promise.all([
     allPages<JsonObject>("/api/v1/announcements?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/assignments?include[]=submission&include[]=all_dates&order_by=due_at&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/modules?include[]=items&include[]=content_details&per_page=100"),
@@ -145,8 +153,11 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/discussion_topics?per_page=100").catch(() => []),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/pages?per_page=100").catch(() => []),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/files?per_page=100").catch(() => []),
+    allPages<JsonObject>("/api/v1/courses/" + courseId + "/folders?per_page=100").catch(() => []),
     allPages<JsonObject>("/api/v1/planner/items?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100").catch(() => []),
+    canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "?include[]=syllabus_body&include[]=term").then((result) => result.data).catch(():JsonObject => ({})),
   ]);
+  const foldersById = new Map(courseFolders.map((folder) => [String(folder.id), folder]));
   const pages = await Promise.all(pageIndex.map((page) => canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "/pages/" + encodeURIComponent(page.url)).then((result) => result.data).catch(() => page)));
   const plannerCompletion = new Map(planner.map((item) => [`${String(item.plannable_type || "").toLowerCase()}:${String(item.plannable_id ?? item.plannable?.id ?? "")}`, Boolean(item.planner_override?.marked_complete)]));
 
@@ -165,11 +176,14 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
     ...pages.map((item) => canvasSource("page", item)),
     ...courseFiles.map((item) => {
       const source = sourceFromObject(courseId, "file", item);
+      source.folderPath = canvasFolderPath(foldersById.get(String(item.folder_id)));
       source.file = { url: item.url ?? "", name: item.display_name ?? item.filename ?? "file", size: Number(item.size ?? 0), contentType: item["content-type"] ?? item.content_type ?? "application/octet-stream" };
       return source;
     }),
     ...planner.map((item) => sourceFromObject(courseId, "planner", item.plannable ?? item)),
   ];
+  const syllabusBody = textFromHtml(courseDetail.syllabus_body);
+  if (syllabusBody) sources.push(sourceFromObject(courseId, "syllabus", { id: courseId, title: "课程大纲 Syllabus", body: syllabusBody, html_url: baseUrl + "/courses/" + courseId + "/assignments/syllabus", updated_at: courseDetail.updated_at, folder_path: "课程大纲" }));
   for (const courseModule of modules) {
     const source = sourceFromObject(courseId, "module", {
       id: courseModule.id,
@@ -203,6 +217,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       source.prerequisiteBlocked = Boolean(item.locked_for_user);
       source.moduleName = courseModule.name ?? null;
       if (type === "file") {
+        source.folderPath = courseModule.name ? `Modules/${courseModule.name}` : canvasFolderPath(foldersById.get(String(detail.folder_id)));
         source.file = {
           url: detail.url ?? "",
           name: detail.display_name ?? detail.filename ?? item.title ?? "file",
@@ -213,12 +228,20 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       if (!seen.has(source.id)) {
         seen.add(source.id);
         sources.push(source);
+      } else if (type === "file") {
+        const existing = sources.find((candidate) => candidate.id === source.id);
+        if (existing) {
+          existing.moduleName = existing.moduleName || courseModule.name || null;
+          existing.folderPath = source.folderPath || existing.folderPath;
+          if (moduleContext && !existing.body.includes(moduleContext)) existing.body = moduleContext + (existing.body ? "\n" + existing.body : "");
+        }
       }
     }
   }
   for (const parent of [...announcements, ...assignments]) {
     for (const attachment of parent.attachments || []) {
       const source = sourceFromObject(courseId, "file", { ...attachment, title: attachment.display_name ?? attachment.filename, html_url: parent.html_url });
+      source.folderPath = parent.name || parent.title ? `附件/${parent.name || parent.title}` : "附件";
       source.file = { url: attachment.url ?? "", name: attachment.display_name ?? attachment.filename ?? "file", size: Number(attachment.size ?? 0), contentType: attachment["content-type"] ?? attachment.content_type ?? "application/octet-stream" };
       if (!seen.has(source.id)) { seen.add(source.id); sources.push(source); }
     }

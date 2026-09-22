@@ -15,7 +15,7 @@ export default async function Page({params}:{params:Promise<{id:string}>}){
   let preview;
   try{preview=await previewDocument(owner.userId,id);}catch{return <PageFrame eyebrow="PRIVATE LIBRARY" title="无法打开资料" description="资料可能已被移除或暂时不可用。"><Button asChild variant="outline"><Link href="/library">返回资料库</Link></Button></PageFrame>;}
   const {document,text,pages}=preview,source=`/api/library/${encodeURIComponent(id)}?preview=1`;
-  return <PageFrame eyebrow="LIBRARY PREVIEW" title={document.name} description={`${document.course_id||'通用资料'} · ${document.size===0?0:Math.max(1,Math.round(document.size/1024))} KB`}>
+  return <PageFrame eyebrow="LIBRARY PREVIEW" title={document.name} description={`${document.course_id||'通用资料'} · ${document.folder_path||'根目录'} · ${document.size===0?0:Math.max(1,Math.round(document.size/1024))} KB`}>
     <div className="mb-4 flex flex-wrap gap-2"><Button asChild variant="outline"><Link href="/library">返回资料目录</Link></Button><Button asChild variant="outline"><a href={`/api/library/${encodeURIComponent(id)}`}>下载原件</a></Button></div>
     {document.mime==='application/pdf'?<>
       <PdfReaderShell source={source} name={document.name}/>

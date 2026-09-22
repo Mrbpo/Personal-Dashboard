@@ -10,7 +10,13 @@ export const EMBED_MODEL='text-embedding-3-small';
 export const MAX_LIBRARY_BYTES=50*1024*1024;
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR || './data/library');
 export const digest=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
-export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;name:string;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
+export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;folder_path:string;name:string;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
+export function normalizeFolderPath(value:string){return value.replaceAll('\\','/').split('/').map(part=>part.trim()).filter(part=>part&&part!=='.'&&part!=='..').slice(0,20).map(part=>part.slice(0,100)).join('/');}
+function inferredFolder(document:Pick<DocumentRow,'origin'|'origin_key'|'folder_path'>){
+  if(document.folder_path)return normalizeFolderPath(document.folder_path);
+  if(document.origin==='upload')try{const parsed=JSON.parse(document.origin_key);const key=Array.isArray(parsed)?String(parsed[1]||''):'';const parts=key.replaceAll('\\','/').split('/');if(parts.length>1)return normalizeFolderPath(parts.slice(0,-1).join('/'));}catch{/* Old non-JSON source key. */}
+  return ({canvas:'Canvas',piazza:'Piazza',mail:'邮件',gmail:'邮件',upload:'上传'} as Record<string,string>)[document.origin]||'其他来源';
+}
 export async function saveBlob(bytes:Uint8Array) {const hash=digest(bytes);await mkdir(root(),{recursive:true,mode:0o700});try{await writeFile(resolve(root(),hash),bytes,{flag:'wx',mode:0o600});}catch(e:any){if(e.code!=='EEXIST')throw e;await utimes(resolve(root(),hash),new Date(),new Date());}return hash;}
 export async function readBlob(hash:string){if(!/^[a-f0-9]{64}$/.test(hash))throw new Error('文件标识无效');return readFile(/* turbopackIgnore: true */ resolve(root(),hash));}
 export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
@@ -19,16 +25,18 @@ export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
   if(mime&&mime!=='application/octet-stream')return mime;
   return ({txt:'text/plain',md:'text/markdown',csv:'text/csv',tsv:'text/tab-separated-values',meg:'text/plain',fa:'text/plain',fas:'text/plain',fasta:'text/plain',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
 }
-export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array) {
+export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='') {
   if(!bytes.length||bytes.length>MAX_LIBRARY_BYTES)throw new Error('资料须非空且单份不超过 50 MB');
   // Same filenames in different courses are distinct sources.
   key=JSON.stringify([course,key]);
   mime=canonicalDocumentMime(name,mime,bytes);
   const hash=await saveBlob(bytes),id=digest([owner,origin,key,hash].join('\0'));
-  await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,name.slice(0,200),mime,hash,bytes.length,new Date().toISOString()).run();
+  folderPath=normalizeFolderPath(folderPath||({canvas:'Canvas',piazza:'Piazza',mail:'邮件',gmail:'邮件',upload:'上传'} as Record<string,string>)[origin]||'其他来源');
+  await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,folderPath,name.slice(0,200),mime,hash,bytes.length,new Date().toISOString()).run();
+  await db.prepare('UPDATE library_documents SET folder_path=? WHERE id=? AND owner_id=?').bind(folderPath,id,owner).run();
   return id;
 }
-export async function listDocuments(owner:string) {return (await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results;}
+export async function listDocuments(owner:string) {return (await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results.map(document=>({...document,folder_path:inferredFolder(document)}));}
 export async function listSourceFailures(owner:string){return (await db.prepare('SELECT origin,origin_key,course_id,name,error,updated_at FROM library_source_failures WHERE owner_id=? ORDER BY updated_at DESC').bind(owner).all()).results;}
 export async function recordSourceFailure(owner:string,origin:string,key:string,course:string,name:string,error:string){await db.prepare('INSERT INTO library_source_failures VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,origin,origin_key) DO UPDATE SET course_id=excluded.course_id,name=excluded.name,error=excluded.error,updated_at=excluded.updated_at').bind(owner,origin,key,course,name.slice(0,200),error,new Date().toISOString()).run();}
 export async function clearSourceFailure(owner:string,origin:string,key:string){await db.prepare('DELETE FROM library_source_failures WHERE owner_id=? AND origin=? AND origin_key=?').bind(owner,origin,key).run();}
@@ -116,13 +124,65 @@ export async function collectUnusedBlobs(now=Date.now()){
  }
  await db.prepare('DELETE FROM library_vectors WHERE chunk_id NOT IN (SELECT id FROM library_chunks)').run();return removed;
 }
-export async function searchLibrary(owner:string,query:string,course='',semantic=true) {
+export function librarySearchTokens(value:string){
+  const normalized=value.normalize('NFKD').toLocaleLowerCase().replace(/([a-z])([0-9])/g,'$1 $2').replace(/([0-9])([a-z])/g,'$1 $2');
+  const singular=new Set(['notes','slides','files','weeks','lectures','answers','solutions','blanks','modules','assignments','tutorials']);
+  return [...new Set((normalized.match(/[a-z0-9]+|[\u3400-\u9fff]{2,}/gu)||[]).map(token=>singular.has(token)?token.slice(0,-1):token).filter(token=>!/^(the|and|for|with)$/.test(token)))];
+}
+function lexicalText(value:string){return librarySearchTokens(value).join(' ');}
+function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
+type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:boolean};
+export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string};
+export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   if(!course){const code=query.toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await db.prepare('SELECT id,code FROM courses WHERE enabled=1').all<{id:string;code:string}>()).results;course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
 
-  const rows=(await db.prepare(`SELECT c.*,d.name,d.course_id FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0) LIMIT 20000`).bind(owner,...(course?[course]:[])).all<{id:string;document_id:string;body:string;locator:string;name:string;course_id:string}>()).results;
-  const words=query.toLowerCase().match(/[a-z0-9]{2,}|[\u3400-\u9fff]{2,}/g)||[];
+  const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(30,options.limit||8));
+  const rows=(await db.prepare(`SELECT c.id,d.id document_id,c.body,c.locator,d.name,d.course_id,d.folder_path,d.origin,d.origin_key FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0) LIMIT 20000`).bind(owner,...(course?[course]:[])).all<{id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string}>()).results.map(row=>({...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
+  const words=librarySearchTokens(query);
+  if(strict){
+    const scoped=path?rows.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):rows;
+    const metadataMatches=scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name}`,words));
+    const candidates=(options.metadataFirst!==false&&metadataMatches.length?metadataMatches:scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name} ${row.body}`,words)));
+    const best=new Map<string,(typeof candidates)[number]&{score:number;match_reason:string}>();
+    for(const row of candidates){const metadata=containsEvery(`${row.folder_path} ${row.name}`,words),title=containsEvery(row.name,words),score=(title?120:metadata?90:45)+words.filter(word=>lexicalText(row.name).split(' ').includes(word)).length*8+(path&&row.folder_path===path?12:0);const hit={...row,score,match_reason:title?'文件名包含全部关键词':metadata?'目录和文件名包含全部关键词':'正文包含全部关键词'};if(!best.has(row.document_id)||best.get(row.document_id)!.score<score)best.set(row.document_id,hit);}
+    return [...best.values()].sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name,undefined,{numeric:true})).slice(0,limit);
+  }
   let vector:number[]|null=null;
   if(semantic&&rows.length&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768});if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
   const vectors=vector?(await db.prepare('SELECT chunk_id,vector FROM library_vectors WHERE model=?').bind(EMBED_MODEL).all<{chunk_id:string;vector:string}>()).results:[];const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
-  return rows.map(r=>{const title=r.name.toLowerCase(),body=r.body.toLowerCase();const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&map.has(r.id)?cosine(vector,JSON.parse(map.get(r.id)!)):0)};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score).slice(0,8);
+  return rows.map(r=>{const title=lexicalText(r.name),body=lexicalText(r.body);const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&map.has(r.id)?cosine(vector,JSON.parse(map.get(r.id)!)):0),match_reason:titleMatches?'文件名匹配':'正文相关'};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score).slice(0,limit);
+}
+
+type Recommendation={document_id:string;name:string;course_id:string;folder_path:string;reason:string;score:number;week:number|null};
+const monthIndex:Record<string,number>={jan:0,january:0,feb:1,february:1,mar:2,march:2,apr:3,april:3,may:4,jun:5,june:5,jul:6,july:6,aug:7,august:7,sep:8,sept:8,september:8,oct:9,october:9,nov:10,november:10,dec:11,december:11};
+export function syllabusWeekForDate(text:string,now=new Date()){
+  const lines=text.split(/\r?\n/).map(line=>line.trim()).filter(Boolean),anchors:Array<{week:number;date:number;label:string}> = [];
+  for(let i=0;i<lines.length;i++){const sameLine=lines[i],nearby=lines.slice(Math.max(0,i-1),Math.min(lines.length,i+2)).join(' '),week=sameLine.match(/\bweek\s*0?(\d{1,2})\b|第\s*(\d{1,2})\s*周/i);if(!week)continue;const date=(sameLine.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})\b/i)||nearby.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})\b/i));if(!date)continue;const month=monthIndex[date[1].toLowerCase()];if(month===undefined)continue;let year=now.getFullYear();const candidate=new Date(year,month,Number(date[2]),12).getTime();if(candidate-now.getTime()>180*86400000)year--;anchors.push({week:Number(week[1]||week[2]),date:new Date(year,month,Number(date[2]),12).getTime(),label:lines[i]});}
+  return anchors.filter(anchor=>anchor.date<=now.getTime()+3*86400000).sort((a,b)=>b.date-a.date)[0]||null;
+}
+export async function recommendLibraryForNow(owner:string,course:string,now=new Date()):Promise<{recommendations:Recommendation[];basis:string[];week:number|null;confidence:'high'|'medium'|'low'}>{
+  if(!course)return {recommendations:[],basis:['先选择一门课程，才能判断当前课堂资料。'],week:null,confidence:'low'};
+  const [documents,sources,tasks,courseRow]=await Promise.all([
+    listDocuments(owner).then(items=>items.filter(item=>item.course_id===course)),
+    db.prepare("SELECT title,body,source_type,dates_json,remote_updated_at FROM source_items WHERE course_id=? AND is_active=1 ORDER BY last_seen_at DESC LIMIT 1000").bind(course).all<{title:string;body:string;source_type:string;dates_json:string;remote_updated_at:string|null}>().then(result=>result.results),
+    db.prepare("SELECT title,action,evidence,start_at,due_at,canvas_status FROM tasks WHERE course_id=? AND canvas_status NOT IN ('completed','possibly_superseded') ORDER BY due_at LIMIT 100").bind(course).all<{title:string;action:string;evidence:string;start_at:string|null;due_at:string|null;canvas_status:string}>().then(result=>result.results),
+    db.prepare('SELECT code,name,start_at FROM courses WHERE id=?').bind(course).first<{code:string;name:string;start_at:string|null}>(),
+  ]);
+  const syllabus=sources.filter(source=>source.source_type==='syllabus'||/syllabus|课程大纲/i.test(source.title+' '+source.body)).map(source=>source.body).join('\n');
+  const explicit=syllabusWeekForDate(syllabus,now);let week=explicit?.week||null;const basis:string[]=[];
+  if(explicit){basis.push(`课程大纲当前日期对应 Week ${explicit.week}`);}
+  if(!week&&courseRow?.start_at){const start=new Date(courseRow.start_at);if(!Number.isNaN(start.getTime())){const calculated=Math.floor((now.getTime()-start.getTime())/(7*86400000))+1;if(calculated>=1&&calculated<=30){week=calculated;basis.push(`Canvas 学期起始日推算为 Week ${week}`);}}}
+  const nearTasks=tasks.filter(task=>{const when=task.due_at||task.start_at;if(!when)return false;const distance=new Date(when).getTime()-now.getTime();return distance>-2*86400000&&distance<10*86400000;}).slice(0,8);
+  if(nearTasks.length)basis.push(`结合 ${nearTasks.length} 个当前或临近 Canvas 项目`);
+  const taskTokens=librarySearchTokens(nearTasks.map(task=>`${task.title} ${task.action} ${task.evidence}`).join(' ')).filter(token=>token.length>2).slice(0,40);
+  const ranked=documents.map(document=>{const metadata=lexicalText(`${document.folder_path} ${document.name}`),lower=`${document.folder_path} ${document.name}`.toLowerCase();let score=0;const reasons:string[]=[];
+    if(week&&new RegExp(`(?:week|wk)\\s*0?${week}\\b|第\\s*${week}\\s*周`,'i').test(lower)){score+=100;reasons.push(`属于 Week ${week}`);}
+    const taskHits=taskTokens.filter(token=>metadata.split(' ').includes(token)).length;if(taskHits){score+=Math.min(36,taskHits*6);reasons.push('与当前 Canvas 项目主题相符');}
+    if(/blank|note|lecture|slide|讲义|课堂|笔记/i.test(lower)){score+=14;reasons.push('适合课堂使用');}
+    if(/solution|answer|key|completed|答案|解答/i.test(lower))score-=18;
+    if(document.mime==='application/pdf')score+=3;
+    return {...document,score,reason:reasons.join('；')};
+  }).filter(item=>item.score>=18).sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name,undefined,{numeric:true})).slice(0,6);
+  if(!basis.length)basis.push('尚未找到带日期的课程大纲或临近 Canvas 项目，因此不会猜测当前周次。');
+  return {recommendations:ranked.map(item=>({document_id:item.id,name:item.name,course_id:item.course_id,folder_path:item.folder_path,reason:item.reason,score:item.score,week})),basis,week,confidence:explicit&&ranked.length?'high':(week||nearTasks.length)&&ranked.length?'medium':'low'};
 }

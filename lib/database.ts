@@ -12,7 +12,7 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS service_leases (id TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS library_remote_versions (owner_id TEXT NOT NULL, origin_key TEXT NOT NULL, fingerprint TEXT NOT NULL, document_id TEXT NOT NULL, PRIMARY KEY(owner_id,origin_key))`,
   `CREATE TABLE IF NOT EXISTS library_source_failures (owner_id TEXT NOT NULL, origin TEXT NOT NULL, origin_key TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, error TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner_id,origin,origin_key))`,
-  `CREATE TABLE IF NOT EXISTS library_documents (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL, origin_key TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, hash TEXT NOT NULL, size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, created_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_id, origin, origin_key, hash))`,
+  `CREATE TABLE IF NOT EXISTS library_documents (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL, origin_key TEXT NOT NULL, folder_path TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, mime TEXT NOT NULL, hash TEXT NOT NULL, size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, created_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_id, origin, origin_key, hash))`,
   `CREATE TABLE IF NOT EXISTS library_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, position INTEGER NOT NULL, locator TEXT NOT NULL, body TEXT NOT NULL, hash TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(document_id)`,
   `CREATE TABLE IF NOT EXISTS library_vectors (chunk_id TEXT NOT NULL, model TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(chunk_id, model))`,
@@ -45,7 +45,7 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS tutor_messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', meta_json TEXT NOT NULL DEFAULT '{}', starred INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_tutor_messages_thread ON tutor_messages(thread_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS tutor_vocabulary_state (owner_id TEXT NOT NULL, course_id TEXT NOT NULL, term TEXT NOT NULL, mastered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner_id, course_id, term))`,
-  `CREATE TABLE IF NOT EXISTS courses (id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT NOT NULL, term_name TEXT, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL, synced_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS courses (id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT NOT NULL, term_name TEXT, start_at TEXT, end_at TEXT, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL, synced_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS source_items (id TEXT PRIMARY KEY, course_id TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', source_url TEXT, content_hash TEXT NOT NULL, remote_updated_at TEXT, dates_json TEXT NOT NULL DEFAULT '{}', analysis_json TEXT, analysis_status TEXT NOT NULL DEFAULT 'pending', extraction_version INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1, missing_at TEXT)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_source_course_type_remote ON source_items(course_id, source_type, source_id)`,
   `CREATE INDEX IF NOT EXISTS idx_source_course_active ON source_items(course_id, is_active)`,
@@ -100,6 +100,8 @@ async function ready() {
     }
     const taskColumns = await getClient().execute("PRAGMA table_info(tasks)");
     const settingsColumns = await getClient().execute("PRAGMA table_info(settings)");
+    const libraryColumns = await getClient().execute("PRAGMA table_info(library_documents)");
+    const courseColumns = await getClient().execute("PRAGMA table_info(courses)");
     const mailColumns = await getClient().execute("PRAGMA table_info(mail_messages)");
     const mailSyncColumns = await getClient().execute("PRAGMA table_info(mail_sync)");
     const addMailColumn = async (name: string, sql: string) => {
@@ -129,6 +131,15 @@ async function ready() {
     }
     if (!taskColumns.rows.some((row) => row.name === "start_at")) {
       await getClient().execute("ALTER TABLE tasks ADD COLUMN start_at TEXT");
+    }
+    if (!libraryColumns.rows.some((row) => row.name === "folder_path")) {
+      await getClient().execute("ALTER TABLE library_documents ADD COLUMN folder_path TEXT NOT NULL DEFAULT ''");
+    }
+    if (!courseColumns.rows.some((row) => row.name === "start_at")) {
+      await getClient().execute("ALTER TABLE courses ADD COLUMN start_at TEXT");
+    }
+    if (!courseColumns.rows.some((row) => row.name === "end_at")) {
+      await getClient().execute("ALTER TABLE courses ADD COLUMN end_at TEXT");
     }
   })();
   await initialized;
