@@ -9,6 +9,15 @@ test -s /srv/study/runtime.env
 test -s /srv/study/backup.recipient
 test -n "$(find /srv/study/assets -maxdepth 1 -name '*.png' -print -quit)"
 install -d -m 755 /srv/study/status
+# Keep the running release for rollback, but remove older application images
+# before receiving another multi-gigabyte image. Persistent data and backups
+# live under /srv/study and are never touched by this cleanup.
+current=''
+if test -f /srv/study/current-version; then current=$(cat /srv/study/current-version); fi
+while IFS= read -r image; do
+  if test -n "$image" && test "$image" != "study-cabinet:$current"; then docker image rm "$image" >/dev/null 2>&1 || true; fi
+done < <(docker image ls study-cabinet --format '{{.Repository}}:{{.Tag}}')
+docker image prune -f >/dev/null
 imagefile=$(mktemp /srv/study/image.XXXXXX)
 trap 'rm -f -- "$imagefile"' EXIT
 # Input is only a Docker image, never shell commands; cap incoming bytes at 2 GiB.
