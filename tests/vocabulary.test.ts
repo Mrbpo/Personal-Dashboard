@@ -9,13 +9,15 @@ const vocabulary = await import('../lib/vocabulary.ts');
 
 test('manual vocabulary deduplicates a term, keeps contexts and stays owner-scoped', async () => {
   const original = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ output_text: JSON.stringify({ meaning: '惯性：物体保持原有运动状态的性质。', language: '英语', partOfSpeech: '名词' }) });
+  globalThis.fetch = async () => Response.json({ output_text: JSON.stringify({ correctedTerm: 'inertia', correctionNote: '', meaning: '惯性：物体保持原有运动状态的性质。', language: '英语', partOfSpeech: '名词', category: '物理学术语', phonetic: '/ɪˈnɜːrʃə/' }) });
   try {
     const first = await vocabulary.saveVocabularyEntry('alice', { term: 'Inertia', background: 'Inertia keeps the object moving.' });
     const second = await vocabulary.saveVocabularyEntry('alice', { term: '  inertia ', background: 'Mass is a measure of inertia.' });
     assert.equal(first.id, second.id);
     assert.deepEqual(second.contexts, ['Inertia keeps the object moving.', 'Mass is a measure of inertia.']);
     assert.equal(second.definitionStatus, 'complete');
+    assert.equal(second.category, '物理学术语');
+    assert.equal(second.phonetic, '/ɪˈnɜːrʃə/');
     assert.equal((await vocabulary.listVocabularyEntries('alice')).length, 1);
     assert.equal((await vocabulary.listVocabularyEntries('bob')).length, 0);
   } finally {
@@ -28,7 +30,7 @@ test('vocabulary examples are stored as three structured bilingual examples', as
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     const format = body.text?.format?.name;
-    if (format === 'vocabulary_definition') return Response.json({ output_text: JSON.stringify({ meaning: '动量。', language: '英语', partOfSpeech: '名词' }) });
+    if (format === 'vocabulary_definition') return Response.json({ output_text: JSON.stringify({ correctedTerm: 'momentum', correctionNote: '修正常见拼写错误', meaning: '动量。', language: '英语', partOfSpeech: '名词', category: '物理学术语', phonetic: '/moʊˈmentəm/' }) });
     return Response.json({ output_text: JSON.stringify({ examples: [
       { sentence: 'Momentum is conserved.', translation: '动量守恒。', note: '被动语态' },
       { sentence: 'The cart gained momentum.', translation: '小车获得了动量。', note: 'gain momentum' },
@@ -36,7 +38,10 @@ test('vocabulary examples are stored as three structured bilingual examples', as
     ] }) });
   };
   try {
-    const entry = await vocabulary.saveVocabularyEntry('alice', { term: 'momentum', background: 'The collision conserves momentum.' });
+    const entry = await vocabulary.saveVocabularyEntry('alice', { term: 'momemtum', background: 'The collision conserves momentum.' });
+    assert.equal(entry.originalTerm, 'momemtum');
+    assert.equal(entry.term, 'momentum');
+    assert.equal(entry.correctionNote, '修正常见拼写错误');
     const completed = await vocabulary.generateVocabularyExamples('alice', entry.id);
     assert.equal(completed.exampleStatus, 'complete');
     assert.equal(completed.examples.length, 3);

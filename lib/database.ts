@@ -45,7 +45,7 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS tutor_messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', meta_json TEXT NOT NULL DEFAULT '{}', starred INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_tutor_messages_thread ON tutor_messages(thread_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS tutor_vocabulary_state (owner_id TEXT NOT NULL, course_id TEXT NOT NULL, term TEXT NOT NULL, mastered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner_id, course_id, term))`,
-  `CREATE TABLE IF NOT EXISTS vocabulary_entries (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', term TEXT NOT NULL, normalized_term TEXT NOT NULL, contexts_json TEXT NOT NULL DEFAULT '[]', meaning TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', part_of_speech TEXT NOT NULL DEFAULT '', examples_json TEXT NOT NULL DEFAULT '[]', definition_status TEXT NOT NULL DEFAULT 'pending', example_status TEXT NOT NULL DEFAULT 'idle', model TEXT NOT NULL DEFAULT '', error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_id,course_id,normalized_term))`,
+  `CREATE TABLE IF NOT EXISTS vocabulary_entries (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', term TEXT NOT NULL, original_term TEXT NOT NULL DEFAULT '', corrected_term TEXT NOT NULL DEFAULT '', correction_note TEXT NOT NULL DEFAULT '', normalized_term TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', phonetic TEXT NOT NULL DEFAULT '', contexts_json TEXT NOT NULL DEFAULT '[]', meaning TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT '', part_of_speech TEXT NOT NULL DEFAULT '', examples_json TEXT NOT NULL DEFAULT '[]', definition_status TEXT NOT NULL DEFAULT 'pending', example_status TEXT NOT NULL DEFAULT 'idle', model TEXT NOT NULL DEFAULT '', error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_id,course_id,normalized_term))`,
   `CREATE INDEX IF NOT EXISTS idx_vocabulary_owner_updated ON vocabulary_entries(owner_id,updated_at DESC)`,
   `CREATE TABLE IF NOT EXISTS courses (id TEXT PRIMARY KEY, name TEXT NOT NULL, code TEXT NOT NULL, term_name TEXT, start_at TEXT, end_at TEXT, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL, synced_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS source_items (id TEXT PRIMARY KEY, course_id TEXT NOT NULL, source_type TEXT NOT NULL, source_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', source_url TEXT, content_hash TEXT NOT NULL, remote_updated_at TEXT, dates_json TEXT NOT NULL DEFAULT '{}', analysis_json TEXT, analysis_status TEXT NOT NULL DEFAULT 'pending', extraction_version INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1, missing_at TEXT)`,
@@ -106,6 +106,7 @@ async function ready() {
     const courseColumns = await getClient().execute("PRAGMA table_info(courses)");
     const mailColumns = await getClient().execute("PRAGMA table_info(mail_messages)");
     const mailSyncColumns = await getClient().execute("PRAGMA table_info(mail_sync)");
+    const vocabularyColumns = await getClient().execute("PRAGMA table_info(vocabulary_entries)");
     const addMailColumn = async (name: string, sql: string) => {
       if (!mailColumns.rows.some((row) => row.name === name)) await getClient().execute(sql);
     };
@@ -128,6 +129,14 @@ async function ready() {
     await addMailSyncColumn("estimated_total", "ALTER TABLE mail_sync ADD COLUMN estimated_total INTEGER");
     await addMailSyncColumn("import_started_at", "ALTER TABLE mail_sync ADD COLUMN import_started_at TEXT");
     await addMailSyncColumn("import_completed_at", "ALTER TABLE mail_sync ADD COLUMN import_completed_at TEXT");
+    const addVocabularyColumn = async (name: string, sql: string) => {
+      if (!vocabularyColumns.rows.some((row) => row.name === name)) await getClient().execute(sql);
+    };
+    await addVocabularyColumn("original_term", "ALTER TABLE vocabulary_entries ADD COLUMN original_term TEXT NOT NULL DEFAULT ''");
+    await addVocabularyColumn("corrected_term", "ALTER TABLE vocabulary_entries ADD COLUMN corrected_term TEXT NOT NULL DEFAULT ''");
+    await addVocabularyColumn("correction_note", "ALTER TABLE vocabulary_entries ADD COLUMN correction_note TEXT NOT NULL DEFAULT ''");
+    await addVocabularyColumn("category", "ALTER TABLE vocabulary_entries ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+    await addVocabularyColumn("phonetic", "ALTER TABLE vocabulary_entries ADD COLUMN phonetic TEXT NOT NULL DEFAULT ''");
     if (!settingsColumns.rows.some((row) => row.name === "display_name")) {
       await getClient().execute("ALTER TABLE settings ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
     }
