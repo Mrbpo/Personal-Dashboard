@@ -14,11 +14,11 @@ import {
   GraduationCap,
   HeartPulse,
   Landmark,
+  Languages,
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { StudyCalendar } from "@/components/study-calendar";
-import { StudyAgenda } from '@/components/study-agenda';
+import { DueDayList } from '@/components/due-day-list';
 import { CourseAssistant } from "@/components/course-assistant";
 import { AiUsagePanel } from "@/components/ai-usage-panel";
 import { ShortcutPanel } from "@/components/shortcut-panel";
@@ -50,6 +50,7 @@ const nav = [
   { href: "/#learning", label: "学习中心", icon: GraduationCap },
   { href: "/study", label: "学习对话与档案", icon: GraduationCap },
   { href: "/library", label: "本地资料库", icon: Grid2X2 },
+  { href: "/vocabulary", label: "生词本", icon: Languages },
   { href: "/mail", label: "邮件中心", icon: Search },
   { href: "/health", label: "健康与 AI 分析", icon: HeartPulse },
   { href: "/#ai-usage", label: "AI 用量", icon: Cpu },
@@ -316,8 +317,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
             </aside>
           </div>
 
-          {loaded && !loadError && <StudyAgenda />}
-          <div className="mt-5">{loaded && !loadError && visibleCourses.length > 0 && <StudyCalendar tasks={data?.tasks || []} timezone={timezone} />}</div>
+          {loaded && !loadError && <DueDayList tasks={data?.tasks || []} timezone={timezone} />}
           <div className="grid items-stretch gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(22rem,.85fr)]"><AiUsagePanel /><ShortcutPanel /></div>
         </main>
       </SidebarInset>

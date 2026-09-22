@@ -1,7 +1,7 @@
 import {database as db} from './database.ts';
 import {enqueueCodexMaintenance} from './codex-maintenance.ts';
 
-const sourceTypes=new Set(['mail','mail-thread','tutor','health','course-summary','library-extraction','course-analysis']);
+const sourceTypes=new Set(['mail','mail-thread','tutor','health','course-summary','library-extraction','course-analysis','vocabulary-definition','vocabulary-example']);
 export async function saveAiFeedback(owner:string,value:{sourceType:string;sourceId:string;rating:number;reason?:string;metadata?:Record<string,unknown>}){
  if(!sourceTypes.has(value.sourceType)||!value.sourceId||value.sourceId.length>500||![1,-1].includes(Number(value.rating)))throw new Error('反馈内容无效');
  const now=new Date().toISOString(),reason=String(value.reason||'').trim().slice(0,1000),metadata=JSON.stringify(value.metadata||{}).slice(0,4000);
