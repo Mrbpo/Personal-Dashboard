@@ -2,6 +2,9 @@ import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaC
 import { countPiazzaPosts, getIntegrationConnection, listCourseSettings, saveIntegrationConnection, savePiazzaPost, updateIntegrationStatus } from "./repository.ts";
 import { getPiazzaDailySummary, piazzaDate, piazzaTimezone } from "./piazza-digest.ts";
 import { database as db } from "./database.ts";
+import { enqueue } from "./jobs.ts";
+import { piazzaWeekStart } from "./piazza-ai.ts";
+import { serviceValue } from "./service-vault.ts";
 
 type FeedItem = { id?: string | number; cid?: string | number; nr?: string | number; modified?: string; updated?: string };
 
@@ -107,7 +110,12 @@ async function runSyncPiazza() {
     await saveIntegrationConnection("piazza", encryptPiazzaCookies(cookies), metadata, "connected");
     await updateIntegrationStatus("piazza", "connected", null, metadata);
     const timezone = await piazzaTimezone();
-    await getPiazzaDailySummary(piazzaDate(new Date(), timezone), timezone);
+    const today = piazzaDate(new Date(), timezone);
+    await getPiazzaDailySummary(today, timezone);
+    if (serviceValue("OPENAI_API_KEY")) {
+      const start = piazzaWeekStart(today);
+      await enqueue("piazza-ai-week", { weekStart: start }, `piazza-ai-week:${start}`, true);
+    }
     return { classes, imported, results, lastSyncedAt: new Date().toISOString() };
   } catch (error) {
     const code = error instanceof Error ? error.message : "PIAZZA_SYNC_FAILED";

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PiazzaAiPanel } from "@/components/piazza-ai-panel";
 
 type Post = { id: string; courseId: string; courseCode: string; title: string; body: string; answer: string; kind: string; url: string | null; updatedAt: string | null };
 type Daily = { date: string; timezone: string; total: number; answered: number; recentDates: string[]; courses: { code: string; total: number; answered: number; notes: number; headlines: { id: string; title: string; excerpt: string; answer: string; kind: string }[] }[]; posts: Post[]; generatedAt: string };
@@ -22,7 +23,7 @@ function PostCard({ post, showAnswer = true }: { post: Post; showAnswer?: boolea
 }
 
 export function PiazzaCenter({ initialStatus }: { initialStatus: Status }) {
-  const [tab, setTab] = useState<"daily" | "answers">("daily");
+  const [tab, setTab] = useState<"daily" | "answers" | "ai">("daily");
   const [date, setDate] = useState("");
   const [daily, setDaily] = useState<Daily | null>(null);
   const [answers, setAnswers] = useState<Answers | null>(null);
@@ -68,8 +69,8 @@ export function PiazzaCenter({ initialStatus }: { initialStatus: Status }) {
     </section>
     {status.status === "needs_reconnect" && <p className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">Piazza 登录已失效。历史归档仍可查看；请到<Link className="mx-1 font-semibold underline" href="/settings">设置</Link>重新连接，以继续同步并识别旧帖中的教师回答。</p>}
     {error && <p role="alert" className="rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
-    <div className="flex flex-wrap gap-2"><Button variant={tab === "daily" ? "default" : "outline"} onClick={() => setTab("daily")}>每日摘要</Button><Button variant={tab === "answers" ? "default" : "outline"} onClick={() => setTab("answers")}>已确认问答</Button></div>
-    {tab === "daily" ? <div className="space-y-5">
+    <div className="flex flex-wrap gap-2"><Button variant={tab === "daily" ? "default" : "outline"} onClick={() => setTab("daily")}>每日消息</Button><Button variant={tab === "ai" ? "default" : "outline"} onClick={() => setTab("ai")}>AI 每周总结与问答</Button><Button variant={tab === "answers" ? "default" : "outline"} onClick={() => setTab("answers")}>已确认问答列表</Button></div>
+    {tab === "ai" ? <PiazzaAiPanel /> : tab === "daily" ? <div className="space-y-5">
       <div className="flex flex-wrap items-end gap-3"><label className="text-sm font-medium">查看日期<Input className="mt-1 w-44" type="date" value={date} onChange={e => { setDate(e.target.value); void loadDaily(e.target.value).catch(error => setError(error.message)); }} /></label><span className="pb-2 text-xs text-muted-foreground">{daily?.timezone || "America/Toronto"}</span></div>
       {daily?.recentDates?.length ? <div className="flex flex-wrap items-center gap-2 text-xs"><span className="text-muted-foreground">最近有更新：</span>{daily.recentDates.slice(0, 8).map(day => <button key={day} className="rounded-md border bg-card px-2 py-1 hover:bg-muted" onClick={() => void loadDaily(day).catch(error => setError(error.message))}>{day}</button>)}</div> : null}
       {daily && <><section className="rounded-2xl border bg-card p-5"><h2 className="text-lg font-semibold">{daily.date} 的 Piazza 摘要</h2><p className="mt-1 text-sm text-muted-foreground">{daily.total} 条更新 · {daily.answered} 条有教师明确回答 · {daily.courses.length} 门课程</p>{daily.courses.map(course => <div key={course.code} className="mt-4 border-t pt-4"><h3 className="font-semibold">{course.code} <span className="text-sm font-normal text-muted-foreground">{course.total} 条消息，{course.answered} 条已回答</span></h3><ul className="mt-2 space-y-2 text-sm">{course.headlines.map(item => <li key={item.id}><span className="font-medium">{item.kind === "question" ? "问：" : "消息："}{item.title}</span>{item.answer ? <p className="mt-0.5 line-clamp-2 text-muted-foreground">答：{item.answer}</p> : item.excerpt && <p className="mt-0.5 line-clamp-2 text-muted-foreground">{item.excerpt}</p>}</li>)}</ul></div>)}{daily.total === 0 && <p className="mt-4 text-sm text-muted-foreground">这一天没有已同步的 Piazza 更新。若课程尚未完成历史补存，可稍后再次同步。</p>}</section><section><h2 className="mb-3 text-lg font-semibold">当天全部消息</h2><div className="grid gap-3">{daily.posts.map(post => <PostCard key={post.id} post={post} />)}</div></section></>}

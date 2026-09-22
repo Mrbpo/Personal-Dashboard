@@ -3,7 +3,7 @@ import { database as db } from "./database.ts";
 
 type Row = { id: string; course_id: string; course_code: string; title: string; body: string; answer: string; kind: string; source_url: string | null; created_at: string | null; remote_updated_at: string | null; synced_at: string; content_hash: string };
 
-function localDate(value: string | null, timezone: string) {
+export function piazzaLocalDate(value: string | null, timezone: string) {
   if (!value) return "";
   const numeric = Number(value);
   const parsed = /^\d{10,13}$/.test(value) ? new Date(numeric * (value.length === 10 ? 1000 : 1)) : new Date(value);
@@ -30,8 +30,8 @@ export async function getPiazzaDailySummary(date: string, timezone = "America/To
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) throw new Error("日期无效");
   const rows = (await db.prepare(`SELECT p.*, c.code course_code FROM piazza_posts p JOIN courses c ON c.id=p.course_id
     WHERE p.is_active=1 ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC`).all<Row>()).results;
-  const recentDates = [...new Set(rows.map(row => localDate(row.remote_updated_at || row.created_at || row.synced_at, timezone)).filter(Boolean))].sort().reverse().slice(0, 20);
-  const dailyRows = rows.filter(row => localDate(row.remote_updated_at || row.created_at || row.synced_at, timezone) === date);
+  const recentDates = [...new Set(rows.map(row => piazzaLocalDate(row.remote_updated_at || row.created_at || row.synced_at, timezone)).filter(Boolean))].sort().reverse().slice(0, 20);
+  const dailyRows = rows.filter(row => piazzaLocalDate(row.remote_updated_at || row.created_at || row.synced_at, timezone) === date);
   const hash = createHash("sha256").update(JSON.stringify(["v2", timezone, recentDates, ...dailyRows.map(row => [row.id, row.content_hash])])).digest("hex");
   const cached = await db.prepare("SELECT summary_json,source_hash FROM piazza_daily_summaries WHERE date=? AND timezone=?").bind(date, timezone).first<{ summary_json: string; source_hash: string }>();
   if (cached?.source_hash === hash) return JSON.parse(cached.summary_json);

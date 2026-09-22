@@ -69,6 +69,7 @@ const schema = [
   `CREATE INDEX IF NOT EXISTS idx_piazza_course_updated ON piazza_posts(course_id, remote_updated_at)`,
   `CREATE TABLE IF NOT EXISTS piazza_post_versions (post_id TEXT NOT NULL, content_hash TEXT NOT NULL, course_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, source_url TEXT, remote_updated_at TEXT, archived_at TEXT NOT NULL, PRIMARY KEY(post_id, content_hash))`,
   `CREATE TABLE IF NOT EXISTS piazza_daily_summaries (date TEXT PRIMARY KEY, timezone TEXT NOT NULL, summary_json TEXT NOT NULL, source_hash TEXT NOT NULL, generated_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS piazza_ai_weekly_summaries (week_start TEXT PRIMARY KEY, timezone TEXT NOT NULL, source_hash TEXT NOT NULL, summary_json TEXT NOT NULL, generated_at TEXT NOT NULL)`,
   `INSERT OR IGNORE INTO piazza_post_versions SELECT id, content_hash, course_id, title, body, source_url, remote_updated_at, synced_at FROM piazza_posts`,
   `CREATE TABLE IF NOT EXISTS shortcuts (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, icon_url TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_shortcuts_url ON shortcuts(url)`,
