@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.SESSION_SECRET = "piazza-test-secret-that-is-not-used-outside-tests";
-const { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaCookies, normalizePiazzaPost, piazzaRpc } = await import("../lib/piazza.ts");
+const { baseCourseCode, classesFromStatus, confirmedPiazzaAnswer, decryptPiazzaCookies, encryptPiazzaCookies, normalizePiazzaPost, piazzaRpc } = await import("../lib/piazza.ts");
 
 test("Piazza session cookies are encrypted and recoverable", () => {
   const cookies = { session_id: "private-session", csrftoken: "csrf" };
@@ -30,6 +30,18 @@ test("Piazza posts keep useful text but omit author metadata", () => {
   assert.match(normalized.body, /Bring a pen/);
   assert.doesNotMatch(normalized.body, /author-id|other-author/);
   assert.equal(normalized.sourceUrl, "https://piazza.com/class/network/post/7");
+});
+
+test("only explicit instructor answers qualify as confirmed", () => {
+  const post = { type: "question", nr: 8, history: [{ subject: "When is the lab?", content: "Please confirm." }], children: [
+    { type: "s_answer", history: [{ content: "I think Tuesday." }] },
+    { type: "followup", history: [{ content: "Any update?" }] },
+    { type: "i_answer", history: [{ content: "The lab is Wednesday at 2 pm." }] },
+  ] };
+  assert.equal(confirmedPiazzaAnswer(post), "The lab is Wednesday at 2 pm.");
+  assert.equal(normalizePiazzaPost(post, "network", "course").answer, "The lab is Wednesday at 2 pm.");
+  assert.equal(confirmedPiazzaAnswer({ ...post, children: post.children.slice(0, 2) }), "");
+  assert.equal(confirmedPiazzaAnswer({ ...post, type: "note" }), "");
 });
 
 test("Piazza client rejects every non-read RPC method", async () => {

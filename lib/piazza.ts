@@ -95,13 +95,24 @@ function nodeText(node: any): string {
   return textFromHtml([own, children].filter(Boolean).join("\n"));
 }
 
+// Only an explicit instructor answer is treated as a confirmed answer. A
+// student reply, follow-up, or note may be useful context but is not proof.
+export function confirmedPiazzaAnswer(post: any): string {
+  if (post?.type !== "question" || !Array.isArray(post.children)) return "";
+  return post.children.filter((child: any) => child?.type === "i_answer")
+    .map(nodeText).filter(Boolean).join("\n\n");
+}
+
 export function normalizePiazzaPost(post: any, networkId: string, courseId: string) {
   const current = Array.isArray(post?.history) ? post.history[0] : post;
   const postNumber = String(post?.nr ?? post?.id ?? current?.id ?? "");
   const title = textFromHtml(current?.subject || post?.subject || `Piazza #${postNumber}`);
   const body = nodeText(post);
+  const answer = confirmedPiazzaAnswer(post);
+  const kind = post?.type === "question" ? "question" : "note";
+  const createdAt = String(post?.created || current?.created || "") || null;
   const updatedAt = String(post?.modified || post?.updated || current?.created || "") || null;
   const folders = Array.isArray(post?.folders) ? post.folders.map(String) : [];
-  const contentHash = createHash("sha256").update(JSON.stringify({ title, body, folders, updatedAt })).digest("hex");
-  return { id: `piazza:${networkId}:${postNumber}`, courseId, networkId, postNumber, title, body, folders, updatedAt, contentHash, sourceUrl: `https://piazza.com/class/${networkId}/post/${postNumber}` };
+  const contentHash = createHash("sha256").update(JSON.stringify({ title, body, answer, kind, folders, updatedAt })).digest("hex");
+  return { id: `piazza:${networkId}:${postNumber}`, courseId, networkId, postNumber, title, body, answer, kind, folders, createdAt, updatedAt, contentHash, sourceUrl: `https://piazza.com/class/${networkId}/post/${postNumber}` };
 }

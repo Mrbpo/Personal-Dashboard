@@ -64,10 +64,11 @@ const schema = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_source_uid ON schedule_events(source_name, external_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_schedule_range ON schedule_events(start_at, end_at)`,
   `CREATE TABLE IF NOT EXISTS integration_connections (provider TEXT PRIMARY KEY, secret_encrypted TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, last_synced_at TEXT, updated_at TEXT NOT NULL, error TEXT)`,
-  `CREATE TABLE IF NOT EXISTS piazza_posts (id TEXT PRIMARY KEY, course_id TEXT NOT NULL, network_id TEXT NOT NULL, post_number TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', source_url TEXT, folders_json TEXT NOT NULL DEFAULT '[]', content_hash TEXT NOT NULL, remote_updated_at TEXT, synced_at TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1)`,
+  `CREATE TABLE IF NOT EXISTS piazza_posts (id TEXT PRIMARY KEY, course_id TEXT NOT NULL, network_id TEXT NOT NULL, post_number TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', answer TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'unknown', created_at TEXT, source_url TEXT, folders_json TEXT NOT NULL DEFAULT '[]', content_hash TEXT NOT NULL, remote_updated_at TEXT, synced_at TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_piazza_network_post ON piazza_posts(network_id, post_number)`,
   `CREATE INDEX IF NOT EXISTS idx_piazza_course_updated ON piazza_posts(course_id, remote_updated_at)`,
   `CREATE TABLE IF NOT EXISTS piazza_post_versions (post_id TEXT NOT NULL, content_hash TEXT NOT NULL, course_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, source_url TEXT, remote_updated_at TEXT, archived_at TEXT NOT NULL, PRIMARY KEY(post_id, content_hash))`,
+  `CREATE TABLE IF NOT EXISTS piazza_daily_summaries (date TEXT PRIMARY KEY, timezone TEXT NOT NULL, summary_json TEXT NOT NULL, source_hash TEXT NOT NULL, generated_at TEXT NOT NULL)`,
   `INSERT OR IGNORE INTO piazza_post_versions SELECT id, content_hash, course_id, title, body, source_url, remote_updated_at, synced_at FROM piazza_posts`,
   `CREATE TABLE IF NOT EXISTS shortcuts (id TEXT PRIMARY KEY, title TEXT NOT NULL, url TEXT NOT NULL, icon_url TEXT, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_shortcuts_url ON shortcuts(url)`,
@@ -107,6 +108,12 @@ async function ready() {
     const mailColumns = await getClient().execute("PRAGMA table_info(mail_messages)");
     const mailSyncColumns = await getClient().execute("PRAGMA table_info(mail_sync)");
     const vocabularyColumns = await getClient().execute("PRAGMA table_info(vocabulary_entries)");
+    const piazzaColumns = await getClient().execute("PRAGMA table_info(piazza_posts)");
+    for (const [name, sql] of [
+      ["answer", "ALTER TABLE piazza_posts ADD COLUMN answer TEXT NOT NULL DEFAULT ''"],
+      ["kind", "ALTER TABLE piazza_posts ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'"],
+      ["created_at", "ALTER TABLE piazza_posts ADD COLUMN created_at TEXT"],
+    ]) if (!piazzaColumns.rows.some((row) => row.name === name)) await getClient().execute(sql);
     const addMailColumn = async (name: string, sql: string) => {
       if (!mailColumns.rows.some((row) => row.name === name)) await getClient().execute(sql);
     };

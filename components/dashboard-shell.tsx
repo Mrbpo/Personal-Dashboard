@@ -15,6 +15,7 @@ import {
   HeartPulse,
   Landmark,
   Languages,
+  MessageSquareText,
   RefreshCw,
   Settings,
 } from "lucide-react";
@@ -50,6 +51,7 @@ const nav = [
   { href: "/#learning", label: "学习中心", icon: GraduationCap },
   { href: "/study", label: "学习对话与档案", icon: GraduationCap },
   { href: "/library", label: "本地资料库", icon: Grid2X2 },
+  { href: "/piazza", label: "Piazza 摘要与问答", icon: MessageSquareText },
   { href: "/vocabulary", label: "生词本", icon: Languages },
   { href: "/mail", label: "邮件中心", icon: Search },
   { href: "/health", label: "健康与 AI 分析", icon: HeartPulse },

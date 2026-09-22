@@ -7,7 +7,7 @@ const repo = await import("../lib/repository.ts");
 
 test("Piazza summaries isolate course and source; archives retain changed versions", async () => {
   await repo.upsertCourses([{ id: "chem", name: "Chemistry", course_code: "CHMA10H3" }, { id: "stats", name: "Statistics", course_code: "STAB22H3" }]);
-  const post = { id: "piazza:test:1", courseId: "chem", networkId: "test", postNumber: "1", title: "Lab safety", body: "Bring goggles", sourceUrl: "https://piazza.com/class/test/post/1", folders: [], updatedAt: "2026-09-14", contentHash: "a" };
+  const post = { id: "piazza:test:1", courseId: "chem", networkId: "test", postNumber: "1", title: "Lab safety", body: "Bring goggles", answer: "", kind: "note", createdAt: "2026-09-14", sourceUrl: "https://piazza.com/class/test/post/1", folders: [], updatedAt: "2026-09-14", contentHash: "a" };
   await repo.savePiazzaPost(post);
   await repo.savePiazzaPost(post);
   await repo.savePiazzaPost({ ...post, body: "Bring goggles and gloves", contentHash: "b" });

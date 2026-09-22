@@ -1,14 +1,25 @@
 import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaCookies, normalizePiazzaPost, piazzaRpc, type PiazzaClass } from "./piazza.ts";
 import { countPiazzaPosts, getIntegrationConnection, listCourseSettings, saveIntegrationConnection, savePiazzaPost, updateIntegrationStatus } from "./repository.ts";
+import { getPiazzaDailySummary, piazzaDate, piazzaTimezone } from "./piazza-digest.ts";
+import { database as db } from "./database.ts";
 
 type FeedItem = { id?: string | number; cid?: string | number; nr?: string | number; modified?: string; updated?: string };
 
 function mapClasses(classes: PiazzaClass[], courses: Awaited<ReturnType<typeof listCourseSettings>>) {
   return classes.map((item) => {
     const code = baseCourseCode(`${item.num} ${item.name}`);
-    const match = courses.find((course) => course.enabled && baseCourseCode(course.code) === code);
-    return { ...item, ...(match ? { courseId: match.id, courseCode: match.code } : {}) };
+    const match = code ? courses.find((course) => course.enabled && baseCourseCode(course.code) === code) : undefined;
+    return { ...item, courseId: match?.id || `piazza:${item.nid}`, courseCode: match?.code || item.num || item.name };
   });
+}
+
+async function ensurePiazzaOnlyCourses(classes: ReturnType<typeof mapClasses>) {
+  const standalone = classes.filter(item => item.courseId?.startsWith("piazza:"));
+  if (!standalone.length) return;
+  const now = new Date().toISOString();
+  await db.batch(standalone.map(item => db.prepare(`INSERT INTO courses (id,name,code,term_name,enabled,updated_at)
+    VALUES (?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,term_name=excluded.term_name,updated_at=excluded.updated_at`)
+    .bind(item.courseId!, item.name, item.courseCode!, item.term, now)));
 }
 
 function sleep(milliseconds: number) {
@@ -36,6 +47,7 @@ export async function connectPiazza(email: string, password: string) {
   const { loginPiazza } = await import("./piazza.ts");
   const { cookies, status } = await loginPiazza(email, password);
   const classes = mapClasses(classesFromStatus(status), await listCourseSettings());
+  await ensurePiazzaOnlyCourses(classes);
   await saveIntegrationConnection("piazza", encryptPiazzaCookies(cookies), { classes, postCount: 0 }, "connected");
   return { connected: true, status: "connected", classes, lastSyncedAt: null, postCount: 0, error: null };
 }
@@ -53,11 +65,12 @@ async function runSyncPiazza() {
   try {
     const status = await piazzaRpc<any>(cookies, "user.status");
     const classes = mapClasses(classesFromStatus(status), await listCourseSettings());
+    await ensurePiazzaOnlyCourses(classes);
     let imported = 0;
     const archiveOffsets: Record<string, number> = { ...(connection.metadata.archiveOffsets || {}) };
     const results: Array<{ nid: string; courseCode?: string; imported: number; error?: string }> = [];
 
-    for (const item of classes.filter((course) => course.courseId)) {
+    for (const item of classes) {
       let courseImported = 0;
       try {
         const seen = new Set<string>();
@@ -93,6 +106,8 @@ async function runSyncPiazza() {
     const metadata = { classes, postCount: await countPiazzaPosts(), archiveOffsets, lastResults: results };
     await saveIntegrationConnection("piazza", encryptPiazzaCookies(cookies), metadata, "connected");
     await updateIntegrationStatus("piazza", "connected", null, metadata);
+    const timezone = await piazzaTimezone();
+    await getPiazzaDailySummary(piazzaDate(new Date(), timezone), timezone);
     return { classes, imported, results, lastSyncedAt: new Date().toISOString() };
   } catch (error) {
     const code = error instanceof Error ? error.message : "PIAZZA_SYNC_FAILED";

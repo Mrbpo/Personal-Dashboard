@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import Link from "next/link";
 import { CheckCircle2, Link2, RefreshCw, Unplug } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,9 +77,9 @@ export function PiazzaSettings({ initial }: { initial: PiazzaStatus }) {
       ) : (
         <div className="mt-5">
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {status.classes.map((item) => <div key={item.nid} className="rounded-2xl border bg-background p-3"><p className="truncate text-sm font-medium">{item.num || item.name}</p><p className="mt-1 text-xs text-muted-foreground">{item.courseCode ? <span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3.5" />匹配 {item.courseCode}</span> : "未找到同代码的 Canvas 课程"}</p></div>)}
+            {status.classes.map((item) => <div key={item.nid} className="rounded-2xl border bg-background p-3"><p className="truncate text-sm font-medium">{item.num || item.name}</p><p className="mt-1 text-xs text-muted-foreground"><span className="inline-flex items-center gap-1 text-emerald-700"><CheckCircle2 className="size-3.5" />{item.courseId?.startsWith("piazza:") ? "Piazza 独立课程" : "匹配 Canvas"} · {item.courseCode || item.num}</span></p></div>)}
           </div>
-          <div className="mt-4 flex flex-wrap items-center gap-3"><Button onClick={sync} disabled={busy} className="rounded-xl"><RefreshCw className={`size-4 ${busy ? "animate-spin" : ""}`} />同步 Piazza</Button><Button variant="outline" onClick={disconnect} disabled={busy} className="rounded-xl"><Unplug className="size-4" />断开连接</Button><span className="text-xs text-muted-foreground">{status.lastSyncedAt ? `上次同步 ${new Date(status.lastSyncedAt).toLocaleString("zh-CN")}` : "尚未同步"}</span></div>
+          <div className="mt-4 flex flex-wrap items-center gap-3"><Button onClick={sync} disabled={busy} className="rounded-xl"><RefreshCw className={`size-4 ${busy ? "animate-spin" : ""}`} />同步 Piazza</Button><Button variant="outline" asChild><Link href="/piazza">查看摘要与问答</Link></Button><Button variant="outline" onClick={disconnect} disabled={busy} className="rounded-xl"><Unplug className="size-4" />断开连接</Button><span className="text-xs text-muted-foreground">{status.lastSyncedAt ? `上次同步 ${new Date(status.lastSyncedAt).toLocaleString("zh-CN")}` : "尚未同步"}</span></div>
         </div>
       )}
       {message && <p aria-live="polite" className="mt-4 text-sm text-muted-foreground">{message}</p>}

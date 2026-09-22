@@ -539,17 +539,17 @@ export async function deleteIntegrationConnection(provider: string) {
   await getDatabase().prepare("DELETE FROM integration_connections WHERE provider=?").bind(provider).run();
 }
 
-export async function savePiazzaPost(post: { id: string; courseId: string; networkId: string; postNumber: string; title: string; body: string; sourceUrl: string; folders: string[]; updatedAt: string | null; contentHash: string }) {
+export async function savePiazzaPost(post: { id: string; courseId: string; networkId: string; postNumber: string; title: string; body: string; answer: string; kind: string; createdAt: string | null; sourceUrl: string; folders: string[]; updatedAt: string | null; contentHash: string }) {
   await getDatabase().prepare(`INSERT OR IGNORE INTO piazza_post_versions
     (post_id, content_hash, course_id, title, body, source_url, remote_updated_at, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(post.id, post.contentHash, post.courseId, post.title, post.body, post.sourceUrl, post.updatedAt, new Date().toISOString()).run();
   await getDatabase().prepare(
-    `INSERT INTO piazza_posts (id, course_id, network_id, post_number, title, body, source_url, folders_json, content_hash, remote_updated_at, synced_at, is_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-     ON CONFLICT(id) DO UPDATE SET course_id=excluded.course_id, title=excluded.title, body=excluded.body,
+    `INSERT INTO piazza_posts (id, course_id, network_id, post_number, title, body, answer, kind, created_at, source_url, folders_json, content_hash, remote_updated_at, synced_at, is_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+     ON CONFLICT(id) DO UPDATE SET course_id=excluded.course_id, title=excluded.title, body=excluded.body, answer=excluded.answer, kind=excluded.kind, created_at=excluded.created_at,
        source_url=excluded.source_url, folders_json=excluded.folders_json, content_hash=excluded.content_hash,
        remote_updated_at=excluded.remote_updated_at, synced_at=excluded.synced_at, is_active=1`
-  ).bind(post.id, post.courseId, post.networkId, post.postNumber, post.title, post.body, post.sourceUrl, JSON.stringify(post.folders), post.contentHash, post.updatedAt, new Date().toISOString()).run();
+  ).bind(post.id, post.courseId, post.networkId, post.postNumber, post.title, post.body, post.answer, post.kind, post.createdAt, post.sourceUrl, JSON.stringify(post.folders), post.contentHash, post.updatedAt, new Date().toISOString()).run();
 }
 
 export async function getPiazzaPostState(id: string) {
