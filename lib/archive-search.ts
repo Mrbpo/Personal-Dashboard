@@ -4,6 +4,7 @@ import { asksForSyllabus } from './search-vocabulary.ts';
 
 type LibraryHit = Awaited<ReturnType<typeof searchLibrary>>[number];
 type CourseOption = { id: string; code: string; name: string; enabled: boolean };
+const syllabusTitle = /syllabus|course\s*outline|课程大纲|教学大纲/i;
 
 function subjectCourse(course: CourseOption, subject: 'math' | 'stats' | 'chemistry') {
   const code = compact(course.code);
@@ -103,7 +104,7 @@ export function preferStrongDocumentMatches(question: string, structured: Course
   const focused = inferredMarker ? library.filter((hit) => activityMarker(hit.name) === inferredMarker) : strong;
   if (summary || !focused.length) return { structured, library };
   const relevant = structured.filter((source) => {
-    if (wantsSyllabus && (source.sourceType === 'syllabus' || /syllabus|课程大纲/i.test(source.title))) return true;
+    if (wantsSyllabus && (source.sourceType === 'syllabus' || syllabusTitle.test(source.title))) return true;
     if (inferredMarker && activityMarker(source.title) && activityMarker(source.title) !== inferredMarker) return false;
     if (source.sourceType === 'piazza') return true;
     if (['assignment', 'quiz', 'page', 'module', 'discussion'].includes(source.sourceType)) return true;
@@ -112,7 +113,7 @@ export function preferStrongDocumentMatches(question: string, structured: Course
   });
   const selectedLibrary = focused.slice(0, 4);
   if (wantsSyllabus) for (const hit of library) {
-    if (/syllabus|course\s*outline|课程大纲/i.test(`${hit.name} ${hit.folder_path || ''}`) && !selectedLibrary.some((selected) => selected.id === hit.id)) selectedLibrary.push(hit);
+    if (syllabusTitle.test(`${hit.name} ${hit.folder_path || ''}`) && !selectedLibrary.some((selected) => selected.id === hit.id)) selectedLibrary.push(hit);
     if (selectedLibrary.length >= 6) break;
   }
   return { structured: relevant.slice(0, 8), library: selectedLibrary };
@@ -131,7 +132,11 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
   const courses = (await listCourseSettings()).filter((course) => course.enabled);
   timings.coursesMs = performance.now() - courseStarted;
   let scope = requestedCourse || explicitArchiveCourse(question, courses);
-  const courseSelection = !requestedCourse && !scope ? subjectArchiveCourses(question, courses) : null;
+  const subjectCourses = subjectArchiveCourses(question, courses);
+  // A selected course or a code in the question must not override a conflicting subject.
+  const courseSelection = subjectCourses && (!scope ? subjectCourses.length !== 1 : !subjectCourses.some((course) => course.id === scope))
+    ? subjectCourses : null;
+  if (!scope && subjectCourses?.length === 1) scope = subjectCourses[0].id;
   if (courseSelection) {
     timings.totalMs = performance.now() - started;
     return { sources: [] as CourseSearchResult[], inferredCourseId: null, courseSelection, timings };
@@ -158,11 +163,11 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
   }
   if (scope && asksForSyllabus(question) && !piazzaOnly) {
     const [syllabusSources, syllabusDocuments] = await Promise.all([
-      searchCourseContent('syllabus', scope, 8),
-      searchLibrary(owner, 'syllabus', scope, false, { limit: 8 }),
+      (async () => { const at = performance.now(); const result = await searchCourseContent('syllabus course outline', scope, 8); timings.structuredMs += performance.now() - at; return result; })(),
+      (async () => { const at = performance.now(); const result = await searchLibrary(owner, 'syllabus course outline', scope, false, { limit: 8, onTiming: recordLibrary }); timings.libraryMs += performance.now() - at; return result; })(),
     ]);
-    const matchingSources = syllabusSources.filter((source) => source.sourceType === 'syllabus' || /syllabus|课程大纲/i.test(source.title));
-    const matchingDocuments = syllabusDocuments.filter((hit) => /syllabus|course\s*outline|课程大纲/i.test(`${hit.name} ${hit.folder_path || ''}`));
+    const matchingSources = syllabusSources.filter((source) => source.sourceType === 'syllabus' || syllabusTitle.test(source.title));
+    const matchingDocuments = syllabusDocuments.filter((hit) => syllabusTitle.test(`${hit.name} ${hit.folder_path || ''}`));
     structured = [...matchingSources, ...structured].filter((source, index, all) => all.findIndex((candidate) => candidate.sourceId === source.sourceId) === index);
     library = [...library, ...matchingDocuments].filter((hit, index, all) => all.findIndex((candidate) => candidate.id === hit.id) === index);
   }

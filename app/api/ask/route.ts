@@ -24,8 +24,9 @@ export async function POST(request: Request) {
     const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
     const { sources, inferredCourseId, courseSelection, timings } = await searchArchiveForAnswer(owner.userId, question, body.courseId, summary ? 100 : 12);
     if (courseSelection) {
+      const subject = /数学|微积分|\bmath|\bcalculus/i.test(question) ? '数学' : /统计|\bstat/i.test(question) ? '统计' : '化学';
       const answer = courseSelection.length
-        ? `找到了多门符合“${/数学|微积分|\bmath|\bcalculus/i.test(question) ? '数学' : /统计|\bstat/i.test(question) ? '统计' : '化学'}”的课程：${courseSelection.map((course) => course.code).join('、')}。请选择上方课程或在问题中写出课程代码，再查询具体要求。`
+        ? `符合“${subject}”的课程：${courseSelection.map((course) => course.code).join('、')}。请在上方选择对应课程或在问题中写出课程代码，再查询具体要求。`
         : '目前没有找到已启用的对应课程。请检查课程同步状态，或在上方选择课程后再查询。';
       return Response.json({ answer, needsClarification: true, followUps: [], citationRefs: [], aiAvailable: false, feedbackId: '', inferredCourseId: null, coverage: '未跨课程引用资料。', citations: [] }, { headers: { 'Cache-Control': 'no-store' } });
     }
