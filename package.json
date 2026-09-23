@@ -6,7 +6,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "predev": "node scripts/copy-excalidraw-assets.mjs",
     "dev": "node scripts/dev-local.mjs",
+    "prebuild": "node scripts/copy-excalidraw-assets.mjs",
     "build": "next build",
     "start": "next start",
     "worker": "node --experimental-strip-types scripts/worker.ts",

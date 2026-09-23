@@ -45,6 +45,7 @@ next-env.d.ts
 /outputs/
 /work/
 /data/
+/public/excalidraw-assets/
 /.tmp-vic3-ui/
 *.db-shm
 *.db-wal
