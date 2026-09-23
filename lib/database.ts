@@ -20,6 +20,8 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS library_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, position INTEGER NOT NULL, locator TEXT NOT NULL, body TEXT NOT NULL, hash TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(document_id)`,
   `CREATE TABLE IF NOT EXISTS library_vectors (chunk_id TEXT NOT NULL, model TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(chunk_id, model))`,
+  `CREATE TABLE IF NOT EXISTS library_mail_sources (document_id TEXT PRIMARY KEY, account TEXT NOT NULL, email_id TEXT NOT NULL, source_hash TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_library_mail_sources_mail ON library_mail_sources(account,email_id)`,
   `CREATE TABLE IF NOT EXISTS background_jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, lease_until INTEGER, lease_token TEXT, error TEXT, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS worker_state (id TEXT PRIMARY KEY, heartbeat INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS ai_ledger (id TEXT PRIMARY KEY, month TEXT NOT NULL, kind TEXT NOT NULL, reserved REAL NOT NULL, charged REAL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,
@@ -37,6 +39,8 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS mail_processing (email_id TEXT PRIMARY KEY, account TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL, analysis_version INTEGER NOT NULL DEFAULT 0, embedding_version TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, error TEXT, updated_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_mail_processing_status ON mail_processing(account,status,updated_at)`,
   `CREATE TABLE IF NOT EXISTS mail_embeddings (email_id TEXT NOT NULL, model TEXT NOT NULL, input_hash TEXT NOT NULL, vector TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(email_id,model))`,
+  `CREATE TABLE IF NOT EXISTS mail_embedding_versions (account TEXT NOT NULL, email_id TEXT NOT NULL, model TEXT NOT NULL, source_hash TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(account,email_id,model,source_hash))`,
+  `CREATE TABLE IF NOT EXISTS mail_search_index_state (name TEXT PRIMARY KEY, version INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS mail_feedback (id TEXT PRIMARY KEY, account TEXT NOT NULL, email_id TEXT NOT NULL, field TEXT NOT NULL, predicted_json TEXT NOT NULL, corrected_json TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', model_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_mail_feedback_lookup ON mail_feedback(account,field,created_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_mail_feedback_email ON mail_feedback(email_id,created_at DESC)`,
@@ -101,9 +105,17 @@ const searchSchema = [
   `CREATE TRIGGER IF NOT EXISTS library_chunks_fts_au AFTER UPDATE OF body ON library_chunks BEGIN INSERT INTO library_chunks_fts(library_chunks_fts,rowid,body) VALUES('delete',old.rowid,old.body); INSERT INTO library_chunks_fts(rowid,body) VALUES(new.rowid,new.body); END`,
 ];
 
+const mailSearchSchema = [
+  `CREATE VIRTUAL TABLE IF NOT EXISTS mail_messages_fts USING fts5(subject,body,content='mail_messages',content_rowid='rowid')`,
+  `CREATE TRIGGER IF NOT EXISTS mail_messages_fts_ai AFTER INSERT ON mail_messages BEGIN INSERT INTO mail_messages_fts(rowid,subject,body) VALUES(new.rowid,new.subject,new.body); END`,
+  `CREATE TRIGGER IF NOT EXISTS mail_messages_fts_ad AFTER DELETE ON mail_messages BEGIN INSERT INTO mail_messages_fts(mail_messages_fts,rowid,subject,body) VALUES('delete',old.rowid,old.subject,old.body); END`,
+  `CREATE TRIGGER IF NOT EXISTS mail_messages_fts_au AFTER UPDATE OF subject,body ON mail_messages WHEN old.subject IS NOT new.subject OR old.body IS NOT new.body BEGIN INSERT INTO mail_messages_fts(mail_messages_fts,rowid,subject,body) VALUES('delete',old.rowid,old.subject,old.body); INSERT INTO mail_messages_fts(rowid,subject,body) VALUES(new.rowid,new.subject,new.body); END`,
+];
+
 let client: Client | null = null;
 let initialized: Promise<void> | null = null;
 let searchIndexReady = false;
+let mailSearchReady = false;
 
 function getClient() {
   if (client) return client;
@@ -200,9 +212,22 @@ async function ready() {
           // Deployments without FTS5 retain a scoped SQL LIKE search path.
           console.warn('[search-index] FTS5 unavailable; using scoped search fallback');
         } finally {
-          await getClient().execute({sql:"DELETE FROM service_leases WHERE id='fts5-bootstrap' AND token=?",args:[token]});
+          await getClient().execute({sql:"INSERT INTO service_leases(id,token,expires_at) VALUES('fts5-bootstrap',?,0) ON CONFLICT(id) DO UPDATE SET expires_at=0 WHERE service_leases.token=?",args:[token,token]});
         }
       }
+    }
+    const indexState=await getClient().execute("SELECT version FROM mail_search_index_state WHERE name='mail-fts5'");
+    if(Number(indexState.rows[0]?.version||0)>=1)mailSearchReady=true;
+    else {
+      const token=crypto.randomUUID(),now=Date.now();
+      const lease=await getClient().execute({sql:`INSERT INTO service_leases(id,token,expires_at) VALUES('mail-fts5-bootstrap',?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE service_leases.expires_at<? RETURNING token`,args:[token,now+600000,now]});
+      if(lease.rows[0]?.token===token)try{
+        for(const sql of mailSearchSchema)await getClient().execute(sql);
+        await getClient().execute("INSERT INTO mail_messages_fts(mail_messages_fts) VALUES('rebuild')");
+        await getClient().execute("INSERT INTO mail_search_index_state(name,version) VALUES('mail-fts5',1) ON CONFLICT(name) DO UPDATE SET version=excluded.version");
+        mailSearchReady=true;
+      }catch{console.warn('[mail-search] FTS5 unavailable; using scoped SQL fallback');}
+      finally{await getClient().execute({sql:"INSERT INTO service_leases(id,token,expires_at) VALUES('mail-fts5-bootstrap',?,0) ON CONFLICT(id) DO UPDATE SET expires_at=0 WHERE service_leases.token=?",args:[token,token]});}
     }
   })();
   await initialized;
@@ -215,6 +240,12 @@ export async function searchIndexAvailable() {
     searchIndexReady = Number(state.rows[0]?.version || 0) >= 1;
   }
   return searchIndexReady;
+}
+
+export async function mailSearchIndexAvailable(){
+  await ready();
+  if(!mailSearchReady){const state=await getClient().execute("SELECT version FROM mail_search_index_state WHERE name='mail-fts5'");mailSearchReady=Number(state.rows[0]?.version||0)>=1;}
+  return mailSearchReady;
 }
 
 class Statement {
