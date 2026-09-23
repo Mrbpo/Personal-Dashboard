@@ -55,6 +55,8 @@ test('archived mail shares one subject/body vector, keeps full-text tail recall,
   assert.equal(semanticHit?.document_id,archived.id);
   assert.match(semanticHit?.body||'',/tailfactconfirmed/);
   assert.equal((await searchRelatedMail('alice','mail-new')).some(hit=>hit.id==='mail-old'),true);
+  await db.batch(Array.from({length:425},(_,index)=>db.prepare('INSERT INTO mail_messages (id,account,thread_id,subject,sender,body,received_at,category,attachments_json,hash) VALUES (?,?,?,?,?,?,?,?,?,?)').bind(`boilerplate-${index}`,'alice@example.invalid',`noise-${index}`,'Routine notice','notice@example.edu','lecture overview','2026-09-22T12:00:00Z','其他','[]',`noise-${index}`)));
+  assert.equal((await searchRelatedMail('alice','mail-new')).some(hit=>hit.id==='mail-old'),true,'an old, specific body match must survive recent boilerplate');
   const beforeConcurrent=embeddingInputs.length;
   await Promise.all([ensureMailEmbedding('alice@example.invalid','mail-old'),ensureMailEmbedding('alice@example.invalid','mail-old')]);
   assert.equal(embeddingInputs.length-beforeConcurrent,1);
