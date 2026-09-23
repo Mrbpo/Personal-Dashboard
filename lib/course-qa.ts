@@ -1,6 +1,7 @@
 import { serviceValue } from "./service-vault.ts";
 import { aiResponse, hasAI } from './ai-response.ts';
 import type { CourseSearchResult } from "./repository.ts";
+import { asksForSyllabus } from './search-vocabulary.ts';
 
 export type CourseAnswer = {
   answer: string;
@@ -64,7 +65,11 @@ export async function answerCourseQuestion(question: string, sources: CourseSear
   const materials = sources.map((source) => `[${source.ref}] 课程：${source.courseCode}\n标题：${source.title}\n类型：${source.sourceType}\n内容：\n${(source.body || source.excerpt).slice(0, 6000)}`).join("\n\n---\n\n");
 
   const actionQuestion=/(?:要|需|应该|具体)?做什么|怎么做|如何做|要求|截止|提交|完成|\b(?:what (?:do|should)|how (?:do|should)|due|submit|complete)\b/i.test(question);
-  const answerMode=actionQuestion?`这是简短的任务问题。只回答用户明确问到的内容，直接给出现在该做什么，优先顺序是：截止时间、必须交付的项目、数据或题目、允许使用的工具、明确的格式限制。控制在 100–350 个中文字、最多 5 个编号。若用户没有明确问登录、启动或环境配置，不得写 RStudio 登录、目录、脚本建立步骤。资料未说明的提交平台、文件类型或命名要求直接省略，不得猜测、提醒确认或追问。followUps 必须为空数组。禁止术语词典、检索过程、来源清单、免责声明、复述文件名和“如果你愿意我还可以”等结尾。除非原文明确分阶段，否则不得套用“课前/课上/课后”模板。忽略与当前任务无关的旧公告、通用 syllabus 和其他周次。`:`根据用户要求组织答案。简短问题用 120–500 个中文字；真正的多资料总结才可用 800–1600 个中文字。禁止输出检索过程、来源清单、免责声明或无关延伸建议。`;
+  const syllabusQuestion = asksForSyllabus(question);
+  const answerMode=actionQuestion ? syllabusQuestion
+    ? `用户同时询问具体任务与课程大纲。分两部分回答：先说明当前 tutorial 要做什么，再根据所给 syllabus/课程大纲概述与该任务有关的课程安排或评分要求。两部分分别引用实际来源。若没有找到大纲原文，明确说明大纲尚未检索到，不要把别的课程大纲当作依据，也不要猜测。控制在 150–500 个中文字；无关的登录与环境配置省略。followUps 必须为空数组。`
+    : `这是简短的任务问题。只回答用户明确问到的内容，直接给出现在该做什么，优先顺序是：截止时间、必须交付的项目、数据或题目、允许使用的工具、明确的格式限制。控制在 100–350 个中文字、最多 5 个编号。若用户没有明确问登录、启动或环境配置，不得写 RStudio 登录、目录、脚本建立步骤。资料未说明的提交平台、文件类型或命名要求直接省略，不得猜测、提醒确认或追问。followUps 必须为空数组。禁止术语词典、检索过程、来源清单、免责声明、复述文件名和“如果你愿意我还可以”等结尾。除非原文明确分阶段，否则不得套用“课前/课上/课后”模板。忽略与当前任务无关的旧公告、通用 syllabus 和其他周次。`
+    : `根据用户要求组织答案。简短问题用 120–500 个中文字；真正的多资料总结才可用 800–1600 个中文字。禁止输出检索过程、来源清单、免责声明或无关延伸建议。`;
   async function requestAnswer(maxOutputTokens: number) {
     const response = await aiResponse("https://api.openai.com/v1/responses", {
       method: "POST",

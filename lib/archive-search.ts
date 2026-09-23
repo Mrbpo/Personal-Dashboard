@@ -1,8 +1,27 @@
 import { searchLibrary } from './library.ts';
 import { listCourseSettings, searchCourseContent, type CourseSearchResult } from './repository.ts';
+import { asksForSyllabus } from './search-vocabulary.ts';
 
 type LibraryHit = Awaited<ReturnType<typeof searchLibrary>>[number];
 type CourseOption = { id: string; code: string; name: string; enabled: boolean };
+const syllabusTitle = /syllabus|course\s*outline|课程大纲|教学大纲/i;
+
+function subjectCourse(course: CourseOption, subject: 'math' | 'stats' | 'chemistry') {
+  const code = compact(course.code);
+  const name = course.name.toLocaleLowerCase();
+  if (subject === 'math') return /^MAT[A-Z]?\d/.test(code) || /\b(?:math|mathematics|calculus|algebra|geometry)\b/i.test(name) && !/\bstatistic/i.test(name);
+  if (subject === 'stats') return /^STA[A-Z]?\d/.test(code) || /\bstatistic/i.test(name);
+  return /^CHM[A-Z]?\d/.test(code) || /\bchemistry\b/i.test(name);
+}
+
+export function subjectArchiveCourses(question: string, courses: CourseOption[]): CourseOption[] | null {
+  const subjects: Array<'math' | 'stats' | 'chemistry'> = [];
+  if (/数学|微积分|\bmath(?:ematics)?\b|\bcalculus\b/i.test(question)) subjects.push('math');
+  if (/统计|\bstat(?:s|istics?)?\b/i.test(question)) subjects.push('stats');
+  if (/化学|\bchem(?:istry)?\b/i.test(question)) subjects.push('chemistry');
+  // A comparison mentioning two subjects must not silently select either one.
+  return subjects.length === 1 ? courses.filter((course) => course.enabled && subjectCourse(course, subjects[0])) : null;
+}
 
 function compact(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9\u3400-\u9fff]/g, '');
@@ -23,15 +42,8 @@ export function explicitArchiveCourse(question: string, courses: CourseOption[])
     return course.enabled && Boolean(code && query.includes(code) || base.length >= 5 && query.includes(base));
   })?.id;
   if (exact) return exact;
-  const text = question.toLocaleLowerCase();
-  const semantic = courses.filter((course) => {
-    const identity = compact(`${course.code} ${course.name}`);
-    if (/STAB|STATISTICS|STATISTICAL/.test(identity)) return /统计|\bstat(?:s|istics?)?\b/i.test(text);
-    if (/MATA|CALCULUS/.test(identity)) return /微积分|\bcalculus\b/i.test(text);
-    if (/CHMA|CHEMISTRY/.test(identity)) return /化学|\bchem(?:istry)?\b/i.test(text);
-    return false;
-  });
-  return semantic.length === 1 ? semantic[0].id : '';
+  const semantic = subjectArchiveCourses(question, courses);
+  return semantic?.length === 1 ? semantic[0].id : '';
 }
 
 export function inferArchiveCourse(structured: CourseSearchResult[], library: LibraryHit[]) {
@@ -73,7 +85,7 @@ export function mergeArchiveSources(structured: CourseSearchResult[], library: L
   }));
   const directoryWithoutParsedDuplicate = structured.filter((source) => !(source.sourceType === 'file' && documentKeys.has(`${source.courseId}\0${normalizeName(source.title)}`)));
   const confirmed = directoryWithoutParsedDuplicate.filter((source) => source.sourceType === 'piazza' && source.confirmedAnswer);
-  const canvas = directoryWithoutParsedDuplicate.filter((source) => ['assignment', 'quiz', 'page', 'module', 'discussion'].includes(source.sourceType));
+  const canvas = directoryWithoutParsedDuplicate.filter((source) => ['assignment', 'quiz', 'page', 'module', 'discussion', 'syllabus'].includes(source.sourceType));
   const other = directoryWithoutParsedDuplicate.filter((source) => !confirmed.includes(source) && !canvas.includes(source));
   const groups = [documents, confirmed, canvas, other];
   const selected: CourseSearchResult[] = [];
@@ -85,19 +97,26 @@ export function mergeArchiveSources(structured: CourseSearchResult[], library: L
 
 export function preferStrongDocumentMatches(question: string, structured: CourseSearchResult[], library: LibraryHit[]) {
   const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
+  const wantsSyllabus = asksForSyllabus(question);
   const strong = library.filter((hit) => hit.score >= 3);
   const requestedMarker = activityMarker(question);
   const inferredMarker = requestedMarker || (/\btut\b/i.test(question) ? activityMarker(strong[0]?.name || '') : '');
   const focused = inferredMarker ? library.filter((hit) => activityMarker(hit.name) === inferredMarker) : strong;
   if (summary || !focused.length) return { structured, library };
   const relevant = structured.filter((source) => {
+    if (wantsSyllabus && (source.sourceType === 'syllabus' || syllabusTitle.test(source.title))) return true;
     if (inferredMarker && activityMarker(source.title) && activityMarker(source.title) !== inferredMarker) return false;
     if (source.sourceType === 'piazza') return true;
     if (['assignment', 'quiz', 'page', 'module', 'discussion'].includes(source.sourceType)) return true;
     if (source.sourceType === 'announcement') return /最新|更改|变动|公告|recent|change|announcement/i.test(question);
     return false;
   });
-  return { structured: relevant.slice(0, 8), library: focused.slice(0, 4) };
+  const selectedLibrary = focused.slice(0, 4);
+  if (wantsSyllabus) for (const hit of library) {
+    if (syllabusTitle.test(`${hit.name} ${hit.folder_path || ''}`) && !selectedLibrary.some((selected) => selected.id === hit.id)) selectedLibrary.push(hit);
+    if (selectedLibrary.length >= 6) break;
+  }
+  return { structured: relevant.slice(0, 8), library: selectedLibrary };
 }
 
 export async function searchArchiveForAnswer(owner: string, question: string, requestedCourse = '', limit = 12) {
@@ -113,6 +132,15 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
   const courses = (await listCourseSettings()).filter((course) => course.enabled);
   timings.coursesMs = performance.now() - courseStarted;
   let scope = requestedCourse || explicitArchiveCourse(question, courses);
+  const subjectCourses = subjectArchiveCourses(question, courses);
+  // A selected course or a code in the question must not override a conflicting subject.
+  const courseSelection = subjectCourses && (!scope ? subjectCourses.length !== 1 : !subjectCourses.some((course) => course.id === scope))
+    ? subjectCourses : null;
+  if (!scope && subjectCourses?.length === 1) scope = subjectCourses[0].id;
+  if (courseSelection) {
+    timings.totalMs = performance.now() - started;
+    return { sources: [] as CourseSearchResult[], inferredCourseId: null, courseSelection, timings };
+  }
   const piazzaOnly = /piazza/i.test(question);
   const [structuredResults, libraryResults] = await Promise.all([
     (async () => { const at = performance.now(); const result = await searchCourseContent(question, scope || undefined, scope ? limit : Math.max(limit * 3, 24)); timings.structuredMs += performance.now() - at; return result; })(),
@@ -133,10 +161,20 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
     library = await searchLibrary(owner, question, scope, true, { limit: 8, embeddingTimeoutMs: 2500, onTiming: recordLibrary });
     timings.libraryMs += performance.now() - at;
   }
+  if (scope && asksForSyllabus(question) && !piazzaOnly) {
+    const [syllabusSources, syllabusDocuments] = await Promise.all([
+      (async () => { const at = performance.now(); const result = await searchCourseContent('syllabus course outline', scope, 8); timings.structuredMs += performance.now() - at; return result; })(),
+      (async () => { const at = performance.now(); const result = await searchLibrary(owner, 'syllabus course outline', scope, false, { limit: 8, onTiming: recordLibrary }); timings.libraryMs += performance.now() - at; return result; })(),
+    ]);
+    const matchingSources = syllabusSources.filter((source) => source.sourceType === 'syllabus' || syllabusTitle.test(source.title));
+    const matchingDocuments = syllabusDocuments.filter((hit) => syllabusTitle.test(`${hit.name} ${hit.folder_path || ''}`));
+    structured = [...matchingSources, ...structured].filter((source, index, all) => all.findIndex((candidate) => candidate.sourceId === source.sourceId) === index);
+    library = [...library, ...matchingDocuments].filter((hit, index, all) => all.findIndex((candidate) => candidate.id === hit.id) === index);
+  }
   const rankingStarted = performance.now();
   ({ structured, library } = preferStrongDocumentMatches(question, structured, library));
   const sources = mergeArchiveSources(structured, library, courses, limit);
   timings.rankingMs = performance.now() - rankingStarted;
   timings.totalMs = performance.now() - started;
-  return { sources, inferredCourseId: scope || null, timings };
+  return { sources, inferredCourseId: scope || null, courseSelection: null, timings };
 }
