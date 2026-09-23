@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {database as db} from './database.ts';
+import {database as db,mailSearchIndexAvailable} from './database.ts';
 import {paidOpenAI} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {getIntegrationConnection} from './repository.ts';
@@ -129,13 +129,22 @@ export async function searchRelatedMail(owner:string,emailId:string){
   const account=await accountForOwner(owner),mail=await db.prepare('SELECT subject,body,sender,hash FROM mail_messages WHERE id=? AND account=? AND removed=0').bind(emailId,account).first<{subject:string;body:string;sender:string;hash:string}>();if(!mail)return [];
   const stop=new Set(['about','after','before','from','have','please','that','the','this','with','your']);
   const unique=(text:string)=>[...new Set(words(text).filter(term=>!stop.has(term)))];
-  const terms=[...new Set([...unique(mail.subject).slice(0,4),...unique(mail.body.slice(-5000)).slice(-6),...unique(mail.body.slice(0,3000)).slice(0,2)])];
-  const bodyCounts=new Map<string,number>();for(const term of words(mail.body))bodyCounts.set(term,(bodyCounts.get(term)||0)+1);
+  const bodyCounts=new Map<string,number>(),buckets=Array.from({length:8},()=>new Set<string>());
+  for(const match of mail.body.toLowerCase().matchAll(/[a-z0-9][a-z0-9_-]{2,}|[\u3400-\u9fff]{2,}/g)){const term=match[0];if(stop.has(term))continue;bodyCounts.set(term,(bodyCounts.get(term)||0)+1);buckets[Math.min(7,Math.floor((match.index||0)*8/Math.max(1,mail.body.length)))].add(term);}
+  const rare=(items:Iterable<string>)=>[...items].sort((a,b)=>(bodyCounts.get(a)||0)-(bodyCounts.get(b)||0)||b.length-a.length||a.localeCompare(b));
+  const terms=[...new Set([...unique(mail.subject).slice(0,4),...buckets.flatMap(bucket=>rare(bucket).slice(0,2)),...rare(bodyCounts.keys()).slice(0,8)])];
   const subjectTerms=new Set(unique(mail.subject)),weight=(term:string)=>subjectTerms.has(term)?1:Math.max(.1,4/Math.sqrt(bodyCounts.get(term)||1));
   const scoreSql=[...terms.flatMap(()=>['CASE WHEN instr(lower(m.subject),?)>0 THEN ? ELSE 0 END','CASE WHEN instr(lower(m.body),?)>0 THEN ? ELSE 0 END','CASE WHEN instr(lower(COALESCE(i.one_line_summary,\'\')),?)>0 THEN ? ELSE 0 END']),'CASE WHEN m.sender=? THEN 2 ELSE 0 END'].join('+');
   const scoreArgs=[...terms.flatMap(term=>[term,3*weight(term),term,weight(term),term,weight(term)]),mail.sender];
-  // SQL ranks the complete body across all dates before returning a bounded set.
-  const lexical=(await db.prepare(`SELECT * FROM (SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,(${scoreSql}) lexical FROM mail_messages m LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account WHERE m.account=? AND m.id!=? AND m.removed=0) WHERE lexical>0 ORDER BY lexical DESC,received_at DESC LIMIT 400`).bind(...scoreArgs,account,emailId).all<{id:string;subject:string;sender:string;received_at:string;one_line_summary:string;lexical:number}>()).results;
+  type LexicalRow={id:string;subject:string;sender:string;received_at:string;one_line_summary:string;lexical:number};
+  let lexical:LexicalRow[]|null=null;
+  if(terms.length&&await mailSearchIndexAvailable())try{
+    const match=terms.map(term=>`"${term.replaceAll('"','""')}"`).join(' OR ');
+    lexical=(await db.prepare(`WITH candidates AS MATERIALIZED (SELECT m.rowid row_id FROM mail_messages_fts JOIN mail_messages m ON m.rowid=mail_messages_fts.rowid WHERE mail_messages_fts MATCH ? AND m.account=? AND m.id!=? AND m.removed=0 ORDER BY bm25(mail_messages_fts,4.0,1.0) LIMIT 1200) SELECT * FROM (SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,(${scoreSql}) lexical FROM candidates c JOIN mail_messages m ON m.rowid=c.row_id LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account) WHERE lexical>0 ORDER BY lexical DESC,received_at DESC LIMIT 400`).bind(match,account,emailId,...scoreArgs).all<LexicalRow>()).results;
+  }catch{/* A deployment without a usable FTS index retains lexical search. */}
+  if(!lexical)lexical=(await db.prepare(`SELECT * FROM (SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,(${scoreSql}) lexical FROM mail_messages m LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account WHERE m.account=? AND m.id!=? AND m.removed=0) WHERE lexical>0 ORDER BY lexical DESC,received_at DESC LIMIT 400`).bind(...scoreArgs,account,emailId).all<LexicalRow>()).results;
+  if(terms.length){const senderRows=(await db.prepare(`SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,2 lexical FROM mail_messages m LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account WHERE m.account=? AND m.id!=? AND m.removed=0 AND m.sender=? ORDER BY m.received_at DESC LIMIT 100`).bind(account,emailId,mail.sender).all<LexicalRow>()).results;const seen=new Set(lexical.map(row=>row.id));for(const row of senderRows)if(!seen.has(row.id)){lexical.push(row);seen.add(row.id);}}
+  lexical.sort((a,b)=>b.lexical-a.lexical||b.received_at.localeCompare(a.received_at));lexical=lexical.slice(0,400);
   const recent=(await db.prepare(`SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,e.vector FROM mail_embeddings e JOIN mail_messages m ON m.id=e.email_id LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account WHERE m.account=? AND m.id!=? AND m.removed=0 AND e.model=? AND e.input_hash=?||m.hash ORDER BY m.received_at DESC LIMIT 300`).bind(account,emailId,EMBED_MODEL,MAIL_EMBED_VERSION).all<{id:string;subject:string;sender:string;received_at:string;one_line_summary:string;vector:string}>()).results;
   const candidateVectors=new Map(recent.map(row=>[row.id,row.vector]));
   if(lexical.length){const ids=lexical.map(row=>row.id);const scoped=(await db.prepare(`SELECT e.email_id,e.vector FROM mail_embeddings e JOIN mail_messages m ON m.id=e.email_id WHERE m.account=? AND e.model=? AND e.input_hash=?||m.hash AND e.email_id IN (${ids.map(()=>'?').join(',')})`).bind(account,EMBED_MODEL,MAIL_EMBED_VERSION,...ids).all<{email_id:string;vector:string}>()).results;for(const row of scoped)candidateVectors.set(row.email_id,row.vector);}

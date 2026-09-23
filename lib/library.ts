@@ -125,7 +125,9 @@ export async function collectUnusedBlobs(now=Date.now()){
   if(!stat.isFile()||stat.isSymbolicLink()||now-stat.mtimeMs<86400000)continue;
   await unlink(/* turbopackIgnore: true */ path);removed++;
  }
- await db.prepare('DELETE FROM library_vectors WHERE chunk_id NOT IN (SELECT id FROM library_chunks)').run();return removed;
+ await db.prepare('DELETE FROM library_vectors WHERE chunk_id NOT IN (SELECT id FROM library_chunks)').run();
+ await db.prepare(`DELETE FROM mail_embedding_versions WHERE NOT EXISTS (SELECT 1 FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id WHERE s.account=mail_embedding_versions.account AND s.email_id=mail_embedding_versions.email_id AND s.source_hash=mail_embedding_versions.source_hash AND d.deleted=0)`).run();
+ return removed;
 }
 export function librarySearchTokens(value:string){
   const normalized=value.normalize('NFKD').toLocaleLowerCase().replace(/([a-z])([0-9])/g,'$1 $2').replace(/([0-9])([a-z])/g,'$1 $2');
@@ -156,11 +158,18 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const bodyIds=[...new Set(rows.filter(r=>r.origin==='gmail'&&isArchivedMailBody(r.origin_key)).map(r=>r.document_id))],bodySet=new Set(bodyIds);
   const mapped=bodyIds.length?(await db.prepare(`SELECT s.document_id FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id WHERE d.owner_id=? AND d.deleted=0 AND s.document_id IN (${bodyIds.map(()=>'?').join(',')})`).bind(owner,...bodyIds).all<{document_id:string}>()).results:[];
   const mappedIds=mapped.map(row=>row.document_id),mappedSet=new Set(mappedIds);
+  const historical=vector&&mappedIds.length?(await db.prepare(`SELECT s.document_id,h.vector FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id JOIN mail_embedding_versions h ON h.account=s.account AND h.email_id=s.email_id AND h.source_hash=s.source_hash AND h.model=? WHERE d.owner_id=? AND d.deleted=0 AND s.document_id IN (${mappedIds.map(()=>'?').join(',')})`).bind(EMBED_MODEL,owner,...mappedIds).all<{document_id:string;vector:string}>()).results:[];
   const mailVectors=vector&&mappedIds.length?(await db.prepare(`SELECT s.document_id,e.vector FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id JOIN mail_messages m ON m.id=s.email_id AND m.account=s.account AND m.hash=s.source_hash JOIN mail_embeddings e ON e.email_id=m.id AND e.model=? AND e.input_hash=?||m.hash WHERE d.owner_id=? AND d.deleted=0 AND s.document_id IN (${mappedIds.map(()=>'?').join(',')})`).bind(EMBED_MODEL,MAIL_EMBED_VERSION,owner,...mappedIds).all<{document_id:string;vector:string}>()).results:[];
-  const mailMap=new Map(mailVectors.map(item=>[item.document_id,item.vector]));
+  const mailMap=new Map([...historical,...mailVectors].map(item=>[item.document_id,item.vector]));
   const ids=rows.filter(r=>!mappedSet.has(r.document_id)&&!r.id.endsWith(':metadata')).map(r=>r.id);
   const vectors=vector&&ids.length?(await db.prepare(`SELECT v.chunk_id,v.vector FROM library_vectors v JOIN library_chunks c ON c.id=v.chunk_id JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND v.model=? AND v.chunk_id IN (${ids.map(()=>'?').join(',')})`).bind(owner,EMBED_MODEL,...ids).all<{chunk_id:string;vector:string}>()).results:[];const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
-  const ranked=rows.map(r=>{const title=lexicalText(r.name),body=lexicalText(r.body),stored=mailMap.get(r.document_id)||map.get(r.id);const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&stored?cosine(vector,JSON.parse(stored)):0),match_reason:titleMatches?'文件名匹配':'正文相关'};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score);
+  const ranked=rows.map(r=>{
+    const title=lexicalText(r.name),body=lexicalText(r.body),stored=mailMap.get(r.document_id)||map.get(r.id);
+    const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;
+    const score=titleMatches*3+bodyMatches+(vector&&stored?cosine(vector,JSON.parse(stored)):0);
+    if(mappedSet.has(r.document_id)&&bodyMatches===0)return {...r,id:`${r.document_id}:mail`,body:'',locator:'邮件全文（段落未定位）',score,match_reason:titleMatches?'标题匹配；段落未定位':'邮件整体语义相关；段落未定位'};
+    return {...r,score,match_reason:titleMatches?'文件名匹配':'正文相关'};
+  }).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score);
   const seenMail=new Set<string>();return ranked.filter(row=>{if(!bodySet.has(row.document_id))return true;if(seenMail.has(row.document_id))return false;seenMail.add(row.document_id);return true;}).slice(0,limit);
 }
 

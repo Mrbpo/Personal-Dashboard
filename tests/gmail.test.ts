@@ -53,5 +53,5 @@ test('Gmail body changes invalidate the old mail vector',async()=>{
   if(target.includes('/messages/changed-mail'))return Response.json({threadId:'thread',internalDate:'1789920000000',payload:{mimeType:'text/plain',headers:[{name:'Subject',value:'New subject'}],body:{data:Buffer.from('New body').toString('base64url')}}});
   throw new Error('Unexpected request: '+target);
  };
- try{await gmail.syncGmail();assert.equal(await db.prepare('SELECT 1 FROM mail_embeddings WHERE email_id=?').bind('changed-mail').first(),null);}finally{globalThis.fetch=original;}
+ try{await gmail.syncGmail();assert.equal(await db.prepare('SELECT 1 FROM mail_embeddings WHERE email_id=?').bind('changed-mail').first(),null);assert.equal(await db.prepare('SELECT 1 FROM mail_embedding_versions WHERE email_id=?').bind('changed-mail').first(),null,'unarchived mail needs no historical vector');}finally{globalThis.fetch=original;}
 });

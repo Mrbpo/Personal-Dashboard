@@ -41,3 +41,13 @@ export async function ensureMailEmbedding(account:string,emailId:string){
  if(existing?.input_hash===MAIL_EMBED_VERSION+mail.hash)return false;
  await storeMailEmbeddings([mail]);return true;
 }
+
+export async function retireMailEmbedding(account:string,emailId:string,sourceHash:string){
+ await db.batch([
+  db.prepare(`INSERT OR IGNORE INTO mail_embedding_versions(account,email_id,model,source_hash,vector)
+    SELECT ?,e.email_id,e.model,?,e.vector FROM mail_embeddings e WHERE e.email_id=? AND e.model=? AND e.input_hash=?||?
+    AND EXISTS (SELECT 1 FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id
+      WHERE s.account=? AND s.email_id=? AND s.source_hash=? AND d.deleted=0)`).bind(account,sourceHash,emailId,EMBED_MODEL,MAIL_EMBED_VERSION,sourceHash,account,emailId,sourceHash),
+  db.prepare('DELETE FROM mail_embeddings WHERE email_id=?').bind(emailId),
+ ]);
+}
