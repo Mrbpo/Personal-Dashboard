@@ -39,6 +39,13 @@ test('structured analysis stores version, evidence, hybrid importance and entity
  try{const result=await intelligence.analyzeMailIntelligence('alice','mail-1',true);assert.ok(result);assert.equal(result.category,'服务','人工纠正不得被重新分析覆盖');assert.ok(result.importanceScore>=4);const entity=await db.prepare("SELECT canonical_name FROM mail_entities WHERE entity_type='course'").first<any>();assert.equal(entity.canonical_name,'BIOA01');const vector=await db.prepare('SELECT input_hash FROM mail_embeddings WHERE email_id=?').bind('mail-1').first();assert.ok(vector);}finally{globalThis.fetch=original;}
 });
 
+test('a cached analysis repairs a missing mail vector without repeating analysis',async()=>{
+ await db.prepare('DELETE FROM mail_embeddings WHERE email_id=?').bind('mail-1').run();
+ const original=globalThis.fetch;let embeddingCalls=0;
+ globalThis.fetch=async(url)=>{if(!String(url).endsWith('/embeddings'))throw new Error('analysis should remain cached');embeddingCalls++;return Response.json({data:[{index:0,embedding:Array(768).fill(.01)}]});};
+ try{const result=await intelligence.analyzeMailIntelligence('alice','mail-1');assert.ok(result);assert.equal(embeddingCalls,1);assert.ok(await db.prepare('SELECT 1 FROM mail_embeddings WHERE email_id=?').bind('mail-1').first());}finally{globalThis.fetch=original;}
+});
+
 test('night maintenance queues only bounded, non-junk local intelligence work',async()=>{
  await seed();await db.prepare(`INSERT OR IGNORE INTO mail_messages (id,account,thread_id,subject,sender,body,received_at,category,attachments_json,hash) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind('mail-night','alice@example.invalid','thread-night','Weekly course reminder','notice@example.edu','Review the lecture notes.','2026-09-21T13:00:00Z','学习','[]','hash-night').run();
  await intelligence.recordMailIngest('alice@example.invalid',{id:'mail-night',sender:'notice@example.edu',subject:'Weekly course reminder',receivedAt:'2026-09-21T13:00:00Z'},{category:'学习',actionRequired:false,deadlineText:'',reason:'课程邮件',priority:2},true);

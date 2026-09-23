@@ -4,6 +4,7 @@ import {paidOpenAI} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {getIntegrationConnection} from './repository.ts';
 import {cosine,EMBED_MODEL,digest} from './library.ts';
+import {ensureMailEmbedding,MAIL_EMBED_VERSION} from './mail-embedding.ts';
 import {enqueue} from './jobs.ts';
 import {addressParser} from 'postal-mime';
 import {z} from 'zod';
@@ -74,7 +75,7 @@ const intelligenceSchema={type:'object',additionalProperties:false,properties:{
 export async function analyzeMailIntelligence(owner:string,emailId:string,force=false):Promise<NonNullable<ReturnType<typeof intelligenceView>>>{
   const account=await accountForOwner(owner),mail=await db.prepare('SELECT * FROM mail_messages WHERE id=? AND account=?').bind(emailId,account).first<any>();if(!mail)throw new Error('邮件不存在');
   const inputHash=createHash('sha256').update(mail.hash+'|'+MAIL_PROMPT_VERSION+'|'+MAIL_ANALYSIS_VERSION).digest('hex'),cached=await db.prepare('SELECT * FROM mail_intelligence WHERE email_id=?').bind(emailId).first<any>();
-  if(!force&&cached?.input_hash===inputHash&&cached.status==='complete')return intelligenceView(cached)!;
+  if(!force&&cached?.input_hash===inputHash&&cached.status==='complete'){try{await ensureMailEmbedding(account,emailId);}catch{/* The cached analysis remains usable. */}return intelligenceView(cached)!;}
   const now=new Date().toISOString();await db.prepare(`INSERT INTO mail_processing (email_id,account,stage,status,analysis_version,attempts,updated_at) VALUES (?,?,?,'running',?,1,?) ON CONFLICT(email_id) DO UPDATE SET stage='analysis',status='running',attempts=mail_processing.attempts+1,error=NULL,updated_at=excluded.updated_at`).bind(emailId,account,'analysis',MAIL_ANALYSIS_VERSION,now).run();
   try{
     const context=await buildMailContext(owner,emailId),model=serviceValue('OPENAI_MODEL')||'gpt-5-mini';
@@ -91,15 +92,9 @@ export async function analyzeMailIntelligence(owner:string,emailId:string,force=
     await db.prepare(`INSERT INTO mail_intelligence (one_line_summary,detailed_summary,category,subcategory,importance_score,urgency_score,confidence,requires_action,action_items_json,deadlines_json,events_json,people_json,organizations_json,courses_json,projects_json,topics_json,keywords_json,referenced_documents_json,referenced_urls_json,why_important_json,model,prompt_version,analysis_version,input_hash,status,error,created_at,updated_at,email_id,account) VALUES (${values.map(()=>'?').join(',')}) ON CONFLICT(email_id) DO UPDATE SET one_line_summary=excluded.one_line_summary,detailed_summary=excluded.detailed_summary,category=excluded.category,subcategory=excluded.subcategory,importance_score=excluded.importance_score,urgency_score=excluded.urgency_score,confidence=excluded.confidence,requires_action=excluded.requires_action,action_items_json=excluded.action_items_json,deadlines_json=excluded.deadlines_json,events_json=excluded.events_json,people_json=excluded.people_json,organizations_json=excluded.organizations_json,courses_json=excluded.courses_json,projects_json=excluded.projects_json,topics_json=excluded.topics_json,keywords_json=excluded.keywords_json,referenced_documents_json=excluded.referenced_documents_json,referenced_urls_json=excluded.referenced_urls_json,why_important_json=excluded.why_important_json,model=excluded.model,prompt_version=excluded.prompt_version,analysis_version=excluded.analysis_version,input_hash=excluded.input_hash,status='complete',error=NULL,updated_at=excluded.updated_at`).bind(...values).run();
     if(mail.category_source!=='manual'&&result.confidence>=.72)await db.prepare("UPDATE mail_messages SET category=?,category_source='ai',category_confidence=?,category_reason=? WHERE id=? AND account=?").bind(result.category,result.confidence,result.whyImportant.join('；').slice(0,500),emailId,account).run();
     await updateMemory(account,emailId,mail,result);await db.prepare("UPDATE mail_processing SET stage='complete',status='complete',error=NULL,analysis_version=?,updated_at=? WHERE email_id=?").bind(MAIL_ANALYSIS_VERSION,new Date().toISOString(),emailId).run();
-    try{await embedMail(emailId,mail,result);}catch{/* Analysis remains usable; the embedding can be retried later. */}
+    try{await ensureMailEmbedding(account,emailId);}catch{/* Analysis remains usable; the embedding can be retried later. */}
     return {...result,emailId,model,promptVersion:MAIL_PROMPT_VERSION,analysisVersion:MAIL_ANALYSIS_VERSION,status:'complete',error:null,updatedAt:now};
   }catch(error){await db.prepare("UPDATE mail_processing SET status='failed',error=?,updated_at=? WHERE email_id=?").bind(error instanceof Error?error.message.slice(0,300):'分析失败',new Date().toISOString(),emailId).run();throw error;}
-}
-
-async function embedMail(emailId:string,mail:any,result:any){
-  const text=[mail.subject,mail.body.slice(0,12000),result.oneLineSummary,result.detailedSummary].join('\n'),inputHash=digest(text),existing=await db.prepare('SELECT input_hash FROM mail_embeddings WHERE email_id=? AND model=?').bind(emailId,EMBED_MODEL).first<{input_hash:string}>();if(existing?.input_hash===inputHash)return;
-  const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:text,dimensions:768});if(!r.ok)throw new Error('邮件向量索引失败');const vector=(await r.json()).data?.[0]?.embedding;if(!Array.isArray(vector)||vector.length!==768||!vector.every(Number.isFinite))throw new Error('邮件向量格式无效');
-  await db.prepare('INSERT INTO mail_embeddings VALUES (?,?,?,?,?) ON CONFLICT(email_id,model) DO UPDATE SET input_hash=excluded.input_hash,vector=excluded.vector,created_at=excluded.created_at').bind(emailId,EMBED_MODEL,inputHash,JSON.stringify(vector),new Date().toISOString()).run();
 }
 
 async function updateMemory(account:string,emailId:string,mail:any,result:any){
@@ -131,11 +126,23 @@ export async function recordMailFeedback(owner:string,emailId:string,field:strin
 }
 
 export async function searchRelatedMail(owner:string,emailId:string){
-  const account=await accountForOwner(owner),mail=await db.prepare('SELECT subject,body,sender FROM mail_messages WHERE id=? AND account=?').bind(emailId,account).first<any>();if(!mail)return [];
-  const rows=(await db.prepare(`SELECT m.id,m.subject,m.sender,m.received_at,i.one_line_summary,e.vector FROM mail_messages m JOIN mail_intelligence i ON i.email_id=m.id LEFT JOIN mail_embeddings e ON e.email_id=m.id AND e.model=? WHERE m.account=? AND m.id!=? ORDER BY m.received_at DESC LIMIT 20000`).bind(EMBED_MODEL,account,emailId).all<any>()).results;
-  const terms=new Set(words(mail.subject+' '+mail.body.slice(0,5000)));let vector:number[]|null=null;
-  if(rows.some(x=>x.vector)&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:(mail.subject+'\n'+mail.body).slice(0,12000),dimensions:768});if(r.ok)vector=(await r.json()).data?.[0]?.embedding;}catch{}
-  return rows.map(x=>{const keyword=words(x.subject+' '+x.one_line_summary).filter((w:string)=>terms.has(w)).length,semantic=vector&&x.vector?cosine(vector,safeJson(x.vector,[])):0,sender=x.sender===mail.sender?1:0;return {...x,vector:undefined,score:keyword*.25+semantic+sender*.5};}).filter(x=>x.score>.4).sort((a,b)=>b.score-a.score).slice(0,8);
+  const account=await accountForOwner(owner),mail=await db.prepare('SELECT subject,body,sender,hash FROM mail_messages WHERE id=? AND account=? AND removed=0').bind(emailId,account).first<{subject:string;body:string;sender:string;hash:string}>();if(!mail)return [];
+  const stop=new Set(['about','after','before','from','have','please','that','the','this','with','your']);
+  const unique=(text:string)=>[...new Set(words(text).filter(term=>!stop.has(term)))];
+  const terms=[...new Set([...unique(mail.subject).slice(0,4),...unique(mail.body.slice(-5000)).slice(-6),...unique(mail.body.slice(0,3000)).slice(0,2)])];
+  const scoreSql=[...terms.flatMap(()=>['CASE WHEN instr(lower(m.subject),?)>0 THEN 3 ELSE 0 END','CASE WHEN instr(lower(m.body),?)>0 THEN 1 ELSE 0 END','CASE WHEN instr(lower(COALESCE(i.one_line_summary,\'\')),?)>0 THEN 1 ELSE 0 END']),'CASE WHEN m.sender=? THEN 2 ELSE 0 END'].join('+');
+  const scoreArgs=[...terms.flatMap(term=>[term,term,term]),mail.sender];
+  // SQL ranks the complete body across all dates before returning a bounded set.
+  const lexical=(await db.prepare(`SELECT * FROM (SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,(${scoreSql}) lexical FROM mail_messages m LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account WHERE m.account=? AND m.id!=? AND m.removed=0) WHERE lexical>0 ORDER BY lexical DESC,received_at DESC LIMIT 400`).bind(...scoreArgs,account,emailId).all<{id:string;subject:string;sender:string;received_at:string;one_line_summary:string;lexical:number}>()).results;
+  const recent=(await db.prepare(`SELECT m.id,m.subject,m.sender,m.received_at,COALESCE(i.one_line_summary,'') one_line_summary,e.vector FROM mail_embeddings e JOIN mail_messages m ON m.id=e.email_id LEFT JOIN mail_intelligence i ON i.email_id=m.id AND i.account=m.account WHERE m.account=? AND m.id!=? AND m.removed=0 AND e.model=? AND e.input_hash=?||m.hash ORDER BY m.received_at DESC LIMIT 300`).bind(account,emailId,EMBED_MODEL,MAIL_EMBED_VERSION).all<{id:string;subject:string;sender:string;received_at:string;one_line_summary:string;vector:string}>()).results;
+  const candidateVectors=new Map(recent.map(row=>[row.id,row.vector]));
+  if(lexical.length){const ids=lexical.map(row=>row.id);const scoped=(await db.prepare(`SELECT e.email_id,e.vector FROM mail_embeddings e JOIN mail_messages m ON m.id=e.email_id WHERE m.account=? AND e.model=? AND e.input_hash=?||m.hash AND e.email_id IN (${ids.map(()=>'?').join(',')})`).bind(account,EMBED_MODEL,MAIL_EMBED_VERSION,...ids).all<{email_id:string;vector:string}>()).results;for(const row of scoped)candidateVectors.set(row.email_id,row.vector);}
+  let vector:number[]|null=null;
+  if(serviceValue('OPENAI_API_KEY'))try{await ensureMailEmbedding(account,emailId);const stored=await db.prepare('SELECT vector,input_hash FROM mail_embeddings WHERE email_id=? AND model=?').bind(emailId,EMBED_MODEL).first<{vector:string;input_hash:string}>();if(stored?.input_hash===MAIL_EMBED_VERSION+mail.hash)vector=safeJson(stored.vector,[]);}catch{}
+  const candidates=new Map<string,{id:string;subject:string;sender:string;received_at:string;one_line_summary:string;lexical:number}>();
+  for(const row of lexical)candidates.set(row.id,row);
+  for(const row of recent)if(!candidates.has(row.id))candidates.set(row.id,{id:row.id,subject:row.subject,sender:row.sender,received_at:row.received_at,one_line_summary:row.one_line_summary,lexical:0});
+  return [...candidates.values()].map(row=>{const stored=candidateVectors.get(row.id),semantic=vector&&stored?cosine(vector,safeJson(stored,[])):0,score=Number(row.lexical)*.2+semantic;return {...row,score};}).filter(row=>row.score>.15).sort((a,b)=>b.score-a.score||b.received_at.localeCompare(a.received_at)).slice(0,8);
 }
 
 export async function mailAnalytics(owner:string){const account=await accountForOwner(owner);const [totals,categories,senders,feedback,confidence]=await Promise.all([

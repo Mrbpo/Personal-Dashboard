@@ -11,6 +11,16 @@ The Gmail connection remains read-only. Provider data is normalized into `mail_m
 5. A successful analysis updates entity memory and a 768-dimensional semantic index. Failures remain retryable in `mail_processing`.
 6. User corrections preserve both the prediction and correction in `mail_feedback`. Category and importance corrections update future sender context without fine-tuning.
 
+## Shared mail and library retrieval
+
+Newly archived email bodies keep their full text in `library_chunks` for keyword search, previews, and citations. `library_mail_sources` records the source account, message, and content hash. Their semantic search uses the same one-per-message `mail_embeddings` vector as related-mail search; `embedMissing` does not embed each body chunk. It also creates that vector for an archived message that has not received AI analysis. Attachments remain separate library documents with their own chunk vectors.
+
+The mail vector contains the subject and up to 6,000 body characters. Long bodies contribute excerpts from the beginning, middle, and end. Exact lexical retrieval searches the complete stored body, including text outside those excerpts. Related-mail search ranks lexical matches across all dates, then uses a bounded, account-scoped pool of at most 300 recent and 400 lexical candidate vectors. It reuses a current message vector when available.
+
+Archives created before `library_mail_sources` keep their existing chunk vectors. They are not automatically mapped to the current email, because the archived body may predate a Gmail content update. Newly archived versions use the shared vector, and source hashes prevent a changed message from lending its vector to an older archive.
+
+The regression fixture in `tests/mail-vectorization.test.ts` archives 30,676 characters: 22 searchable body chunks produce one mail embedding input and zero body chunk vectors. The test also checks tail matches, an unanalysed message, attachment vectors, updates, legacy archives, and owner isolation. The checked-in local database contains no email rows, so this is fixture evidence rather than a production measurement.
+
 Night processing keeps scheduling internal batches until every eligible message is handled; the batch size is only queue back-pressure, not a nightly total limit. The existing monthly AI budget remains the spending safety boundary. It prioritizes unanalysed, non-junk messages and outdated analysis versions. It never overwrites raw mail or a manual category.
 
 ## Reused components and external references

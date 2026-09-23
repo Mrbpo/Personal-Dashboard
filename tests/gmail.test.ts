@@ -40,3 +40,18 @@ test('Gmail initial pagination, incremental cursor expiry and revoked auth keep 
   mode='revoked';await assert.rejects(gmail.syncGmail());const state=await gmail.mailState('alice');assert.equal(state.status,'needs_reconnect');assert.equal(state.messages.length,3);
  }finally{globalThis.fetch=original;}
 });
+test('Gmail body changes invalidate the old mail vector',async()=>{
+ await saveIntegrationConnection('gmail',seal({refresh:'test-refresh'}),{owner:'alice',email:'changed@test.invalid'});
+ await db.prepare('INSERT INTO mail_sync (account,history_id,since_epoch) VALUES (?,?,?)').bind('changed@test.invalid','10',0).run();
+ await db.prepare('INSERT INTO mail_messages (id,account,thread_id,subject,sender,body,received_at,category,attachments_json,hash) VALUES (?,?,?,?,?,?,?,?,?,?)').bind('changed-mail','changed@test.invalid','thread','Old subject','sender@test.invalid','Old body','2026-09-20T12:00:00Z','其他','[]','old-hash').run();
+ await db.prepare('INSERT INTO mail_embeddings VALUES (?,?,?,?,?)').bind('changed-mail','text-embedding-3-small','subject-body-v1:old-hash',JSON.stringify(Array(768).fill(.1)),'now').run();
+ const original=globalThis.fetch;
+ globalThis.fetch=async(url)=>{
+  const target=String(url);
+  if(target.includes('oauth2.googleapis.com'))return Response.json({access_token:'test-access'});
+  if(target.includes('/history?'))return Response.json({history:[{messagesAdded:[{message:{id:'changed-mail'}}]}],historyId:'11'});
+  if(target.includes('/messages/changed-mail'))return Response.json({threadId:'thread',internalDate:'1789920000000',payload:{mimeType:'text/plain',headers:[{name:'Subject',value:'New subject'}],body:{data:Buffer.from('New body').toString('base64url')}}});
+  throw new Error('Unexpected request: '+target);
+ };
+ try{await gmail.syncGmail();assert.equal(await db.prepare('SELECT 1 FROM mail_embeddings WHERE email_id=?').bind('changed-mail').first(),null);}finally{globalThis.fetch=original;}
+});

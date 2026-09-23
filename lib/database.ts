@@ -18,6 +18,8 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS library_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, position INTEGER NOT NULL, locator TEXT NOT NULL, body TEXT NOT NULL, hash TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(document_id)`,
   `CREATE TABLE IF NOT EXISTS library_vectors (chunk_id TEXT NOT NULL, model TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(chunk_id, model))`,
+  `CREATE TABLE IF NOT EXISTS library_mail_sources (document_id TEXT PRIMARY KEY, account TEXT NOT NULL, email_id TEXT NOT NULL, source_hash TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_library_mail_sources_mail ON library_mail_sources(account,email_id)`,
   `CREATE TABLE IF NOT EXISTS background_jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, lease_until INTEGER, lease_token TEXT, error TEXT, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS worker_state (id TEXT PRIMARY KEY, heartbeat INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0)`,
   `CREATE TABLE IF NOT EXISTS ai_ledger (id TEXT PRIMARY KEY, month TEXT NOT NULL, kind TEXT NOT NULL, reserved REAL NOT NULL, charged REAL, status TEXT NOT NULL, created_at INTEGER NOT NULL)`,

@@ -6,7 +6,8 @@ import { paidOpenAI } from './ai-budget.ts';
 import { serviceValue } from './service-vault.ts';
 import { acquireLease,enqueue,releaseLease } from './jobs.ts';
 import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
-export const EMBED_MODEL='text-embedding-3-small';
+import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
+export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR || './data/library');
 export const digest=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
@@ -56,11 +57,11 @@ export async function previewDocument(owner:string,id:string) {
   }
   return {document,text,pages};
 }
-export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(id,owner)]);}
+export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_mail_sources WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(id,owner)]);}
 export async function hideRemoteDocuments(owner:string,course:string,origin:string,remoteKey:string){
  const key=JSON.stringify([course,remoteKey]);
  const documents=(await db.prepare('SELECT id FROM library_documents WHERE owner_id=? AND course_id=? AND origin=? AND origin_key=? AND deleted=0').bind(owner,course,origin,key).all<{id:string}>()).results;
- for(const document of documents)await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(document.id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(document.id,owner)]);
+ for(const document of documents)await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(document.id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_mail_sources WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(document.id,owner)]);
  return documents.length;
 }
 export function splitText(text:string) {const out:string[]=[];for(let i=0;i<text.length;i+=1400){out.push(text.slice(i,i+1600));if(i+1600>=text.length)break;}return out;}
@@ -103,7 +104,9 @@ export async function embedMissing(owner:string) {
   try{return await embedBatch(owner);}finally{await releaseLease(lease,token);}
 }
 async function embedBatch(owner:string) {
-  const pending=(await db.prepare(`SELECT c.* FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND NOT EXISTS (SELECT 1 FROM library_vectors v WHERE v.chunk_id=c.id AND v.model=?) LIMIT 32`).bind(owner,EMBED_MODEL).all<{id:string;body:string}>()).results;
+  const mails=(await db.prepare(`SELECT DISTINCT m.id,m.account,m.subject,m.body,m.hash FROM library_documents d JOIN library_mail_sources s ON s.document_id=d.id JOIN mail_messages m ON m.id=s.email_id AND m.account=s.account AND m.hash=s.source_hash LEFT JOIN mail_embeddings e ON e.email_id=m.id AND e.model=? WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND (e.email_id IS NULL OR e.input_hash!=?||m.hash) LIMIT 32`).bind(EMBED_MODEL,owner,MAIL_EMBED_VERSION).all<MailEmbeddingInput>()).results;
+  if(mails.length)return storeMailEmbeddings(mails);
+  const pending=(await db.prepare(`SELECT c.* FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND NOT EXISTS (SELECT 1 FROM library_mail_sources s WHERE s.document_id=d.id) AND NOT EXISTS (SELECT 1 FROM library_vectors v WHERE v.chunk_id=c.id AND v.model=?) LIMIT 32`).bind(owner,EMBED_MODEL).all<{id:string;body:string}>()).results;
   if(!pending.length)return 0;
   const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:pending.map(c=>c.body),dimensions:768});if(!r.ok)throw new Error('向量索引暂时失败');const p=await r.json();
   if(p.data?.length!==pending.length)throw new Error('向量结果不完整');
@@ -130,6 +133,7 @@ export function librarySearchTokens(value:string){
   return [...new Set((normalized.match(/[a-z0-9]+|[\u3400-\u9fff]{2,}/gu)||[]).map(token=>singular.has(token)?token.slice(0,-1):token).filter(token=>!/^(the|and|for|with)$/.test(token)))];
 }
 function lexicalText(value:string){return librarySearchTokens(value).join(' ');}
+function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return Array.isArray(parts)&&typeof parts[1]==='string'&&parts[1].endsWith('/body');}catch{return false;}}
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:boolean};
 export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string};
@@ -149,8 +153,15 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   }
   let vector:number[]|null=null;
   if(semantic&&rows.length&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768});if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
-  const vectors=vector?(await db.prepare('SELECT chunk_id,vector FROM library_vectors WHERE model=?').bind(EMBED_MODEL).all<{chunk_id:string;vector:string}>()).results:[];const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
-  return rows.map(r=>{const title=lexicalText(r.name),body=lexicalText(r.body);const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&map.has(r.id)?cosine(vector,JSON.parse(map.get(r.id)!)):0),match_reason:titleMatches?'文件名匹配':'正文相关'};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score).slice(0,limit);
+  const bodyIds=[...new Set(rows.filter(r=>r.origin==='gmail'&&isArchivedMailBody(r.origin_key)).map(r=>r.document_id))],bodySet=new Set(bodyIds);
+  const mapped=bodyIds.length?(await db.prepare(`SELECT s.document_id FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id WHERE d.owner_id=? AND d.deleted=0 AND s.document_id IN (${bodyIds.map(()=>'?').join(',')})`).bind(owner,...bodyIds).all<{document_id:string}>()).results:[];
+  const mappedIds=mapped.map(row=>row.document_id),mappedSet=new Set(mappedIds);
+  const mailVectors=vector&&mappedIds.length?(await db.prepare(`SELECT s.document_id,e.vector FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id JOIN mail_messages m ON m.id=s.email_id AND m.account=s.account AND m.hash=s.source_hash JOIN mail_embeddings e ON e.email_id=m.id AND e.model=? AND e.input_hash=?||m.hash WHERE d.owner_id=? AND d.deleted=0 AND s.document_id IN (${mappedIds.map(()=>'?').join(',')})`).bind(EMBED_MODEL,MAIL_EMBED_VERSION,owner,...mappedIds).all<{document_id:string;vector:string}>()).results:[];
+  const mailMap=new Map(mailVectors.map(item=>[item.document_id,item.vector]));
+  const ids=rows.filter(r=>!mappedSet.has(r.document_id)&&!r.id.endsWith(':metadata')).map(r=>r.id);
+  const vectors=vector&&ids.length?(await db.prepare(`SELECT v.chunk_id,v.vector FROM library_vectors v JOIN library_chunks c ON c.id=v.chunk_id JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND v.model=? AND v.chunk_id IN (${ids.map(()=>'?').join(',')})`).bind(owner,EMBED_MODEL,...ids).all<{chunk_id:string;vector:string}>()).results:[];const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
+  const ranked=rows.map(r=>{const title=lexicalText(r.name),body=lexicalText(r.body),stored=mailMap.get(r.document_id)||map.get(r.id);const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&stored?cosine(vector,JSON.parse(stored)):0),match_reason:titleMatches?'文件名匹配':'正文相关'};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score);
+  const seenMail=new Set<string>();return ranked.filter(row=>{if(!bodySet.has(row.document_id))return true;if(seenMail.has(row.document_id))return false;seenMail.add(row.document_id);return true;}).slice(0,limit);
 }
 
 type Recommendation={document_id:string;name:string;course_id:string;folder_path:string;reason:string;score:number;week:number|null};
