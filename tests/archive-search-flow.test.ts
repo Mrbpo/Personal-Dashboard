@@ -6,6 +6,7 @@ process.env.OPENAI_API_KEY = 'test-key';
 const repo = await import('../lib/repository.ts');
 const lib = await import('../lib/library.ts');
 const { searchArchiveForAnswer } = await import('../lib/archive-search.ts');
+const { answerCourseQuestion } = await import('../lib/course-qa.ts');
 
 test('strong local lab evidence avoids an external embedding wait', async () => {
   await repo.upsertCourses([{ id:'chem', name:'Chemistry', course_code:'CHMA10H3' }, { id:'stats', name:'Statistics', course_code:'STAB22H3' }]);
@@ -73,6 +74,21 @@ test('subject questions stay in their courses and mixed math requests retain syl
   assert.ok(result.sources.some((item)=>item.sourceType==='syllabus'));
   assert.ok(result.sources.every((item)=>item.courseId==='math'));
   assert.ok(!result.sources.some((item)=>item.sourceId===statsTutorial));
+  const tutorialRef=result.sources.find((item)=>item.sourceId===mathTutorial)!.ref;
+  const syllabusRef=result.sources.find((item)=>item.sourceType==='syllabus')!.ref;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=(async (_input: string | URL | Request, init?: RequestInit) => {
+    const prompt=JSON.parse(String(init?.body)).input[0].content[0].text as string;
+    assert.match(prompt,/complete problems 1 and 2/);
+    assert.match(prompt,/Tutorials count for 10 percent/);
+    assert.doesNotMatch(prompt,/make boxplots|balance equations/);
+    return Response.json({status:'completed',output_text:JSON.stringify({answer:`完成第 1、2 题。[${tutorialRef}]\n课程大纲说明 tutorial 占总评 10%。[${syllabusRef}]`,needsClarification:false,followUps:[],citationRefs:[tutorialRef,syllabusRef]})});
+  }) as typeof fetch;
+  try {
+    const answer=await answerCourseQuestion('数学tut要做什么，帮我看看课程大纲',result.sources);
+    assert.deepEqual(answer.citationRefs,[tutorialRef,syllabusRef]);
+    assert.deepEqual(result.sources.filter((item)=>answer.citationRefs.includes(item.ref)).map((item)=>item.courseId),['math','math']);
+  } finally {globalThis.fetch=originalFetch;}
 
   for (const [question, courseId] of [['统计tut要做什么', 'stats'], ['化学tut要做什么', 'chem']] as const) {
     const subjectResult=await searchArchiveForAnswer('student',question);
