@@ -17,6 +17,8 @@ const schema = [
   `CREATE INDEX IF NOT EXISTS idx_library_version_lookup ON library_documents(owner_id,origin,origin_key,deleted,created_at)`,
   `CREATE TABLE IF NOT EXISTS library_annotations (owner_id TEXT NOT NULL, document_id TEXT NOT NULL, page INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, strokes_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL, PRIMARY KEY(owner_id,document_id,page))`,
   `CREATE INDEX IF NOT EXISTS idx_library_annotations_document ON library_annotations(document_id)`,
+  `CREATE TABLE IF NOT EXISTS library_annotation_scenes (owner_id TEXT NOT NULL, document_id TEXT NOT NULL, page INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, scene_json TEXT NOT NULL DEFAULT '{"elements":[],"pageWidth":0,"pageHeight":0}', updated_at TEXT NOT NULL, PRIMARY KEY(owner_id,document_id,page))`,
+  `CREATE INDEX IF NOT EXISTS idx_library_annotation_scenes_document ON library_annotation_scenes(document_id)`,
   `CREATE TABLE IF NOT EXISTS library_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, position INTEGER NOT NULL, locator TEXT NOT NULL, body TEXT NOT NULL, hash TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_library_chunks_doc ON library_chunks(document_id)`,
   `CREATE TABLE IF NOT EXISTS library_vectors (chunk_id TEXT NOT NULL, model TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(chunk_id, model))`,
