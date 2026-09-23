@@ -1,10 +1,11 @@
-import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaCookies, normalizePiazzaPost, piazzaRpc, type PiazzaClass } from "./piazza.ts";
+import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaCookies, loginPiazza, normalizePiazzaPost, piazzaRpc, type PiazzaClass } from "./piazza.ts";
 import { countPiazzaPosts, getIntegrationConnection, listCourseSettings, saveIntegrationConnection, savePiazzaPost, updateIntegrationStatus } from "./repository.ts";
 import { getPiazzaDailySummary, piazzaDate, piazzaTimezone } from "./piazza-digest.ts";
 import { database as db } from "./database.ts";
-import { enqueue } from "./jobs.ts";
+import { acquireLease, enqueue, releaseLease } from "./jobs.ts";
 import { piazzaWeekStart } from "./piazza-ai.ts";
 import { serviceValue } from "./service-vault.ts";
+import { deletePiazzaAutoLogin, getPiazzaAutoLogin, getPiazzaAutoLoginStatus, markPiazzaAutoLoginAttempt, markPiazzaAutoLoginResult, savePiazzaAutoLogin } from "./piazza-auto-login.ts";
 
 type FeedItem = { id?: string | number; cid?: string | number; nr?: string | number; modified?: string; updated?: string };
 
@@ -35,7 +36,8 @@ function isAuthFailure(code: string) {
 
 export async function getPiazzaStatus() {
   const connection = await getIntegrationConnection("piazza");
-  if (!connection) return { connected: false, status: "disconnected", classes: [], lastSyncedAt: null, postCount: 0, error: null };
+  const auto = await getPiazzaAutoLoginStatus();
+  if (!connection) return { connected: false, status: "disconnected", classes: [], lastSyncedAt: null, postCount: 0, error: null, autoLoginEnabled: false, lastAutoLoginAt: null, autoLoginError: null };
   return {
     connected: connection.status === "connected" || connection.status === "error",
     status: connection.status,
@@ -43,16 +45,47 @@ export async function getPiazzaStatus() {
     lastSyncedAt: connection.lastSyncedAt,
     postCount: await countPiazzaPosts(),
     error: connection.error,
+    autoLoginEnabled: auto.enabled,
+    lastAutoLoginAt: auto.lastSuccessAt,
+    autoLoginError: auto.error,
   };
 }
 
-export async function connectPiazza(email: string, password: string) {
-  const { loginPiazza } = await import("./piazza.ts");
+export async function connectPiazza(email: string, password: string, autoLogin = false) {
   const { cookies, status } = await loginPiazza(email, password);
   const classes = mapClasses(classesFromStatus(status), await listCourseSettings());
   await ensurePiazzaOnlyCourses(classes);
-  await saveIntegrationConnection("piazza", encryptPiazzaCookies(cookies), { classes, postCount: 0 }, "connected");
-  return { connected: true, status: "connected", classes, lastSyncedAt: null, postCount: 0, error: null };
+  const previous = await getIntegrationConnection("piazza");
+  const archiveOffsets = Object.fromEntries(Object.entries(previous?.metadata.archiveOffsets || {}).filter(([nid]) => classes.some(item => item.nid === nid)));
+  const postCount = await countPiazzaPosts();
+  await saveIntegrationConnection("piazza", encryptPiazzaCookies(cookies), { classes, postCount, archiveOffsets }, "connected");
+  if (autoLogin) await savePiazzaAutoLogin(email, password);
+  else await deletePiazzaAutoLogin();
+  return { connected: true, status: "connected", classes, lastSyncedAt: previous?.lastSyncedAt || null,
+    postCount, error: null, autoLoginEnabled: autoLogin, lastAutoLoginAt: null, autoLoginError: null };
+}
+
+async function refreshPiazzaSession(cookies: Record<string, string>, metadata: Record<string, unknown>) {
+  const credentials = await getPiazzaAutoLogin();
+  if (!credentials) throw new Error("PIAZZA_AUTO_LOGIN_NOT_CONFIGURED");
+  if (credentials.lastAttemptAt && Date.now() - new Date(credentials.lastAttemptAt).getTime() < 15 * 60_000)
+    throw new Error("PIAZZA_AUTO_LOGIN_COOLDOWN");
+  const token = crypto.randomUUID();
+  if (!await acquireLease("piazza-auto-login", token, Date.now(), 120_000)) throw new Error("PIAZZA_AUTO_LOGIN_BUSY");
+  try {
+    await markPiazzaAutoLoginAttempt();
+    try {
+      const refreshed = await loginPiazza(credentials.email, credentials.password);
+      for (const name of Object.keys(cookies)) delete cookies[name];
+      Object.assign(cookies, refreshed.cookies);
+      await saveIntegrationConnection("piazza", encryptPiazzaCookies(cookies), metadata, "connected");
+      await markPiazzaAutoLoginResult(true);
+    } catch (error) {
+      await markPiazzaAutoLoginResult(false);
+      if (error instanceof Error && error.message === "PIAZZA_AUTH_FAILED") await deletePiazzaAutoLogin();
+      throw error;
+    }
+  } finally { await releaseLease("piazza-auto-login", token); }
 }
 
 let activeSync: Promise<unknown> | null = null;
@@ -65,8 +98,19 @@ async function runSyncPiazza() {
   const connection = await getIntegrationConnection("piazza");
   if (!connection) throw new Error("PIAZZA_NOT_CONNECTED");
   const cookies = decryptPiazzaCookies(connection.encryptedSecret);
+  let reloginAttempted = false;
+  async function rpc<T = any>(method: string, params: Record<string, unknown> = {}, nid?: string): Promise<T> {
+    try { return await piazzaRpc<T>(cookies, method, params, nid); }
+    catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      if (!isAuthFailure(code) || reloginAttempted) throw error;
+      reloginAttempted = true;
+      await refreshPiazzaSession(cookies, connection!.metadata);
+      return piazzaRpc<T>(cookies, method, params, nid);
+    }
+  }
   try {
-    const status = await piazzaRpc<any>(cookies, "user.status");
+    const status = await rpc<any>("user.status");
     const classes = mapClasses(classesFromStatus(status), await listCourseSettings());
     await ensurePiazzaOnlyCourses(classes);
     let imported = 0;
@@ -80,14 +124,14 @@ async function runSyncPiazza() {
         // Refresh the newest page, then progressively backfill older pages across runs.
         const olderOffset = Math.max(30, Number(archiveOffsets[item.nid]) || 30);
         for (const offset of [0, olderOffset, olderOffset + 30]) {
-        const feedResult = await piazzaRpc<any>(cookies, "network.get_my_feed", { limit: 30, offset, sort: "updated" }, item.nid);
+        const feedResult = await rpc<any>("network.get_my_feed", { limit: 30, offset, sort: "updated" }, item.nid);
         if (!Array.isArray(feedResult?.feed)) throw new Error("PIAZZA_FEED_INVALID");
         const feed: FeedItem[] = Array.isArray(feedResult?.feed) ? feedResult.feed : [];
         for (const feedItem of feed.slice(0, 30)) {
           const cid = String(feedItem.id ?? feedItem.cid ?? "");
           if (!cid || seen.has(cid)) continue;
           seen.add(cid);
-          const fullPost = await piazzaRpc<any>(cookies, "content.get", { cid, student_view: null }, item.nid);
+          const fullPost = await rpc<any>("content.get", { cid, student_view: null }, item.nid);
           const normalized = normalizePiazzaPost(fullPost, item.nid, item.courseId!);
           if (!normalized.postNumber) continue;
           await savePiazzaPost(normalized);
@@ -119,8 +163,8 @@ async function runSyncPiazza() {
     return { classes, imported, results, lastSyncedAt: new Date().toISOString() };
   } catch (error) {
     const code = error instanceof Error ? error.message : "PIAZZA_SYNC_FAILED";
-    const authFailure = isAuthFailure(code);
-    await updateIntegrationStatus("piazza", authFailure ? "needs_reconnect" : "error", authFailure ? "Piazza 登录已失效，请重新连接" : "Piazza 暂时无法同步");
+    const authFailure = reloginAttempted || isAuthFailure(code) || code.startsWith("PIAZZA_AUTO_LOGIN_");
+    await updateIntegrationStatus("piazza", authFailure ? "needs_reconnect" : "error", authFailure ? "Piazza 会话失效；自动重登未成功，请检查设置" : "Piazza 暂时无法同步");
     throw error;
   }
 }

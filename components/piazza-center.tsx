@@ -10,7 +10,7 @@ import { PiazzaAiPanel } from "@/components/piazza-ai-panel";
 type Post = { id: string; courseId: string; courseCode: string; title: string; body: string; answer: string; kind: string; url: string | null; updatedAt: string | null };
 type Daily = { date: string; timezone: string; total: number; answered: number; recentDates: string[]; courses: { code: string; total: number; answered: number; notes: number; headlines: { id: string; title: string; excerpt: string; answer: string; kind: string }[] }[]; posts: Post[]; generatedAt: string };
 type Answers = { total: number; items: Post[]; nextOffset: number | null };
-type Status = { connected: boolean; status: string; classes: { nid: string; courseId?: string; courseCode?: string }[]; lastSyncedAt: string | null; postCount: number; error: string | null };
+type Status = { connected: boolean; status: string; classes: { nid: string; courseId?: string; courseCode?: string }[]; lastSyncedAt: string | null; postCount: number; error: string | null; autoLoginEnabled: boolean };
 
 function PostCard({ post, showAnswer = true }: { post: Post; showAnswer?: boolean }) {
   return <article className="rounded-2xl border bg-card p-4 shadow-sm">
@@ -65,9 +65,9 @@ export function PiazzaCenter({ initialStatus }: { initialStatus: Status }) {
   return <div className="space-y-5">
     <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border bg-card p-4 text-sm">
       <div><p className="font-semibold">已归档 {status.postCount} 条帖子</p><p className="mt-1 text-xs text-muted-foreground">{status.lastSyncedAt ? `上次同步：${new Date(status.lastSyncedAt).toLocaleString("zh-CN")}` : "尚未同步"} · 摘要按网站时区逐日生成；历史帖子正在分批补齐。</p></div>
-      <div className="flex gap-2"><Button variant="outline" asChild><Link href="/settings">连接设置</Link></Button>{status.connected && <Button onClick={sync} disabled={busy}><RefreshCw className={busy ? "size-4 animate-spin" : "size-4"} />{busy ? "同步中…" : "立即同步"}</Button>}</div>
+      <div className="flex gap-2"><Button variant="outline" asChild><Link href="/settings">连接设置</Link></Button>{(status.connected || status.autoLoginEnabled) && <Button onClick={sync} disabled={busy}><RefreshCw className={busy ? "size-4 animate-spin" : "size-4"} />{busy ? "同步中…" : "立即同步"}</Button>}</div>
     </section>
-    {status.status === "needs_reconnect" && <p className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">Piazza 登录已失效。历史归档仍可查看；请到<Link className="mx-1 font-semibold underline" href="/settings">设置</Link>重新连接，以继续同步并识别旧帖中的教师回答。</p>}
+    {status.status === "needs_reconnect" && <p className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{status.autoLoginEnabled ? "Piazza 会话失效，系统会尝试自动重登；若持续失败，请检查设置。" : "Piazza 登录已失效。历史归档仍可查看；请到设置重新连接，并开启自动重登。"}<Link className="ml-1 font-semibold underline" href="/settings">打开设置</Link></p>}
     {error && <p role="alert" className="rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
     <div className="flex flex-wrap gap-2"><Button variant={tab === "daily" ? "default" : "outline"} onClick={() => setTab("daily")}>每日消息</Button><Button variant={tab === "ai" ? "default" : "outline"} onClick={() => setTab("ai")}>AI 每周总结与问答</Button><Button variant={tab === "answers" ? "default" : "outline"} onClick={() => setTab("answers")}>已确认问答列表</Button></div>
     {tab === "ai" ? <PiazzaAiPanel /> : tab === "daily" ? <div className="space-y-5">

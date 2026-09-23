@@ -20,7 +20,7 @@ export default async function SettingsPage() {
   if (!authorized) return <PageFrame eyebrow="PRIVATE" title="无法访问">请使用网站所有者账号登录。</PageFrame>;
   const settings = await getSettings(user.userId).catch(() => ({ timezone: "America/Toronto", dailyMinutes: 150 }));
   const courses = await listCourseSettings().catch(() => []);
-  const piazza = await getPiazzaStatus().catch(() => ({ connected: false, status: "disconnected", classes: [], lastSyncedAt: null, postCount: 0, error: null }));
+  const piazza = await getPiazzaStatus().catch(() => ({ connected: false, status: "disconnected", classes: [], lastSyncedAt: null, postCount: 0, error: null, autoLoginEnabled: false, lastAutoLoginAt: null, autoLoginError: null }));
   const services = [
     { name: "Quercus", ready: Boolean(serviceValue("CANVAS_TOKEN")), detail: process.env.CANVAS_BASE_URL || "https://q.utoronto.ca" },
     { name: "AI 分析", ready: Boolean(serviceValue("OPENAI_API_KEY")), detail: serviceValue("OPENAI_MODEL") || "gpt-5-mini" },

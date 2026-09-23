@@ -1,6 +1,8 @@
 import { requireOwnerApi } from "@/lib/authz";
 import { deleteIntegrationConnection } from "@/lib/repository";
 import { connectPiazza } from "@/lib/piazza-sync";
+import { deletePiazzaAutoLogin } from "@/lib/piazza-auto-login";
+import { sameOrigin } from "@/lib/service-vault";
 
 export const runtime = "nodejs";
 
@@ -14,6 +16,7 @@ function publicError(error: unknown) {
 export async function POST(request: Request) {
   const denied = await requireOwnerApi();
   if (denied) return denied;
+  if (!sameOrigin(request)) return Response.json({ error: "请从本站设置页连接 Piazza" }, { status: 403 });
   try {
     const body = await request.json();
     const email = String(body.email || "").trim();
@@ -21,16 +24,18 @@ export async function POST(request: Request) {
     if (!/^\S+@\S+\.\S+$/.test(email) || !password || email.length > 254 || password.length > 512) {
       return Response.json({ error: "请输入有效的 Piazza 邮箱和密码" }, { status: 400 });
     }
-    return Response.json(await connectPiazza(email, password), { status: 201 });
+    return Response.json(await connectPiazza(email, password, body.autoLogin === true), { status: 201 });
   } catch (error) {
     const safe = publicError(error);
     return Response.json({ error: safe.message }, { status: safe.status });
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   const denied = await requireOwnerApi();
   if (denied) return denied;
+  if (!sameOrigin(request)) return Response.json({ error: "请从本站设置页断开 Piazza" }, { status: 403 });
+  await deletePiazzaAutoLogin();
   await deleteIntegrationConnection("piazza");
   return Response.json({ connected: false });
 }

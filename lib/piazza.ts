@@ -61,14 +61,14 @@ export async function piazzaRpc<T = any>(cookies: PiazzaCookies, method: string,
 
 export async function loginPiazza(email: string, password: string) {
   const cookies: PiazzaCookies = {};
-  const csrfResponse = await fetch("https://piazza.com/main/csrf_token", { redirect: "follow" });
+  const csrfResponse = await fetch("https://piazza.com/main/csrf_token", { redirect: "follow", signal: AbortSignal.timeout(30_000) });
   setCookies(csrfResponse, cookies);
   const csrfText = await csrfResponse.text();
   const token = csrfText.match(/csrf_token\s*=\s*["']([^"']+)/i)?.[1];
   if (!token) throw new Error("PIAZZA_CSRF_FAILED");
   const form = new URLSearchParams({ from: "/signup", email, password, remember: "on", csrf_token: token });
   const loginResponse = await fetch("https://piazza.com/class", {
-    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookieHeader(cookies) }, body: form, redirect: "follow",
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookieHeader(cookies) }, body: form, redirect: "follow", signal: AbortSignal.timeout(30_000),
   });
   setCookies(loginResponse, cookies);
   const html = await loginResponse.text();

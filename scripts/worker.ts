@@ -8,6 +8,7 @@ import {syncGmail} from '../lib/gmail.ts';
 import {analyzeMailIntelligence,queueNightMailMaintenance} from '../lib/mail-intelligence.ts';
 import {archiveCanvas,archiveCanvasCourse} from '../lib/canvas-archive.ts';
 import {getIntegrationConnection} from '../lib/repository.ts';
+import {getPiazzaAutoLoginStatus} from '../lib/piazza-auto-login.ts';
 import {serviceValue} from '../lib/service-vault.ts';
 import {indexMemories} from '../lib/tutor-memory.ts';
 import {enqueueCodexMaintenance} from '../lib/codex-maintenance.ts';
@@ -21,7 +22,7 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  if(process.env.SYNC_PRIMARY==='true'){
  if(serviceValue('CANVAS_TOKEN'))await enqueue('canvas',{owner},`canvas:${Math.floor(now/900000)}`);
  if((await getIntegrationConnection('gmail'))?.status==='connected')await enqueue('gmail',{owner},`gmail:${Math.floor(now/900000)}`);
- if((await getIntegrationConnection('piazza'))?.status==='connected')await enqueue('piazza',{owner},`piazza:${Math.floor(now/1800000)}`);
+ const piazza=await getIntegrationConnection('piazza');if(piazza&&(['connected','error'].includes(piazza.status)||piazza.status==='needs_reconnect'&&(await getPiazzaAutoLoginStatus()).enabled))await enqueue('piazza',{owner},`piazza:${Math.floor(now/1800000)}`);
  const night=nightKey();if(night)await enqueue('night',{owner},`night:${night}`);
  }
  const job=await claimJob();if(!job)return;const renew=setInterval(()=>{void db.batch([db.prepare('UPDATE background_jobs SET lease_until=? WHERE id=? AND lease_token=?').bind(Date.now()+180000,job.id,job.lease_token),db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now())]);},30000);

@@ -64,6 +64,7 @@ const schema = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_source_uid ON schedule_events(source_name, external_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_schedule_range ON schedule_events(start_at, end_at)`,
   `CREATE TABLE IF NOT EXISTS integration_connections (provider TEXT PRIMARY KEY, secret_encrypted TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, last_synced_at TEXT, updated_at TEXT NOT NULL, error TEXT)`,
+  `CREATE TABLE IF NOT EXISTS piazza_auto_login (id INTEGER PRIMARY KEY CHECK(id=1), credentials_encrypted TEXT NOT NULL, last_attempt_at TEXT, last_success_at TEXT, last_error TEXT)`,
   `CREATE TABLE IF NOT EXISTS piazza_posts (id TEXT PRIMARY KEY, course_id TEXT NOT NULL, network_id TEXT NOT NULL, post_number TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', answer TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'unknown', created_at TEXT, source_url TEXT, folders_json TEXT NOT NULL DEFAULT '[]', content_hash TEXT NOT NULL, remote_updated_at TEXT, synced_at TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_piazza_network_post ON piazza_posts(network_id, post_number)`,
   `CREATE INDEX IF NOT EXISTS idx_piazza_course_updated ON piazza_posts(course_id, remote_updated_at)`,

@@ -62,7 +62,7 @@ async function runPiazzaSync() {
     const statusResponse = await fetch(`${localOrigin}/api/piazza/status`);
     if (!statusResponse.ok) return;
     const status = await statusResponse.json();
-    if (!status.connected) return;
+    if (!status.connected && !status.autoLoginEnabled) return;
     const response = await fetch(`${localOrigin}/api/piazza/sync`, { method: "POST" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const result = await response.json();
