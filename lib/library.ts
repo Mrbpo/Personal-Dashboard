@@ -173,9 +173,16 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
     return [...best.values()].sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name,undefined,{numeric:true})).slice(0,limit);
   }
   const indexed=await searchIndexAvailable(),match=ftsMatchTerms(words);
-  if(indexed&&match){
-    raw=(await db.prepare(`SELECT ${fields} FROM library_chunks_fts JOIN library_chunks c ON c.rowid=library_chunks_fts.rowid JOIN library_documents d ON d.id=c.document_id WHERE library_chunks_fts MATCH ? AND ${scopeSql} ORDER BY bm25(library_chunks_fts) LIMIT 240`).bind(match,...scopeArgs).all<CandidateRow>()).results;
-  }else{
+  let useIndex=indexed&&Boolean(match);
+  if(useIndex){
+    try{
+      raw=(await db.prepare(`SELECT ${fields} FROM library_chunks_fts JOIN library_chunks c ON c.rowid=library_chunks_fts.rowid JOIN library_documents d ON d.id=c.document_id WHERE library_chunks_fts MATCH ? AND ${scopeSql} ORDER BY bm25(library_chunks_fts) LIMIT 240`).bind(match,...scopeArgs).all<CandidateRow>()).results;
+    }catch{
+      useIndex=false;
+      console.warn('[library-search] FTS query failed; using scoped keyword fallback');
+    }
+  }
+  if(!useIndex){
     const searchWords=words.filter(word=>word.length>=2).slice(0,12);
     if(searchWords.length){
       const condition=searchWords.map(()=>'(lower(d.name) LIKE ? OR lower(c.body) LIKE ?)').join(' OR ');
