@@ -60,14 +60,27 @@ function normalizeName(value: string) {
 export function mergeArchiveSources(structured: CourseSearchResult[], library: LibraryHit[], courses: CourseOption[], limit: number) {
   const codes = new Map(courses.map((course) => [course.id, course.code]));
   const documentKeys = new Set(library.map((hit) => `${hit.course_id}\0${normalizeName(hit.name)}`));
-  const documents: CourseSearchResult[] = library.map((hit) => ({
+  const perDocument = new Map<string, number>();
+  const documents: CourseSearchResult[] = library.filter((hit) => {
+    const count = perDocument.get(hit.document_id) || 0;
+    perDocument.set(hit.document_id, count + 1);
+    return limit > 20 || count < 2;
+  }).map((hit) => ({
     ref: '', sourceId: hit.document_id, courseId: hit.course_id,
     courseCode: codes.get(hit.course_id) || hit.course_id, sourceType: 'document',
     title: `${hit.name} · ${hit.locator}`, excerpt: hit.body.slice(0, 1400), body: hit.body,
     sourceUrl: `/api/library/${hit.document_id}`, updatedAt: null,
   }));
   const directoryWithoutParsedDuplicate = structured.filter((source) => !(source.sourceType === 'file' && documentKeys.has(`${source.courseId}\0${normalizeName(source.title)}`)));
-  return [...documents, ...directoryWithoutParsedDuplicate].slice(0, limit).map((source, index) => ({ ...source, ref: `S${index + 1}` }));
+  const confirmed = directoryWithoutParsedDuplicate.filter((source) => source.sourceType === 'piazza' && source.confirmedAnswer);
+  const canvas = directoryWithoutParsedDuplicate.filter((source) => ['assignment', 'quiz', 'page', 'module', 'discussion'].includes(source.sourceType));
+  const other = directoryWithoutParsedDuplicate.filter((source) => !confirmed.includes(source) && !canvas.includes(source));
+  const groups = [documents, confirmed, canvas, other];
+  const selected: CourseSearchResult[] = [];
+  for (let index = 0; selected.length < limit && groups.some((group) => group.length > index); index++) {
+    for (const group of groups) if (group[index] && selected.length < limit) selected.push(group[index]);
+  }
+  return selected.map((source, index) => ({ ...source, ref: `S${index + 1}` }));
 }
 
 export function preferStrongDocumentMatches(question: string, structured: CourseSearchResult[], library: LibraryHit[]) {
@@ -76,24 +89,54 @@ export function preferStrongDocumentMatches(question: string, structured: Course
   const requestedMarker = activityMarker(question);
   const inferredMarker = requestedMarker || (/\btut\b/i.test(question) ? activityMarker(strong[0]?.name || '') : '');
   const focused = inferredMarker ? library.filter((hit) => activityMarker(hit.name) === inferredMarker) : strong;
-  return !summary && focused.length ? { structured: [] as CourseSearchResult[], library: focused.slice(0, 4) } : { structured, library };
+  if (summary || !focused.length) return { structured, library };
+  const relevant = structured.filter((source) => {
+    if (inferredMarker && activityMarker(source.title) && activityMarker(source.title) !== inferredMarker) return false;
+    if (source.sourceType === 'piazza') return true;
+    if (['assignment', 'quiz', 'page', 'module', 'discussion'].includes(source.sourceType)) return true;
+    if (source.sourceType === 'announcement') return /最新|更改|变动|公告|recent|change|announcement/i.test(question);
+    return false;
+  });
+  return { structured: relevant.slice(0, 8), library: focused.slice(0, 4) };
 }
 
 export async function searchArchiveForAnswer(owner: string, question: string, requestedCourse = '', limit = 12) {
+  const started = performance.now();
+  const timings = { coursesMs: 0, structuredMs: 0, libraryMs: 0, embeddingMs: 0, rankingMs: 0, totalMs: 0, candidateCount: 0, vectorRows: 0, vectorBytes: 0 };
+  const recordLibrary = (detail: { embeddingMs:number; candidateCount:number; vectorRows:number; vectorBytes:number }) => {
+    timings.embeddingMs += detail.embeddingMs;
+    timings.candidateCount += detail.candidateCount;
+    timings.vectorRows += detail.vectorRows;
+    timings.vectorBytes += detail.vectorBytes;
+  };
+  const courseStarted = performance.now();
   const courses = (await listCourseSettings()).filter((course) => course.enabled);
+  timings.coursesMs = performance.now() - courseStarted;
   let scope = requestedCourse || explicitArchiveCourse(question, courses);
   const piazzaOnly = /piazza/i.test(question);
-  let [structured, library] = await Promise.all([
-    searchCourseContent(question, scope || undefined, limit),
-    piazzaOnly ? Promise.resolve([]) : searchLibrary(owner, question, scope, true),
+  const [structuredResults, libraryResults] = await Promise.all([
+    (async () => { const at = performance.now(); const result = await searchCourseContent(question, scope || undefined, scope ? limit : Math.max(limit * 3, 24)); timings.structuredMs += performance.now() - at; return result; })(),
+    (async () => { const at = performance.now(); const result = piazzaOnly ? [] : await searchLibrary(owner, question, scope, false, { limit: 30, onTiming: recordLibrary }); timings.libraryMs += performance.now() - at; return result; })(),
   ]);
+  let structured = structuredResults, library = libraryResults;
   if (!scope) {
-    scope = inferActivityCourse(question, library) || inferArchiveCourse(structured, library);
-    if (scope) [structured, library] = await Promise.all([
-      searchCourseContent(question, scope, limit),
-      piazzaOnly ? Promise.resolve([]) : searchLibrary(owner, question, scope, true),
-    ]);
+    const genericLab = /实验|\blab(?:oratory)?\b/i.test(question) && !activityMarker(question);
+    const competingCourses = new Set([...structured.map((item) => item.courseId), ...library.map((item) => item.course_id)].filter((id) => id && id !== 'schedule'));
+    if (!genericLab || competingCourses.size <= 1) scope = inferActivityCourse(question, library) || inferArchiveCourse(structured, library);
+    if (scope) {
+      structured = structured.filter((item) => item.courseId === scope);
+      library = library.filter((item) => item.course_id === scope);
+    }
   }
+  if (!piazzaOnly && !library.some((hit) => hit.score >= 2) && !structured.some((source) => source.confirmedAnswer || ['assignment', 'page'].includes(source.sourceType))) {
+    const at = performance.now();
+    library = await searchLibrary(owner, question, scope, true, { limit: 8, embeddingTimeoutMs: 2500, onTiming: recordLibrary });
+    timings.libraryMs += performance.now() - at;
+  }
+  const rankingStarted = performance.now();
   ({ structured, library } = preferStrongDocumentMatches(question, structured, library));
-  return { sources: mergeArchiveSources(structured, library, courses, limit), inferredCourseId: scope || null };
+  const sources = mergeArchiveSources(structured, library, courses, limit);
+  timings.rankingMs = performance.now() - rankingStarted;
+  timings.totalMs = performance.now() - started;
+  return { sources, inferredCourseId: scope || null, timings };
 }

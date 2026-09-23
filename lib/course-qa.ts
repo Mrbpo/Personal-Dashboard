@@ -32,6 +32,17 @@ export function cleanActionAnswer(answer: string, question: string) {
 }
 
 export async function answerCourseQuestion(question: string, sources: CourseSearchResult[]): Promise<CourseAnswer> {
+  const asksForRequirements = /实验|lab|要求|截止|提交|必须|应该|怎么做|what.*(?:do|require)|due|submit/i.test(question);
+  const courseSources = sources.filter((source) => source.courseId && source.courseId !== 'schedule');
+  const courseCodes = [...new Set(courseSources.map((source) => source.courseCode))];
+  if (asksForRequirements && courseCodes.length > 1 && !/比较|对比|各门|所有课程|分别|compare|both/i.test(question)) return {
+    answer: `找到了 ${courseCodes.join('、')} 的相关资料。请指定课程代码或实验编号，我才能把对应要求与 Piazza 讨论准确合并。`,
+    needsClarification: true, followUps: [], citationRefs: courseCodes.map((code) => courseSources.find((source) => source.courseCode === code)!.ref), aiAvailable: hasAI(),
+  };
+  if (asksForRequirements && sources.length && sources.every((source) => source.unconfirmedDiscussion)) return {
+    answer: "归档中只找到未经教师确认的 Piazza 讨论，不能据此确定实验要求。请指定课程或实验编号，或查看下方讨论原帖。",
+    needsClarification: true, followUps: [], citationRefs: sources.slice(0, 2).map((source) => source.ref), aiAvailable: hasAI(),
+  };
   if (!hasAI()) return {
     answer: sources.length ? "我找到了相关课程资料，但 AI 分析当前不可用。请查看下面的原始来源。" : "本地课程资料中没有找到足够相关的内容。",
     needsClarification: sources.length === 0,
@@ -73,6 +84,7 @@ export async function answerCourseQuestion(question: string, sources: CourseSear
 6. 引用是证据，不是回答主体。每个关键步骤末尾用 [S1] 形式标注来源，但不要大段照抄英文。
 7. 保留必要英文名称并用简洁中文说明。不要省略重要的已确认日期与结论。引用侧栏会展示来源，因此正文不要另列“关键证据来源”。
 8. 只有缺少关键信息、无法可靠回答时才设置 needsClarification=true。普通的延伸问题放进 followUps，但不能说成用户“必须确认”。如果命中多个课程且无法判断所指课程，明确列出区别并设置 needsClarification=true。citationRefs 只列实际使用的来源。
+9. Piazza 问答中，只有标为“教师明确回答”的文字能确认要求；学生发言、尚无教师回答的帖子和身份未核实的旧归档只能说明讨论过什么，不能当作正式要求。若 Canvas 原文与教师答复均提供了依据，应综合两者并分别引用；若证据不足，明确指出缺失之处。
 
 用户问题：${question}
 

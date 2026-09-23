@@ -41,10 +41,19 @@ test('parsed document text replaces a filename-only Canvas directory record',()=
   assert.deepEqual(merged.map((item)=>item.ref),['S1','S2']);
 });
 
-test('a strong filename match excludes generic syllabus and stale announcements for a short task question',()=>{
+test('a strong filename match excludes stale announcements but keeps confirmed Piazza and Canvas requirements',()=>{
   const selected=preferStrongDocumentMatches('统计 tut 我要做什么',[source('stats','Old tutorial announcement','announcement')],[{...hit('stats','STAB22TUT1Notes.pdf'),score:3.5},{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','No tutorial sessions this week.txt'),score:3.3},{...hit('stats','TUTORIAL ACTIVITIES.txt'),score:3.2},{...hit('stats','Syllabus.pdf'),score:1.4}]);
   assert.equal(selected.structured.length,0);
   assert.deepEqual(selected.library.map((item)=>item.name),['STAB22TUT1Notes.pdf','STAB22TUT1.pdf']);
+  const evidence=preferStrongDocumentMatches('Lab 1 要求',[
+    source('stats','Old lab announcement','announcement'),
+    {...source('stats','Lab 1 discussion','piazza'),confirmedAnswer:true},
+    source('stats','Lab 1 assignment','assignment'),
+    source('stats','Lab 2 assignment','assignment'),
+  ],[{...hit('stats','Lab1.pdf'),score:3.6}]);
+  assert.deepEqual(evidence.structured.map((item)=>item.title),['Lab 1 discussion','Lab 1 assignment']);
+  const merged=mergeArchiveSources(evidence.structured,evidence.library,courses,3);
+  assert.deepEqual(merged.map((item)=>item.sourceType),['document','piazza','assignment']);
 });
 
 test('an explicit tutorial number keeps only documents for that tutorial',()=>{

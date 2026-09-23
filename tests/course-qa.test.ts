@@ -26,3 +26,48 @@ test("course Q&A retries a truncated structured response", async () => {
     assert.deepEqual(tokenLimits, [3200, 6400]);
   } finally { globalThis.fetch = original; }
 });
+
+test("answer context includes both a strong document and confirmed Piazza evidence", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body));
+    const prompt = request.input[0].content[0].text;
+    assert.match(prompt, /Lab 1 PDF says prepare the notebook/);
+    assert.match(prompt, /教师明确回答：Bring goggles/);
+    assert.match(prompt, /分别引用/);
+    return Response.json({ status:'completed', output_text:JSON.stringify({ answer:'准备实验记录本，并带护目镜。[S1][S2]', needsClarification:false, followUps:[], citationRefs:['S1','S2'] }) });
+  }) as typeof fetch;
+  try {
+    const sources = [
+      { ref:'S1', sourceId:'pdf', courseId:'chem', courseCode:'CHMA10', sourceType:'document', title:'Lab1.pdf', excerpt:'Lab 1 PDF says prepare the notebook', body:'Lab 1 PDF says prepare the notebook', sourceUrl:'/api/library/pdf', updatedAt:null },
+      { ref:'S2', sourceId:'post', courseId:'chem', courseCode:'CHMA10', sourceType:'piazza', title:'Lab 1 discussion', excerpt:'教师明确回答：Bring goggles', body:'教师明确回答：Bring goggles', sourceUrl:'https://piazza.com/test', updatedAt:null, confirmedAnswer:true },
+    ];
+    const result = await answerCourseQuestion('CHMA10 Lab 1 要求是什么？', sources);
+    assert.deepEqual(result.citationRefs, ['S1','S2']);
+  } finally { globalThis.fetch = original; }
+});
+
+test("unconfirmed Piazza discussion alone cannot establish lab requirements", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('insufficient evidence must not invoke AI'); }) as typeof fetch;
+  try {
+    const result = await answerCourseQuestion('Lab 1 要求是什么？', [{ ref:'S1', sourceId:'student', courseId:'chem', courseCode:'CHMA10', sourceType:'piazza', title:'Lab 1 question', excerpt:'学生猜测', body:'此问答帖尚无教师明确回答。学生猜测', sourceUrl:null, updatedAt:null, unconfirmedDiscussion:true }]);
+    assert.equal(result.needsClarification, true);
+    assert.match(result.answer, /不能据此确定实验要求/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("an ambiguous lab request asks for the course instead of mixing requirements", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('ambiguous courses must not invoke AI'); }) as typeof fetch;
+  try {
+    const common = { sourceType:'assignment', title:'Lab 1', excerpt:'Lab requirements', body:'Lab requirements', sourceUrl:null, updatedAt:null };
+    const result = await answerCourseQuestion('我的实验要求', [
+      { ...common, ref:'S1', sourceId:'chem-lab', courseId:'chem', courseCode:'CHMA10' },
+      { ...common, ref:'S2', sourceId:'stats-lab', courseId:'stats', courseCode:'STAB22' },
+    ]);
+    assert.equal(result.needsClarification, true);
+    assert.match(result.answer, /CHMA10、STAB22/);
+    assert.deepEqual(result.citationRefs, ['S1','S2']);
+  } finally { globalThis.fetch = original; }
+});

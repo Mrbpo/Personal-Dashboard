@@ -1,6 +1,7 @@
 import type { CanvasSource, ExtractedAnalysis, LearningTask } from "./domain.ts";
 import { classifyCanvasStatus, priorityScore, statusLabels, urgencyForStatus, urgencyForTask } from "./task-rules.ts";
-import { database } from "./database.ts";
+import { database, searchIndexAvailable } from "./database.ts";
+import { activitySearchAliases, ftsMatchTerms } from "./search-vocabulary.ts";
 
 type D1Row = Record<string, any>;
 const EXTRACTION_VERSION = 5;
@@ -434,14 +435,15 @@ export type CourseSearchResult = {
   body: string;
   sourceUrl: string | null;
   updatedAt: string | null;
+  confirmedAnswer?: boolean;
+  unconfirmedDiscussion?: boolean;
 };
 
 function searchTerms(question: string) {
   const normalized = question.toLocaleLowerCase();
   const terms = new Set(normalized.match(/[a-z0-9][a-z0-9#_-]{1,}|[\u3400-\u9fff]{2,}/gu) || []);
-  if (/课前|pre.?lab/i.test(question)) ["pre-lab", "prelab", "before lab"].forEach((term) => terms.add(term));
   if (/第一(?:节|次)?|lab\s*#?0?1\b/i.test(question)) ["lab 1", "lab #1", "lab 01"].forEach((term) => terms.add(term));
-  if (/notebook|实验记录|实验本/i.test(question)) ["notebook", "notebook mark", "lab notebook"].forEach((term) => terms.add(term));
+  activitySearchAliases(question).forEach((term) => terms.add(term));
   if (/怎么|要求|如何|what|how/i.test(question)) ["requirement", "instruction", "complete", "submit"].forEach((term) => terms.add(term));
   return [...terms].filter((term) => !["我的", "这个", "什么", "怎么做", "课程内容"].includes(term));
 }
@@ -453,24 +455,34 @@ export async function searchCourseContent(question: string, courseId?: string, l
   const terms = searchTerms(question);
   if (!terms.length) return [];
   const db = getDatabase();
-  const canvasRows = await db.prepare(
+  const indexed = await searchIndexAvailable();
+  const match = ftsMatchTerms(terms);
+  const broadSummary = summary && Boolean(requestedCodes.length || courseId || piazzaOnly);
+  const useIndex = indexed && Boolean(match) && !broadSummary;
+  const fallbackTerms = terms.filter((term) => term.length >= 2).slice(0, 12);
+  const likeFilter = (alias: string, columns: string[]) => fallbackTerms.map(() => `(${columns.map((column) => `lower(${alias}.${column}) LIKE ?`).join(' OR ')})`).join(' OR ');
+  const likeArgs = (columns: number) => fallbackTerms.flatMap((term) => Array(columns).fill(`%${term.toLocaleLowerCase()}%`));
+  const candidateLimit = Math.min(1800, Math.max(600, limit * 12));
+  const canvasRows = piazzaOnly ? { results: [] as D1Row[] } : await db.prepare(
     `SELECT s.id, s.course_id, c.code course_code, s.source_type, s.title, s.body, s.source_url,
-      s.remote_updated_at, s.analysis_json
-     FROM source_items s JOIN courses c ON c.id=s.course_id
+      s.remote_updated_at, s.analysis_json, '' answer, '' kind
+     FROM source_items s JOIN courses c ON c.id=s.course_id ${useIndex ? 'JOIN source_items_fts ON source_items_fts.rowid=s.rowid' : ''}
      WHERE s.is_active=1 AND c.enabled=1 ${courseId ? "AND (s.course_id=? OR c.code=?)" : ""}
-     ORDER BY s.last_seen_at DESC LIMIT 2500`
-  ).bind(...(courseId ? [courseId, courseId] : [])).all<D1Row>();
+     ${useIndex ? 'AND source_items_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('s',['title','body','analysis_json'])})` : ''}
+     ORDER BY ${useIndex ? 'bm25(source_items_fts,10.0,2.0,1.0)' : 's.last_seen_at DESC'} LIMIT ?`
+  ).bind(...(courseId ? [courseId, courseId] : []),...(useIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
   const piazzaRows = await db.prepare(
     `SELECT p.id, p.course_id, c.code course_code, 'piazza' source_type, p.title, p.body, p.source_url,
-      p.remote_updated_at, NULL analysis_json
-     FROM piazza_posts p JOIN courses c ON c.id=p.course_id
+      p.remote_updated_at, NULL analysis_json, p.answer, p.kind
+     FROM piazza_posts p JOIN courses c ON c.id=p.course_id ${useIndex ? 'JOIN piazza_posts_fts ON piazza_posts_fts.rowid=p.rowid' : ''}
      WHERE p.is_active=1 AND c.enabled=1 ${courseId ? "AND (p.course_id=? OR c.code=?)" : ""}
-     ORDER BY p.remote_updated_at DESC LIMIT 1000`
-  ).bind(...(courseId ? [courseId, courseId] : [])).all<D1Row>();
+     ${useIndex ? 'AND piazza_posts_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('p',['title','body','answer'])})` : ''}
+     ORDER BY ${useIndex ? 'bm25(piazza_posts_fts,10.0,1.0,6.0)' : 'p.remote_updated_at DESC'} LIMIT ?`
+  ).bind(...(courseId ? [courseId, courseId] : []),...(useIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
   const scheduleRows = courseId ? { results: [] as D1Row[] } : await db.prepare(
     `SELECT id, 'schedule' course_id, '个人日程' course_code, 'schedule' source_type, title,
       (description || '\n开始：' || start_at || '\n结束：' || end_at) body, NULL source_url,
-      updated_at remote_updated_at, NULL analysis_json
+      updated_at remote_updated_at, NULL analysis_json, '' answer, '' kind
      FROM schedule_events ORDER BY start_at DESC LIMIT 1000`
   ).all<D1Row>();
   const rows = { results: [...canvasRows.results, ...piazzaRows.results, ...scheduleRows.results].filter((row) => {
@@ -481,23 +493,52 @@ export async function searchCourseContent(question: string, courseId?: string, l
   const ranked = rows.results.map((row) => {
     const title = String(row.title || "");
     const body = String(row.body || "");
+    const answer = String(row.answer || "");
     const analysis = String(row.analysis_json || "");
     const titleText = title.toLocaleLowerCase();
     const bodyText = (body + " " + analysis).toLocaleLowerCase();
+    const answerText = answer.toLocaleLowerCase();
     let score = 0;
     for (const term of terms) {
       if (titleText.includes(term)) score += 9;
       if (bodyText.includes(term)) score += 2;
+      if (answerText.includes(term)) score += 5;
     }
     if (summary && (requestedCodes.length || courseId || piazzaOnly)) score += 1;
     return { row, title, body, score };
-  }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
+  }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
 
-  return ranked.map((item, index) => {
+  // Preserve a small number of authoritative results before the global limit.
+  // Otherwise numerous high-scoring Canvas file titles can hide a teacher's
+  // Piazza answer before the archive merger ever sees it.
+  const prioritized = [
+    ...ranked.filter((item) => item.row.source_type === 'piazza' && item.row.kind === 'question' && Boolean(item.row.answer)).slice(0, Math.min(2, limit)),
+    ...ranked.filter((item) => ['assignment', 'quiz', 'page'].includes(String(item.row.source_type))).slice(0, Math.min(2, limit)),
+    ...ranked,
+  ];
+  const seen = new Set<string>();
+  const selected: typeof ranked = [];
+  for (const item of prioritized) {
+    if (seen.has(String(item.row.id))) continue;
+    seen.add(String(item.row.id));
+    selected.push(item);
+    if (selected.length >= limit) break;
+  }
+
+  return selected.map((item, index) => {
     const lower = item.body.toLocaleLowerCase();
     const firstMatch = terms.map((term) => lower.indexOf(term)).filter((position) => position >= 0).sort((a, b) => a - b)[0] ?? 0;
     const start = Math.max(0, firstMatch - 220);
-    const excerpt = item.body.slice(start, start + 1400).trim();
+    const confirmedAnswer = item.row.source_type === 'piazza' && item.row.kind === 'question' && Boolean(item.row.answer);
+    const unconfirmedDiscussion = item.row.source_type === 'piazza' && (item.row.kind === 'unknown' || item.row.kind === 'question' && !confirmedAnswer);
+    const piazzaBody = item.row.source_type !== 'piazza' ? item.body : confirmedAnswer
+      ? `教师明确回答：${String(item.row.answer)}\n\n讨论背景（含未经确认的学生发言）：${item.body}`
+      : item.row.kind === 'question'
+        ? `此问答帖尚无教师明确回答。以下讨论不可当作已确认课程要求：${item.body}`
+        : item.row.kind === 'unknown'
+          ? `旧 Piazza 归档，发帖身份未核实。以下内容不可当作教师确认：${item.body}`
+          : `Piazza 帖子正文：${item.body}`;
+    const excerpt = piazzaBody.slice(item.row.source_type === 'piazza' ? 0 : start, (item.row.source_type === 'piazza' ? 0 : start) + 1400).trim();
     return {
       ref: `S${index + 1}`,
       sourceId: String(item.row.id),
@@ -506,9 +547,11 @@ export async function searchCourseContent(question: string, courseId?: string, l
       sourceType: String(item.row.source_type),
       title: item.title,
       excerpt,
-      body: item.body.slice(0, 12000),
+      body: piazzaBody.slice(0, 12000),
       sourceUrl: item.row.source_url ? String(item.row.source_url) : null,
       updatedAt: item.row.remote_updated_at ? String(item.row.remote_updated_at) : null,
+      confirmedAnswer,
+      unconfirmedDiscussion,
     };
   });
 }
