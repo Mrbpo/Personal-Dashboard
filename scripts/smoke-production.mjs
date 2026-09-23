@@ -5,10 +5,11 @@ import {join} from 'node:path';
 import assert from 'node:assert/strict';
 import {serviceFields} from '../lib/service-fields.ts';
 const directory=await mkdtemp(join(tmpdir(),'study-smoke-'));
-const origin='http://127.0.0.1:3107';
+const port=Number(process.env.SMOKE_PORT||3107);
+const origin=`http://127.0.0.1:${port}`;
 process.env.APP_ORIGIN=origin;
 const env={...process.env,...Object.fromEntries(serviceFields.map(f=>[f.key,''])),NODE_ENV:'production',LOCAL_DEV_BYPASS_AUTH:'false',DATABASE_URL:`file:${directory.replaceAll('\\','/')}/smoke.db`,SERVICE_VAULT_DIR:join(directory,'private'),LIBRARY_DIR:join(directory,'library'),OWNER_ACCESS_KEY:'isolated-smoke-password',SESSION_SECRET:'isolated-smoke-session',DASHBOARD_API_TOKEN:'',CLOUD_MODE:'true'};
-const child=spawn(process.execPath,['node_modules/next/dist/bin/next','start','-H','127.0.0.1','-p','3107'],{env,stdio:['ignore','pipe','pipe']});
+const child=spawn(process.execPath,['node_modules/next/dist/bin/next','start','-H','127.0.0.1','-p',String(port)],{env,stdio:['ignore','pipe','pipe']});
 let log='';child.stdout.on('data',b=>{log+=b.toString();});child.stderr.on('data',b=>{log+=b.toString();});
 let worker,workerLog='';
 try{

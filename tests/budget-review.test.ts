@@ -10,6 +10,11 @@ test('concurrent requests reserve funds atomically without overspending the mont
  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal((await budgetStatus()).used,.6);
  await assert.rejects(reserveBudget(Number.NaN,'test'));await assert.rejects(reserveBudget(-1,'test'));
 });
+test('PDF formula requests stop at a separate UTC daily count',async()=>{
+ const results=await Promise.allSettled([reserveBudget(.001,'pdf-formula',2),reserveBudget(.001,'pdf-formula',2),reserveBudget(.001,'pdf-formula',2)]);
+ assert.equal(results.filter(r=>r.status==='fulfilled').length,2);
+ assert.equal((await db.prepare("SELECT COUNT(*) n FROM ai_ledger WHERE kind='pdf-formula'").first<{n:number}>())?.n,2);
+});
 test('review confirmation verifies source ownership and does not overwrite conflicting schedules',async()=>{
  await db.prepare("INSERT INTO tutor_threads VALUES ('t','alice','','Test','now','now')").run();
  await db.prepare("INSERT INTO tutor_messages VALUES ('m','t','assistant','Review evidence','[]','{}',0,'now')").run();

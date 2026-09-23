@@ -19,15 +19,17 @@ export async function budgetStatus() {
   const r = await db.prepare('SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) used FROM ai_ledger WHERE month=?').bind(budgetMonth()).first<{used:number}>();
   return {limit: Math.max(0,Number(serviceValue('AI_MONTHLY_BUDGET') || 30)), used:Number(r?.used || 0), month:budgetMonth()};
 }
-export async function reserveBudget(amount:number,kind:string) {
+export async function reserveBudget(amount:number,kind:string,dailyLimit?:number) {
   if (!Number.isFinite(amount) || amount <= 0) throw new Error('费用估算不可用');
-  const id=crypto.randomUUID(), month=budgetMonth(), {limit}=await budgetStatus();
+  if(dailyLimit!==undefined&&(!Number.isInteger(dailyLimit)||dailyLimit<1))throw new Error('每日请求上限无效');
+  const id=crypto.randomUUID(), month=budgetMonth(), {limit}=await budgetStatus(),now=Date.now(),dayStart=Math.floor(now/86400000)*86400000;
   const r=await db.prepare(`INSERT INTO ai_ledger SELECT ?, ?, ?, ?, NULL, 'reserved', ? WHERE
-    (SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM ai_ledger WHERE month=?) + ? <= ?`).bind(id,month,kind,amount,Date.now(),month,amount,limit).run();
-  if(!r.rowsAffected) throw new Error('本月 AI 预算不足；同步与已存资料仍可使用');
+    (SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM ai_ledger WHERE month=?) + ? <= ?
+    AND (? IS NULL OR (SELECT COUNT(*) FROM ai_ledger WHERE kind=? AND created_at>=? AND created_at<?) < ?)`).bind(id,month,kind,amount,now,month,amount,limit,dailyLimit??null,kind,dayStart,dayStart+86400000,dailyLimit??0).run();
+  if(!r.rowsAffected) throw new Error('AI 预算或每日请求上限已到；同步与已存资料仍可使用');
   return id;
 }
-export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,signal?:AbortSignal|null) {
+export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,signal?:AbortSignal|null,policy?:{kind:string;dailyLimit:number}) {
   if(process.env.AI_BUDGET_TEST_BYPASS==='true' && process.env.NODE_ENV!=='production') return fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const rate=configuredRate(body.model);
   if(!serviceValue('OPENAI_API_KEY')) throw new Error('请先配置 OpenAI API Key');
@@ -40,7 +42,7 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   const tokens=endpoint==='embeddings'?inputBytes:Math.min(rate.context,Math.max(1000,Math.ceil(inputBytes/2)));
   const toolMax=body.tools?.length ? Math.max(1,body.max_tool_calls || 1) * 0.02 : 0;
   const reserved=Math.max(0.000001,(tokens*rate.input+maxOutput*rate.output)/1e6+toolMax);
-  const id=await reserveBudget(reserved,endpoint);
+  const id=await reserveBudget(reserved,policy?.kind||endpoint,policy?.dailyLimit);
   // On an ambiguous timeout keep the reservation: provider may have already billed it.
   const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
   const p=await response.clone().json().catch(()=>null);
