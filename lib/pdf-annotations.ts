@@ -2,7 +2,8 @@ import {database as db} from './database.ts';
 import {getDocument} from './library.ts';
 
 export type AnnotationPoint={x:number;y:number};
-export type AnnotationStroke={id:string;color:string;width:number;points:AnnotationPoint[]};
+export type AnnotationShape='line'|'circle'|'rectangle';
+export type AnnotationStroke={id:string;color:string;width:number;points:AnnotationPoint[];shape?:AnnotationShape};
 
 const MAX_STROKES=1000;
 const MAX_POINTS=30000;
@@ -22,6 +23,7 @@ export function validateStrokes(value:unknown):AnnotationStroke[]{
   let pointCount=0;
   for(const stroke of value){
     if(!stroke||typeof stroke!=='object'||typeof stroke.id!=='string'||stroke.id.length>100||!stroke.id||typeof stroke.color!=='string'||!/^#[0-9a-fA-F]{6}$/.test(stroke.color)||typeof stroke.width!=='number'||!Number.isFinite(stroke.width)||stroke.width<0.001||stroke.width>0.03||!Array.isArray(stroke.points)||!stroke.points.length||stroke.points.length>3000)throw new Error('批注格式无效');
+    if(stroke.shape!==undefined&&(!['line','circle','rectangle'].includes(stroke.shape)||stroke.points.length!==2))throw new Error('批注图形格式无效');
     pointCount+=stroke.points.length;
     if(pointCount>MAX_POINTS||stroke.points.some((point:unknown)=>!point||typeof point!=='object'||typeof (point as AnnotationPoint).x!=='number'||typeof (point as AnnotationPoint).y!=='number'||!Number.isFinite((point as AnnotationPoint).x)||!Number.isFinite((point as AnnotationPoint).y)||(point as AnnotationPoint).x<0||(point as AnnotationPoint).x>1||(point as AnnotationPoint).y<0||(point as AnnotationPoint).y>1))throw new Error('批注坐标无效');
   }
