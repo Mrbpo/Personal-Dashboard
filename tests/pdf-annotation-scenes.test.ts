@@ -29,5 +29,7 @@ test('Excalidraw scenes reject backgrounds, images, links, duplicate IDs, and ov
   assert.throws(()=>validateAnnotationScene(scene([{...line,link:'https://example.com'}])));
   assert.throws(()=>validateAnnotationScene(scene([line,line])));
   assert.throws(()=>validateAnnotationScene(scene([{...line,x:Infinity}])));
+  assert.throws(()=>validateAnnotationScene(scene([{...line,x:850}])));
+  assert.throws(()=>validateAnnotationScene(scene([{...line,x:0,y:0,angle:Math.PI/4}])));
   assert.throws(()=>validateAnnotationScene(scene([{...line,text:'x'.repeat(1024*1024)}])));
 });

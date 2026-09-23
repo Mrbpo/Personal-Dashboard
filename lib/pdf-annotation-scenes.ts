@@ -30,6 +30,13 @@ export function validateAnnotationScene(value:unknown):AnnotationScene{
       const coordinate=element[key];
       if(typeof coordinate!=='number'||!Number.isFinite(coordinate)||Math.abs(coordinate)>1_000_000)throw new Error('绘图坐标无效');
     }
+    const x=element.x as number,y=element.y as number,width=element.width as number,height=element.height as number;
+    const angle=element.angle===undefined?0:element.angle;
+    if(width<0||height<0||typeof angle!=='number'||!Number.isFinite(angle))throw new Error('绘图坐标无效');
+    const halfWidth=(Math.abs(Math.cos(angle))*width+Math.abs(Math.sin(angle))*height)/2;
+    const halfHeight=(Math.abs(Math.sin(angle))*width+Math.abs(Math.cos(angle))*height)/2;
+    const centerX=x+width/2,centerY=y+height/2,epsilon=0.01;
+    if(centerX-halfWidth< -epsilon||centerY-halfHeight< -epsilon||centerX+halfWidth>scene.pageWidth+epsilon||centerY+halfHeight>scene.pageHeight+epsilon)throw new Error('绘图元素超出了 PDF 页面');
   }
   const json=JSON.stringify(value);
   if(Buffer.byteLength(json)>MAX_SCENE_BYTES)throw new Error('绘图数据超出限制');
