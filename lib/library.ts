@@ -56,11 +56,11 @@ export async function previewDocument(owner:string,id:string) {
   }
   return {document,text,pages};
 }
-export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id)]);}
+export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(id,owner)]);}
 export async function hideRemoteDocuments(owner:string,course:string,origin:string,remoteKey:string){
  const key=JSON.stringify([course,remoteKey]);
  const documents=(await db.prepare('SELECT id FROM library_documents WHERE owner_id=? AND course_id=? AND origin=? AND origin_key=? AND deleted=0').bind(owner,course,origin,key).all<{id:string}>()).results;
- for(const document of documents)await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(document.id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(document.id)]);
+ for(const document of documents)await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(document.id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(document.id,owner)]);
  return documents.length;
 }
 export function splitText(text:string) {const out:string[]=[];for(let i=0;i<text.length;i+=1400){out.push(text.slice(i,i+1600));if(i+1600>=text.length)break;}return out;}

@@ -18,7 +18,7 @@ export default async function Page({params}:{params:Promise<{id:string}>}){
   return <PageFrame eyebrow="LIBRARY PREVIEW" title={document.name} description={`${document.course_id||'通用资料'} · ${document.folder_path||'根目录'} · ${document.size===0?0:Math.max(1,Math.round(document.size/1024))} KB`}>
     <div className="mb-4 flex flex-wrap gap-2"><Button asChild variant="outline"><Link href="/library">返回资料目录</Link></Button><Button asChild variant="outline"><a href={`/api/library/${encodeURIComponent(id)}`}>下载原件</a></Button></div>
     {document.mime==='application/pdf'?<>
-      <PdfReaderShell source={source} name={document.name}/>
+      <PdfReaderShell source={source} name={document.name} documentId={document.id}/>
       <section className="mt-8 overflow-hidden rounded-2xl border bg-card" id="text-version">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-4"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-muted-foreground">TEXT VERSION</p><h2 className="mt-1 text-xl font-semibold">PDF 文字版本</h2></div><span className="text-sm text-muted-foreground">{pages.length?`${pages.length} 页已转换`:document.status==='error'?'正在重新尝试转换':'正在转换'}</span></div>
         {pages.length?<div className="max-h-[75vh] overflow-auto px-5 md:px-7">{pages.map(item=><article key={item.page} className="border-b py-6 last:border-b-0"><h3 className="mb-3 font-semibold text-primary">{item.locator}</h3><pre className="whitespace-pre-wrap break-words font-sans text-base leading-7">{item.text}</pre></article>)}</div>:<div className="p-8 text-center text-muted-foreground"><p>后台正在逐页转换文字，扫描页会自动识别。</p><p className="mt-2 text-sm">稍后刷新本页即可看到文字版本；已完成的页面会保留并从中断处继续。</p></div>}
