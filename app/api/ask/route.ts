@@ -22,7 +22,13 @@ export async function POST(request: Request) {
     if (question.length < 2) return Response.json({ error: "请输入课程问题" }, { status: 400 });
     if (question.length > 600) return Response.json({ error: "问题不能超过 600 字" }, { status: 400 });
     const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
-    const { sources, inferredCourseId, timings } = await searchArchiveForAnswer(owner.userId, question, body.courseId, summary ? 100 : 12);
+    const { sources, inferredCourseId, courseSelection, timings } = await searchArchiveForAnswer(owner.userId, question, body.courseId, summary ? 100 : 12);
+    if (courseSelection) {
+      const answer = courseSelection.length
+        ? `找到了多门符合“${/数学|微积分|\bmath|\bcalculus/i.test(question) ? '数学' : /统计|\bstat/i.test(question) ? '统计' : '化学'}”的课程：${courseSelection.map((course) => course.code).join('、')}。请选择上方课程或在问题中写出课程代码，再查询具体要求。`
+        : '目前没有找到已启用的对应课程。请检查课程同步状态，或在上方选择课程后再查询。';
+      return Response.json({ answer, needsClarification: true, followUps: [], citationRefs: [], aiAvailable: false, feedbackId: '', inferredCourseId: null, coverage: '未跨课程引用资料。', citations: [] }, { headers: { 'Cache-Control': 'no-store' } });
+    }
     const answerStarted = performance.now();
     const result = await answerCourseQuestion(question, sources);
     const answerMs = performance.now() - answerStarted;

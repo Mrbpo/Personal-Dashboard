@@ -51,3 +51,27 @@ test('weak evidence makes at most one bounded embedding request', async () => {
     assert.ok(result.timings.totalMs >= result.timings.embeddingMs);
   } finally { globalThis.fetch = original; }
 });
+
+test('math tutorial plus syllabus remains within math and includes both requested sources', async () => {
+  await repo.upsertCourses([{ id:'math', name:'Calculus I', course_code:'MATA29H3' }, { id:'stats', name:'Statistics I', course_code:'STAB22H3' }]);
+  const mathTutorial=await lib.saveDocument('student','math','upload','math-tut','Tutorial 2.txt','text/plain',Buffer.from('Tutorial 2: complete problems 1 and 2 before Friday.'));
+  await lib.indexDocument('student',mathTutorial);
+  const statsTutorial=await lib.saveDocument('student','stats','upload','stats-tut','Tutorial 2.txt','text/plain',Buffer.from('Statistics Tutorial 2: make boxplots.'));
+  await lib.indexDocument('student',statsTutorial);
+  const syllabus={ id:'math:syllabus', courseId:'math', sourceType:'syllabus', sourceId:'syllabus', title:'课程大纲 Syllabus', body:'Tutorials count for 10 percent of the course grade.', sourceUrl:null, updatedAt:null, dueAt:null, unlockAt:null, lockAt:null, submissionState:null, pointsPossible:null, prerequisiteBlocked:false };
+  await repo.saveSource(syllabus, null, await repo.hashSource(syllabus), 'rule_only');
+
+  const result=await searchArchiveForAnswer('student','数学tut要做什么，帮我看看课程大纲');
+  assert.equal(result.inferredCourseId,'math');
+  assert.equal(result.courseSelection,null);
+  assert.ok(result.sources.some((item)=>item.sourceId===mathTutorial));
+  assert.ok(result.sources.some((item)=>item.sourceType==='syllabus'));
+  assert.ok(result.sources.every((item)=>item.courseId==='math'));
+  assert.ok(!result.sources.some((item)=>item.sourceId===statsTutorial));
+
+  await repo.upsertCourses([{ id:'math2', name:'Linear Algebra', course_code:'MATB41H3' }]);
+  const ambiguous=await searchArchiveForAnswer('student','数学tut要做什么，帮我看看课程大纲');
+  assert.equal(ambiguous.inferredCourseId,null);
+  assert.deepEqual(ambiguous.courseSelection?.map((course)=>course.id), ['math','math2']);
+  assert.deepEqual(ambiguous.sources,[]);
+});
