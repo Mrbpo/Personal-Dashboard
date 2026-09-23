@@ -13,6 +13,8 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS library_remote_versions (owner_id TEXT NOT NULL, origin_key TEXT NOT NULL, fingerprint TEXT NOT NULL, document_id TEXT NOT NULL, PRIMARY KEY(owner_id,origin_key))`,
   `CREATE TABLE IF NOT EXISTS library_source_failures (owner_id TEXT NOT NULL, origin TEXT NOT NULL, origin_key TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, error TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner_id,origin,origin_key))`,
   `CREATE TABLE IF NOT EXISTS library_documents (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL, origin_key TEXT NOT NULL, folder_path TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, mime TEXT NOT NULL, hash TEXT NOT NULL, size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT, created_at TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_id, origin, origin_key, hash))`,
+  `CREATE INDEX IF NOT EXISTS idx_library_owner_course_ready ON library_documents(owner_id,course_id,status,deleted)`,
+  `CREATE INDEX IF NOT EXISTS idx_library_version_lookup ON library_documents(owner_id,origin,origin_key,deleted,created_at)`,
   `CREATE TABLE IF NOT EXISTS library_annotations (owner_id TEXT NOT NULL, document_id TEXT NOT NULL, page INTEGER NOT NULL, revision INTEGER NOT NULL DEFAULT 1, strokes_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL, PRIMARY KEY(owner_id,document_id,page))`,
   `CREATE INDEX IF NOT EXISTS idx_library_annotations_document ON library_annotations(document_id)`,
   `CREATE TABLE IF NOT EXISTS library_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, position INTEGER NOT NULL, locator TEXT NOT NULL, body TEXT NOT NULL, hash TEXT NOT NULL)`,
@@ -84,8 +86,24 @@ const schema = [
   `PRAGMA optimize`,
 ];
 
+const searchSchema = [
+  `CREATE VIRTUAL TABLE IF NOT EXISTS source_items_fts USING fts5(title,body,analysis_json,content='source_items',content_rowid='rowid')`,
+  `CREATE TRIGGER IF NOT EXISTS source_items_fts_ai AFTER INSERT ON source_items BEGIN INSERT INTO source_items_fts(rowid,title,body,analysis_json) VALUES(new.rowid,new.title,new.body,new.analysis_json); END`,
+  `CREATE TRIGGER IF NOT EXISTS source_items_fts_ad AFTER DELETE ON source_items BEGIN INSERT INTO source_items_fts(source_items_fts,rowid,title,body,analysis_json) VALUES('delete',old.rowid,old.title,old.body,old.analysis_json); END`,
+  `CREATE TRIGGER IF NOT EXISTS source_items_fts_au AFTER UPDATE OF title,body,analysis_json ON source_items BEGIN INSERT INTO source_items_fts(source_items_fts,rowid,title,body,analysis_json) VALUES('delete',old.rowid,old.title,old.body,old.analysis_json); INSERT INTO source_items_fts(rowid,title,body,analysis_json) VALUES(new.rowid,new.title,new.body,new.analysis_json); END`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS piazza_posts_fts USING fts5(title,body,answer,content='piazza_posts',content_rowid='rowid')`,
+  `CREATE TRIGGER IF NOT EXISTS piazza_posts_fts_ai AFTER INSERT ON piazza_posts BEGIN INSERT INTO piazza_posts_fts(rowid,title,body,answer) VALUES(new.rowid,new.title,new.body,new.answer); END`,
+  `CREATE TRIGGER IF NOT EXISTS piazza_posts_fts_ad AFTER DELETE ON piazza_posts BEGIN INSERT INTO piazza_posts_fts(piazza_posts_fts,rowid,title,body,answer) VALUES('delete',old.rowid,old.title,old.body,old.answer); END`,
+  `CREATE TRIGGER IF NOT EXISTS piazza_posts_fts_au AFTER UPDATE OF title,body,answer ON piazza_posts BEGIN INSERT INTO piazza_posts_fts(piazza_posts_fts,rowid,title,body,answer) VALUES('delete',old.rowid,old.title,old.body,old.answer); INSERT INTO piazza_posts_fts(rowid,title,body,answer) VALUES(new.rowid,new.title,new.body,new.answer); END`,
+  `CREATE VIRTUAL TABLE IF NOT EXISTS library_chunks_fts USING fts5(body,content='library_chunks',content_rowid='rowid')`,
+  `CREATE TRIGGER IF NOT EXISTS library_chunks_fts_ai AFTER INSERT ON library_chunks BEGIN INSERT INTO library_chunks_fts(rowid,body) VALUES(new.rowid,new.body); END`,
+  `CREATE TRIGGER IF NOT EXISTS library_chunks_fts_ad AFTER DELETE ON library_chunks BEGIN INSERT INTO library_chunks_fts(library_chunks_fts,rowid,body) VALUES('delete',old.rowid,old.body); END`,
+  `CREATE TRIGGER IF NOT EXISTS library_chunks_fts_au AFTER UPDATE OF body ON library_chunks BEGIN INSERT INTO library_chunks_fts(library_chunks_fts,rowid,body) VALUES('delete',old.rowid,old.body); INSERT INTO library_chunks_fts(rowid,body) VALUES(new.rowid,new.body); END`,
+];
+
 let client: Client | null = null;
 let initialized: Promise<void> | null = null;
+let searchIndexReady = false;
 
 function getClient() {
   if (client) return client;
@@ -163,8 +181,40 @@ async function ready() {
     if (!courseColumns.rows.some((row) => row.name === "end_at")) {
       await getClient().execute("ALTER TABLE courses ADD COLUMN end_at TEXT");
     }
+    await getClient().execute("CREATE TABLE IF NOT EXISTS search_index_state (name TEXT PRIMARY KEY, version INTEGER NOT NULL)");
+    const state = await getClient().execute("SELECT version FROM search_index_state WHERE name='fts5'");
+    if (Number(state.rows[0]?.version || 0) >= 1) searchIndexReady = true;
+    else {
+      const token = crypto.randomUUID(), now = Date.now();
+      const lease = await getClient().execute({sql:`INSERT INTO service_leases(id,token,expires_at) VALUES('fts5-bootstrap',?,?)
+        ON CONFLICT(id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE service_leases.expires_at<?
+        RETURNING token`,args:[token,now+600000,now]});
+      if (lease.rows[0]?.token === token) {
+        try {
+          for (const sql of searchSchema) await getClient().execute(sql);
+          for (const table of ['source_items_fts','piazza_posts_fts','library_chunks_fts'])
+            await getClient().execute(`INSERT INTO ${table}(${table}) VALUES('rebuild')`);
+          await getClient().execute("INSERT INTO search_index_state(name,version) VALUES('fts5',1) ON CONFLICT(name) DO UPDATE SET version=excluded.version");
+          searchIndexReady = true;
+        } catch {
+          // Deployments without FTS5 retain a scoped SQL LIKE search path.
+          console.warn('[search-index] FTS5 unavailable; using scoped search fallback');
+        } finally {
+          await getClient().execute({sql:"DELETE FROM service_leases WHERE id='fts5-bootstrap' AND token=?",args:[token]});
+        }
+      }
+    }
   })();
   await initialized;
+}
+
+export async function searchIndexAvailable() {
+  await ready();
+  if (!searchIndexReady) {
+    const state = await getClient().execute("SELECT version FROM search_index_state WHERE name='fts5'");
+    searchIndexReady = Number(state.rows[0]?.version || 0) >= 1;
+  }
+  return searchIndexReady;
 }
 
 class Statement {

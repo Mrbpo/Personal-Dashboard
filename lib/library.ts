@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, readdir, lstat, unlink, utimes } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { database as db } from './database.ts';
+import { database as db, searchIndexAvailable } from './database.ts';
 import { paidOpenAI } from './ai-budget.ts';
 import { serviceValue } from './service-vault.ts';
 import { acquireLease,enqueue,releaseLease } from './jobs.ts';
 import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
+import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
 export const EMBED_MODEL='text-embedding-3-small';
 export const MAX_LIBRARY_BYTES=50*1024*1024;
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR || './data/library');
@@ -126,20 +127,28 @@ export async function collectUnusedBlobs(now=Date.now()){
 }
 export function librarySearchTokens(value:string){
   const normalized=value.normalize('NFKD').toLocaleLowerCase().replace(/([a-z])([0-9])/g,'$1 $2').replace(/([0-9])([a-z])/g,'$1 $2');
-  const singular=new Set(['notes','slides','files','weeks','lectures','answers','solutions','blanks','modules','assignments','tutorials']);
+  const singular=new Set(['notes','slides','files','weeks','lectures','answers','solutions','blanks','modules','assignments','tutorials','instructions','requirements']);
   return [...new Set((normalized.match(/[a-z0-9]+|[\u3400-\u9fff]{2,}/gu)||[]).map(token=>singular.has(token)?token.slice(0,-1):token).filter(token=>!/^(the|and|for|with)$/.test(token)))];
 }
 function lexicalText(value:string){return librarySearchTokens(value).join(' ');}
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
-type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:boolean};
+type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
+type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:boolean;embeddingTimeoutMs?:number;onTiming?:(detail:SearchTiming)=>void};
 export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string};
+type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   if(!course){const code=query.toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await db.prepare('SELECT id,code FROM courses WHERE enabled=1').all<{id:string;code:string}>()).results;course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
 
   const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(30,options.limit||8));
-  const rows=(await db.prepare(`SELECT c.id,d.id document_id,c.body,c.locator,d.name,d.course_id,d.folder_path,d.origin,d.origin_key FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0) LIMIT 20000`).bind(owner,...(course?[course]:[])).all<{id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string}>()).results.map(row=>({...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
-  const words=librarySearchTokens(query);
+  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0)`;
+  const scopeArgs=[owner,...(course?[course]:[])];
+  const fields='c.id,d.id document_id,c.body,c.locator,d.name,d.course_id,d.folder_path,d.origin,d.origin_key';
+  const words=strict?librarySearchTokens(query):[...new Set([...activitySearchAliases(query),...librarySearchTokens(query)])];
+  const candidateStarted=performance.now();
+  let raw:CandidateRow[]=[];
   if(strict){
+    raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;
+    const rows=raw.map(row=>({...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
     const scoped=path?rows.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):rows;
     const metadataMatches=scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name}`,words));
     const candidates=(options.metadataFirst!==false&&metadataMatches.length?metadataMatches:scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name} ${row.body}`,words)));
@@ -147,9 +156,37 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
     for(const row of candidates){const metadata=containsEvery(`${row.folder_path} ${row.name}`,words),title=containsEvery(row.name,words),score=(title?120:metadata?90:45)+words.filter(word=>lexicalText(row.name).split(' ').includes(word)).length*8+(path&&row.folder_path===path?12:0);const hit={...row,score,match_reason:title?'文件名包含全部关键词':metadata?'目录和文件名包含全部关键词':'正文包含全部关键词'};if(!best.has(row.document_id)||best.get(row.document_id)!.score<score)best.set(row.document_id,hit);}
     return [...best.values()].sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name,undefined,{numeric:true})).slice(0,limit);
   }
+  const indexed=await searchIndexAvailable(),match=ftsMatchTerms(words);
+  if(indexed&&match){
+    raw=(await db.prepare(`SELECT ${fields} FROM library_chunks_fts JOIN library_chunks c ON c.rowid=library_chunks_fts.rowid JOIN library_documents d ON d.id=c.document_id WHERE library_chunks_fts MATCH ? AND ${scopeSql} ORDER BY bm25(library_chunks_fts) LIMIT 240`).bind(match,...scopeArgs).all<CandidateRow>()).results;
+  }else{
+    const searchWords=words.filter(word=>word.length>=2).slice(0,12);
+    if(searchWords.length){
+      const condition=searchWords.map(()=>'(lower(d.name) LIKE ? OR lower(c.body) LIKE ?)').join(' OR ');
+      raw=(await db.prepare(`SELECT ${fields} FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE ${scopeSql} AND (${condition}) LIMIT 240`).bind(...scopeArgs,...searchWords.flatMap(word=>[`%${word}%`,`%${word}%`])).all<CandidateRow>()).results;
+    }
+  }
+  const metadataWords=words.filter(word=>word.length>=2).slice(0,12);
+  if(metadataWords.length){
+    const condition=metadataWords.map(()=>'(lower(d.name) LIKE ? OR lower(d.folder_path) LIKE ?)').join(' OR ');
+    const metadata=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id AND c.position=0 WHERE ${scopeSql} AND (${condition}) ORDER BY d.created_at DESC LIMIT 60`).bind(...scopeArgs,...metadataWords.flatMap(word=>[`%${word}%`,`%${word}%`])).all<CandidateRow>()).results;
+    raw=[...raw,...metadata];
+  }
+  if(!raw.length&&semantic){
+    // Bounded fallback for concepts with no lexical overlap. Course and owner
+    // filters still apply before any vector JSON is read.
+    raw=(await db.prepare(`SELECT ${fields} FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE ${scopeSql} ORDER BY d.created_at DESC,c.position LIMIT 256`).bind(...scopeArgs).all<CandidateRow>()).results;
+  }
+  const rows=[...new Map(raw.map(row=>[row.id||`${row.document_id}:metadata`,{...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}])).values()];
+  const candidateMs=performance.now()-candidateStarted;
   let vector:number[]|null=null;
-  if(semantic&&rows.length&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768});if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
-  const vectors=vector?(await db.prepare('SELECT chunk_id,vector FROM library_vectors WHERE model=?').bind(EMBED_MODEL).all<{chunk_id:string;vector:string}>()).results:[];const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
+  const embeddingStarted=performance.now();
+  if(semantic&&rows.length&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768},options.embeddingTimeoutMs?AbortSignal.timeout(options.embeddingTimeoutMs):undefined);if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
+  const embeddingMs=semantic?performance.now()-embeddingStarted:0;
+  const ids=[...new Set(raw.map(candidate=>candidate.id).filter((id):id is string=>Boolean(id)))];
+  const vectors=vector&&ids.length?(await db.prepare(`SELECT v.chunk_id,v.vector FROM library_vectors v JOIN library_chunks c ON c.id=v.chunk_id JOIN library_documents d ON d.id=c.document_id WHERE v.model=? AND ${scopeSql} AND v.chunk_id IN (${ids.map(()=>'?').join(',')})`).bind(EMBED_MODEL,...scopeArgs,...ids).all<{chunk_id:string;vector:string}>()).results:[];
+  options.onTiming?.({candidateMs,candidateCount:rows.length,embeddingMs,vectorRows:vectors.length,vectorBytes:vectors.reduce((sum,item)=>sum+item.vector.length,0)});
+  const map=new Map(vectors.map(v=>[v.chunk_id,v.vector]));
   return rows.map(r=>{const title=lexicalText(r.name),body=lexicalText(r.body);const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;return {...r,score:titleMatches*3+bodyMatches+(vector&&map.has(r.id)?cosine(vector,JSON.parse(map.get(r.id)!)):0),match_reason:titleMatches?'文件名匹配':'正文相关'};}).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score).slice(0,limit);
 }
 

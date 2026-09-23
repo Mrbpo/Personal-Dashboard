@@ -23,6 +23,32 @@ test("Piazza summaries isolate course and source; archives retain changed versio
   assert.equal((await repo.searchCourseContent("总结ZZZZ99 piazza")).length, 0);
 });
 
+test("cross-language lab queries retain a confirmed Piazza answer before the result limit", async () => {
+  const db = repo.getDatabase();
+  for (let index = 0; index < 20; index++) {
+    await db.prepare(`INSERT INTO source_items (id,course_id,source_type,source_id,title,body,content_hash,first_seen_at,last_seen_at)
+      VALUES (?,?,?,?,?,?,?,?,?)`).bind(`chem:lab:${index}`, 'chem', 'file', `lab:${index}`, `Lab 1 requirements file ${index}`, 'Lab 1 requirements instructions and notebook', `hash:${index}`, 'now', 'now').run();
+  }
+  await db.prepare(`INSERT INTO source_items (id,course_id,source_type,source_id,title,body,content_hash,first_seen_at,last_seen_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`).bind('chem:lab:assignment', 'chem', 'assignment', 'lab:assignment', 'Lab 1 assignment', 'Prepare the notebook before class.', 'hash:assignment', 'now', 'now').run();
+  await repo.savePiazzaPost({ id:'piazza:test:teacher', courseId:'chem', networkId:'test', postNumber:'teacher', title:'Lab 1 discussion', body:'A student guessed that goggles are optional.', answer:'Goggles are required for Lab 1.', kind:'question', createdAt:'2026-09-15', sourceUrl:'https://piazza.com/class/test/post/teacher', folders:[], updatedAt:'2026-09-15', contentHash:'teacher' });
+  await db.prepare(`INSERT INTO source_items (id,course_id,source_type,source_id,title,body,content_hash,first_seen_at,last_seen_at)
+    VALUES (?,?,?,?,?,?,?,?,?)`).bind('stats:lab:other', 'stats', 'assignment', 'lab:other', 'Lab 1 assignment', 'A different course requires a calculator.', 'hash:other', 'now', 'now').run();
+
+  const bilingual = await repo.searchCourseContent('我的实验要求', 'chem', 8);
+  assert.ok(bilingual.some((item) => item.title.includes('Lab 1')));
+  assert.ok(bilingual.every((item) => item.courseId === 'chem'));
+
+  const limited = await repo.searchCourseContent('CHMA10 lab 1 requirements', 'chem', 8);
+  const teacher = limited.find((item) => item.sourceId === 'piazza:test:teacher');
+  assert.ok(teacher, 'teacher answer must survive 20 higher-scoring file titles');
+  assert.equal(teacher.confirmedAnswer, true);
+  assert.match(teacher.body, /^教师明确回答：Goggles are required/);
+  assert.match(teacher.body, /未经确认的学生发言/);
+  assert.ok(limited.some((item) => item.sourceType === 'assignment'));
+  assert.ok(limited.every((item) => item.courseId === 'chem'));
+});
+
 const analysis: ExtractedAnalysis = {
   summary: "完成实验并提交源文件。",
   actions: [{ title: "Lab 1", action: "完成 Lab 1", requirements: ["提交 .py 文件"], recommendedStartAt: "2026-09-13T09:00:00-04:00", inferredDueAt: null, confidence: "certain", evidence: "Submit the Python file", estimatedMinutes: 60, possiblyCancelled: false }],
