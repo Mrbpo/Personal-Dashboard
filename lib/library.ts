@@ -48,9 +48,12 @@ export async function previewDocument(owner:string,id:string) {
   let text='',pages:Array<{page:number;locator:string;text:string}>=[];
   if(document.mime.startsWith('text/')) text=(await readBlob(document.hash)).toString('utf8');
   else if(document.mime==='application/pdf'){
-    const parsed=(await db.prepare('SELECT page,body FROM library_parse_pages WHERE document_id=? AND parser=? ORDER BY page LIMIT 500').bind(id,PDF_PARSER_VERSION).all<{page:number;body:string}>()).results;
-    pages=parsed.map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
-    if(document.status!=='ready'||!pages.length)await enqueue('index',{owner,id},`index:${id}`,true);
+    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 ELSE 1 END LIMIT 1000").bind(id,PDF_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
+    const best=new Map<number,{page:number;body:string;parser:string}>();
+    for(const item of parsed)if(!best.has(item.page))best.set(item.page,item);
+    pages=[...best.values()].map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
+    const hasOld=parsed.some(item=>item.parser==='pdf-page-v2'),hasCurrent=parsed.some(item=>item.parser===PDF_PARSER_VERSION);
+    if(document.status!=='ready'||(!hasOld&&!hasCurrent)||(process.env.PDF_FORMULA_BACKFILL==='true'&&!hasCurrent))await enqueue('index',{owner,id},`index:${id}`,true);
   }
   else if(!document.mime.startsWith('image/')&&document.mime!=='application/pdf'){
     const chunks=(await db.prepare('SELECT locator,body FROM library_chunks WHERE document_id=? ORDER BY position LIMIT 500').bind(id).all<{locator:string;body:string}>()).results;
@@ -68,6 +71,10 @@ export async function hideRemoteDocuments(owner:string,course:string,origin:stri
 export function splitText(text:string) {const out:string[]=[];for(let i=0;i<text.length;i+=1400){out.push(text.slice(i,i+1600));if(i+1600>=text.length)break;}return out;}
 export async function indexDocument(owner:string,id:string) {
   const d=await getDocument(owner,id);
+  if(d.mime==='application/pdf'&&d.status==='ready'&&process.env.PDF_FORMULA_BACKFILL!=='true'){
+    const old=await db.prepare("SELECT 1 ok FROM library_parse_pages WHERE document_id=? AND parser='pdf-page-v2' LIMIT 1").bind(id).first();
+    if(old)return;
+  }
   if(d.status==='ready'){
     if(d.mime!=='application/pdf')return;
     const current=await db.prepare('SELECT 1 ok FROM library_parse_pages WHERE document_id=? AND parser=? LIMIT 1').bind(id,PDF_PARSER_VERSION).first();
@@ -95,7 +102,7 @@ export async function indexDocument(owner:string,id:string) {
       }
     }
     const chunks=pages.flatMap(p=>splitText(p.text).map(body=>({locator:p.locator,body})));if(!chunks.length)throw new Error('没有识别到可读正文');
-    const warning=pages.some(p=>p.text.startsWith('[本页自动识别不完整')||p.text.startsWith('[自动识别不完整'))?'部分内容无法可靠识别；搜索结果会提示核对原文件。':pages.some(p=>p.text.startsWith('[本地 OCR'))?'本地 OCR 已完成；公式、表格与图形可能不完整，请核对 PDF 原页。':/word|officedocument/.test(d.mime)?'Word 文本已解析；内嵌图片和图表请另存 PDF 后导入。':null;
+    const warning=pages.some(p=>p.text.startsWith('[本页自动识别不完整')||p.text.startsWith('[自动识别不完整'))?'部分内容无法可靠识别；搜索结果会提示核对原文件。':pages.some(p=>p.text.startsWith('[本地 OCR'))?'本地 OCR 已完成；公式、表格与图形可能不完整，请核对 PDF 原页。':pages.some(p=>p.text.includes('[本页公式识别不完整')||p.text.includes('[部分公式无法可靠识别'))?'部分公式无法可靠识别，请核对 PDF 原页。':/word|officedocument/.test(d.mime)?'Word 文本已解析；内嵌图片和图表请另存 PDF 后导入。':null;
     await db.batch([db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),...chunks.map((c,i)=>db.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(`${id}:${i}`,id,i,c.locator,c.body,digest('parser1:split1:'+c.body))),db.prepare("UPDATE library_documents SET status='ready',error=? WHERE id=? AND deleted=0").bind(warning,id)]);
   }catch(e){await db.prepare("UPDATE library_documents SET status='error',error=? WHERE id=?").bind(e instanceof Error&&/^[\u3400-\u9fff]/.test(e.message)?e.message:'解析失败，请稍后重试',id).run();throw e;}
 }
