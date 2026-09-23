@@ -84,3 +84,63 @@ test('an incomplete legacy PDF retries even when historical backfill is disabled
  assert.equal((await db.prepare('SELECT COUNT(*) n FROM library_parse_pages WHERE document_id=? AND parser=?').bind(id,PDF_PARSER_VERSION).first<{n:number}>())?.n,2);
  assert.equal((await db.prepare('SELECT status FROM library_documents WHERE id=?').bind(id).first<{status:string}>())?.status,'ready');
 });
+
+test('one owner-scoped click queues one resumable PDF formula job and preserves old text',async()=>{
+ process.env.DATABASE_URL=':memory:';
+ process.env.LOCAL_OCR='false';
+ delete process.env.PDF_FORMULA_BACKFILL;
+ const {database:db}=await import('../lib/database.ts');
+ const {saveDocument,previewDocument,indexDocument}=await import('../lib/library.ts');
+ const {getPdfFormulaReparseStatus,queuePdfFormulaReparse}=await import('../lib/pdf-formula-reparse.ts');
+ const {PDF_PARSER_VERSION}=await import('../lib/document-parser.ts');
+ const pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();const bytes=await pdf.save();
+ const id=await saveDocument('click-owner','math','upload','formula-old.pdf','formula-old.pdf','application/pdf',bytes);
+ await db.prepare("INSERT INTO library_parse_pages VALUES (?, 'pdf-page-v2', 0, ?)").bind(id,'Old page one').run();
+ await db.prepare("INSERT INTO library_parse_pages VALUES (?, 'pdf-page-v2', 1, ?)").bind(id,'Old page two').run();
+ await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+ await assert.rejects(queuePdfFormulaReparse('other-owner',id));
+ assert.equal((await getPdfFormulaReparseStatus('click-owner',id)).status,'idle');
+ assert.equal((await queuePdfFormulaReparse('click-owner',id)).status,'queued');
+ await db.prepare('UPDATE background_jobs SET attempts=2 WHERE id=?').bind(`index:${id}`).run();
+ assert.equal((await queuePdfFormulaReparse('click-owner',id)).status,'queued');
+ const job=await db.prepare('SELECT status,attempts,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;attempts:number;payload:string}>();
+ assert.equal(job?.attempts,2);
+ assert.equal(JSON.parse(job!.payload).forcePdfFormulaReparse,true);
+ await db.prepare("UPDATE background_jobs SET status='running' WHERE id=?").bind(`index:${id}`).run();
+ assert.equal((await queuePdfFormulaReparse('click-owner',id)).status,'running');
+ await db.prepare("UPDATE background_jobs SET status='failed' WHERE id=?").bind(`index:${id}`).run();
+ assert.equal((await getPdfFormulaReparseStatus('click-owner',id)).status,'failed');
+ assert.equal((await queuePdfFormulaReparse('click-owner',id)).status,'queued');
+ await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,0,?)').bind(id,PDF_PARSER_VERSION,'New page one \\[E=mc^{2}\\]').run();
+ await db.prepare("UPDATE background_jobs SET status='running' WHERE id=?").bind(`index:${id}`).run();
+ assert.equal((await getPdfFormulaReparseStatus('click-owner',id)).status,'running');
+ assert.deepEqual((await previewDocument('click-owner',id)).pages.map(page=>page.text),['Old page one','Old page two']);
+ const original=globalThis.fetch;globalThis.fetch=async()=>Response.json({output_text:JSON.stringify({text:'New page two \\[\\frac{a}{b}\\]',complete:true})});
+ try{await indexDocument('click-owner',id,true);}finally{globalThis.fetch=original;}
+ await db.prepare("UPDATE background_jobs SET status='complete' WHERE id=?").bind(`index:${id}`).run();
+ assert.equal((await getPdfFormulaReparseStatus('click-owner',id)).status,'complete');
+ assert.match((await previewDocument('click-owner',id)).pages[0]?.text||'',/mc\^\{2\}/u);
+ assert.match((await previewDocument('click-owner',id)).pages[1]?.text||'',/\\frac/u);
+});
+
+test('a failed manual reparse keeps the ready PDF and old search chunks',async()=>{
+ process.env.DATABASE_URL=':memory:';
+ process.env.LOCAL_OCR='false';
+ const {database:db}=await import('../lib/database.ts');
+ const {saveDocument,previewDocument,indexDocument}=await import('../lib/library.ts');
+ const {getPdfFormulaReparseStatus,queuePdfFormulaReparse}=await import('../lib/pdf-formula-reparse.ts');
+ const pdf=await PDFDocument.create();pdf.addPage();const bytes=await pdf.save();
+ const id=await saveDocument('failure-owner','math','upload','failed-old.pdf','failed-old.pdf','application/pdf',bytes);
+ await db.prepare("INSERT INTO library_parse_pages VALUES (?, 'pdf-page-v2', 0, ?)").bind(id,'Old searchable text').run();
+ await db.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(`${id}:0`,id,0,'第 1 页','Old searchable text','old-hash').run();
+ await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+ await queuePdfFormulaReparse('failure-owner',id);
+ await db.prepare("UPDATE background_jobs SET status='running' WHERE id=?").bind(`index:${id}`).run();
+ const original=globalThis.fetch;globalThis.fetch=async()=>{throw new Error('synthetic provider failure');};
+ try{await assert.rejects(indexDocument('failure-owner',id,true));}finally{globalThis.fetch=original;}
+ await db.prepare("UPDATE background_jobs SET status='failed' WHERE id=?").bind(`index:${id}`).run();
+ assert.equal((await db.prepare('SELECT status FROM library_documents WHERE id=?').bind(id).first<{status:string}>())?.status,'ready');
+ assert.equal((await db.prepare('SELECT body FROM library_chunks WHERE document_id=?').bind(id).first<{body:string}>())?.body,'Old searchable text');
+ assert.equal((await previewDocument('failure-owner',id)).pages[0]?.text,'Old searchable text');
+ assert.equal((await getPdfFormulaReparseStatus('failure-owner',id)).status,'failed');
+});
