@@ -10,6 +10,7 @@
     "build": "next build",
     "start": "next start",
     "worker": "node --experimental-strip-types scripts/worker.ts",
+    "backfill:mail-embeddings": "node --experimental-strip-types scripts/backfill-mail-embeddings.ts",
     "import:library": "node scripts/import-library.mjs",
     "lint": "eslint . --ignore-pattern .next --ignore-pattern dist",
     "test": "node scripts/test-isolated.mjs",
