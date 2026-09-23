@@ -49,3 +49,11 @@ Obsidian Excalidraw 插件是针对 Obsidian API、Vault 和 Electron 的集成�
 - Excalidraw [MIT 许可](https://github.com/excalidraw/excalidraw/blob/master/LICENSE)、[React 包安装/字体部署](https://docs.excalidraw.com/docs/@excalidraw/excalidraw/installation)、[嵌入与 API](https://docs.excalidraw.com/docs/@excalidraw/excalidraw/api/props)。
 - [Obsidian Excalidraw 插件 AGPL-3.0 许可](https://github.com/zsviczian/obsidian-excalidraw-plugin/blob/master/LICENSE)及[硬件橡皮脚本说明](https://github.com/zsviczian/obsidian-excalidraw-plugin/blob/master/README.md)。
 - 上游仍开放的[局部擦除请求](https://github.com/excalidraw/excalidraw/issues/4904)和[整笔擦除行为报告](https://github.com/excalidraw/excalidraw/issues/10332)；[插件数位笔需求汇总](https://github.com/zsviczian/obsidian-excalidraw-plugin/issues/2773)。
+
+## 正式阅读器最小集成的验收记录
+
+独立原型保留在 `codex/excalidraw-pdf-study` 分支；正式集成分支删除实验路由。正式 PDF 详情页加入按需加载的“扩展绘图”：PDF 原页和旧笔迹仅作为锁定背景，新场景按页写入 `library_annotation_scenes`，保留旧 `strokes_json` 和阅读文字层。保存采用浏览器草稿、900 ms 合并、最长 5 s 等待、修订冲突提示；场景只有基础图形，PDF 图像不提交 API。页框采用固定坐标和可见边线，超界元素在客户端拒绝保存，服务端也验证边界，阅读叠加层裁剪到 PDF 页内。
+
+2026-09-23 在本地开发服务器上传一页合成 PDF 验收：在扩展模式画矩形、直线、箭头、文字，点“立即保存”、返回阅读、刷新后四种图形均可见且布局对应原页；阅读模式可选择 PDF 原文；将新矩形拖出左页框后出现“图形超出页面”提示且保存按钮禁用，撤销后恢复，服务端场景仍只有原四个元素。`npm run build`、定向 ESLint 均通过。该测试使用本地合成 PDF 和开发环境数据库，尚未在生产站点和真实数位笔上验收。
+
+**显示取舍：**阅读模式采用轻量 SVG 重绘，图形位置与内容保留，但 Excalidraw 的 RoughJS 线条、圆角和手写字体会变成较朴素的线框与系统字体。若要视觉完全一致，可在第二阶段将 Excalidraw 导出的 SVG 作为按页缓存，同时保留可访问的 PDF 文字层。编辑器仍是可平移缩放的画布；页外操作会显示，但不会进入保存场景，超界图形需移回页内或撤销。它的原生橡皮继续按整个元素删除，局部圆形擦除留在原阅读模式。
