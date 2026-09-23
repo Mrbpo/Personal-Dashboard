@@ -129,31 +129,40 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
     };
   },[writeDraft]);
 
+  const restoreAcceptedNow=()=>{
+    if(rollbackTimer.current)clearTimeout(rollbackTimer.current);
+    rollbackTimer.current=null;
+    const api=editorApi.current;
+    if(!api){if(rollbackPending.current){updateStatus('error');setMessage('无法恢复越界图形，请返回阅读模式后重试。');}return;}
+    const appState=api.getAppState();
+    const visible=[...api.getSceneElements(),appState.newElement,appState.resizingElement,appState.multiElement];
+    const outside=visible.some(element=>element&&element.id!==prepared.backgroundId&&element.id!==prepared.borderId&&!element.isDeleted&&!insidePage(element,background.width,background.height));
+    // A rejected shape can remain visible as Excalidraw's in-progress
+    // newElement even when the committed scene is already back inside.
+    if(!outside&&!rollbackPending.current)return;
+    rollbackPending.current=false;
+    api.updateScene({
+      elements:[...prepared.initialData.elements!.slice(0,2),...elements.current],
+      appState:{selectedElementIds:{},editingTextElement:null,newElement:null,resizingElement:null,multiElement:null,selectionElement:null},
+      captureUpdate:CaptureUpdateAction.NEVER,
+    });
+    updateStatus(dirty.current?'unsaved':'saved');
+    setMessage('已把越界图形恢复到 PDF 页内。');
+    api.setToast({message:'已把越界图形恢复到 PDF 页内。',duration:3000});
+  };
   const restoreAccepted=()=>{
     if(rollbackTimer.current)clearTimeout(rollbackTimer.current);
-    // Excalidraw can publish its final transform after pointer-up and even
-    // after a zero-delay task. Give that final update time to settle.
+    // Let Excalidraw publish its final transform before reading its scene.
     rollbackTimer.current=setTimeout(()=>{
       rollbackTimer.current=null;
-      if(pointerIsDown.current)return;
-      const api=editorApi.current;
-      if(!api){if(rollbackPending.current){updateStatus('error');setMessage('无法恢复越界图形，请返回阅读模式后重试。');}return;}
-      const appState=api.getAppState();
-      const visible=[...api.getSceneElements(),appState.newElement,appState.resizingElement,appState.multiElement];
-      const outside=visible.some(element=>element&&element.id!==prepared.backgroundId&&element.id!==prepared.borderId&&!element.isDeleted&&!insidePage(element,background.width,background.height));
-      // A rejected shape can remain visible as Excalidraw's in-progress
-      // newElement even when the committed scene is already back inside.
-      if(!outside&&!rollbackPending.current)return;
-      rollbackPending.current=false;
-      api.updateScene({
-        elements:[...prepared.initialData.elements!.slice(0,2),...elements.current],
-        appState:{selectedElementIds:{},editingTextElement:null,newElement:null,resizingElement:null,multiElement:null,selectionElement:null},
-        captureUpdate:CaptureUpdateAction.NEVER,
-      });
-      updateStatus(dirty.current?'unsaved':'saved');
-      setMessage('已把越界图形恢复到 PDF 页内。');
-      api.setToast({message:'已把越界图形恢复到 PDF 页内。',duration:3000});
+      if(!pointerIsDown.current)restoreAcceptedNow();
     },100);
+  };
+  const beginPointer=()=>{
+    // Resolve the previous gesture before Excalidraw starts a new one. Its
+    // delayed rollback must never discard a legitimate subsequent stroke.
+    if(rollbackTimer.current||rollbackPending.current)restoreAcceptedNow();
+    pointerIsDown.current=true;
   };
   const restoreRef=useRef(restoreAccepted);
   useEffect(()=>{restoreRef.current=restoreAccepted;});
@@ -209,7 +218,7 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
       {status==='conflict'&&<><button type="button" className="rounded border px-2 py-1" onClick={()=>void overwrite()}>保留本地并覆盖</button><button type="button" className="rounded border px-2 py-1" onClick={discard}>放弃本地并重载</button></>}
     </div>
     {message&&<p role="alert" className="text-sm text-amber-700">{message}</p>}
-    <div className="h-[72vh] min-h-[550px] overflow-hidden rounded-lg border bg-white" onPointerDownCapture={()=>{pointerIsDown.current=true;}} onMouseDownCapture={()=>{pointerIsDown.current=true;}}><Excalidraw initialData={prepared.initialData} excalidrawAPI={api=>{editorApi.current=api;}} onChange={onChange} onPointerUp={()=>{pointerIsDown.current=false;restoreAccepted();}} langCode="zh-CN" handleKeyboardGlobally={false} UIOptions={{tools:{image:false},canvasActions:{loadScene:false,saveToActiveFile:false,clearCanvas:false}}} onPaste={()=>false}/></div>
+    <div className="h-[72vh] min-h-[550px] overflow-hidden rounded-lg border bg-white" onPointerDownCapture={beginPointer} onMouseDownCapture={beginPointer}><Excalidraw initialData={prepared.initialData} excalidrawAPI={api=>{editorApi.current=api;}} onChange={onChange} onPointerUp={()=>{pointerIsDown.current=false;restoreAccepted();}} langCode="zh-CN" handleKeyboardGlobally={false} UIOptions={{tools:{image:false},canvasActions:{loadScene:false,saveToActiveFile:false,clearCanvas:false}}} onPaste={()=>false}/></div>
     <p className="text-xs text-muted-foreground">请在蓝色 PDF 页框内绘图。PDF 原页和旧批注仅作为绘图背景；返回阅读后可继续选择 PDF 文字和使用原有橡皮擦。</p>
   </div>;
 }
