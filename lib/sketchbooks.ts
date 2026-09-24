@@ -7,9 +7,10 @@ import { database as db } from './database.ts';
 import { aiResponse, hasAI } from './ai-response.ts';
 import { serviceValue } from './service-vault.ts';
 import { acquireLease, releaseLease } from './jobs.ts';
+import { validateStrokes, type AnnotationStroke } from './pdf-annotations.ts';
 
 type Book = { id:string; owner_id:string; status:string; draft_text:string; revision:number; last_activity_at:string; created_at:string; archived_at:string|null; archive_claimed_at:string|null; archive_token:string|null };
-type Page = { id:string; book_id:string; page_no:number; image_hash:string|null; revision:number; note_draft:string; note_revision:number; updated_at:string };
+type Page = { id:string; book_id:string; page_no:number; image_hash:string|null; base_image_hash:string|null; strokes_json:string|null; cleared_image_hash:string|null; cleared_base_image_hash:string|null; cleared_strokes_json:string|null; revision:number; note_draft:string; note_revision:number; updated_at:string };
 type Entry = { id:string; book_id:string; page_no:number; kind:string; body:string; edit_revision:number; request_id:string|null; created_at:string; updated_at:string };
 type PdfVersion = { id:string; book_id:string; source_revision:number; pdf_hash:string; created_at:string };
 const now = () => new Date().toISOString();
@@ -57,7 +58,7 @@ export async function sketchState(owner:string,bookId?:string){
     db.prepare('SELECT * FROM sketch_pdf_versions WHERE book_id=? ORDER BY created_at DESC').bind(book.id).all<PdfVersion>(),
     db.prepare("SELECT id,status,created_at,archived_at FROM sketchbooks WHERE owner_id=? AND status='archived' ORDER BY archived_at DESC LIMIT 100").bind(owner).all<Pick<Book,'id'|'status'|'created_at'|'archived_at'>>(),
   ]);
-  return {book,pages:pages.results,entries:entries.results,versions:versions.results.map(v=>({id:v.id,book_id:v.book_id,source_revision:v.source_revision,created_at:v.created_at})),archive:archive.results};
+  return {book,pages:pages.results.map(page=>({...page,strokes:page.strokes_json===null?null:JSON.parse(page.strokes_json) as AnnotationStroke[],strokes_json:undefined,cleared_strokes_json:undefined})),entries:entries.results,versions:versions.results.map(v=>({id:v.id,book_id:v.book_id,source_revision:v.source_revision,created_at:v.created_at})),archive:archive.results};
 }
 
 export async function addSketchPage(owner:string,bookId:string){
@@ -71,8 +72,9 @@ export async function addSketchPage(owner:string,bookId:string){
   ]);
   if(!result[0].rowsAffected)throw new Error('画册状态已变化，请刷新');return next;
 }
-export async function saveSketchPage(owner:string,bookId:string,pageNo:number,dataUrl:string,revision:number){
+export async function saveSketchPage(owner:string,bookId:string,pageNo:number,dataUrl:string,revision:number,strokes?:unknown){
   await writable(owner,bookId);if(!validPage(pageNo)||!Number.isInteger(revision))throw new Error('页码或版本无效');
+  const strokesJson=strokes===undefined?undefined:JSON.stringify(validateStrokes(strokes));
   let hash:string|null=null;
   if(dataUrl){
     const match=/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
@@ -83,11 +85,27 @@ export async function saveSketchPage(owner:string,bookId:string,pageNo:number,da
   }
   const at=now();
   const result=await db.batch([
-    db.prepare("UPDATE sketch_pages SET image_hash=?,revision=revision+1,updated_at=? WHERE book_id=? AND page_no=? AND revision=? AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(hash,at,bookId,pageNo,revision,bookId,owner),
+    db.prepare("UPDATE sketch_pages SET image_hash=?,base_image_hash=CASE WHEN ? IS NOT NULL AND strokes_json IS NULL THEN image_hash ELSE base_image_hash END,strokes_json=COALESCE(?,strokes_json),revision=revision+1,updated_at=? WHERE book_id=? AND page_no=? AND revision=? AND (? IS NOT NULL OR strokes_json IS NULL) AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(hash,strokesJson??null,strokesJson??null,at,bookId,pageNo,revision,strokesJson??null,bookId,owner),
     db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND status IN ('active','archived') AND EXISTS (SELECT 1 FROM sketch_pages WHERE book_id=? AND page_no=? AND image_hash IS ? AND revision=?)").bind(at,bookId,owner,bookId,pageNo,hash,revision+1),
   ]);
-  if(!result[0].rowsAffected)throw new Error('本页已在其他窗口更改，请刷新后再画');
+  if(!result[0].rowsAffected)throw new Error('本页已在其他窗口更新或需要新版画笔；本机备份保留，请刷新后核对');
   return {revision:revision+1,hasImage:Boolean(hash)};
+}
+export async function clearSketchPage(owner:string,bookId:string,pageNo:number,revision:number){
+  await writable(owner,bookId);if(!validPage(pageNo)||!Number.isInteger(revision))throw new Error('页码或版本无效');
+  const at=now();const result=await db.batch([
+    db.prepare("UPDATE sketch_pages SET cleared_image_hash=image_hash,cleared_base_image_hash=base_image_hash,cleared_strokes_json=strokes_json,image_hash=NULL,base_image_hash=NULL,strokes_json='[]',revision=revision+1,updated_at=? WHERE book_id=? AND page_no=? AND revision=? AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(at,bookId,pageNo,revision,bookId,owner),
+    db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND EXISTS (SELECT 1 FROM sketch_pages WHERE book_id=? AND page_no=? AND revision=? AND updated_at=?)").bind(at,bookId,owner,bookId,pageNo,revision+1,at),
+  ]);
+  if(!result[0].rowsAffected)throw new Error('本页已在其他窗口更改，请刷新后再试');return {revision:revision+1};
+}
+export async function restoreClearedSketchPage(owner:string,bookId:string,pageNo:number,revision:number){
+  await writable(owner,bookId);if(!validPage(pageNo)||!Number.isInteger(revision))throw new Error('页码或版本无效');
+  const at=now();const result=await db.batch([
+    db.prepare("UPDATE sketch_pages SET image_hash=cleared_image_hash,base_image_hash=cleared_base_image_hash,strokes_json=cleared_strokes_json,cleared_image_hash=NULL,cleared_base_image_hash=NULL,cleared_strokes_json=NULL,revision=revision+1,updated_at=? WHERE book_id=? AND page_no=? AND revision=? AND image_hash IS NULL AND strokes_json='[]' AND cleared_image_hash IS NOT NULL AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(at,bookId,pageNo,revision,bookId,owner),
+    db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND EXISTS (SELECT 1 FROM sketch_pages WHERE book_id=? AND page_no=? AND revision=? AND updated_at=?)").bind(at,bookId,owner,bookId,pageNo,revision+1,at),
+  ]);
+  if(!result[0].rowsAffected)throw new Error('画页已更新，无法直接恢复；请核对本页内容');return {revision:revision+1};
 }
 export async function saveSketchDraft(owner:string,bookId:string,text:string,expected:string){
   await writable(owner,bookId);if(text.length>6000)throw new Error('问题不能超过 6000 字');
@@ -216,6 +234,7 @@ export async function generateSketchPdf(owner:string,bookId:string,archiveToken?
 }
 export async function sketchPdf(owner:string,bookId:string,versionId:string){await owned(owner,bookId);const version=await db.prepare('SELECT * FROM sketch_pdf_versions WHERE id=? AND book_id=?').bind(versionId,bookId).first<PdfVersion>();if(!version)throw new Error('PDF 不存在');return readBlob(version.pdf_hash);}
 export async function sketchImage(owner:string,bookId:string,pageNo:number){await owned(owner,bookId);const page=await db.prepare('SELECT image_hash FROM sketch_pages WHERE book_id=? AND page_no=?').bind(bookId,pageNo).first<Pick<Page,'image_hash'>>();if(!page?.image_hash)throw new Error('画作不存在');return readBlob(page.image_hash);}
+export async function sketchBaseImage(owner:string,bookId:string,pageNo:number){await owned(owner,bookId);const page=await db.prepare('SELECT base_image_hash FROM sketch_pages WHERE book_id=? AND page_no=?').bind(bookId,pageNo).first<Pick<Page,'base_image_hash'>>();if(!page?.base_image_hash)throw new Error('底图不存在');return readBlob(page.base_image_hash);}
 
 // Cancel claims left by an older worker during a rolling restart. Invalidate
 // its token so it cannot finish an automatic archive after this version starts.
