@@ -95,3 +95,45 @@ test('legacy archive claims are restored without a blank book',async()=>{
   assert.equal(resumed.book.id,id);assert.equal(resumed.book.status,'active');assert.equal(resumed.book.draft_text,'必须保留的原文');
   assert.equal(resumed.versions.length,0);
 });
+
+test('legacy PNG remains a base image when new strokes are saved and erased',async()=>{
+  const owner='vector-migration-owner',first=await sketch.sketchState(owner),id=first.book.id;
+  await sketch.saveSketchPage(owner,id,1,red,0);
+  const legacy=await sketch.sketchState(owner,id);
+  assert.equal(legacy.pages[0].strokes,null);
+  const oldPdf=await sketch.generateSketchPdf(owner,id);
+  const original=await sketch.sketchImage(owner,id,1);
+  const strokes=[{id:'new-ink',color:'#123456',width:0.003,points:[{x:0.1,y:0.2},{x:0.5,y:0.6}]}];
+  await sketch.saveSketchPage(owner,id,1,blue,1,strokes);
+  const migrated=await sketch.sketchState(owner,id);
+  assert.deepEqual(migrated.pages[0].strokes,strokes);
+  await assert.rejects(sketch.saveSketchPage(owner,id,1,red,2),/新版画笔/);
+  assert.equal((await sketch.sketchState(owner,id)).pages[0].revision,2);
+  assert.equal((await sketch.sketchBaseImage(owner,id,1)).toString('base64'),original.toString('base64'));
+  await sketch.saveSketchPage(owner,id,1,red,2,[]);
+  assert.deepEqual((await sketch.sketchState(owner,id)).pages[0].strokes,[]);
+  assert.equal((await sketch.sketchBaseImage(owner,id,1)).toString('base64'),original.toString('base64'));
+  assert.equal((await sketch.sketchPdf(owner,id,oldPdf)).subarray(0,4).toString(),'%PDF');
+  await assert.rejects(sketch.saveSketchPage(owner,id,1,red,2,strokes));
+  await assert.rejects(sketch.saveSketchPage(owner,id,1,red,3,[{...strokes[0],color:'invalid'}]));
+});
+
+test('clear whole page stays blank after reload and can restore its PNG and strokes',async()=>{
+  const owner='clear-page-owner',first=await sketch.sketchState(owner),id=first.book.id;
+  await sketch.saveSketchPage(owner,id,1,red,0);
+  const strokes=[{id:'old-stroke',color:'#123456',width:0.003,points:[{x:0.1,y:0.2}]}];
+  await sketch.saveSketchPage(owner,id,1,blue,1,strokes);
+  const pdf=await sketch.generateSketchPdf(owner,id);
+  await sketch.clearSketchPage(owner,id,1,2);
+  const blank=await sketch.sketchState(owner,id);
+  assert.equal(blank.pages[0].image_hash,null);
+  assert.deepEqual(blank.pages[0].strokes,[]);
+  assert.ok(blank.pages[0].cleared_image_hash);
+  assert.equal((await sketch.sketchPdf(owner,id,pdf)).subarray(0,4).toString(),'%PDF');
+  await sketch.restoreClearedSketchPage(owner,id,1,3);
+  const restored=await sketch.sketchState(owner,id);
+  assert.deepEqual(restored.pages[0].strokes,strokes);
+  assert.equal((await sketch.sketchImage(owner,id,1)).toString('base64'),Buffer.from(blue.split(',')[1],'base64').toString('base64'));
+  assert.equal((await sketch.sketchBaseImage(owner,id,1)).toString('base64'),Buffer.from(red.split(',')[1],'base64').toString('base64'));
+  await assert.rejects(sketch.restoreClearedSketchPage(owner,id,1,4));
+});

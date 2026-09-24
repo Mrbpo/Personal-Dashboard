@@ -55,7 +55,7 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS sketchbooks (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', draft_text TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0, last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, archived_at TEXT, archive_claimed_at TEXT, archive_token TEXT)`,
   `CREATE INDEX IF NOT EXISTS idx_sketchbooks_owner_status ON sketchbooks(owner_id,status,last_activity_at)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_sketchbooks_one_active ON sketchbooks(owner_id) WHERE status='active'`,
-  `CREATE TABLE IF NOT EXISTS sketch_pages (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, page_no INTEGER NOT NULL, image_hash TEXT, revision INTEGER NOT NULL DEFAULT 0, note_draft TEXT NOT NULL DEFAULT '', note_revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, UNIQUE(book_id,page_no))`,
+  `CREATE TABLE IF NOT EXISTS sketch_pages (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, page_no INTEGER NOT NULL, image_hash TEXT, base_image_hash TEXT, strokes_json TEXT, cleared_image_hash TEXT, cleared_base_image_hash TEXT, cleared_strokes_json TEXT, revision INTEGER NOT NULL DEFAULT 0, note_draft TEXT NOT NULL DEFAULT '', note_revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, UNIQUE(book_id,page_no))`,
   `CREATE TABLE IF NOT EXISTS sketch_entries (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, page_no INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, edit_revision INTEGER NOT NULL DEFAULT 0, request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(book_id,request_id,kind))`,
   `CREATE INDEX IF NOT EXISTS idx_sketch_entries_book ON sketch_entries(book_id,created_at)`,
   `CREATE TABLE IF NOT EXISTS sketch_pdf_versions (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, source_revision INTEGER NOT NULL, pdf_hash TEXT NOT NULL, created_at TEXT NOT NULL)`,
@@ -148,6 +148,11 @@ async function ready() {
     for (const [table, name, definition] of [
       ["sketch_pages", "note_draft", "TEXT NOT NULL DEFAULT ''"],
       ["sketch_pages", "note_revision", "INTEGER NOT NULL DEFAULT 0"],
+      ["sketch_pages", "base_image_hash", "TEXT"],
+      ["sketch_pages", "strokes_json", "TEXT"],
+      ["sketch_pages", "cleared_image_hash", "TEXT"],
+      ["sketch_pages", "cleared_base_image_hash", "TEXT"],
+      ["sketch_pages", "cleared_strokes_json", "TEXT"],
       ["sketch_entries", "edit_revision", "INTEGER NOT NULL DEFAULT 0"],
     ]) {
       const columns = await getClient().execute(`PRAGMA table_info(${table})`);
