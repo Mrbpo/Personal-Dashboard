@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Eraser, PenLine, Plus, Send, FileDown, RotateCcw, Trash2 } from 'lucide-react';
 import { createSketchDraftSaver, reconcileSketchDraft } from '@/lib/sketch-draft';
 import { createSketchPageSaveScheduler } from '@/lib/sketch-page-save';
+import { isSketchEditable, planSketchPoll } from '@/lib/sketch-poll';
 
 type Book={id:string;status:string;draft_text:string;revision:number;created_at:string;last_activity_at:string};
 type Page={id:string;page_no:number;image_hash:string|null;revision:number};
@@ -20,7 +21,23 @@ export function SketchWorkspace(){
   const refresh=useCallback(async(bookId?:string)=>{const revisionAtLoad=draftRevision.current;const next=await load(bookId);apply(next,revisionAtLoad);if(!next.pages.some(p=>p.page_no===pageRef.current)){pageRef.current=next.pages[0]?.page_no||1;setPageNo(pageRef.current);}return next;},[apply]);
   useEffect(()=>{void refresh().catch(e=>setMessage(String(e)));},[refresh]);
   useEffect(()=>{const warn=(event:BeforeUnloadEvent)=>{if(dirty.current||pendingSaves.current||draftValue.current!==stateRef.current?.book.draft_text){void pageSaver.current?.flush().catch(()=>undefined);event.preventDefault();event.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[]);
-  useEffect(()=>{const timer=setInterval(()=>{const current=stateRef.current;if(!current||current.book.status==='archived'||dirty.current||drawing.current||pendingSaves.current||draftValue.current!==current.book.draft_text||busy)return;const revisionAtLoad=draftRevision.current;void load().then(next=>{if(next.book.id!==current.book.id){pageRef.current=1;setPageNo(1);apply(next,revisionAtLoad);}}).catch(()=>undefined);},60000);return()=>clearInterval(timer);},[apply,busy]);
+  useEffect(()=>{const timer=setInterval(()=>{
+    const current=stateRef.current;if(!current||current.book.status==='archived'||busy)return;
+    const revisionAtLoad=draftRevision.current;
+    const hasLocalWork=(snapshot:Snapshot)=>dirty.current||drawing.current||pendingSaves.current>0||draftValue.current!==snapshot.book.draft_text;
+    void load().then(async next=>{
+      const latest=stateRef.current;if(!latest||latest.book.id!==current.book.id)return;
+      let plan=planSketchPoll(latest,next,hasLocalWork(latest));
+      if(plan.kind==='inspectCurrent'){
+        const old=await load(latest.book.id),still=stateRef.current;
+        if(!still||still.book.id!==latest.book.id)return;
+        plan=planSketchPoll(still,old,hasLocalWork(still));
+      }
+      if(plan.kind==='none'||plan.kind==='inspectCurrent')return;
+      if(plan.kind==='switch'){pageRef.current=1;setPageNo(1);}
+      apply(plan.snapshot,revisionAtLoad);
+    }).catch(()=>undefined);
+  },60000);return()=>clearInterval(timer);},[apply,busy]);
   useEffect(()=>{
     const ctx=canvas.current?.getContext('2d'),element=canvas.current,current=stateRef.current;
     if(!ctx||!element||!current)return;
@@ -73,10 +90,10 @@ export function SketchWorkspace(){
   const move=async(number:number)=>{if(number===pageNo)return;try{await flushPage();await flushDraft();if(stateRef.current?.book.status==='active')await request({action:'touch',bookId:stateRef.current.book.id});pageRef.current=number;setPageNo(number);}catch(e){setMessage(e instanceof Error?e.message:'切页失败');}};
   const action=async(fn:()=>Promise<void>)=>{setBusy(true);setMessage('');try{await flushPage();await flushDraft();if(stateRef.current?.book.status==='active')await request({action:'touch',bookId:stateRef.current.book.id});await fn();}catch(e){setMessage(e instanceof Error?e.message:'操作失败');}finally{setBusy(false);}};
   const point=(event:React.PointerEvent<HTMLCanvasElement>)=>{const box=event.currentTarget.getBoundingClientRect();return{x:(event.clientX-box.left)*event.currentTarget.width/box.width,y:(event.clientY-box.top)*event.currentTarget.height/box.height};};
-  const start=(event:React.PointerEvent<HTMLCanvasElement>)=>{if(!readyRef.current||state?.book.status==='archiving')return;event.currentTarget.setPointerCapture(event.pointerId);const ctx=event.currentTarget.getContext('2d');if(!ctx)return;scheduledPageSave().pause();drawing.current=true;const p=point(event);ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p.x+.01,p.y+.01);ctx.strokeStyle=tool==='eraser'?'#fffdf8':'#1c2930';ctx.lineWidth=tool==='eraser'?24:3;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke();dirty.current=true;};
+  const start=(event:React.PointerEvent<HTMLCanvasElement>)=>{if(!readyRef.current||!isSketchEditable(state?.book.status))return;event.currentTarget.setPointerCapture(event.pointerId);const ctx=event.currentTarget.getContext('2d');if(!ctx)return;scheduledPageSave().pause();drawing.current=true;const p=point(event);ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p.x+.01,p.y+.01);ctx.strokeStyle=tool==='eraser'?'#fffdf8':'#1c2930';ctx.lineWidth=tool==='eraser'?24:3;ctx.lineCap='round';ctx.lineJoin='round';ctx.stroke();dirty.current=true;};
   const draw=(event:React.PointerEvent<HTMLCanvasElement>)=>{if(!drawing.current)return;const ctx=event.currentTarget.getContext('2d');if(!ctx)return;const p=point(event);ctx.lineTo(p.x,p.y);ctx.stroke();dirty.current=true;};
   const stop=()=>{if(!drawing.current)return;drawing.current=false;scheduledPageSave().schedule();};
-  const currentPage=state?.pages.find(p=>p.page_no===pageNo),editable=state?.book.status==='active'||state?.book.status==='archived';
+  const currentPage=state?.pages.find(p=>p.page_no===pageNo),editable=isSketchEditable(state?.book.status);
   return <div className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
     <section className="min-w-0 space-y-4">
       <div className="rounded-2xl border border-[#bdb29b] bg-[#f9f5ea] p-3 shadow-sm sm:p-5">
