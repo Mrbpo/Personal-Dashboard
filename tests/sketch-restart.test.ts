@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-test('a replacement worker recovers a persisted expired archive claim',()=>{
+test('a replacement worker cancels a persisted archive claim and keeps the same book',()=>{
   const directory=mkdtempSync(join(tmpdir(),'sketch-restart-'));
   const env={...process.env,DATABASE_URL:`file:${join(directory,'study.db').replaceAll('\\','/')}`,LIBRARY_DIR:join(directory,'blobs')};
   const run=(source:string)=>{
@@ -21,17 +21,17 @@ test('a replacement worker recovers a persisted expired archive claim',()=>{
       const sketch=await import('./lib/sketchbooks.ts');
       const {database:db}=await import('./lib/database.ts');
       const state=await sketch.sketchState('restart-owner');
-      await sketch.saveSketchDraft('restart-owner',state.book.id,'必须保留的原文');
+      await sketch.saveSketchDraft('restart-owner',state.book.id,'必须保留的原文','');
       await db.prepare("UPDATE sketchbooks SET status='archiving',last_activity_at=?,archive_claimed_at=?,archive_token=? WHERE id=?").bind(new Date(Date.now()-3*60*60*1000).toISOString(),new Date(Date.now()-10*60*1000).toISOString(),'dead-worker',state.book.id).run();
       console.log(state.book.id);
     `);
     const result=JSON.parse(run(`
       const sketch=await import('./lib/sketchbooks.ts');
-      await sketch.archiveIdleSketchbooks();
+      await sketch.recoverSketchArchiveClaims();
       const archived=await sketch.sketchState('restart-owner','${id}');
       const active=await sketch.sketchState('restart-owner');
       console.log(JSON.stringify({status:archived.book.status,draft:archived.book.draft_text,versions:archived.versions.length,newId:active.book.id}));
     `)) as {status:string;draft:string;versions:number;newId:string};
-    assert.equal(result.status,'archived');assert.equal(result.draft,'必须保留的原文');assert.ok(result.versions>0);assert.notEqual(result.newId,id);
+    assert.equal(result.status,'active');assert.equal(result.draft,'必须保留的原文');assert.equal(result.versions,0);assert.equal(result.newId,id);
   }finally{rmSync(directory,{recursive:true,force:true});}
 });

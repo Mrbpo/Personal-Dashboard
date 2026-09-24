@@ -19,7 +19,7 @@ export function reconcileSketchDraft<T extends {book:{id:string;draft_text:strin
 // completed on the server. A later edit during a request is sent next.
 export function createSketchDraftSaver(
   read:()=>SketchDraftSnapshot|null,
-  write:(bookId:string,text:string)=>Promise<void>,
+  write:(bookId:string,text:string,expected:string)=>Promise<void>,
   markSaved:(bookId:string,text:string)=>void,
 ){
   let queue:Promise<void>=Promise.resolve();
@@ -31,7 +31,7 @@ export function createSketchDraftSaver(
         const snapshot=read();
         if(!snapshot||snapshot.bookId!==bookId||snapshot.status==='archiving'||snapshot.current===snapshot.saved)return;
         const text=snapshot.current;
-        await write(bookId,text);
+        await write(bookId,text,snapshot.saved);
         markSaved(bookId,text);
       }
     });
