@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { explicitArchiveCourse, inferActivityCourse, inferArchiveCourse, mergeArchiveSources, preferStrongDocumentMatches } from '../lib/archive-search.ts';
+import { explicitArchiveCourse, inferActivityCourse, inferArchiveCourse, mergeArchiveSources, preferStrongDocumentMatches, subjectArchiveCourses } from '../lib/archive-search.ts';
 import type { CourseSearchResult } from '../lib/repository.ts';
 
 const courses = [
@@ -22,6 +22,10 @@ test('archive search recognizes an explicit course code without manual setup',()
 test('archive search recognizes an unambiguous subject name before generic tutorial matches',()=>{
   assert.equal(explicitArchiveCourse('统计 tut 我要做什么', courses),'stats');
   assert.equal(explicitArchiveCourse('微积分 tutorial 的要求', courses),'math');
+  assert.equal(explicitArchiveCourse('数学tut要做什么，帮我看看课程大纲', courses),'math');
+  assert.deepEqual(subjectArchiveCourses('数学 tut', courses)?.map((course) => course.id), ['math']);
+  assert.deepEqual(subjectArchiveCourses('数学 tut', [...courses, { id:'math2', code:'MATB41H3', name:'Algebra', enabled:true }])?.map((course) => course.id), ['math','math2']);
+  assert.deepEqual(subjectArchiveCourses('数学 tut', courses.filter((course) => course.id !== 'math')), []);
 });
 
 test('archive search infers one course from repeated top directory matches',()=>{
@@ -59,4 +63,16 @@ test('a strong filename match excludes stale announcements but keeps confirmed P
 test('an explicit tutorial number keeps only documents for that tutorial',()=>{
   const selected=preferStrongDocumentMatches('tutorial 1 要完成哪些图表',[],[{...hit('stats','STAB22TUT1Notes.pdf'),score:3.5},{...hit('stats','STAB22TUT1.pdf'),score:3.4},{...hit('stats','Tutorial registration.txt'),score:3.3},{...hit('stats','STAB22TUT2.pdf'),score:3.2}]);
   assert.deepEqual(selected.library.map((item)=>item.name),['STAB22TUT1Notes.pdf','STAB22TUT1.pdf']);
+});
+
+test('a question about both tutorial work and syllabus keeps the syllabus alongside the tutorial',()=>{
+  const selected=preferStrongDocumentMatches('数学tut要做什么，帮我看看课程大纲',[
+    source('math','Old tutorial announcement','announcement'),
+    source('math','课程大纲 Syllabus','syllabus'),
+  ],[
+    {...hit('math','Tutorial 2.pdf'),score:4.1},
+    {...hit('math','Syllabus.pdf'),score:1.4},
+  ]);
+  assert.deepEqual(selected.structured.map((item)=>item.title), ['课程大纲 Syllabus']);
+  assert.deepEqual(selected.library.map((item)=>item.name), ['Tutorial 2.pdf','Syllabus.pdf']);
 });

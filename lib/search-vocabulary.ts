@@ -13,6 +13,10 @@ export function activitySearchAliases(question: string): string[] {
   return [...aliases];
 }
 
+export function asksForSyllabus(question: string): boolean {
+  return /课程大纲|教学大纲|\bsyllabus\b|\bcourse\s+outline\b/i.test(question);
+}
+
 export function ftsMatchTerms(terms: string[]): string {
   return [...new Set(terms.map((term) => term.trim().toLocaleLowerCase()))]
     .filter((term) => term.length >= 2 && !/^\d+$/.test(term))

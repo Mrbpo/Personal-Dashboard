@@ -463,22 +463,33 @@ export async function searchCourseContent(question: string, courseId?: string, l
   const likeFilter = (alias: string, columns: string[]) => fallbackTerms.map(() => `(${columns.map((column) => `lower(${alias}.${column}) LIKE ?`).join(' OR ')})`).join(' OR ');
   const likeArgs = (columns: number) => fallbackTerms.flatMap((term) => Array(columns).fill(`%${term.toLocaleLowerCase()}%`));
   const candidateLimit = Math.min(1800, Math.max(600, limit * 12));
-  const canvasRows = piazzaOnly ? { results: [] as D1Row[] } : await db.prepare(
+  const queryRows = async (withIndex: boolean) => {
+    const canvasRows = piazzaOnly ? { results: [] as D1Row[] } : await db.prepare(
     `SELECT s.id, s.course_id, c.code course_code, s.source_type, s.title, s.body, s.source_url,
       s.remote_updated_at, s.analysis_json, '' answer, '' kind
-     FROM source_items s JOIN courses c ON c.id=s.course_id ${useIndex ? 'JOIN source_items_fts ON source_items_fts.rowid=s.rowid' : ''}
+     FROM source_items s JOIN courses c ON c.id=s.course_id ${withIndex ? 'JOIN source_items_fts ON source_items_fts.rowid=s.rowid' : ''}
      WHERE s.is_active=1 AND c.enabled=1 ${courseId ? "AND (s.course_id=? OR c.code=?)" : ""}
-     ${useIndex ? 'AND source_items_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('s',['title','body','analysis_json'])})` : ''}
-     ORDER BY ${useIndex ? 'bm25(source_items_fts,10.0,2.0,1.0)' : 's.last_seen_at DESC'} LIMIT ?`
-  ).bind(...(courseId ? [courseId, courseId] : []),...(useIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
-  const piazzaRows = await db.prepare(
+     ${withIndex ? 'AND source_items_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('s',['title','body','analysis_json'])})` : ''}
+     ORDER BY ${withIndex ? 'bm25(source_items_fts,10.0,2.0,1.0)' : 's.last_seen_at DESC'} LIMIT ?`
+    ).bind(...(courseId ? [courseId, courseId] : []),...(withIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
+    const piazzaRows = await db.prepare(
     `SELECT p.id, p.course_id, c.code course_code, 'piazza' source_type, p.title, p.body, p.source_url,
       p.remote_updated_at, NULL analysis_json, p.answer, p.kind
-     FROM piazza_posts p JOIN courses c ON c.id=p.course_id ${useIndex ? 'JOIN piazza_posts_fts ON piazza_posts_fts.rowid=p.rowid' : ''}
+     FROM piazza_posts p JOIN courses c ON c.id=p.course_id ${withIndex ? 'JOIN piazza_posts_fts ON piazza_posts_fts.rowid=p.rowid' : ''}
      WHERE p.is_active=1 AND c.enabled=1 ${courseId ? "AND (p.course_id=? OR c.code=?)" : ""}
-     ${useIndex ? 'AND piazza_posts_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('p',['title','body','answer'])})` : ''}
-     ORDER BY ${useIndex ? 'bm25(piazza_posts_fts,10.0,1.0,6.0)' : 'p.remote_updated_at DESC'} LIMIT ?`
-  ).bind(...(courseId ? [courseId, courseId] : []),...(useIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
+     ${withIndex ? 'AND piazza_posts_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('p',['title','body','answer'])})` : ''}
+     ORDER BY ${withIndex ? 'bm25(piazza_posts_fts,10.0,1.0,6.0)' : 'p.remote_updated_at DESC'} LIMIT ?`
+    ).bind(...(courseId ? [courseId, courseId] : []),...(withIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
+    return { canvasRows, piazzaRows };
+  };
+  let searched: Awaited<ReturnType<typeof queryRows>>;
+  try { searched = await queryRows(useIndex); }
+  catch (error) {
+    if (!useIndex) throw error;
+    searched = await queryRows(false);
+    console.warn('[course-search] FTS query failed; using scoped keyword fallback');
+  }
+  const { canvasRows, piazzaRows } = searched;
   const scheduleRows = courseId ? { results: [] as D1Row[] } : await db.prepare(
     `SELECT id, 'schedule' course_id, '个人日程' course_code, 'schedule' source_type, title,
       (description || '\n开始：' || start_at || '\n结束：' || end_at) body, NULL source_url,

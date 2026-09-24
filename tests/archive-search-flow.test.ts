@@ -6,6 +6,7 @@ process.env.OPENAI_API_KEY = 'test-key';
 const repo = await import('../lib/repository.ts');
 const lib = await import('../lib/library.ts');
 const { searchArchiveForAnswer } = await import('../lib/archive-search.ts');
+const { answerCourseQuestion } = await import('../lib/course-qa.ts');
 
 test('strong local lab evidence avoids an external embedding wait', async () => {
   await repo.upsertCourses([{ id:'chem', name:'Chemistry', course_code:'CHMA10H3' }, { id:'stats', name:'Statistics', course_code:'STAB22H3' }]);
@@ -50,4 +51,71 @@ test('weak evidence makes at most one bounded embedding request', async () => {
     assert.ok(result.timings.embeddingMs >= 0);
     assert.ok(result.timings.totalMs >= result.timings.embeddingMs);
   } finally { globalThis.fetch = original; }
+});
+
+test('subject questions stay in their courses and mixed math requests retain syllabus evidence', async () => {
+  await repo.upsertCourses([{ id:'math', name:'Calculus I', course_code:'MATA29H3' }, { id:'stats', name:'Statistics I', course_code:'STAB22H3' }, { id:'chem', name:'Chemistry I', course_code:'CHMA10H3' }]);
+  const mathTutorial=await lib.saveDocument('student','math','upload','math-tut','Tutorial 2.txt','text/plain',Buffer.from('Tutorial 2: complete problems 1 and 2 before Friday.'));
+  await lib.indexDocument('student',mathTutorial);
+  const mathOutline=await lib.saveDocument('student','math','upload','math-outline','Course Outline.txt','text/plain',Buffer.from('Tutorials count for 10 percent of the course grade.'));
+  await lib.indexDocument('student',mathOutline);
+  const statsTutorial=await lib.saveDocument('student','stats','upload','stats-tut','Tutorial 2.txt','text/plain',Buffer.from('Statistics Tutorial 2: make boxplots.'));
+  await lib.indexDocument('student',statsTutorial);
+  const chemTutorial=await lib.saveDocument('student','chem','upload','chem-tut','Tutorial 2.txt','text/plain',Buffer.from('Chemistry Tutorial 2: balance equations.'));
+  await lib.indexDocument('student',chemTutorial);
+  const syllabus={ id:'math:syllabus', courseId:'math', sourceType:'syllabus', sourceId:'syllabus', title:'课程大纲 Syllabus', body:'Tutorials count for 10 percent of the course grade.', sourceUrl:null, updatedAt:null, dueAt:null, unlockAt:null, lockAt:null, submissionState:null, pointsPossible:null, prerequisiteBlocked:false };
+  await repo.saveSource(syllabus, null, await repo.hashSource(syllabus), 'rule_only');
+
+  const result=await searchArchiveForAnswer('student','数学tut要做什么，帮我看看课程大纲');
+  assert.equal(result.inferredCourseId,'math');
+  assert.equal(result.courseSelection,null);
+  assert.ok(result.sources.some((item)=>item.sourceId===mathTutorial));
+  assert.ok(result.sources.some((item)=>item.sourceId===mathOutline));
+  assert.ok(result.sources.some((item)=>item.sourceType==='syllabus'));
+  assert.ok(result.sources.every((item)=>item.courseId==='math'));
+  assert.ok(!result.sources.some((item)=>item.sourceId===statsTutorial));
+  const tutorialRef=result.sources.find((item)=>item.sourceId===mathTutorial)!.ref;
+  const syllabusRef=result.sources.find((item)=>item.sourceType==='syllabus')!.ref;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=(async (_input: string | URL | Request, init?: RequestInit) => {
+    const prompt=JSON.parse(String(init?.body)).input[0].content[0].text as string;
+    assert.match(prompt,/complete problems 1 and 2/);
+    assert.match(prompt,/Tutorials count for 10 percent/);
+    assert.doesNotMatch(prompt,/make boxplots|balance equations/);
+    return Response.json({status:'completed',output_text:JSON.stringify({answer:`完成第 1、2 题。[${tutorialRef}]\n课程大纲说明 tutorial 占总评 10%。[${syllabusRef}]`,needsClarification:false,followUps:[],citationRefs:[tutorialRef,syllabusRef]})});
+  }) as typeof fetch;
+  try {
+    const answer=await answerCourseQuestion('数学tut要做什么，帮我看看课程大纲',result.sources);
+    assert.deepEqual(answer.citationRefs,[tutorialRef,syllabusRef]);
+    assert.deepEqual(result.sources.filter((item)=>answer.citationRefs.includes(item.ref)).map((item)=>item.courseId),['math','math']);
+  } finally {globalThis.fetch=originalFetch;}
+
+  for (const [question, courseId] of [['统计tut要做什么', 'stats'], ['化学tut要做什么', 'chem']] as const) {
+    const subjectResult=await searchArchiveForAnswer('student',question);
+    assert.equal(subjectResult.inferredCourseId,courseId);
+    assert.ok(subjectResult.sources.length>0);
+    assert.ok(subjectResult.sources.every((item)=>item.courseId===courseId));
+  }
+
+  for (const [question, selectedCourse] of [['数学 STAB22 tut 要做什么', ''], ['数学tut要做什么', 'stats']] as const) {
+    const conflict=await searchArchiveForAnswer('student',question,selectedCourse);
+    assert.equal(conflict.inferredCourseId,null);
+    assert.deepEqual(conflict.courseSelection?.map((course)=>course.id), ['math']);
+    assert.deepEqual(conflict.sources,[]);
+  }
+
+  await repo.upsertCourses([{ id:'math2', name:'Linear Algebra', course_code:'MATB41H3' }]);
+  const ambiguous=await searchArchiveForAnswer('student','数学tut要做什么，帮我看看课程大纲');
+  assert.equal(ambiguous.inferredCourseId,null);
+  assert.deepEqual(ambiguous.courseSelection?.map((course)=>course.id), ['math','math2']);
+  assert.deepEqual(ambiguous.sources,[]);
+  const explicit=await searchArchiveForAnswer('student','MATA29H3 数学tut要做什么，帮我看看课程大纲');
+  assert.equal(explicit.inferredCourseId,'math');
+  assert.ok(explicit.sources.every((item)=>item.courseId==='math'));
+  assert.ok(explicit.sources.some((item)=>item.sourceType==='syllabus'));
+  await repo.setCourseEnabled('math',false);
+  await repo.setCourseEnabled('math2',false);
+  const unavailable=await searchArchiveForAnswer('student','数学tut要做什么，帮我看看课程大纲');
+  assert.deepEqual(unavailable.courseSelection,[]);
+  assert.deepEqual(unavailable.sources,[]);
 });

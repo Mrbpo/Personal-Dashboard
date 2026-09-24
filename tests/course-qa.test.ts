@@ -57,6 +57,26 @@ test("unconfirmed Piazza discussion alone cannot establish lab requirements", as
   } finally { globalThis.fetch = original; }
 });
 
+test('a combined tutorial and syllabus question asks AI to answer both parts', async () => {
+  const original=globalThis.fetch;
+  globalThis.fetch=(async (_input: string | URL | Request, init?: RequestInit) => {
+    const prompt=JSON.parse(String(init?.body)).input[0].content[0].text as string;
+    assert.match(prompt,/分两部分回答/);
+    assert.match(prompt,/Tutorial 2 requires problems 1 and 2/);
+    assert.match(prompt,/Tutorials count for 10 percent/);
+    assert.doesNotMatch(prompt,/忽略与当前任务无关的旧公告、通用 syllabus/);
+    return Response.json({status:'completed',output_text:JSON.stringify({answer:'Tutorial 2 完成第 1、2 题。[S1]\n大纲说明 tutorial 占总评 10%。[S2]',needsClarification:false,followUps:[],citationRefs:['S1','S2']})});
+  }) as typeof fetch;
+  try {
+    const base={courseId:'math',courseCode:'MATA29H3',excerpt:'',sourceUrl:null,updatedAt:null};
+    const answer=await answerCourseQuestion('数学tut要做什么，帮我看看课程大纲',[
+      {...base,ref:'S1',sourceId:'tut',sourceType:'document',title:'Tutorial 2',body:'Tutorial 2 requires problems 1 and 2.'},
+      {...base,ref:'S2',sourceId:'syllabus',sourceType:'syllabus',title:'Syllabus',body:'Tutorials count for 10 percent.'},
+    ]);
+    assert.deepEqual(answer.citationRefs,['S1','S2']);
+  } finally {globalThis.fetch=original;}
+});
+
 test("an ambiguous lab request asks for the course instead of mixing requirements", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () => { throw new Error('ambiguous courses must not invoke AI'); }) as typeof fetch;
