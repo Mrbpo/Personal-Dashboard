@@ -9,8 +9,8 @@ import { serviceValue } from './service-vault.ts';
 import { acquireLease, releaseLease } from './jobs.ts';
 
 type Book = { id:string; owner_id:string; status:string; draft_text:string; revision:number; last_activity_at:string; created_at:string; archived_at:string|null; archive_claimed_at:string|null; archive_token:string|null };
-type Page = { id:string; book_id:string; page_no:number; image_hash:string|null; revision:number; updated_at:string };
-type Entry = { id:string; book_id:string; page_no:number; kind:string; body:string; request_id:string|null; created_at:string; updated_at:string };
+type Page = { id:string; book_id:string; page_no:number; image_hash:string|null; revision:number; note_draft:string; note_revision:number; updated_at:string };
+type Entry = { id:string; book_id:string; page_no:number; kind:string; body:string; edit_revision:number; request_id:string|null; created_at:string; updated_at:string };
 type PdfVersion = { id:string; book_id:string; source_revision:number; pdf_hash:string; created_at:string };
 const now = () => new Date().toISOString();
 const validPage = (value:number) => Number.isInteger(value) && value>=1 && value<=100;
@@ -89,22 +89,43 @@ export async function saveSketchPage(owner:string,bookId:string,pageNo:number,da
   if(!result[0].rowsAffected)throw new Error('本页已在其他窗口更改，请刷新后再画');
   return {revision:revision+1,hasImage:Boolean(hash)};
 }
-export async function saveSketchDraft(owner:string,bookId:string,text:string){
+export async function saveSketchDraft(owner:string,bookId:string,text:string,expected:string){
   await writable(owner,bookId);if(text.length>6000)throw new Error('问题不能超过 6000 字');
-  const result=await db.prepare("UPDATE sketchbooks SET draft_text=?,revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND status IN ('active','archived')").bind(text,now(),bookId,owner).run();
-  if(!result.rowsAffected)throw new Error('画册状态已变化，请刷新');
+  const result=await db.prepare("UPDATE sketchbooks SET draft_text=?,revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND status IN ('active','archived') AND draft_text=?").bind(text,now(),bookId,owner,expected).run();
+  if(!result.rowsAffected)throw new Error('共享文字已在其他窗口更改；本窗口文字仍在，请复制后刷新核对');
 }
 export async function touchSketch(owner:string,bookId:string){
   const result=await db.prepare("UPDATE sketchbooks SET last_activity_at=? WHERE id=? AND owner_id=? AND status='active'").bind(now(),bookId,owner).run();
   if(!result.rowsAffected)await writable(owner,bookId);
 }
-export async function editSketchEntry(owner:string,bookId:string,entryId:string,body:string){
-  await writable(owner,bookId);if(body.length>30000)throw new Error('记录过长');
+export async function editSketchEntry(owner:string,bookId:string,entryId:string,body:string,revision:number){
+  await writable(owner,bookId);if(body.length>30000||!Number.isInteger(revision)||revision<0)throw new Error('记录或版本无效');
   const at=now();const result=await db.batch([
-    db.prepare("UPDATE sketch_entries SET body=?,updated_at=? WHERE id=? AND book_id=? AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(body,at,entryId,bookId,bookId,owner),
-    db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND status IN ('active','archived') AND EXISTS (SELECT 1 FROM sketch_entries WHERE id=? AND book_id=? AND updated_at=?)").bind(at,bookId,owner,entryId,bookId,at),
+    db.prepare("UPDATE sketch_entries SET body=?,edit_revision=edit_revision+1,updated_at=? WHERE id=? AND book_id=? AND edit_revision=? AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(body,at,entryId,bookId,revision,bookId,owner),
+    db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND status IN ('active','archived') AND EXISTS (SELECT 1 FROM sketch_entries WHERE id=? AND book_id=? AND edit_revision=?)").bind(at,bookId,owner,entryId,bookId,revision+1),
   ]);
-  if(!result[0].rowsAffected)throw new Error('记录不存在或画册正在归档');
+  if(!result[0].rowsAffected)throw new Error('记录已在其他窗口更改；本窗口文字仍在，请复制后刷新核对');
+  return {revision:revision+1};
+}
+export async function saveSketchNoteDraft(owner:string,bookId:string,pageNo:number,text:string,revision:number){
+  await writable(owner,bookId);if(!validPage(pageNo)||text.length>6000||!Number.isInteger(revision)||revision<0)throw new Error('补充文字或版本无效');
+  const at=now();const result=await db.batch([
+    db.prepare("UPDATE sketch_pages SET note_draft=?,note_revision=note_revision+1,updated_at=? WHERE book_id=? AND page_no=? AND note_revision=? AND EXISTS (SELECT 1 FROM sketchbooks WHERE id=? AND owner_id=? AND status IN ('active','archived'))").bind(text,at,bookId,pageNo,revision,bookId,owner),
+    db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND status IN ('active','archived') AND EXISTS (SELECT 1 FROM sketch_pages WHERE book_id=? AND page_no=? AND note_revision=?)").bind(at,bookId,owner,bookId,pageNo,revision+1),
+  ]);
+  if(!result[0].rowsAffected)throw new Error('补充文字已在其他窗口更改；本窗口文字仍在，请复制后刷新核对');
+  return {revision:revision+1};
+}
+export async function commitSketchNote(owner:string,bookId:string,pageNo:number,body:string,revision:number,entryId:string){
+  await writable(owner,bookId);if(!validPage(pageNo)||!body.trim()||body.length>6000||!Number.isInteger(revision)||revision<0||!passwordSafeId(entryId))throw new Error('补充文字或版本无效');
+  const at=now();const result=await db.batch([
+    db.prepare("INSERT OR IGNORE INTO sketch_entries(id,book_id,page_no,kind,body,created_at,updated_at) SELECT ?,p.book_id,p.page_no,'text',?,?,? FROM sketch_pages p JOIN sketchbooks b ON b.id=p.book_id WHERE p.book_id=? AND p.page_no=? AND p.note_revision=? AND p.note_draft=? AND b.owner_id=? AND b.status IN ('active','archived')").bind(entryId,body,at,at,bookId,pageNo,revision,body,owner),
+    db.prepare("UPDATE sketch_pages SET note_draft='',note_revision=note_revision+1,updated_at=? WHERE book_id=? AND page_no=? AND note_revision=? AND EXISTS (SELECT 1 FROM sketch_entries WHERE id=? AND book_id=? AND body=?)").bind(at,bookId,pageNo,revision,entryId,bookId,body),
+    db.prepare("UPDATE sketchbooks SET revision=revision+1,last_activity_at=CASE WHEN status='active' THEN ? ELSE last_activity_at END WHERE id=? AND owner_id=? AND EXISTS (SELECT 1 FROM sketch_entries WHERE id=? AND book_id=?)").bind(at,bookId,owner,entryId,bookId),
+  ]);
+  const existing=await db.prepare('SELECT id FROM sketch_entries WHERE id=? AND book_id=?').bind(entryId,bookId).first();
+  if(!result[0].rowsAffected&&!existing)throw new Error('补充文字已在其他窗口更改，请刷新核对');
+  return {id:entryId,revision:revision+1};
 }
 export async function addSketchText(owner:string,bookId:string,pageNo:number,body:string){
   await writable(owner,bookId);if(!validPage(pageNo)||!body.trim()||body.length>6000)throw new Error('请输入不超过 6000 字的文字');
@@ -172,6 +193,7 @@ async function renderPdf(book:Book,pages:Page[],entries:Entry[]){
     lines(`绘画问 AI · 第 ${pageRow.page_no} 页`,16);y-=12;
     if(pageRow.page_no===1&&book.draft_text.trim()){lines('当前共享文字问题',11,muted);lines(book.draft_text);y-=12;}
     if(pageRow.image_hash){const image=await pdf.embedPng(await readBlob(pageRow.image_hash));const scale=Math.min(505/image.width,360/image.height);const w=image.width*scale,h=image.height*scale;if(y-h<55)newSheet();sheet.drawImage(image,{x:45,y:y-h,width:w,height:h});y-=h+20;}
+    if(pageRow.note_draft.trim()){lines('尚未添加的补充文字草稿',11,muted);lines(pageRow.note_draft);y-=12;}
     for(const entry of entries.filter(e=>e.page_no===pageRow.page_no)){
       if(y<95)newSheet();
       const title=entry.kind==='answer'?'AI 回答':entry.kind==='question'?'用户原文':'补充文字';
@@ -195,32 +217,8 @@ export async function generateSketchPdf(owner:string,bookId:string,archiveToken?
 export async function sketchPdf(owner:string,bookId:string,versionId:string){await owned(owner,bookId);const version=await db.prepare('SELECT * FROM sketch_pdf_versions WHERE id=? AND book_id=?').bind(versionId,bookId).first<PdfVersion>();if(!version)throw new Error('PDF 不存在');return readBlob(version.pdf_hash);}
 export async function sketchImage(owner:string,bookId:string,pageNo:number){await owned(owner,bookId);const page=await db.prepare('SELECT image_hash FROM sketch_pages WHERE book_id=? AND page_no=?').bind(bookId,pageNo).first<Pick<Page,'image_hash'>>();if(!page?.image_hash)throw new Error('画作不存在');return readBlob(page.image_hash);}
 
-export async function archiveIdleSketchbooks(){
-  const cutoff=new Date(Date.now()-2*60*60*1000).toISOString();
-  const staleCutoff=new Date(Date.now()-5*60*1000).toISOString();
-  // A killed worker leaves this state behind. Reclaim only expired claims;
-  // the token prevents an older worker from completing after another takes over.
-  await db.prepare("UPDATE sketchbooks SET status='active',archive_claimed_at=NULL,archive_token=NULL WHERE status='archiving' AND (archive_claimed_at IS NULL OR archive_claimed_at<=?)").bind(staleCutoff).run();
-  const hasContent="(trim(draft_text)<>'' OR EXISTS (SELECT 1 FROM sketch_pages WHERE book_id=sketchbooks.id AND image_hash IS NOT NULL) OR EXISTS (SELECT 1 FROM sketch_entries WHERE book_id=sketchbooks.id))";
-  const due=(await db.prepare(`SELECT id,owner_id FROM sketchbooks WHERE status='active' AND last_activity_at<=? AND ${hasContent} ORDER BY last_activity_at LIMIT 20`).bind(cutoff).all<Pick<Book,'id'|'owner_id'>>()).results;
-  for(const candidate of due){
-    const token=crypto.randomUUID(),claimedAt=now();
-    const claim=await db.prepare(`UPDATE sketchbooks SET status='archiving',archive_claimed_at=?,archive_token=? WHERE id=? AND owner_id=? AND status='active' AND last_activity_at<=? AND ${hasContent}`).bind(claimedAt,token,candidate.id,candidate.owner_id,cutoff).run();
-    if(!claim.rowsAffected)continue;
-    try{
-      const version=await generateSketchPdf(candidate.owner_id,candidate.id,token);
-      const pdf=await db.prepare('SELECT pdf_hash FROM sketch_pdf_versions WHERE id=? AND book_id=?').bind(version,candidate.id).first<Pick<PdfVersion,'pdf_hash'>>();
-      if(!pdf||!(await readBlob(pdf.pdf_hash)).length)throw new Error('PDF 未保存');
-      const freshId=crypto.randomUUID(),freshPage=crypto.randomUUID(),at=now();
-      const committed=await db.batch([
-        db.prepare("UPDATE sketchbooks SET status='archived',archived_at=?,archive_claimed_at=NULL WHERE id=? AND owner_id=? AND status='archiving' AND archive_token=?").bind(at,candidate.id,candidate.owner_id,token),
-        db.prepare("INSERT OR IGNORE INTO sketchbooks(id,owner_id,status,last_activity_at,created_at) SELECT ?,owner_id,'active',?,? FROM sketchbooks WHERE id=? AND owner_id=? AND status='archived' AND archive_token=?").bind(freshId,at,at,candidate.id,candidate.owner_id,token),
-        db.prepare('INSERT OR IGNORE INTO sketch_pages(id,book_id,page_no,updated_at) SELECT ?,id,1,? FROM sketchbooks WHERE id=? AND owner_id=?').bind(freshPage,at,freshId,candidate.owner_id),
-        db.prepare("UPDATE sketchbooks SET archive_token=NULL WHERE id=? AND owner_id=? AND status='archived' AND archive_token=?").bind(candidate.id,candidate.owner_id,token),
-      ]);
-      if(!committed[0].rowsAffected)throw new Error('归档所有权已变化');
-    }catch{
-      await db.prepare("UPDATE sketchbooks SET status='active',archive_claimed_at=NULL,archive_token=NULL WHERE id=? AND owner_id=? AND status='archiving' AND archive_token=?").bind(candidate.id,candidate.owner_id,token).run();
-    }
-  }
+// Cancel claims left by an older worker during a rolling restart. Invalidate
+// its token so it cannot finish an automatic archive after this version starts.
+export async function recoverSketchArchiveClaims(){
+  await db.prepare("UPDATE sketchbooks SET status='active',archive_claimed_at=NULL,archive_token=NULL WHERE status='archiving'").run();
 }

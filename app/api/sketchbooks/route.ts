@@ -1,5 +1,5 @@
 import { apiOwner, apiError } from '@/lib/api-guard';
-import { sketchState, addSketchPage, saveSketchPage, saveSketchDraft, touchSketch, addSketchText, editSketchEntry, deleteSketchEntry, askSketch, generateSketchPdf, sketchPdf, sketchImage } from '@/lib/sketchbooks';
+import { sketchState, addSketchPage, saveSketchPage, saveSketchDraft, saveSketchNoteDraft, commitSketchNote, addSketchText, touchSketch, editSketchEntry, deleteSketchEntry, askSketch, generateSketchPdf, sketchPdf, sketchImage } from '@/lib/sketchbooks';
 export const runtime='nodejs';
 const noStore={'Cache-Control':'private, no-store'};
 export async function GET(request:Request){
@@ -17,10 +17,11 @@ export async function POST(request:Request){
     const body=await request.json(),bookId=String(body.bookId||''),action=String(body.action||'');
     if(action==='page')return Response.json({pageNo:await addSketchPage(owner,bookId)});
     if(action==='savePage')return Response.json(await saveSketchPage(owner,bookId,Number(body.pageNo),String(body.image||''),Number(body.revision)));
-    if(action==='draft'){await saveSketchDraft(owner,bookId,String(body.text||''));return Response.json({ok:true});}
+    if(action==='draft'){await saveSketchDraft(owner,bookId,String(body.text||''),String(body.expected||''));return Response.json({ok:true});}
     if(action==='touch'){await touchSketch(owner,bookId);return Response.json({ok:true});}
-    if(action==='text')return Response.json({id:await addSketchText(owner,bookId,Number(body.pageNo),String(body.body||''))});
-    if(action==='edit'){await editSketchEntry(owner,bookId,String(body.entryId||''),String(body.body||''));return Response.json({ok:true});}
+    if(action==='noteDraft')return Response.json(await saveSketchNoteDraft(owner,bookId,Number(body.pageNo),String(body.text||''),Number(body.revision)));
+    if(action==='text')return Response.json(body.entryId?await commitSketchNote(owner,bookId,Number(body.pageNo),String(body.body||''),Number(body.revision),String(body.entryId)): {id:await addSketchText(owner,bookId,Number(body.pageNo),String(body.body||''))});
+    if(action==='edit')return Response.json(await editSketchEntry(owner,bookId,String(body.entryId||''),String(body.body||''),Number(body.revision)));
     if(action==='delete'){await deleteSketchEntry(owner,bookId,String(body.entryId||''));return Response.json({ok:true});}
     if(action==='ask'){await askSketch(owner,bookId,Number(body.pageNo),String(body.requestId||''));return Response.json(await sketchState(owner,bookId));}
     if(action==='pdf')return Response.json({versionId:await generateSketchPdf(owner,bookId)});
