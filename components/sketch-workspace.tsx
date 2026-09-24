@@ -5,7 +5,7 @@ import { createSketchDraftSaver, reconcileSketchDraft } from '@/lib/sketch-draft
 import { createSketchPageSaveScheduler } from '@/lib/sketch-page-save';
 import { isSketchEditable, planSketchPoll, shouldRetrySketchPageSave } from '@/lib/sketch-poll';
 import { annotationShortcut, isPenEraser } from '@/lib/pdf-input';
-import { drawSketchStroke, hitSketchTrail, SKETCH_WIDTH, SKETCH_HEIGHT, ERASER_RADIUS, type SketchPoint, type SketchStroke, type SketchTool } from '@/lib/sketch-ink';
+import { drawSketchStroke, hitSketchTrail, eraserDisplayRadius, SKETCH_WIDTH, SKETCH_HEIGHT, ERASER_RADIUS, type SketchPoint, type SketchStroke, type SketchTool } from '@/lib/sketch-ink';
 
 type Book={id:string;status:string;draft_text:string;revision:number;created_at:string;last_activity_at:string};
 type Page={id:string;page_no:number;image_hash:string|null;base_image_hash:string|null;cleared_image_hash:string|null;strokes:SketchStroke[]|null;revision:number;note_draft:string;note_revision:number};
@@ -23,7 +23,7 @@ function getBackup<T>(key:string):T|null{try{return JSON.parse(localStorage.getI
 function clearBackup(key:string){try{localStorage.removeItem(key);}catch{}}
 
 export function SketchWorkspace(){
-  const [state,setState]=useState<Snapshot|null>(null),[pageNo,setPageNo]=useState(1),[draft,setDraft]=useState(''),[tool,setTool]=useState<SketchTool>('pen'),[color,setColor]=useState('#1c2930'),[thickness,setThickness]=useState(3),[tabletMode,setTabletMode]=useState(false),[panel,setPanel]=useState<'question'|'records'|'history'|null>('question'),[inkUi,setInkUi]=useState({undo:0,redo:0,strokes:0}),[eraserPoint,setEraserPoint]=useState<SketchPoint|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[canvasReady,setCanvasReady]=useState(false),[pageConflict,setPageConflict]=useState(false),[saveStatus,setSaveStatus]=useState<'saved'|'pending'|'failed'>('saved');
+  const [state,setState]=useState<Snapshot|null>(null),[pageNo,setPageNo]=useState(1),[draft,setDraft]=useState(''),[tool,setTool]=useState<SketchTool>('pen'),[color,setColor]=useState('#1c2930'),[thickness,setThickness]=useState(3),[tabletMode,setTabletMode]=useState(false),[panel,setPanel]=useState<'question'|'records'|'history'|null>('question'),[inkUi,setInkUi]=useState({undo:0,redo:0,strokes:0}),[eraserPoint,setEraserPoint]=useState<SketchPoint|null>(null),[eraserCssRadius,setEraserCssRadius]=useState(ERASER_RADIUS),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[canvasReady,setCanvasReady]=useState(false),[pageConflict,setPageConflict]=useState(false),[saveStatus,setSaveStatus]=useState<'saved'|'pending'|'failed'>('saved');
   const canvas=useRef<HTMLCanvasElement>(null),drawing=useRef(false),dirty=useRef(false),hasMarks=useRef(false),readyRef=useRef(false),pendingSaves=useRef(0),pageSaveError=useRef(''),loadedCanvasPage=useRef(''),saveChain=useRef<Promise<void>>(Promise.resolve()),pageSaver=useRef<ReturnType<typeof createSketchPageSaveScheduler>|null>(null),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftValue=useRef(''),draftRevision=useRef(0),draftSaver=useRef<ReturnType<typeof createSketchDraftSaver>|null>(null),stateRef=useRef<Snapshot|null>(null),pageRef=useRef(1);
   const strokes=useRef<SketchStroke[]>([]),undoStack=useRef<SketchStroke[][]>([]),redoStack=useRef<SketchStroke[][]>([]),baseImage=useRef<HTMLImageElement|null>(null),legacyBackup=useRef(false),active=useRef<{pointerId:number;tool:SketchTool;before:SketchStroke[];last:SketchPoint;erase:Set<string>}|null>(null),hoverIds=useRef(new Set<string>());
   const repaint=useCallback(()=>{const ctx=canvas.current?.getContext('2d');if(!ctx)return;ctx.fillStyle='#fffdf8';ctx.fillRect(0,0,SKETCH_WIDTH,SKETCH_HEIGHT);if(baseImage.current)ctx.drawImage(baseImage.current,0,0,SKETCH_WIDTH,SKETCH_HEIGHT);for(const stroke of strokes.current)drawSketchStroke(ctx,stroke,hoverIds.current.has(stroke.id));},[]);
@@ -130,13 +130,13 @@ export function SketchWorkspace(){
     event.preventDefault();event.currentTarget.setPointerCapture(event.pointerId);scheduledPageSave().pause();drawing.current=true;
     const p=point(event),before=strokes.current.map(s=>({...s,points:[...s.points]}));
     active.current={pointerId:event.pointerId,tool:selectedTool,before,last:p,erase:new Set()};
-    if(selectedTool==='eraser'){setEraserPoint(p);markErase(p,p,active.current.erase);return;}
+    if(selectedTool==='eraser'){setEraserCssRadius(eraserDisplayRadius(event.currentTarget.getBoundingClientRect().width));setEraserPoint(p);markErase(p,p,active.current.erase);return;}
     const stroke:SketchStroke={id:crypto.randomUUID(),color,width:thickness/SKETCH_WIDTH,points:selectedTool==='pen'?[p]:[p,p],...(selectedTool==='pen'?{}:{shape:selectedTool})};strokes.current=[...strokes.current,stroke];if(selectedTool==='pen'){const ctx=canvas.current?.getContext('2d');if(ctx)drawSketchStroke(ctx,stroke);}else repaint();
   };
   const draw=(event:React.PointerEvent<HTMLCanvasElement>)=>{
     const p=point(event),gesture=active.current;
-    if(!gesture||gesture.pointerId!==event.pointerId){if(readyRef.current&&(tool==='eraser'||isPenEraser(event))){setEraserPoint(p);hoverIds.current=hitSketchTrail(strokes.current,p,p);repaint();}else if(hoverIds.current.size){hoverIds.current.clear();setEraserPoint(null);repaint();}return;}
-    event.preventDefault();if(gesture.tool==='eraser'){setEraserPoint(p);markErase(gesture.last,p,gesture.erase);gesture.last=p;return;}
+    if(!gesture||gesture.pointerId!==event.pointerId){if(readyRef.current&&(tool==='eraser'||isPenEraser(event))){setEraserCssRadius(eraserDisplayRadius(event.currentTarget.getBoundingClientRect().width));setEraserPoint(p);hoverIds.current=hitSketchTrail(strokes.current,p,p);repaint();}else if(hoverIds.current.size||eraserPoint){hoverIds.current.clear();setEraserPoint(null);repaint();}return;}
+    event.preventDefault();if(gesture.tool==='eraser'){setEraserCssRadius(eraserDisplayRadius(event.currentTarget.getBoundingClientRect().width));setEraserPoint(p);markErase(gesture.last,p,gesture.erase);gesture.last=p;return;}
     const last=strokes.current.at(-1);if(!last)return;
     if(gesture.tool==='pen'){if(last.points.length>=3000)return;const d=Math.hypot((p.x-gesture.last.x)*SKETCH_WIDTH,(p.y-gesture.last.y)*SKETCH_HEIGHT);if(d<1)return;const previous=gesture.last;last.points.push(p);const ctx=canvas.current?.getContext('2d');if(ctx)drawSketchStroke(ctx,{...last,points:[previous,p]});}else{last.points[1]=p;repaint();}
     gesture.last=p;
@@ -174,7 +174,7 @@ export function SketchWorkspace(){
         <div className={tabletMode?'relative flex min-h-0 flex-1 items-start justify-center overflow-auto rounded-xl bg-[#d9d1c1] p-1':'relative'}>
           <div className={tabletMode?'relative aspect-[10/7] max-h-full max-w-full shadow-lg':'relative'} style={tabletMode?{width:'min(100%, calc((100dvh - 220px) * 10 / 7))'}:undefined}>
             <canvas ref={canvas} width={SKETCH_WIDTH} height={SKETCH_HEIGHT} className="block aspect-[10/7] w-full rounded-lg border border-[#d6cfbf] bg-[#fffdf8]" style={{cursor:editable&&canvasReady?tool==='view'?'grab':tool==='eraser'?'none':'crosshair':'wait',touchAction:tool==='view'?'auto':'none'}} onPointerEnter={event=>{if(event.pointerType==='pen')event.currentTarget.style.touchAction='none';}} onPointerDown={start} onPointerMove={draw} onPointerUp={event=>stop(event)} onPointerCancel={event=>stop(event,true)} onPointerLeave={event=>{event.currentTarget.style.touchAction=tool==='view'?'auto':'none';if(!active.current){setEraserPoint(null);hoverIds.current.clear();repaint();}}} aria-label={`第 ${pageNo} 页绘图区`}/>
-            {eraserPoint&&tool==='eraser'&&<span aria-hidden="true" className="pointer-events-none absolute rounded-full border-2 border-[#df684d] bg-[#df684d]/20" style={{left:`${eraserPoint.x*100}%`,top:`${eraserPoint.y*100}%`,width:ERASER_RADIUS*2,height:ERASER_RADIUS*2,transform:'translate(-50%,-50%)'}}/>}
+            {eraserPoint&&<span aria-hidden="true" className="pointer-events-none absolute rounded-full border-2 border-[#df684d] bg-[#df684d]/20" style={{left:`${eraserPoint.x*100}%`,top:`${eraserPoint.y*100}%`,width:eraserCssRadius*2,height:eraserCssRadius*2,transform:'translate(-50%,-50%)'}}/>}
           </div>
         </div>
         {!canvasReady&&<p role="status" className="mt-2 text-xs text-[#695f50]">正在载入本页画作…</p>}

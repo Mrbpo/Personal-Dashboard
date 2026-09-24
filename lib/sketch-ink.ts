@@ -6,6 +6,7 @@ export type SketchTool='view'|'pen'|'eraser'|AnnotationShape;
 export const SKETCH_WIDTH=1000;
 export const SKETCH_HEIGHT=700;
 export const ERASER_RADIUS=14;
+export const eraserDisplayRadius=(canvasCssWidth:number)=>ERASER_RADIUS*canvasCssWidth/SKETCH_WIDTH;
 
 export function drawSketchStroke(ctx:CanvasRenderingContext2D,stroke:SketchStroke,highlight=false){
   const points=stroke.points.map(point=>({x:point.x*SKETCH_WIDTH,y:point.y*SKETCH_HEIGHT}));

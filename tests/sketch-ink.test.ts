@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {hitSketchStroke,hitSketchTrail,type SketchStroke} from '../lib/sketch-ink.ts';
+import {hitSketchStroke,hitSketchTrail,eraserDisplayRadius,type SketchStroke} from '../lib/sketch-ink.ts';
+import {isPenEraser} from '../lib/pdf-input.ts';
 
 const stroke=(id:string,points:SketchStroke['points'],shape?:SketchStroke['shape']):SketchStroke=>({id,color:'#123456',width:0.003,points,...(shape?{shape}:{})});
 
@@ -17,4 +18,11 @@ test('line, circle and rectangle hit only their outlines',()=>{
   assert.equal(hitSketchStroke(stroke('circle',[{x:.5,y:.5},{x:.7,y:.5}],'circle'),{x:.5,y:.5}),false);
   assert.equal(hitSketchStroke(stroke('rect',[{x:.2,y:.2},{x:.8,y:.8}],'rectangle'),{x:.8,y:.5}),true);
   assert.equal(hitSketchStroke(stroke('rect',[{x:.2,y:.2},{x:.8,y:.8}],'rectangle'),{x:.5,y:.5}),false);
+});
+
+test('stylus tail selects the eraser and its preview scales with the displayed canvas',()=>{
+  assert.equal(isPenEraser({pointerType:'pen',button:5,buttons:0}),true);
+  assert.equal(isPenEraser({pointerType:'pen',button:0,buttons:32}),true);
+  assert.equal(eraserDisplayRadius(1000),14);
+  assert.equal(eraserDisplayRadius(500),7);
 });
