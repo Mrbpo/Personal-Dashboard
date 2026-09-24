@@ -1,9 +1,8 @@
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {mkdtemp,rm,readFile,writeFile,stat} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
-import {execFileSync} from 'node:child_process';
 import {serviceFields} from '../lib/service-fields.ts';
 const directory=await mkdtemp(join(tmpdir(),'study-smoke-'));
 const port=Number(process.env.SMOKE_PORT||3107);
@@ -29,11 +28,14 @@ try{
  const generatedBody=await generated.text();
  assert.equal(generated.status,200,`sketch PDF generation failed: ${generatedBody}; font present: ${await stat('assets/NotoSansSC-Regular.ttf').then(()=>true,()=>false)}`);
  const versionId=JSON.parse(generatedBody).versionId;assert.ok(versionId);
+ const versions=await fetch(origin+`/api/sketchbooks?book=${bookId}`,{headers});assert.equal(versions.status,200);
+ assert.ok((await versions.json()).versions.some(version=>version.id===versionId));
  const pdfResponse=await fetch(origin+`/api/sketchbooks?book=${bookId}&pdf=${versionId}`,{headers});assert.equal(pdfResponse.status,200);
  const pdf=Buffer.from(await pdfResponse.arrayBuffer());assert.equal(pdf.subarray(0,4).toString(),'%PDF');
  const pdfPath=join(directory,'sketchbook.pdf');await writeFile(pdfPath,pdf);
  const extracted=execFileSync('pdftotext',['-enc','UTF-8',pdfPath,'-'],{encoding:'utf8'});
  assert.match(extracted,/中文画作：红色方块/);
+ assert.match(execFileSync('pdfimages',['-list',pdfPath],{encoding:'utf8'}),/^\s*1\s+\d+\s+image\s+/m);
  const renderedPath=join(directory,'sketchbook-rendered');execFileSync('pdftoppm',['-f','1','-singlefile','-png','-scale-to','800',pdfPath,renderedPath]);
  assert.equal((await readFile(renderedPath+'.png')).subarray(0,8).toString('hex'),'89504e470d0a1a0a');
  assert.ok((await stat('assets/NotoSansSC-Regular.ttf')).size>0);
