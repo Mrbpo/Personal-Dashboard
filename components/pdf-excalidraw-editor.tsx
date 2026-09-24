@@ -1,8 +1,8 @@
 'use client';
 
 import {useCallback,useEffect,useMemo,useRef,useState} from 'react';
-import {Excalidraw,convertToExcalidrawElements} from '@excalidraw/excalidraw';
-import type {DataURL,ExcalidrawInitialDataState,NormalizedZoomValue} from '@excalidraw/excalidraw/types';
+import {CaptureUpdateAction,Excalidraw,convertToExcalidrawElements} from '@excalidraw/excalidraw';
+import type {DataURL,ExcalidrawImperativeAPI,ExcalidrawInitialDataState,NormalizedZoomValue} from '@excalidraw/excalidraw/types';
 import type {ExcalidrawElement,FileId} from '@excalidraw/excalidraw/element/types';
 import type {AnnotationScene} from '@/lib/pdf-annotation-scenes';
 import '@excalidraw/excalidraw/index.css';
@@ -36,8 +36,10 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
   const initial=useMemo(()=>getDraft(key),[key]);
   const [starting]=useState(()=>initial?.scene||scene);
   const elements=useRef<ExcalidrawElement[]>(starting.elements as ExcalidrawElement[]),lastJson=useRef(JSON.stringify(starting.elements));
+  const gestureStart=useRef<ExcalidrawElement[]>(starting.elements as ExcalidrawElement[]),rollbackElements=useRef<ExcalidrawElement[]|null>(null);
   const currentRevision=useRef(revision),version=useRef(0),dirty=useRef(Boolean(initial));
-  const saving=useRef(false),outside=useRef(false),saveTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),dirtySince=useRef(0);
+  const saving=useRef(false),editorApi=useRef<ExcalidrawImperativeAPI|null>(null),rollbackTimer=useRef<ReturnType<typeof setTimeout>|null>(null),rollbackPending=useRef(false),pointerIsDown=useRef(false);
+  const saveTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),dirtySince=useRef(0);
   const [status,setStatus]=useState<Status>(initial&&initial.revision!==revision?'conflict':initial?'unsaved':'saved');
   const statusRef=useRef<Status>(status);
   const updateStatus=useCallback((value:Status)=>{statusRef.current=value;setStatus(value);},[]);
@@ -72,10 +74,10 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
   },[key,background.width,background.height]);
 
   const save=useCallback(async(keepalive=false)=>{
-    if(saving.current||!dirty.current||statusRef.current==='conflict')return;
+    if(saving.current||!dirty.current||statusRef.current==='conflict'||rollbackPending.current)return;
     saving.current=true;
     try{
-      while(dirty.current){
+      while(dirty.current&&!rollbackPending.current){
         const atVersion=version.current;
         const currentScene={elements:elements.current,pageWidth:background.width,pageHeight:background.height};
         const body=JSON.stringify({revision:currentRevision.current,scene:currentScene});
@@ -90,8 +92,8 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
           dirty.current=version.current!==atVersion;
           onSceneChange(currentScene,result.revision);
           writeDraft();
-          updateStatus(outside.current?'outside':dirty.current?'unsaved':'saved');
-          if(!outside.current)setMessage('');
+          updateStatus(rollbackPending.current?'outside':dirty.current?'unsaved':'saved');
+          if(!rollbackPending.current)setMessage('');
         }catch{
           updateStatus('error');setMessage('保存失败，保留了浏览器草稿，稍后自动重试。');
           if(saveTimer.current)clearTimeout(saveTimer.current);
@@ -123,11 +125,70 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
       window.removeEventListener('pagehide',flush);
       if(saveTimer.current)clearTimeout(saveTimer.current);
       if(draftTimer.current)clearTimeout(draftTimer.current);
+      if(rollbackTimer.current)clearTimeout(rollbackTimer.current);
       flush();
     };
   },[writeDraft]);
 
-  const onChange:NonNullable<EditorProps['onChange']>=(all)=>{
+  const restoreAcceptedNow=()=>{
+    if(rollbackTimer.current)clearTimeout(rollbackTimer.current);
+    rollbackTimer.current=null;
+    const api=editorApi.current;
+    if(!api){if(rollbackPending.current){updateStatus('error');setMessage('无法恢复越界图形，请返回阅读模式后重试。');}return;}
+    const appState=api.getAppState();
+    const visible=[...api.getSceneElements(),appState.newElement,appState.resizingElement,appState.multiElement];
+    const outside=visible.some(element=>element&&element.id!==prepared.backgroundId&&element.id!==prepared.borderId&&!element.isDeleted&&!insidePage(element,background.width,background.height));
+    // A rejected shape can remain visible as Excalidraw's in-progress
+    // newElement even when the committed scene is already back inside.
+    if(!outside&&!rollbackPending.current)return;
+    const accepted=rollbackElements.current??elements.current;
+    const acceptedJson=JSON.stringify(accepted);
+    if(acceptedJson!==lastJson.current){
+      elements.current=JSON.parse(acceptedJson) as ExcalidrawElement[];
+      lastJson.current=acceptedJson;
+      version.current++;
+      dirty.current=true;
+    }
+    rollbackElements.current=null;
+    rollbackPending.current=false;
+    api.updateScene({
+      elements:[...prepared.initialData.elements!.slice(0,2),...elements.current],
+      appState:{selectedElementIds:{},editingTextElement:null,newElement:null,resizingElement:null,multiElement:null,selectionElement:null},
+      captureUpdate:CaptureUpdateAction.NEVER,
+    });
+    updateStatus(dirty.current?'unsaved':'saved');
+    setMessage('已把越界图形恢复到 PDF 页内。');
+    api.setToast({message:'已把越界图形恢复到 PDF 页内。',duration:3000});
+    if(dirty.current)scheduleSave();
+  };
+  const restoreAccepted=()=>{
+    if(rollbackTimer.current)clearTimeout(rollbackTimer.current);
+    // Let Excalidraw publish its final transform before reading its scene.
+    rollbackTimer.current=setTimeout(()=>{
+      rollbackTimer.current=null;
+      if(!pointerIsDown.current&&!editorApi.current?.getAppState().editingTextElement)restoreAcceptedNow();
+    },100);
+  };
+  const beginPointer=()=>{
+    // Resolve the previous gesture before Excalidraw starts a new one. Its
+    // delayed rollback must never discard a legitimate subsequent stroke.
+    const starting=!pointerIsDown.current;
+    const editingText=Boolean(editorApi.current?.getAppState().editingTextElement);
+    if((rollbackTimer.current||rollbackPending.current)&&!editingText)restoreAcceptedNow();
+    if(starting&&!editingText)gestureStart.current=JSON.parse(JSON.stringify(elements.current)) as ExcalidrawElement[];
+    pointerIsDown.current=true;
+  };
+  const restoreRef=useRef(restoreAccepted);
+  useEffect(()=>{restoreRef.current=restoreAccepted;});
+  useEffect(()=>{
+    const release=()=>{pointerIsDown.current=false;restoreRef.current();};
+    window.addEventListener('pointerup',release,true);
+    window.addEventListener('pointercancel',release,true);
+    window.addEventListener('mouseup',release,true);
+    return()=>{window.removeEventListener('pointerup',release,true);window.removeEventListener('pointercancel',release,true);window.removeEventListener('mouseup',release,true);};
+  },[]);
+
+  const onChange:NonNullable<EditorProps['onChange']>=(all,appState)=>{
     if(statusRef.current==='conflict')return;
     const next=all.filter(element=>element.id!==prepared.backgroundId&&element.id!==prepared.borderId&&!element.isDeleted);
     if(next.some(element=>!ALLOWED_TYPES.has(element.type)||element.link)){
@@ -135,14 +196,25 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
       return;
     }
     if(next.some(element=>!insidePage(element,background.width,background.height))){
-      outside.current=true;updateStatus('outside');
-      setMessage('有图形超出 PDF 页边界。请将它移回蓝色页框内，或撤销该操作；超界修改不会保存。');
+      // Excalidraw's canvas is infinite; wait for pointer-up before rolling back a
+      // drag, so its internal transform cannot race a programmatic scene update.
+      if(!rollbackPending.current)rollbackElements.current=pointerIsDown.current||appState.editingTextElement?gestureStart.current:elements.current;
+      rollbackPending.current=true;
+      if(saveTimer.current)clearTimeout(saveTimer.current);
+      saveTimer.current=null;
+      if(!pointerIsDown.current&&!appState.editingTextElement)restoreAccepted();
+      updateStatus('outside');
+      setMessage(appState.editingTextElement?'文字超出 PDF 页边界，请缩短文字或结束编辑以恢复到页内。':'图形超出 PDF 页边界，松开后会恢复到页内。');
       return;
     }
-    outside.current=false;
+    rollbackElements.current=null;
+    rollbackPending.current=false;
     const json=JSON.stringify(next);
-    if(json===lastJson.current){if(statusRef.current==='outside'){updateStatus(dirty.current?'unsaved':'saved');setMessage('');}return;}
-    lastJson.current=json;elements.current=[...next];version.current++;dirty.current=true;
+    if(json===lastJson.current){
+      if(statusRef.current==='outside'){updateStatus(dirty.current?'unsaved':'saved');setMessage('');if(dirty.current)scheduleSave();}
+      return;
+    }
+    lastJson.current=json;elements.current=JSON.parse(json) as ExcalidrawElement[];version.current++;dirty.current=true;
     updateStatus('unsaved');setMessage('');
     if(!draftTimer.current)draftTimer.current=setTimeout(writeDraft,500);
     scheduleSave();
@@ -167,7 +239,7 @@ export function PdfExcalidrawEditor({documentId,page,background,scene,revision,o
       {status==='conflict'&&<><button type="button" className="rounded border px-2 py-1" onClick={()=>void overwrite()}>保留本地并覆盖</button><button type="button" className="rounded border px-2 py-1" onClick={discard}>放弃本地并重载</button></>}
     </div>
     {message&&<p role="alert" className="text-sm text-amber-700">{message}</p>}
-    <div className="h-[72vh] min-h-[550px] overflow-hidden rounded-lg border bg-white"><Excalidraw initialData={prepared.initialData} onChange={onChange} langCode="zh-CN" handleKeyboardGlobally={false} UIOptions={{tools:{image:false},canvasActions:{loadScene:false,saveToActiveFile:false,clearCanvas:false}}} onPaste={()=>false}/></div>
+    <div className="h-[72vh] min-h-[550px] overflow-hidden rounded-lg border bg-white" onPointerDownCapture={beginPointer} onMouseDownCapture={beginPointer} onBlurCapture={event=>{if(event.target instanceof HTMLTextAreaElement&&event.target.dataset.type==='wysiwyg'&&rollbackPending.current)restoreAccepted();}}><Excalidraw initialData={prepared.initialData} excalidrawAPI={api=>{editorApi.current=api;}} onChange={onChange} onPointerUp={()=>{pointerIsDown.current=false;restoreAccepted();}} langCode="zh-CN" handleKeyboardGlobally={false} UIOptions={{tools:{image:false},canvasActions:{loadScene:false,saveToActiveFile:false,clearCanvas:false}}} onPaste={()=>false}/></div>
     <p className="text-xs text-muted-foreground">请在蓝色 PDF 页框内绘图。PDF 原页和旧批注仅作为绘图背景；返回阅读后可继续选择 PDF 文字和使用原有橡皮擦。</p>
   </div>;
 }
