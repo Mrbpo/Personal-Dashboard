@@ -15,11 +15,11 @@ function publicSource(source: CourseSearchResult) {
 
 export async function POST(request: Request) {
   const started = performance.now();
-  const owner = await getCurrentOwner();
-  if (!owner) return Response.json({ error: "需要登录或有效 API Token" }, { status: 401 });
   const requestId = crypto.randomUUID();
   let stage: AskStage = 'request';
   try {
+    const owner = await getCurrentOwner();
+    if (!owner) return Response.json({ error: "需要登录或有效 API Token" }, { status: 401 });
     const body = await request.json() as { question?: string; courseId?: string };
     const question = String(body.question || "").trim();
     if (question.length < 2) return Response.json({ error: "请输入课程问题" }, { status: 400 });
