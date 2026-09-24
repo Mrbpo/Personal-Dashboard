@@ -7,6 +7,9 @@
 !lib/**
 !hooks/
 !hooks/**
+!assets/
+!assets/NotoSansSC-Regular.ttf
+!assets/OFL.txt
 !vendor/
 !vendor/**
 !scripts/
