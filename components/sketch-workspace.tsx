@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Eraser, PenLine, Plus, Send, FileDown, RotateCcw, Trash2 } from 'lucide-react';
-import { createSketchDraftSaver } from '@/lib/sketch-draft';
+import { createSketchDraftSaver, reconcileSketchDraft } from '@/lib/sketch-draft';
 
 type Book={id:string;status:string;draft_text:string;revision:number;created_at:string;last_activity_at:string};
 type Page={id:string;page_no:number;image_hash:string|null;revision:number};
@@ -14,12 +14,12 @@ function blankCanvas(element:HTMLCanvasElement){const pixels=element.getContext(
 
 export function SketchWorkspace(){
   const [state,setState]=useState<Snapshot|null>(null),[pageNo,setPageNo]=useState(1),[draft,setDraft]=useState(''),[note,setNote]=useState(''),[tool,setTool]=useState<'pen'|'eraser'>('pen'),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[canvasReady,setCanvasReady]=useState(false);
-  const canvas=useRef<HTMLCanvasElement>(null),drawing=useRef(false),dirty=useRef(false),readyRef=useRef(false),pendingSaves=useRef(0),loadedCanvasPage=useRef(''),saveChain=useRef<Promise<void>>(Promise.resolve()),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftValue=useRef(''),draftSaver=useRef<ReturnType<typeof createSketchDraftSaver>|null>(null),stateRef=useRef<Snapshot|null>(null),pageRef=useRef(1);
-  const apply=useCallback((next:Snapshot)=>{stateRef.current=next;setState(next);draftValue.current=next.book.draft_text;setDraft(next.book.draft_text);},[]);
-  const refresh=useCallback(async(bookId?:string)=>{const next=await load(bookId);apply(next);if(!next.pages.some(p=>p.page_no===pageRef.current)){pageRef.current=next.pages[0]?.page_no||1;setPageNo(pageRef.current);}return next;},[apply]);
+  const canvas=useRef<HTMLCanvasElement>(null),drawing=useRef(false),dirty=useRef(false),readyRef=useRef(false),pendingSaves=useRef(0),loadedCanvasPage=useRef(''),saveChain=useRef<Promise<void>>(Promise.resolve()),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftValue=useRef(''),draftRevision=useRef(0),draftSaver=useRef<ReturnType<typeof createSketchDraftSaver>|null>(null),stateRef=useRef<Snapshot|null>(null),pageRef=useRef(1);
+  const apply=useCallback((next:Snapshot,revisionAtLoad:number)=>{const merged=reconcileSketchDraft(stateRef.current,next,draftValue.current,revisionAtLoad,draftRevision.current);stateRef.current=merged.snapshot;setState(merged.snapshot);draftValue.current=merged.draft;setDraft(merged.draft);},[]);
+  const refresh=useCallback(async(bookId?:string)=>{const revisionAtLoad=draftRevision.current;const next=await load(bookId);apply(next,revisionAtLoad);if(!next.pages.some(p=>p.page_no===pageRef.current)){pageRef.current=next.pages[0]?.page_no||1;setPageNo(pageRef.current);}return next;},[apply]);
   useEffect(()=>{void refresh().catch(e=>setMessage(String(e)));},[refresh]);
   useEffect(()=>{const warn=(event:BeforeUnloadEvent)=>{if(dirty.current||pendingSaves.current||draftValue.current!==stateRef.current?.book.draft_text){event.preventDefault();event.returnValue='';}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn);},[]);
-  useEffect(()=>{const timer=setInterval(()=>{const current=stateRef.current;if(!current||current.book.status==='archived'||dirty.current||drawing.current||pendingSaves.current||draftValue.current!==current.book.draft_text||busy)return;void load().then(next=>{if(next.book.id!==current.book.id){pageRef.current=1;setPageNo(1);apply(next);}}).catch(()=>undefined);},60000);return()=>clearInterval(timer);},[apply,busy]);
+  useEffect(()=>{const timer=setInterval(()=>{const current=stateRef.current;if(!current||current.book.status==='archived'||dirty.current||drawing.current||pendingSaves.current||draftValue.current!==current.book.draft_text||busy)return;const revisionAtLoad=draftRevision.current;void load().then(next=>{if(next.book.id!==current.book.id){pageRef.current=1;setPageNo(1);apply(next,revisionAtLoad);}}).catch(()=>undefined);},60000);return()=>clearInterval(timer);},[apply,busy]);
   useEffect(()=>{
     const ctx=canvas.current?.getContext('2d'),element=canvas.current,current=stateRef.current;
     if(!ctx||!element||!current)return;
@@ -52,11 +52,11 @@ export function SketchWorkspace(){
     if(!draftSaver.current)draftSaver.current=createSketchDraftSaver(
       ()=>{const current=stateRef.current;return current?{bookId:current.book.id,status:current.book.status,current:draftValue.current,saved:current.book.draft_text}:null;},
       async(bookId,text)=>{await request({action:'draft',bookId,text});},
-      (bookId,text)=>{const latest=stateRef.current;if(!latest||latest.book.id!==bookId)return;const next={...latest,book:{...latest.book,draft_text:text}};stateRef.current=next;setState(next);},
+      (bookId,text)=>{const latest=stateRef.current;if(!latest||latest.book.id!==bookId)return;draftRevision.current++;const next={...latest,book:{...latest.book,draft_text:text}};stateRef.current=next;setState(next);},
     );
     await draftSaver.current();
   },[]);
-  const changeDraft=(value:string)=>{draftValue.current=value;setDraft(value);if(draftTimer.current)clearTimeout(draftTimer.current);draftTimer.current=setTimeout(()=>{void flushDraft().catch(e=>setMessage(String(e)));},650);};
+  const changeDraft=(value:string)=>{draftRevision.current++;draftValue.current=value;setDraft(value);if(draftTimer.current)clearTimeout(draftTimer.current);draftTimer.current=setTimeout(()=>{void flushDraft().catch(e=>setMessage(String(e)));},650);};
   const move=async(number:number)=>{if(number===pageNo)return;try{await persist();await flushDraft();if(stateRef.current?.book.status==='active')await request({action:'touch',bookId:stateRef.current.book.id});pageRef.current=number;setPageNo(number);}catch(e){setMessage(e instanceof Error?e.message:'切页失败');}};
   const action=async(fn:()=>Promise<void>)=>{setBusy(true);setMessage('');try{await flushDraft();if(stateRef.current?.book.status==='active')await request({action:'touch',bookId:stateRef.current.book.id});await fn();}catch(e){setMessage(e instanceof Error?e.message:'操作失败');}finally{setBusy(false);}};
   const point=(event:React.PointerEvent<HTMLCanvasElement>)=>{const box=event.currentTarget.getBoundingClientRect();return{x:(event.clientX-box.left)*event.currentTarget.width/box.width,y:(event.clientY-box.top)*event.currentTarget.height/box.height};};
