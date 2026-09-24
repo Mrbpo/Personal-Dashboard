@@ -29,7 +29,7 @@ export function PdfExcalidrawSceneOverlay({scene,rotation,width,height}:{scene:A
   if(!scene||scene.pageWidth<=0||scene.pageHeight<=0||!scene.elements.length||width<=0||height<=0)return null;
   const w=scene.pageWidth,h=scene.pageHeight;
   const transform=rotation===90?`translate(${h} 0) rotate(90)`:rotation===180?`translate(${w} ${h}) rotate(180)`:rotation===270?`translate(0 ${w}) rotate(270)`:undefined;
-  return <svg aria-label="PDF 扩展绘图" className="pointer-events-none absolute inset-0 z-10" width={width} height={height} viewBox={`0 0 ${rotation%180?h:w} ${rotation%180?w:h}`} preserveAspectRatio="none">
+  return <svg aria-label="已保存 PDF 绘图（只读）" className="pointer-events-none absolute inset-0 z-10" width={width} height={height} viewBox={`0 0 ${rotation%180?h:w} ${rotation%180?w:h}`} preserveAspectRatio="none">
     <defs><marker id="pdf-scene-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10" fill="none" stroke="context-stroke" strokeWidth="2"/></marker></defs>
     <g transform={transform}>{scene.elements.map(draw)}</g>
   </svg>;
