@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Eraser, PenLine, Plus, Send, FileDown, RotateCcw, Trash2 } from 'lucide-react';
 import { createSketchDraftSaver, reconcileSketchDraft } from '@/lib/sketch-draft';
 import { createSketchPageSaveScheduler } from '@/lib/sketch-page-save';
-import { isSketchEditable, planSketchPoll } from '@/lib/sketch-poll';
+import { isSketchEditable, planSketchPoll, shouldRetrySketchPageSave } from '@/lib/sketch-poll';
 
 type Book={id:string;status:string;draft_text:string;revision:number;created_at:string;last_activity_at:string};
 type Page={id:string;page_no:number;image_hash:string|null;revision:number};
@@ -16,7 +16,7 @@ function blankCanvas(element:HTMLCanvasElement){const pixels=element.getContext(
 
 export function SketchWorkspace(){
   const [state,setState]=useState<Snapshot|null>(null),[pageNo,setPageNo]=useState(1),[draft,setDraft]=useState(''),[note,setNote]=useState(''),[tool,setTool]=useState<'pen'|'eraser'>('pen'),[busy,setBusy]=useState(false),[message,setMessage]=useState(''),[canvasReady,setCanvasReady]=useState(false);
-  const canvas=useRef<HTMLCanvasElement>(null),drawing=useRef(false),dirty=useRef(false),readyRef=useRef(false),pendingSaves=useRef(0),loadedCanvasPage=useRef(''),saveChain=useRef<Promise<void>>(Promise.resolve()),pageSaver=useRef<ReturnType<typeof createSketchPageSaveScheduler>|null>(null),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftValue=useRef(''),draftRevision=useRef(0),draftSaver=useRef<ReturnType<typeof createSketchDraftSaver>|null>(null),stateRef=useRef<Snapshot|null>(null),pageRef=useRef(1);
+  const canvas=useRef<HTMLCanvasElement>(null),drawing=useRef(false),dirty=useRef(false),readyRef=useRef(false),pendingSaves=useRef(0),pageSaveError=useRef(''),loadedCanvasPage=useRef(''),saveChain=useRef<Promise<void>>(Promise.resolve()),pageSaver=useRef<ReturnType<typeof createSketchPageSaveScheduler>|null>(null),draftTimer=useRef<ReturnType<typeof setTimeout>|null>(null),draftValue=useRef(''),draftRevision=useRef(0),draftSaver=useRef<ReturnType<typeof createSketchDraftSaver>|null>(null),stateRef=useRef<Snapshot|null>(null),pageRef=useRef(1);
   const apply=useCallback((next:Snapshot,revisionAtLoad:number)=>{const merged=reconcileSketchDraft(stateRef.current,next,draftValue.current,revisionAtLoad,draftRevision.current);stateRef.current=merged.snapshot;setState(merged.snapshot);draftValue.current=merged.draft;setDraft(merged.draft);},[]);
   const refresh=useCallback(async(bookId?:string)=>{const revisionAtLoad=draftRevision.current;const next=await load(bookId);apply(next,revisionAtLoad);if(!next.pages.some(p=>p.page_no===pageRef.current)){pageRef.current=next.pages[0]?.page_no||1;setPageNo(pageRef.current);}return next;},[apply]);
   useEffect(()=>{void refresh().catch(e=>setMessage(String(e)));},[refresh]);
@@ -36,6 +36,7 @@ export function SketchWorkspace(){
       if(plan.kind==='none'||plan.kind==='inspectCurrent')return;
       if(plan.kind==='switch'){pageRef.current=1;setPageNo(1);}
       apply(plan.snapshot,revisionAtLoad);
+      if(plan.kind==='apply'&&shouldRetrySketchPageSave(plan.snapshot.book.status,dirty.current,drawing.current))pageSaver.current?.schedule();
     }).catch(()=>undefined);
   },60000);return()=>clearInterval(timer);},[apply,busy]);
   useEffect(()=>{
@@ -61,9 +62,10 @@ export function SketchWorkspace(){
         const latest=stateRef.current;if(!latest||latest.book.id!==bookId)return;const page=latest.pages.find(p=>p.page_no===number);if(!page)return;
         const data=await request({action:'savePage',bookId,pageNo:number,image,revision:page.revision});
         const updated={...latest,pages:latest.pages.map(p=>p.page_no===number?{...p,image_hash:data.hasImage?'saved':null,revision:data.revision}:p)};stateRef.current=updated;setState(updated);
+        if(pageSaveError.current){const error=pageSaveError.current;pageSaveError.current='';setMessage(message=>message===error?'':message);}
       }).finally(()=>{pendingSaves.current--;});
     }
-    try{await saveChain.current;}catch(e){dirty.current=true;setMessage(e instanceof Error?e.message:'保存画作失败');throw e;}
+    try{await saveChain.current;}catch(e){dirty.current=true;const error=e instanceof Error?e.message:'保存画作失败';pageSaveError.current=error;setMessage(error);throw e;}
   },[]);
   const scheduledPageSave=useCallback(()=>{
     if(!pageSaver.current)pageSaver.current=createSketchPageSaveScheduler(persist);
