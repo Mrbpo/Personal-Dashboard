@@ -11,12 +11,14 @@ import {getIntegrationConnection} from '../lib/repository.ts';
 import {getPiazzaAutoLoginStatus} from '../lib/piazza-auto-login.ts';
 import {serviceValue} from '../lib/service-vault.ts';
 import {indexMemories} from '../lib/tutor-memory.ts';
+import {archiveIdleSketchbooks} from '../lib/sketchbooks.ts';
 import {enqueueCodexMaintenance} from '../lib/codex-maintenance.ts';
-const owner='local-owner';let stopping=false,cleanedLegacyQueue=false,queuedDocumentBackfill=false;const reparseOldPdf=process.env.PDF_FORMULA_BACKFILL==='true';process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
+const owner='local-owner';let stopping=false,cleanedLegacyQueue=false,queuedDocumentBackfill=false,lastSketchArchiveScan=0;const reparseOldPdf=process.env.PDF_FORMULA_BACKFILL==='true';process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
 type PiazzaArchiveRow={id:string;course_id:string;title:string;body:string};
 type PendingDocumentRow={id:string;owner_id:string};
 const primaryToken=crypto.randomUUID();
 async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_state VALUES ('primary',?,0) ON CONFLICT(id) DO UPDATE SET heartbeat=excluded.heartbeat").bind(now).run();const state=await db.prepare("SELECT paused FROM worker_state WHERE id='primary'").first<{paused:number}>();if(state?.paused)return;
+ if(now-lastSketchArchiveScan>=60000){lastSketchArchiveScan=now;await archiveIdleSketchbooks();}
  if(!cleanedLegacyQueue){await db.prepare("DELETE FROM background_jobs WHERE kind='index' AND status='queued' AND id NOT LIKE 'index:%'").run();cleanedLegacyQueue=true;}
  if(!queuedDocumentBackfill){const docs=(await db.prepare("SELECT d.id,d.owner_id FROM library_documents d WHERE d.deleted=0 AND ((d.status!='ready' AND d.mime IN ('application/pdf','application/octet-stream')) OR (?=1 AND d.mime='application/pdf' AND NOT EXISTS (SELECT 1 FROM library_parse_pages p WHERE p.document_id=d.id AND p.parser=?))) LIMIT 500").bind(Number(reparseOldPdf),PDF_PARSER_VERSION).all<PendingDocumentRow>()).results;for(const d of docs)await enqueue('index',{owner:d.owner_id,id:d.id},`index:${d.id}`,true);queuedDocumentBackfill=true;}
  if(process.env.SYNC_PRIMARY==='true'){

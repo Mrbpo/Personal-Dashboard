@@ -52,6 +52,13 @@ const schema = [
   `CREATE TABLE IF NOT EXISTS mail_entity_relationships (account TEXT NOT NULL, source_entity TEXT NOT NULL, relation_type TEXT NOT NULL, target_entity TEXT NOT NULL, confidence REAL NOT NULL, evidence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY(account,source_entity,relation_type,target_entity))`,
   `CREATE TABLE IF NOT EXISTS mail_recurring_patterns (account TEXT NOT NULL, sender_key TEXT NOT NULL, subject_pattern TEXT NOT NULL, pattern_type TEXT NOT NULL, typical_interval_days REAL, typical_importance REAL NOT NULL DEFAULT 0, confidence REAL NOT NULL, evidence_count INTEGER NOT NULL DEFAULT 1, last_seen TEXT NOT NULL, PRIMARY KEY(account,sender_key,subject_pattern))`,
   `CREATE TABLE IF NOT EXISTS tutor_threads (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, course_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS sketchbooks (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', draft_text TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0, last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, archived_at TEXT, archive_claimed_at TEXT, archive_token TEXT)`,
+  `CREATE INDEX IF NOT EXISTS idx_sketchbooks_owner_status ON sketchbooks(owner_id,status,last_activity_at)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_sketchbooks_one_active ON sketchbooks(owner_id) WHERE status='active'`,
+  `CREATE TABLE IF NOT EXISTS sketch_pages (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, page_no INTEGER NOT NULL, image_hash TEXT, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, UNIQUE(book_id,page_no))`,
+  `CREATE TABLE IF NOT EXISTS sketch_entries (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, page_no INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(book_id,request_id,kind))`,
+  `CREATE INDEX IF NOT EXISTS idx_sketch_entries_book ON sketch_entries(book_id,created_at)`,
+  `CREATE TABLE IF NOT EXISTS sketch_pdf_versions (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, source_revision INTEGER NOT NULL, pdf_hash TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS tutor_messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', meta_json TEXT NOT NULL DEFAULT '{}', starred INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_tutor_messages_thread ON tutor_messages(thread_id, created_at)`,
   `CREATE TABLE IF NOT EXISTS tutor_vocabulary_state (owner_id TEXT NOT NULL, course_id TEXT NOT NULL, term TEXT NOT NULL, mastered INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(owner_id, course_id, term))`,
@@ -133,6 +140,11 @@ async function ready() {
     // Wait briefly for startup migrations/writes instead of surfacing a transient lock as an API error.
     await getClient().execute("PRAGMA busy_timeout=10000");
     await getClient().batch(schema.map((sql) => ({ sql })), "write");
+    const sketchColumns = await getClient().execute("PRAGMA table_info(sketchbooks)");
+    for (const name of ["archive_claimed_at", "archive_token"]) if (!sketchColumns.rows.some((row) => row.name === name)) {
+      try { await getClient().execute(`ALTER TABLE sketchbooks ADD COLUMN ${name} TEXT`); }
+      catch (error) { if (!/duplicate column name/i.test(String(error))) throw error; }
+    }
     const columns = await getClient().execute("PRAGMA table_info(source_items)");
     if (!columns.rows.some((row) => row.name === "extraction_version")) {
       await getClient().execute("ALTER TABLE source_items ADD COLUMN extraction_version INTEGER NOT NULL DEFAULT 1");
