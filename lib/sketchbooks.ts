@@ -8,7 +8,7 @@ import { aiResponse, hasAI } from './ai-response.ts';
 import { serviceValue } from './service-vault.ts';
 import { acquireLease, releaseLease } from './jobs.ts';
 
-type Book = { id:string; owner_id:string; status:string; draft_text:string; revision:number; last_activity_at:string; created_at:string; archived_at:string|null };
+type Book = { id:string; owner_id:string; status:string; draft_text:string; revision:number; last_activity_at:string; created_at:string; archived_at:string|null; archive_claimed_at:string|null; archive_token:string|null };
 type Page = { id:string; book_id:string; page_no:number; image_hash:string|null; revision:number; updated_at:string };
 type Entry = { id:string; book_id:string; page_no:number; kind:string; body:string; request_id:string|null; created_at:string; updated_at:string };
 type PdfVersion = { id:string; book_id:string; source_revision:number; pdf_hash:string; created_at:string };
@@ -180,14 +180,14 @@ async function renderPdf(book:Book,pages:Page[],entries:Entry[]){
   }
   return new Uint8Array(await pdf.save());
 }
-export async function generateSketchPdf(owner:string,bookId:string){
+export async function generateSketchPdf(owner:string,bookId:string,archiveToken?:string){
   const book=await owned(owner,bookId);
   const [pages,entries]=await Promise.all([
     db.prepare('SELECT * FROM sketch_pages WHERE book_id=? ORDER BY page_no').bind(bookId).all<Page>(),
     db.prepare('SELECT * FROM sketch_entries WHERE book_id=? ORDER BY created_at,id').bind(bookId).all<Entry>(),
   ]);
   const bytes=await renderPdf(book,pages.results,entries.results);
-  const current=await owned(owner,bookId);if(current.revision!==book.revision||current.status!==book.status)throw new Error('画册已更新，请重新生成 PDF');
+  const current=await owned(owner,bookId);if(current.revision!==book.revision||current.status!==book.status||archiveToken&&current.archive_token!==archiveToken)throw new Error('画册已更新，请重新生成 PDF');
   const hash=await saveBlob(bytes),id=crypto.randomUUID(),at=now();
   await db.prepare('INSERT INTO sketch_pdf_versions(id,book_id,source_revision,pdf_hash,created_at) VALUES (?,?,?,?,?)').bind(id,bookId,book.revision,hash,at).run();
   return id;
@@ -197,23 +197,30 @@ export async function sketchImage(owner:string,bookId:string,pageNo:number){awai
 
 export async function archiveIdleSketchbooks(){
   const cutoff=new Date(Date.now()-2*60*60*1000).toISOString();
+  const staleCutoff=new Date(Date.now()-5*60*1000).toISOString();
+  // A killed worker leaves this state behind. Reclaim only expired claims;
+  // the token prevents an older worker from completing after another takes over.
+  await db.prepare("UPDATE sketchbooks SET status='active',archive_claimed_at=NULL,archive_token=NULL WHERE status='archiving' AND (archive_claimed_at IS NULL OR archive_claimed_at<=?)").bind(staleCutoff).run();
   const hasContent="(trim(draft_text)<>'' OR EXISTS (SELECT 1 FROM sketch_pages WHERE book_id=sketchbooks.id AND image_hash IS NOT NULL) OR EXISTS (SELECT 1 FROM sketch_entries WHERE book_id=sketchbooks.id))";
   const due=(await db.prepare(`SELECT id,owner_id FROM sketchbooks WHERE status='active' AND last_activity_at<=? AND ${hasContent} ORDER BY last_activity_at LIMIT 20`).bind(cutoff).all<Pick<Book,'id'|'owner_id'>>()).results;
   for(const candidate of due){
-    const claim=await db.prepare(`UPDATE sketchbooks SET status='archiving' WHERE id=? AND owner_id=? AND status='active' AND last_activity_at<=? AND ${hasContent}`).bind(candidate.id,candidate.owner_id,cutoff).run();
+    const token=crypto.randomUUID(),claimedAt=now();
+    const claim=await db.prepare(`UPDATE sketchbooks SET status='archiving',archive_claimed_at=?,archive_token=? WHERE id=? AND owner_id=? AND status='active' AND last_activity_at<=? AND ${hasContent}`).bind(claimedAt,token,candidate.id,candidate.owner_id,cutoff).run();
     if(!claim.rowsAffected)continue;
     try{
-      const version=await generateSketchPdf(candidate.owner_id,candidate.id);
+      const version=await generateSketchPdf(candidate.owner_id,candidate.id,token);
       const pdf=await db.prepare('SELECT pdf_hash FROM sketch_pdf_versions WHERE id=? AND book_id=?').bind(version,candidate.id).first<Pick<PdfVersion,'pdf_hash'>>();
       if(!pdf||!(await readBlob(pdf.pdf_hash)).length)throw new Error('PDF 未保存');
       const freshId=crypto.randomUUID(),freshPage=crypto.randomUUID(),at=now();
-      await db.batch([
-        db.prepare("UPDATE sketchbooks SET status='archived',archived_at=? WHERE id=? AND owner_id=? AND status='archiving'").bind(at,candidate.id,candidate.owner_id),
-        db.prepare("INSERT OR IGNORE INTO sketchbooks(id,owner_id,status,last_activity_at,created_at) VALUES (?,?,'active',?,?)").bind(freshId,candidate.owner_id,at,at),
+      const committed=await db.batch([
+        db.prepare("UPDATE sketchbooks SET status='archived',archived_at=?,archive_claimed_at=NULL WHERE id=? AND owner_id=? AND status='archiving' AND archive_token=?").bind(at,candidate.id,candidate.owner_id,token),
+        db.prepare("INSERT OR IGNORE INTO sketchbooks(id,owner_id,status,last_activity_at,created_at) SELECT ?,owner_id,'active',?,? FROM sketchbooks WHERE id=? AND owner_id=? AND status='archived' AND archive_token=?").bind(freshId,at,at,candidate.id,candidate.owner_id,token),
         db.prepare('INSERT OR IGNORE INTO sketch_pages(id,book_id,page_no,updated_at) SELECT ?,id,1,? FROM sketchbooks WHERE id=? AND owner_id=?').bind(freshPage,at,freshId,candidate.owner_id),
+        db.prepare("UPDATE sketchbooks SET archive_token=NULL WHERE id=? AND owner_id=? AND status='archived' AND archive_token=?").bind(candidate.id,candidate.owner_id,token),
       ]);
+      if(!committed[0].rowsAffected)throw new Error('归档所有权已变化');
     }catch{
-      await db.prepare("UPDATE sketchbooks SET status='active' WHERE id=? AND owner_id=? AND status='archiving'").bind(candidate.id,candidate.owner_id).run();
+      await db.prepare("UPDATE sketchbooks SET status='active',archive_claimed_at=NULL,archive_token=NULL WHERE id=? AND owner_id=? AND status='archiving' AND archive_token=?").bind(candidate.id,candidate.owner_id,token).run();
     }
   }
 }

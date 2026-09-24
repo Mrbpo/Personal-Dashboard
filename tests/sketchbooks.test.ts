@@ -101,3 +101,14 @@ test('a used but cleared book stays active without generating an empty PDF',asyn
   const after=await sketch.sketchState('cleared-owner');
   assert.equal(after.book.id,id);assert.equal(after.book.status,'active');assert.equal(after.versions.length,0);
 });
+
+test('recent archive claim is not stolen before its recovery window',async()=>{
+  const current=await sketch.sketchState('claim-owner'),id=current.book.id;
+  await sketch.saveSketchDraft('claim-owner',id,'待归档文字');
+  await db.prepare("UPDATE sketchbooks SET status='archiving',last_activity_at=?,archive_claimed_at=?,archive_token=? WHERE id=?").bind(new Date(Date.now()-3*60*60*1000).toISOString(),new Date().toISOString(),'running-worker',id).run();
+  await sketch.archiveIdleSketchbooks();
+  assert.equal((await sketch.sketchState('claim-owner',id)).book.status,'archiving');
+  await db.prepare('UPDATE sketchbooks SET archive_claimed_at=? WHERE id=?').bind(new Date(Date.now()-10*60*1000).toISOString(),id).run();
+  await sketch.archiveIdleSketchbooks();
+  assert.equal((await sketch.sketchState('claim-owner',id)).book.status,'archived');
+});
