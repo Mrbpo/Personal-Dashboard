@@ -6,7 +6,6 @@ import {Document,Page,pdfjs} from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import {Button} from './ui/button';
-import {PdfExcalidrawEditorShell} from './pdf-excalidraw-editor-shell';
 import {PdfExcalidrawSceneOverlay} from './pdf-excalidraw-scene-overlay';
 import type {AnnotationPoint,AnnotationShape,AnnotationStroke} from '@/lib/pdf-annotations';
 import type {AnnotationScene} from '@/lib/pdf-annotation-scenes';
@@ -75,8 +74,7 @@ export function PdfReader({source,name,documentId}:{source:string;name:string;do
   const entries=useRef<Record<number,PageInk>>({}),saveTimers=useRef<Record<number,ReturnType<typeof setTimeout>>>({}),saving=useRef(new Set<number>()),active=useRef<ActiveStroke|null>(null);
   const [,render]=useState(0),[pages,setPages]=useState(0),[page,setPage]=useState(1),[zoom,setZoom]=useState(1),[rotation,setRotation]=useState(0),[width,setWidth]=useState(900);
   const [tool,setTool]=useState<Tool>('view'),[color,setColor]=useState('#e63946'),[thickness,setThickness]=useState(4),[overlaySize,setOverlaySize]=useState({width:0,height:0}),[loadNonce,setLoadNonce]=useState(0),[notice,setNotice]=useState(''),[eraserPreview,setEraserPreview]=useState<EraserPreview|null>(null),[penOver,setPenOver]=useState(false);
-  const [scene,setScene]=useState<AnnotationScene|null>(null),[sceneRevision,setSceneRevision]=useState(0),[sceneReady,setSceneReady]=useState(false),[sceneError,setSceneError]=useState(false);
-  const [extended,setExtended]=useState(false),[editorBackground,setEditorBackground]=useState<{dataURL:string;width:number;height:number}|null>(null);
+  const [scene,setScene]=useState<AnnotationScene|null>(null),[sceneError,setSceneError]=useState(false);
   const redraw=()=>render(value=>value+1);
   const url=useCallback((p:number)=>`/api/library/${encodeURIComponent(documentId)}/annotations?page=${p}`,[documentId]);
   const draftKey=useCallback((p:number)=>`pdf-ink:${documentId}:${p}`,[documentId]);
@@ -130,14 +128,14 @@ export function PdfReader({source,name,documentId}:{source:string;name:string;do
     const element=pageWrap.current;if(!element)return;
     const resize=()=>setOverlaySize({width:element.clientWidth,height:element.clientHeight});
     resize();const observer=new ResizeObserver(resize);observer.observe(element);return()=>observer.disconnect();
-  },[page,zoom,rotation,pages,extended]);
+  },[page,zoom,rotation,pages]);
   useEffect(()=>{
     let cancelled=false;
-    setSceneReady(false);setSceneError(false);setScene(null);
+    setSceneError(false);setScene(null);
     fetch(`/api/library/${encodeURIComponent(documentId)}/annotation-scenes?page=${page}`,{cache:'no-store'})
-      .then(async response=>{if(!response.ok)throw new Error('扩展绘图加载失败');return response.json() as Promise<{revision:number;scene:AnnotationScene}>;})
-      .then(result=>{if(!cancelled){setScene(result.scene);setSceneRevision(result.revision);setSceneReady(true);}})
-      .catch(()=>{if(!cancelled){setSceneError(true);setSceneReady(true);}});
+      .then(async response=>{if(!response.ok)throw new Error('已保存绘图加载失败');return response.json() as Promise<{scene:AnnotationScene}>;})
+      .then(result=>{if(!cancelled)setScene(result.scene);})
+      .catch(()=>{if(!cancelled)setSceneError(true);});
     return()=>{cancelled=true;};
   },[documentId,page]);
   useEffect(()=>setEraserPreview(null),[tool,page,zoom,rotation]);
@@ -175,28 +173,7 @@ export function PdfReader({source,name,documentId}:{source:string;name:string;do
     return()=>{document.removeEventListener('visibilitychange',onVisibility);window.removeEventListener('pagehide',flush);flush();};
   },[savePage,commit]);
 
-  function go(next:number){if(active.current)finishPointer();setExtended(false);setEditorBackground(null);setPage(Math.min(Math.max(1,next),pages||1));}
-  function openExtended(){
-    if(!sceneReady||sceneError||!scene){setNotice('扩展绘图尚未加载，请稍后重试。');return;}
-    if(rotation!==0){setRotation(0);setNotice('已恢复原始方向，请等待 PDF 绘制完成后再打开扩展绘图。');return;}
-    const canvas=pageWrap.current?.querySelector<HTMLCanvasElement>('canvas.react-pdf__Page__canvas');
-    if(!canvas||!canvas.width||!canvas.height){setNotice('PDF 页面尚未绘制完成，请稍后重试。');return;}
-    const snapshot=document.createElement('canvas');snapshot.width=canvas.width;snapshot.height=canvas.height;
-    const context=snapshot.getContext('2d');if(!context){setNotice('无法创建绘图背景。');return;}
-    context.drawImage(canvas,0,0);
-    const strokes=entries.current[page]?.strokes||[];
-    for(const stroke of strokes){
-      const points=stroke.points.map(point=>({x:point.x*snapshot.width,y:point.y*snapshot.height}));
-      context.beginPath();context.strokeStyle=stroke.color;context.fillStyle=stroke.color;context.lineWidth=stroke.width*snapshot.width;context.lineCap='round';context.lineJoin='round';
-      if(stroke.shape==='circle'){context.arc(points[0].x,points[0].y,Math.hypot(points[1].x-points[0].x,points[1].y-points[0].y),0,Math.PI*2);context.stroke();}
-      else if(stroke.shape==='rectangle'){context.strokeRect(points[0].x,points[0].y,points[1].x-points[0].x,points[1].y-points[0].y);}
-      else if(points.length===1){context.arc(points[0].x,points[0].y,context.lineWidth/2,0,Math.PI*2);context.fill();}
-      else{context.moveTo(points[0].x,points[0].y);for(const point of points.slice(1))context.lineTo(point.x,point.y);context.stroke();}
-    }
-    const fixedWidth=1000;
-    setEditorBackground({dataURL:snapshot.toDataURL('image/png'),width:fixedWidth,height:fixedWidth*snapshot.height/snapshot.width});
-    setNotice('');setExtended(true);setTool('view');
-  }
+  function go(next:number){if(active.current)finishPointer();setPage(Math.min(Math.max(1,next),pages||1));}
   function mappedPointer(event:ReactPointerEvent<Element>):AnnotationPoint{
     const rect=pageWrap.current!.getBoundingClientRect();
     return canonicalPoint({x:clamp((event.clientX-rect.left)/rect.width),y:clamp((event.clientY-rect.top)/rect.height)},rotation);
@@ -374,14 +351,12 @@ export function PdfReader({source,name,documentId}:{source:string;name:string;do
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1 border-t pt-2">
-        {extended?<><span className="text-sm text-muted-foreground">扩展绘图模式 · 第 {page} 页</span></>:<>
         <Button type="button" size="sm" variant={tool==='view'?'default':'ghost'} onClick={()=>setTool('view')} aria-label="阅读和选中文字"><MousePointer2 className="mr-1 size-4"/>阅读</Button>
         <Button type="button" size="sm" variant={tool==='pen'?'default':'ghost'} disabled={!canEdit} onClick={()=>setTool('pen')} aria-label="画笔"><Brush className="mr-1 size-4"/>画笔</Button>
         <Button type="button" size="sm" variant={tool==='line'?'default':'ghost'} disabled={!canEdit} onClick={()=>setTool('line')} aria-label="直尺画直线"><Slash className="mr-1 size-4"/>直尺</Button>
         <Button type="button" size="sm" variant={tool==='circle'?'default':'ghost'} disabled={!canEdit} onClick={()=>setTool('circle')} aria-label="圆规画圆"><Circle className="mr-1 size-4"/>圆规</Button>
         <Button type="button" size="sm" variant={tool==='rectangle'?'default':'ghost'} disabled={!canEdit} onClick={()=>setTool('rectangle')} aria-label="画矩形"><Square className="mr-1 size-4"/>矩形</Button>
         <Button type="button" size="sm" variant={tool==='eraser'?'default':'ghost'} disabled={!canEdit} onClick={()=>setTool('eraser')} aria-label="橡皮擦"><Eraser className="mr-1 size-4"/>橡皮擦</Button>
-        <Button type="button" size="sm" variant="outline" disabled={!canEdit||!sceneReady||sceneError} onClick={openExtended} aria-label="打开扩展绘图"><Square className="mr-1 size-4"/>扩展绘图</Button>
         <label className="ml-2 flex items-center gap-1 text-xs">颜色 <input type="color" aria-label="画笔颜色" value={color} onChange={event=>setColor(event.target.value)} className="h-7 w-8 cursor-pointer"/></label>
         <label className="flex items-center gap-1 text-xs">粗细 <input type="range" aria-label="画笔粗细" min="2" max="16" value={thickness} onChange={event=>setThickness(Number(event.target.value))} className="w-20"/><span>{thickness}</span></label>
         <Button type="button" size="icon" variant="ghost" disabled={!canEdit||!ink?.undo.length} onClick={()=>undoRedo('undo')} aria-label="撤销" aria-keyshortcuts="Control+Z Meta+Z" title="撤销 (Ctrl/⌘+Z)"><Undo2 className="size-4"/></Button>
@@ -391,14 +366,12 @@ export function PdfReader({source,name,documentId}:{source:string;name:string;do
         <Button type="button" size="sm" variant="outline" disabled={!ink?.dirty||ink.status==='conflict'} onClick={()=>void savePage(page)}><Save className="mr-1 size-4"/>立即保存</Button>
         {ink?.status==='conflict'&&<><Button type="button" size="sm" variant="outline" onClick={()=>void overwriteConflict()}>保留本地并覆盖</Button><Button type="button" size="sm" variant="outline" onClick={discardConflict}>放弃本地并重载</Button></>}
         {ink?.status==='load-error'&&<Button type="button" size="sm" variant="outline" onClick={()=>{delete entries.current[page];setLoadNonce(value=>value+1);}}>重试加载</Button>}
-        {sceneError&&<span role="alert" className="text-xs text-amber-700">扩展绘图加载失败，请刷新后重试。</span>}
-        </>}
+        {sceneError&&<span role="alert" className="text-xs text-amber-700">已保存绘图加载失败，请刷新后重试。</span>}
       </div>
       {notice&&<p role="alert" className="pt-1 text-xs text-amber-700 dark:text-amber-300">{notice}</p>}
     </div>
     <div ref={container} className="max-h-[78vh] min-h-[60vh] overflow-auto p-4">
-      {extended&&editorBackground&&scene&&<PdfExcalidrawEditorShell documentId={documentId} page={page} background={editorBackground} scene={scene} revision={sceneRevision} onSceneChange={(next,nextRevision)=>{setScene(next);setSceneRevision(nextRevision);}} onClose={()=>{setExtended(false);setEditorBackground(null);}}/>}
-      <div className={extended?'hidden':''}><Document file={source} onLoadSuccess={({numPages})=>{setPages(numPages);setPage(current=>Math.min(current,numPages));}} loading={<p className="py-24 text-center text-muted-foreground">正在加载 PDF…</p>} error={<div className="mx-auto max-w-lg rounded-xl border bg-background p-6 text-center"><strong>PDF 暂时无法显示</strong><p className="mt-2 text-sm text-muted-foreground">请刷新页面重试，或使用上方的“下载原件”。</p></div>}>
+      <Document file={source} onLoadSuccess={({numPages})=>{setPages(numPages);setPage(current=>Math.min(current,numPages));}} loading={<p className="py-24 text-center text-muted-foreground">正在加载 PDF…</p>} error={<div className="mx-auto max-w-lg rounded-xl border bg-background p-6 text-center"><strong>PDF 暂时无法显示</strong><p className="mt-2 text-sm text-muted-foreground">请刷新页面重试，或使用上方的“下载原件”。</p></div>}>
         <div ref={pageWrap} tabIndex={0} className="relative mx-auto w-fit overflow-hidden shadow-xl" style={{touchAction:tool==='view'&&!penOver?'auto':'none'}} onPointerDown={event=>{pointerPresence(event);if(tool==='view'&&isPenEraser(event))pointerDown(event);}} onPointerMove={event=>{pointerPresence(event);if(tool==='view')pointerMove(event);}} onPointerEnter={event=>{pointerPresence(event);if(tool==='view')pointerMove(event);}} onPointerLeave={event=>{if(event.pointerType==='pen'){setPenOver(false);if(tool==='view')event.currentTarget.style.touchAction='auto';}if(tool==='view')setEraserPreview(null);}} onPointerUp={event=>{if(tool==='view'&&active.current?.tool==='eraser'){pointerMove(event);finishPointer();}}} onPointerCancel={()=>{if(tool==='view'){finishPointer(true);setEraserPreview(null);}}}>
           <Page pageNumber={page} width={width*zoom} rotate={rotation} renderAnnotationLayer renderTextLayer loading={<p className="py-24 text-center text-muted-foreground">正在绘制第 {page} 页…</p>}/>
           {overlaySize.width>0&&overlaySize.height>0&&<svg className="absolute inset-0 z-10" width={overlaySize.width} height={overlaySize.height} viewBox={`0 0 ${overlaySize.width} ${overlaySize.height}`} style={{pointerEvents:tool==='view'||!canEdit?'none':'auto',touchAction:tool==='view'?'auto':'none',cursor:tool==='view'?'auto':'crosshair'}} aria-label="PDF 批注画布" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerEnter={pointerMove} onPointerLeave={()=>setEraserPreview(null)} onPointerUp={event=>{pointerMove(event);finishPointer();}} onPointerCancel={()=>finishPointer(true)}>
@@ -416,7 +389,6 @@ export function PdfReader({source,name,documentId}:{source:string;name:string;do
           <PdfExcalidrawSceneOverlay scene={scene} rotation={rotation} width={overlaySize.width} height={overlaySize.height}/>
         </div>
       </Document>
-      </div>
     </div>
     <p className="border-t bg-background/80 px-4 py-2 text-center text-xs text-muted-foreground">{name} · 阅读模式可选中文字；批注自动保存，下载原件不会包含批注</p>
   </section>;
