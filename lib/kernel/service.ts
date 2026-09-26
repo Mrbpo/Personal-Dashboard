@@ -19,6 +19,10 @@ const safeDate = (value: unknown) => {
   const parsed=Date.parse(value);
   return Number.isFinite(parsed)?new Date(parsed).toISOString():null;
 };
+const realCalendarDate=(value:string)=>{
+  const parsed=new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
+};
 
 export type Deadline = {
   date: string | null; at: string | null; localTime: string | null;
@@ -29,14 +33,18 @@ export type Deadline = {
 export function parseDeadline(raw: string | null, timezone: string | null = null): Deadline {
   if (!raw) return { date: null, at: null, localTime: null, timezone: null, precision: null, original: null };
   const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
-  if (date) return { date, at: null, localTime: null, timezone: null, precision: 'date', original: raw };
+  if (date) return realCalendarDate(date)
+    ? { date, at: null, localTime: null, timezone: null, precision: 'date', original: raw }
+    : { date: null, at: null, localTime: null, timezone: null, precision: null, original: raw };
   // Only an explicit offset or Z establishes an instant. A local time without a zone stays a candidate.
   const match = /^(\d{4}-\d{2}-\d{2})T(\d{2})(?::(\d{2}))?(?::(\d{2})(?:\.\d+)?)?([Zz]|[+-]\d{2}:?\d{2})$/.exec(raw);
   if (!match || !Number.isFinite(Date.parse(raw))) return { date: null, at: null, localTime: null, timezone: null, precision: null, original: raw };
   const precision = match[4] !== undefined ? 'second' : match[3] !== undefined ? 'minute' : 'hour';
   const instant = new Date(raw).toISOString();
+  if(!realCalendarDate(match[1]) || (!timezone && !/^[Zz]$/.test(match[5])))
+    return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};
   // An explicit offset identifies the instant. Preserve local wall time in a trusted IANA zone;
-  // otherwise use the IANA UTC zone and retain the source wording in original.
+  // A Z suffix explicitly identifies UTC. A numeric offset alone is not an IANA zone.
   if(timezone){
     try{
       const parts=new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',
@@ -44,11 +52,14 @@ export function parseDeadline(raw: string | null, timezone: string | null = null
       const part=(type:string)=>parts.find(item=>item.type===type)?.value||'';
       const localDate=`${part('year')}-${part('month')}-${part('day')}`;
       const localTime=`${part('hour')}:${part('minute')}:${part('second')}`;
-      if(`${localDate}T${localTime}`!==`${match[1]}T${match[2]}:${match[3]??'00'}:${match[4]??'00'}`)
+      if(!/^[Zz]$/.test(match[5]) &&
+        `${localDate}T${localTime}`!==`${match[1]}T${match[2]}:${match[3]??'00'}:${match[4]??'00'}`)
         return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};
       return {date:localDate,at:instant,localTime,timezone,precision,original:raw};
     }catch{return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};}
   }
+  if(`${match[1]}T${match[2]}:${match[3]??'00'}:${match[4]??'00'}`!==instant.slice(0,19))
+    return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};
   return {date:instant.slice(0,10),at:instant,localTime:instant.slice(11,19),
     timezone:'Etc/UTC',precision,original:raw};
 }

@@ -11,6 +11,9 @@ import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngesti
 test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});
   assert.equal(parseDeadline('2026-09-25T12:30').precision,null);
+  assert.equal(parseDeadline('2026-02-30').precision,null);
+  assert.equal(parseDeadline('2026-09-25T23:59:00-04:00').precision,null);
+  assert.equal(parseDeadline('2026-09-25T23:59:00Z','America/Toronto').localTime,'19:59:00');
   assert.equal(parseDeadline('2026-09-25T12:30:00Z').timezone,'Etc/UTC');
   assert.deepEqual(parseDeadline('2026-09-25T23:59:00-04:00','America/Toronto'),{
     date:'2026-09-25',at:'2026-09-26T03:59:00.000Z',localTime:'23:59:00',
