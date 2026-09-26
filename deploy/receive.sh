@@ -53,14 +53,17 @@ trap 'rollback' ERR
 printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 if test -n "$previous"; then APP_VERSION="$previous" "${compose[@]}" stop worker web; fi
 bash /srv/study/backup.sh
+bash /srv/study/verify-backup.sh
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
 # All old executors are stopped. Clear only the executor lease so the new
 # worker can become primary immediately; job leases and progress are retained.
 "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
 started=$(date +%s%3N)
-"${compose[@]}" up -d web worker proxy
+# Docker may start a v1 writer before `up` returns. From this point, a failed
+# command must preserve PostgreSQL writes rather than booting the v0 writer.
 cutover_started=1
+"${compose[@]}" up -d web worker proxy
 healthy=0
 for n in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:3000/api/health/live >/dev/null && "${compose[@]}" exec -T worker node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts';import {kernelPool} from './lib/kernel/db.ts';const r=await database.prepare(\"SELECT heartbeat FROM worker_state WHERE id='primary'\").first();const s=await database.prepare('SELECT MAX(version) AS v FROM schema_releases').first();const k=await kernelPool().query('SELECT MAX(version) AS v FROM kernel_migrations');process.exit(r && r.heartbeat>$started && Date.now()-r.heartbeat<15000 && s.v===1 && k.rows[0].v===1?0:1);" && "${compose[@]}" exec -T worker node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then healthy=1; break; fi

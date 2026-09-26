@@ -15,7 +15,7 @@ trap cleanup EXIT
 age -d -i /srv/study/backup.identity "/srv/study/backups/$latest" | tar --no-same-owner -xf - -C "$temporary"
 (cd "$temporary" && sha256sum -c manifest.sha256 >/dev/null)
 test -s "$temporary/data/course-radar-v2.db"
-version=$(cat /srv/study/current-version)
+version=${APP_VERSION:-$(cat /srv/study/current-version)}
 [[ "$version" =~ ^[a-f0-9]{40}$ ]]
 docker run --rm --network none --user 0 --read-only --cap-drop ALL \
   -v "$temporary/data:/restore:ro" "study-cabinet:$version" \
