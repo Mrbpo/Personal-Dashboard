@@ -4,9 +4,11 @@ set -euo pipefail
 image="${1:?Pass the built image tag}"
 network="study-smoke-$$"
 database_container="${network}-postgres"
+dump_file=$(mktemp)
 cleanup(){
   docker rm -f "$database_container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
+  rm -f -- "$dump_file"
 }
 trap cleanup EXIT
 
@@ -30,3 +32,13 @@ docker run --rm --network "$network" -e KERNEL_DATABASE_URL="$database_url" "$im
   node --experimental-strip-types scripts/kernel-migrate.ts
 docker run --rm --network "$network" -e KERNEL_DATABASE_URL="$database_url" "$image" \
   node --experimental-strip-types scripts/smoke-production.mjs
+
+# Exercise a real PostgreSQL dump and isolated restore with canonical data.
+docker run --rm --network "$network" -e KERNEL_DATABASE_URL="$database_url" "$image" \
+  node --experimental-strip-types --input-type=module -e \
+  "import {kernel} from './lib/kernel/service.ts';import {kernelPool} from './lib/kernel/db.ts';await kernel.upsertCourse({id:'backup-smoke',name:'Backup smoke',course_code:'BACKUP101'});await kernelPool().end();"
+docker exec "$database_container" pg_dump -U study_kernel -d study_kernel -Fc --no-owner > "$dump_file"
+test -s "$dump_file"
+docker exec "$database_container" createdb -U study_kernel study_kernel_restore
+docker exec -i "$database_container" pg_restore -U study_kernel -d study_kernel_restore --no-owner --exit-on-error < "$dump_file"
+test "$(docker exec "$database_container" psql -U study_kernel -d study_kernel_restore -Atc "SELECT count(*) FROM courses WHERE id='backup-smoke'")" = 1

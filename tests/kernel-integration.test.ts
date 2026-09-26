@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
 import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
@@ -81,4 +84,31 @@ test('persistent jobs recover expired leases and failed transactions roll back',
     throw new Error('abort');
   }));
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM academic_terms WHERE id=$1',[marker])).rows[0].count),0);
+});
+
+test('Docling failure keeps the original and retry commits parsed evidence',async()=>{
+  await migrateKernel();
+  const directory=mkdtempSync(join(tmpdir(),'kernel-docling-'));
+  process.env.DATABASE_URL=':memory:';
+  process.env.LIBRARY_DIR=directory;
+  process.env.DOCLING_URL='http://docling.invalid';
+  const library=await import('../lib/library.ts');
+  const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
+  const id=await library.saveDocument('owner','','upload','retry.pdf','retry.pdf','application/pdf',
+    Buffer.from('%PDF-1.4 retry evidence'));
+  const original=globalThis.fetch;
+  try{
+    globalThis.fetch=async()=>new Response('unavailable',{status:503});
+    await assert.rejects(convertDocumentWithDocling('owner',id),/submit failed/);
+    assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_items WHERE id=$1',[`document:${id}`])).rows[0].count),0);
+    globalThis.fetch=async url=>String(url).endsWith('/async')
+      ?Response.json({task_id:'retry-task',task_status:'success'})
+      :Response.json({status:'success',document:{json_content:{texts:[{text:'Recovered formula notes',prov:[{page_no:1}]}]}}});
+    await convertDocumentWithDocling('owner',id);
+    assert.equal(Number((await kernelPool().query('SELECT count(*) FROM evidence WHERE source_item_id=$1',[`document:${id}`])).rows[0].count),1);
+    assert.equal((await library.getDocument('owner',id)).status,'ready');
+  }finally{
+    globalThis.fetch=original;
+    rmSync(directory,{recursive:true,force:true});
+  }
 });
