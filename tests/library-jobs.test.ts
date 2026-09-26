@@ -7,6 +7,7 @@ const lib=await import('../lib/library.ts');
 const jobs=await import('../lib/jobs.ts');
 const parser=await import('../lib/document-parser.ts');
 const {kernel}=await import('../lib/kernel/service.ts');
+const {claimIngestionJob,finishIngestionJob}=await import('../lib/kernel/jobs.ts');
 test('DOCX text is extracted locally without an AI request',async()=>{
  const zip=new JSZip();
  zip.file('[Content_Types].xml','<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
@@ -94,8 +95,8 @@ test('terminal document jobs can be revived without disturbing an active lease',
 test('source synchronization is not starved by an indexing backlog',async()=>{
  await jobs.enqueue('index',{id:'slow'},'index:slow');
  await jobs.enqueue('canvas',{},'canvas:priority');
- const first=await jobs.claimJob();assert.equal(first?.id,'canvas:priority');
- await jobs.finishJob(first!.id,first!.lease_token);
+ const first=await claimIngestionJob();assert.equal(first?.kind,'canvas');
+ await finishIngestionJob(first!.id,first!.lease_token);
  const second=await jobs.claimJob();assert.equal(second?.id,'index:slow');
  await jobs.finishJob(second!.id,second!.lease_token);
 });

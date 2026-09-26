@@ -49,6 +49,13 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(Number((await kernelPool().query(
     `SELECT count(*) FROM fact_versions WHERE fact_id=(SELECT id FROM facts WHERE entity_id=$1 AND attribute='due')`,
     [tasks[0].entity_id])).rows[0].count),2);
+  const dueHistory=(await kernelPool().query<{valid_from:Date;valid_to:Date|null}>(
+    `SELECT valid_from,valid_to FROM fact_versions WHERE fact_id=
+     (SELECT id FROM facts WHERE entity_id=$1 AND attribute='due') ORDER BY version`,
+    [tasks[0].entity_id])).rows;
+  assert.equal(dueHistory[0].valid_from.toISOString(),'2026-09-20T12:00:00.000Z');
+  assert.equal(dueHistory[0].valid_to?.toISOString(),'2026-09-21T12:00:00.000Z');
+  assert.equal(dueHistory[1].valid_from.toISOString(),'2026-09-21T12:00:00.000Z');
   await kernel.completeSourceScan('canvas',courseId,[]);
   const before=(await kernel.taskRows(courseId))[0];
   assert.equal(before.source_missing,true);

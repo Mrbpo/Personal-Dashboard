@@ -14,7 +14,11 @@ type CandidateInput = {
 const stableId = (...parts: string[]) => createHash('sha256').update(parts.join('\u0000')).digest('hex');
 const iso = (value: unknown) => value instanceof Date ? value.toISOString() : value == null ? null : String(value);
 const dateOnly = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : value == null ? null : String(value);
-const safeDate = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+const safeDate = (value: unknown) => {
+  if(typeof value!=='string'||!/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:Z|[+-][0-9]{2}:[0-9]{2})$/i.test(value))return null;
+  const parsed=Date.parse(value);
+  return Number.isFinite(parsed)?new Date(parsed).toISOString():null;
+};
 
 export type Deadline = {
   date: string | null; at: string | null; localTime: string | null;
@@ -56,13 +60,18 @@ async function sourceVersion(client: PoolClient, input: {
 }
 
 async function acceptCandidate(client: PoolClient, candidateId: string, reason: string): Promise<void> {
-  const candidate = (await client.query<{entity_id:string;attribute:string;value:unknown;evidence_id:string}>(
-    'SELECT entity_id,attribute,value,evidence_id FROM candidate_facts WHERE id=$1 FOR UPDATE', [candidateId])).rows[0];
+  const candidate = (await client.query<{entity_id:string;attribute:string;value:unknown;evidence_id:string;valid_from:Date|null}>(
+    `SELECT c.entity_id,c.attribute,c.value,c.evidence_id,e.valid_from FROM candidate_facts c
+     JOIN evidence e ON e.id=c.evidence_id WHERE c.id=$1 FOR UPDATE OF c`, [candidateId])).rows[0];
   if (!candidate) throw new Error('Candidate not found');
   const factId = stableId(candidate.entity_id,candidate.attribute);
   const previous = (await client.query<{version:number}>(
     'SELECT version FROM facts WHERE id=$1 FOR UPDATE', [factId])).rows[0];
   const version = (previous?.version ?? 0) + 1;
+  if(previous?.version && candidate.valid_from)await client.query(
+    `UPDATE fact_versions SET valid_to=$3 WHERE fact_id=$1 AND version=$2
+     AND valid_to IS NULL AND (valid_from IS NULL OR valid_from<=$3)`,
+    [factId,previous.version,candidate.valid_from]);
   await client.query(
     `INSERT INTO facts(id,entity_id,attribute,canonical_value,chosen_candidate_id,version)
      VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO UPDATE SET
@@ -70,8 +79,9 @@ async function acceptCandidate(client: PoolClient, candidateId: string, reason: 
      version=excluded.version,updated_at=now()`,
     [factId,candidate.entity_id,candidate.attribute,JSON.stringify(candidate.value),candidateId,version]);
   await client.query(
-    `INSERT INTO fact_versions(fact_id,version,value,candidate_id,reason)
-     VALUES ($1,$2,$3,$4,$5)`, [factId,version,JSON.stringify(candidate.value),candidateId,reason]);
+    `INSERT INTO fact_versions(fact_id,version,value,candidate_id,reason,valid_from)
+     VALUES ($1,$2,$3,$4,$5,$6)`, [factId,version,JSON.stringify(candidate.value),candidateId,
+      reason,candidate.valid_from]);
   await client.query('UPDATE candidate_facts SET status=\'accepted\',reason=$2,decided_at=now() WHERE id=$1', [candidateId,reason]);
   await client.query('INSERT INTO fact_evidence(fact_id,evidence_id,candidate_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
     [factId,candidate.evidence_id,candidateId]);
@@ -96,7 +106,8 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
       parsed_value,confidence,valid_from,locator)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
     [evidenceId,input.sourceVersionId,input.source,input.sourceItemId,input.acquiredAt,safeDate(input.publishedAt),
-      input.originalExcerpt,JSON.stringify(input.value),input.confidence,safeDate(input.validFrom),input.locator]);
+      input.originalExcerpt,JSON.stringify(input.value),input.confidence,
+      safeDate(input.validFrom)??safeDate(input.publishedAt)??input.acquiredAt,input.locator]);
   const candidateId = stableId(input.entityId,input.attribute,evidenceId);
   await client.query(
     `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority)
