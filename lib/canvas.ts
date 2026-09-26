@@ -138,8 +138,10 @@ export async function listActiveCourses() {
   return allPages<JsonObject>("/api/v1/courses?enrollment_state=active&include[]=term&per_page=100");
 }
 
-export async function getCourseSources(courseId: string): Promise<{ sources: CanvasSource[]; assignments: JsonObject[] }> {
+export async function getCourseSources(courseId: string): Promise<{ sources: CanvasSource[]; assignments: JsonObject[]; complete: boolean }> {
   const { baseUrl } = config();
+  let complete=true;
+  const optional=<T>(request:Promise<T>,fallback:T)=>request.catch(()=>{complete=false;return fallback;});
   const now = new Date();
   const start = new Date(now.getTime() - 120 * 86400000).toISOString().slice(0, 10);
   const end = new Date(now.getTime() + 180 * 86400000).toISOString().slice(0, 10);
@@ -149,13 +151,13 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
     allPages<JsonObject>("/api/v1/announcements?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/assignments?include[]=submission&include[]=all_dates&order_by=due_at&per_page=100"),
     allPages<JsonObject>("/api/v1/courses/" + courseId + "/modules?include[]=items&include[]=content_details&per_page=100"),
-    allPages<JsonObject>("/api/v1/courses/" + courseId + "/quizzes?per_page=100").catch(() => []),
-    allPages<JsonObject>("/api/v1/courses/" + courseId + "/discussion_topics?per_page=100").catch(() => []),
-    allPages<JsonObject>("/api/v1/courses/" + courseId + "/pages?per_page=100").catch(() => []),
-    allPages<JsonObject>("/api/v1/courses/" + courseId + "/files?per_page=100").catch(() => []),
-    allPages<JsonObject>("/api/v1/courses/" + courseId + "/folders?per_page=100").catch(() => []),
-    allPages<JsonObject>("/api/v1/planner/items?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100").catch(() => []),
-    canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "?include[]=syllabus_body&include[]=term").then((result) => result.data).catch(():JsonObject => ({})),
+    optional(allPages<JsonObject>("/api/v1/courses/" + courseId + "/quizzes?per_page=100"),[]),
+    optional(allPages<JsonObject>("/api/v1/courses/" + courseId + "/discussion_topics?per_page=100"),[]),
+    optional(allPages<JsonObject>("/api/v1/courses/" + courseId + "/pages?per_page=100"),[]),
+    optional(allPages<JsonObject>("/api/v1/courses/" + courseId + "/files?per_page=100"),[]),
+    optional(allPages<JsonObject>("/api/v1/courses/" + courseId + "/folders?per_page=100"),[]),
+    optional(allPages<JsonObject>("/api/v1/planner/items?context_codes[]=" + encodedContext + "&start_date=" + start + "&end_date=" + end + "&per_page=100"),[]),
+    optional(canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "?include[]=syllabus_body&include[]=term").then((result) => result.data),{}),
   ]);
   const foldersById = new Map(courseFolders.map((folder) => [String(folder.id), folder]));
   const pages = await Promise.all(pageIndex.map((page) => canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "/pages/" + encodeURIComponent(page.url)).then((result) => result.data).catch(() => page)));
@@ -246,7 +248,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       if (!seen.has(source.id)) { seen.add(source.id); sources.push(source); }
     }
   }
-  return { sources, assignments };
+  return { sources, assignments, complete };
 }
 
 export async function downloadCanvasFile(url: string): Promise<Response> {

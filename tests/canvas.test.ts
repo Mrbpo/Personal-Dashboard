@@ -3,7 +3,21 @@ import assert from "node:assert/strict";
 
 process.env.CANVAS_BASE_URL = "https://canvas.example.test";
 process.env.CANVAS_TOKEN = "test-token";
-const { allPages, downloadCanvasFile, setCanvasPlannerComplete, textFromHtml } = await import("../lib/canvas.ts");
+const { allPages, downloadCanvasFile, getCourseSources, setCanvasPlannerComplete, textFromHtml } = await import("../lib/canvas.ts");
+
+test('an optional Canvas endpoint failure marks the course scan incomplete',async()=>{
+  const original=globalThis.fetch;
+  globalThis.fetch=(async input=>{
+    const url=String(input);
+    if(url.includes('/quizzes?'))return new Response('temporary failure',{status:503});
+    return Response.json(url.includes('/courses/course-1?')?{}:[]);
+  }) as typeof fetch;
+  try{
+    const result=await getCourseSources('course-1');
+    assert.equal(result.complete,false);
+    assert.deepEqual(result.sources,[]);
+  }finally{globalThis.fetch=original;}
+});
 
 test("Canvas pagination follows the next link and keeps bearer auth", async () => {
   const original = globalThis.fetch;

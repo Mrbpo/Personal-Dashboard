@@ -117,7 +117,7 @@ export async function saveSource(source: CanvasSource, analysis: ExtractedAnalys
 
 export async function reconcileCourseSources(courseId: string, seenIds: string[], scanStartedAt: string) {
   const db = getDatabase();
-  const current = await db.prepare("SELECT id, title FROM source_items WHERE course_id=? AND is_active=1 AND last_seen_at<?").bind(courseId,scanStartedAt).all<D1Row>();
+  const current = await db.prepare("SELECT id, title FROM source_items WHERE course_id=? AND is_active=1 AND last_seen_at<? AND source_type NOT IN ('announcement','planner')").bind(courseId,scanStartedAt).all<D1Row>();
   const seen = new Set(seenIds);
   const missing = current.results.filter((row) => !seen.has(String(row.id)));
   const now = new Date().toISOString();
@@ -206,7 +206,10 @@ function rowToTask(row: D1Row, timezone='America/Toronto'): LearningTask {
     id: row.id, courseId: row.course_id, courseCode: row.course_code, courseName: row.course_name,
     sourceType: row.source_type, sourceId: row.source_id, sourceUrl: row.source_url,
     title: row.title, action: row.action, requirements: JSON.parse(row.requirements_json || "[]"),
-    startAt: row.start_at, dueAt: row.due_at, unlockAt: row.unlock_at, lockAt: row.lock_at,
+    startAt: row.start_at, dueAt: row.due_at,dueDate:row.due_date??null,
+    duePrecision:row.due_precision??null,dueTimezone:row.due_timezone??null,
+    dueLocalTime:row.due_local_time??null,dueOriginal:row.due_original??null,
+    unlockAt: row.unlock_at, lockAt: row.lock_at,
     canvasStatus: liveStatus, localStatus: row.local_status,
     urgency: row.due_precision==='date'?urgencyForStatus(liveStatus):urgencyForTask(liveStatus, row.due_at), confidence: row.confidence, analysisStatus: row.analysis_status, evidence: row.evidence,
     estimatedMinutes: row.estimated_minutes, pointsPossible: row.points_possible,

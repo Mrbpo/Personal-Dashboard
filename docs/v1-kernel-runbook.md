@@ -2,6 +2,10 @@
 
 This branch lives in `D:\Desktop\Files\canvas-study-dashboard-v1`, a worktree of the existing GitHub repository. The v0 checkout and running release remain separate until a verified cutover. The Compose and scripts in this branch are deployment instructions, not evidence that any service is running.
 
+PostgreSQL owns courses, terms, tasks, events, source status, entities and canonical facts. SQLite remains in use for original Gmail/Piazza content, search chunks and vectors, PDF annotations, sketchbooks, settings, feedback and AI-derived mail analysis indexes. Those mail indexes are retrieval aids, not canonical entities or task/event state. The backup includes the entire SQLite file and its original blobs so none of these retained stores is omitted.
+
+Canvas announcement and planner feeds are requested for a moving date window. Their absence from a later window is not treated as source deletion. Optional Canvas endpoint failures mark the scan incomplete, retain the previous source state and retry the job.
+
 ## Required host state
 
 - Install Docker Engine/Compose, `age`, AWS CLI, and enough disk for a complete PostgreSQL restore plus an encrypted copy of SQLite, blobs and assets.

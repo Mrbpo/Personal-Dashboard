@@ -137,21 +137,23 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
       [existing.id,evidenceId,candidateId]);
     return candidateId;
   }
-  if (!existing && ['canvas','verified_official','legacy_import','calendar_import'].includes(input.authority)) {
+  if (!existing && ['canvas','piazza','verified_official','legacy_import','calendar_import'].includes(input.authority)) {
     await acceptCandidate(client,candidateId,'first validated evidence');
     return candidateId;
   }
-  if (existing && ['canvas','calendar_import'].includes(input.authority)) {
-    const prior = (await client.query<{source:string;remote_updated_at:Date|null}>(
-      `SELECT e.source,v.remote_updated_at FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+  if (existing && ['canvas','piazza','calendar_import'].includes(input.authority)) {
+    const prior = (await client.query<{source:string;source_item_id:string;remote_updated_at:Date|null;acquired_at:Date}>(
+      `SELECT e.source,e.source_item_id,v.remote_updated_at,e.acquired_at FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
        JOIN source_item_versions v ON v.id=e.source_version_id WHERE c.id=$1`,[existing.chosen_candidate_id])).rows[0];
     if (prior?.source === 'legacy_import' && input.authority === 'canvas') {
       await acceptCandidate(client,candidateId,'current Canvas evidence supersedes legacy import');
     } else if (input.authority === 'calendar_import' && prior?.source === 'calendar_import') {
       await acceptCandidate(client,candidateId,'new explicitly imported calendar version');
-    } else if (prior?.source === 'canvas' && safeDate(input.publishedAt) && prior.remote_updated_at &&
-      Date.parse(input.publishedAt!) > prior.remote_updated_at.getTime()) {
-      await acceptCandidate(client,candidateId,'newer Canvas version');
+    } else if (prior?.source === input.source && prior.source_item_id===input.sourceItemId &&
+      (safeDate(input.publishedAt)&&prior.remote_updated_at
+        ?Date.parse(input.publishedAt!)>prior.remote_updated_at.getTime()
+        :Date.parse(input.acquiredAt)>prior.acquired_at.getTime())) {
+      await acceptCandidate(client,candidateId,'newer version of the same source item');
     }
   }
   // Different sources, uncertain authority, and ambiguous date changes remain pending for review.
@@ -245,7 +247,8 @@ export class KernelService {
       const entityId=stableId('course',id);
       await entity(client,entityId,'course',id,id,termId);
       await recordCandidate(client,{entityId,attribute:'course_payload',value:raw,sourceVersionId:version,source,
-        sourceItemId:sourceId,originalExcerpt:JSON.stringify(raw),confidence:1,authority:source==='canvas'?'canvas':'legacy_import',
+        sourceItemId:sourceId,originalExcerpt:JSON.stringify(raw),confidence:1,
+        authority:source==='canvas'?'canvas':source==='piazza'?'piazza':'legacy_import',
         locator:'course_payload',acquiredAt:new Date().toISOString(),publishedAt:safeDate(course.updated_at)});
       const chosen=(await client.query<{canonical_value:Json}>(
         `SELECT canonical_value FROM facts WHERE entity_id=$1 AND attribute='course_payload'`,[entityId])).rows[0]?.canonical_value;
@@ -417,7 +420,8 @@ export class KernelService {
     return kernelTransaction(async client => {
       const current=await client.query<{id:string}>(
         `SELECT id FROM source_items WHERE source=$1 AND scope=$2 AND state='active'
-         AND last_seen_at<$3 FOR UPDATE`,[source,scope,scanStartedAt]);
+         AND last_seen_at<$3 AND ($1<>'canvas' OR split_part(external_id,':',1) NOT IN ('announcement','planner'))
+         FOR UPDATE`,[source,scope,scanStartedAt]);
       const seen=new Set(seenIds);
       const missing=current.rows.filter(row=>!seen.has(row.id));
       for (const item of missing) {
@@ -430,6 +434,13 @@ export class KernelService {
          last_completed_at=excluded.last_completed_at,last_error=NULL,state='idle'`,[source,scope,cursor]);
       return missing.length;
     });
+  }
+
+  async noteSourceFailure(source:string,scope:string,error:string):Promise<void>{
+    await kernelPool().query(
+      `INSERT INTO source_status(source,scope,state,last_error) VALUES ($1,$2,'error',$3)
+       ON CONFLICT(source,scope) DO UPDATE SET state='error',last_error=excluded.last_error`,
+      [source,scope,error.slice(0,500)]);
   }
 
   async listCourses() {
@@ -634,9 +645,12 @@ export class KernelService {
   async linkCandidate(id:string,taskId:string,reason:string,actor:string):Promise<string>{
     if(!reason.trim()||!actor.trim())throw new Error('Actor and reason are required');
     return kernelTransaction(async client=>{
-      const candidate=(await client.query<{entity_id:string;attribute:string;value:unknown;evidence_id:string;status:string;authority:string}>(
-        'SELECT entity_id,attribute,value,evidence_id,status,authority FROM candidate_facts WHERE id=$1 FOR UPDATE',[id])).rows[0];
+      const candidate=(await client.query<{entity_id:string;attribute:string;value:unknown;evidence_id:string;status:string;authority:string;kind:string}>(
+        `SELECT c.entity_id,c.attribute,c.value,c.evidence_id,c.status,c.authority,e.kind
+         FROM candidate_facts c JOIN entities e ON e.id=c.entity_id WHERE c.id=$1 FOR UPDATE OF c`,[id])).rows[0];
       if(!candidate||candidate.status!=='pending')throw new Error('Candidate is not pending');
+      if(candidate.kind!=='mail_claim'||!['due','cancelled'].includes(candidate.attribute))
+        throw new Error('Only an unlinked mail deadline or cancellation claim can be linked');
       const target=(await client.query<{entity_id:string}>(
         'SELECT entity_id FROM tasks WHERE id=$1',[taskId])).rows[0];
       if(!target)throw new Error('Target task not found');

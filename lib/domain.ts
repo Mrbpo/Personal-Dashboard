@@ -23,6 +23,11 @@ export type LearningTask = {
   requirements: string[];
   startAt: string | null;
   dueAt: string | null;
+  dueDate?: string | null;
+  duePrecision?: 'date' | 'hour' | 'minute' | 'second' | null;
+  dueTimezone?: string | null;
+  dueLocalTime?: string | null;
+  dueOriginal?: string | null;
   unlockAt: string | null;
   lockAt: string | null;
   canvasStatus: CanvasStatus;

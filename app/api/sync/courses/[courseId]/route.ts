@@ -1,6 +1,7 @@
 import { getCourseSources } from "@/lib/canvas";
 import { analyzeSource, analyzeSourceFile, hasOpenAI } from "@/lib/openai-analysis";
 import { requireOwnerApi } from "@/lib/authz";
+import {kernel} from '@/lib/kernel/service';
 import {
   getStoredSource,
   hashSource,
@@ -23,7 +24,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
   await updateSyncCourse(runId, courseId, "running");
   try {
     const scanStartedAt=new Date().toISOString();
-    const { sources } = await getCourseSources(courseId);
+    const { sources,complete } = await getCourseSources(courseId);
 
     let analyzed = 0;
     let attempted = 0;
@@ -61,6 +62,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
       if (["externaltool", "externalurl"].includes(source.sourceType)) analysisStatus = "external_unreadable";
       await saveSource(source, analysis, hash, analysisStatus);
     }
+    if(!complete)throw new Error('CANVAS_PARTIAL_SCAN');
     const missing = await reconcileCourseSources(courseId, sources.map((source) => source.id),scanStartedAt);
     await markCourseSynced(courseId);
     await rebuildCourseSummary(courseId);
@@ -68,6 +70,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
     return Response.json({ courseId, sourceCount: sources.length, analyzed, attempted, unchanged, aiFailures, missing });
   } catch (error) {
     const message = error instanceof Error ? error.message : "COURSE_SYNC_FAILED";
+    await kernel.noteSourceFailure('canvas',courseId,message);
     await updateSyncCourse(runId, courseId, "failed", message);
     return Response.json({ error: message, courseId }, { status: 502 });
   }

@@ -66,6 +66,8 @@ test("repository stores tasks, changes, disappearance and capacity plans", async
   await repo.saveSource(first, analysis, await repo.hashSource(first), "complete");
   let tasks = await repo.listTasks();
   assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].duePrecision,'second');
+  assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(tasks[0].dueDate||''));
   assert.deepEqual(tasks[0].requirements, ["提交 .py 文件"]);
   assert.equal(tasks[0].startAt, "2026-09-13T13:00:00.000Z");
 

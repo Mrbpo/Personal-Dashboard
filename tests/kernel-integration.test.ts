@@ -22,6 +22,8 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   await migrateKernel();
   const courseId=`test:${randomUUID()}`,sourceId=`${courseId}:assignment:42`;
   await kernel.upsertCourse({id:courseId,name:'Math',course_code:'MAT101',updated_at:'2026-09-20T12:00:00Z'});
+  await kernel.upsertCourse({id:courseId,name:'Math revised',course_code:'MAT101'});
+  assert.equal((await kernel.getCourse(courseId))?.name,'Math revised');
   const source={id:sourceId,courseId,sourceType:'assignment',sourceId:'42',title:'Tutorial 2',body:'Submit Tutorial 2',
     sourceUrl:`https://canvas.example/courses/${courseId}/assignments/42`,updatedAt:'2026-09-20T12:00:00Z',
     dueAt:'2026-09-25T23:59:00Z',unlockAt:null,lockAt:null};
@@ -31,9 +33,13 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(tasks.length,1);
   assert.equal(tasks[0].due_at,'2026-09-25T23:59:00.000Z');
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_item_versions WHERE source_item_id=$1',[sourceId])).rows[0].count),1);
+  const windowedId=`${courseId}:announcement:old`;
+  await kernel.ingestCanvasSource({...source,id:windowedId,sourceType:'announcement',sourceId:'old',
+    dueAt:null,title:'Old announcement'},null,'windowed-hash');
   assert.equal(await kernel.completeSourceScan('canvas',courseId,[],null,'2026-09-20T00:00:00Z'),0);
   assert.equal((await kernel.taskRows(courseId))[0].source_missing,false);
   await kernel.completeSourceScan('canvas',courseId,[],null,'2100-01-01T00:00:00Z');
+  assert.equal((await kernelPool().query('SELECT state FROM source_items WHERE id=$1',[windowedId])).rows[0].state,'active');
   tasks=await kernel.taskRows(courseId);
   assert.equal(tasks[0].source_missing,true);
   assert.equal(tasks[0].due_at,'2026-09-25T23:59:00.000Z');
