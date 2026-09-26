@@ -4,6 +4,11 @@ import { kernelPool, migrateKernel } from '../lib/kernel/db.ts';
 import {completeSourcePage} from '../lib/kernel/jobs.ts';
 
 await migrateKernel();
+if (process.argv.includes('--rebuild-projections')) {
+  console.log(JSON.stringify(await kernel.rebuildProjections()));
+  await kernelPool().end();
+  process.exit(0);
+}
 if (!process.argv.includes('--import-legacy')) {
   console.log('Kernel schema is current. Pass --import-legacy to import the SQLite core snapshot.');
   process.exit(0);

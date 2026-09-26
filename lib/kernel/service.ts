@@ -130,21 +130,27 @@ async function entity(client: PoolClient, id: string, kind: string, identityKey:
 }
 
 async function projectTask(client: PoolClient, entityId: string, sourceItemId: string): Promise<void> {
-  const result = await client.query<{attribute:string;canonical_value:unknown}>(
-    'SELECT attribute,canonical_value FROM facts WHERE entity_id=$1',[entityId]);
+  const result = await client.query<{attribute:string;canonical_value:unknown;updated_at:Date}>(
+    'SELECT attribute,canonical_value,updated_at FROM facts WHERE entity_id=$1',[entityId]);
   const facts = Object.fromEntries(result.rows.map(row=>[row.attribute,row.canonical_value]));
   const payload = facts.task_payload as Json | undefined;
   if (!payload) return;
   const existingTask=(await client.query<{id:string;source_item_id:string}>(
     'SELECT id,source_item_id FROM tasks WHERE entity_id=$1',[entityId])).rows[0];
+  const primarySourceItemId=existingTask?.source_item_id||sourceItemId;
+  const sourceState=(await client.query<{state:string}>(
+    'SELECT state FROM source_items WHERE id=$1',[primarySourceItemId])).rows[0]?.state;
   const due = (facts.due as Deadline | undefined) ?? parseDeadline(null);
   const cancelled = facts.cancelled === true;
+  const cancelledAt=cancelled?result.rows.find(row=>row.attribute==='cancelled')?.updated_at??null:null;
+  const localStatus=['active','completed','ignored'].includes(String(facts.local_status))
+    ?String(facts.local_status):'active';
   await client.query(
     `INSERT INTO tasks(id,entity_id,course_id,source_item_id,source_type,source_id,source_url,title,action,requirements,
       start_at,due_date,due_at,due_local_time,due_timezone,due_precision,due_original,unlock_at,lock_at,canvas_status,
-      urgency,confidence,evidence_excerpt,estimated_minutes,points_possible,prerequisite_blocked,cancelled_at,source_missing)
+      urgency,confidence,evidence_excerpt,estimated_minutes,points_possible,prerequisite_blocked,cancelled_at,source_missing,local_status)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-       CASE WHEN $27::boolean THEN now() ELSE NULL END,false)
+       $27,$28,$29)
      ON CONFLICT(id) DO UPDATE SET title=excluded.title,action=excluded.action,requirements=excluded.requirements,
        start_at=excluded.start_at,due_date=excluded.due_date,due_at=excluded.due_at,due_local_time=excluded.due_local_time,
        due_timezone=excluded.due_timezone,due_precision=excluded.due_precision,due_original=excluded.due_original,
@@ -152,13 +158,14 @@ async function projectTask(client: PoolClient, entityId: string, sourceItemId: s
        urgency=excluded.urgency,confidence=excluded.confidence,evidence_excerpt=excluded.evidence_excerpt,
        estimated_minutes=excluded.estimated_minutes,points_possible=excluded.points_possible,
        prerequisite_blocked=excluded.prerequisite_blocked,cancelled_at=excluded.cancelled_at,
-       source_missing=false,updated_at=now()`,
-    [existingTask?.id||String(payload.id),entityId,payload.courseId,existingTask?.source_item_id||sourceItemId,
+       source_missing=excluded.source_missing,local_status=excluded.local_status,updated_at=now()`,
+    [existingTask?.id||String(payload.id),entityId,payload.courseId,primarySourceItemId,
       payload.sourceType,payload.sourceId,payload.sourceUrl,
       payload.title,payload.action,JSON.stringify(payload.requirements ?? []),safeDate(payload.startAt),due.date,due.at,
       due.localTime,due.timezone,due.precision,due.original,safeDate(payload.unlockAt),safeDate(payload.lockAt),
       cancelled ? 'possibly_superseded' : payload.canvasStatus,payload.urgency,payload.confidence,payload.evidence,
-      payload.estimatedMinutes,payload.pointsPossible,payload.prerequisiteBlocked,cancelled]);
+      payload.estimatedMinutes,payload.pointsPossible,payload.prerequisiteBlocked,cancelledAt,
+      sourceState==='missing',localStatus]);
 }
 
 export class KernelService {
@@ -475,6 +482,42 @@ export class KernelService {
       `SELECT * FROM events WHERE ends_at>=$1 AND starts_at<=$2 ORDER BY starts_at,ends_at`,[startAt,endAt]);
     return result.rows.map(row=>({id:row.id,uid:row.external_uid,sourceName:row.source_name,title:row.title,
       description:row.description,startAt:iso(row.starts_at)!,endAt:iso(row.ends_at)!,allDay:row.all_day}));
+  }
+
+  async rebuildProjections(): Promise<{courses:number;tasks:number;events:number}> {
+    return kernelTransaction(async client=>{
+      // Maintenance operation: serialize projection rebuild with all kernel writers.
+      await client.query('LOCK TABLE courses, tasks, events, facts, candidate_facts, evidence, source_items IN ACCESS EXCLUSIVE MODE');
+      const courseFacts=(await client.query<{id:string;payload:Json;enabled:boolean|null}>(
+        `SELECT c.id,f.canonical_value payload,enabled.canonical_value enabled
+         FROM courses c JOIN entities en ON en.kind='course' AND en.identity_key=c.id
+         JOIN facts f ON f.entity_id=en.id AND f.attribute='course_payload'
+         LEFT JOIN facts enabled ON enabled.entity_id=en.id AND enabled.attribute='enabled'`)).rows;
+      for(const row of courseFacts){
+        await client.query(
+          `UPDATE courses SET name=$2,code=$3,term_id=$4,starts_at=$5,ends_at=$6,enabled=$7,updated_at=now() WHERE id=$1`,
+          [row.id,row.payload.name,row.payload.code,row.payload.termId,safeDate(row.payload.startsAt),
+            safeDate(row.payload.endsAt),row.enabled??row.payload.enabled]);
+      }
+      const taskFacts=(await client.query<{entity_id:string;source_item_id:string}>(
+        `SELECT f.entity_id,e.source_item_id FROM facts f
+         JOIN candidate_facts c ON c.id=f.chosen_candidate_id
+         JOIN evidence e ON e.id=c.evidence_id WHERE f.attribute='task_payload'`)).rows;
+      await client.query('DELETE FROM tasks');
+      for(const row of taskFacts)await projectTask(client,row.entity_id,row.source_item_id);
+      const eventFacts=(await client.query<{entity_id:string;source_item_id:string;source:string;external_id:string;payload:{title:string;description:string;startAt:string;endAt:string;allDay:boolean}}>(
+        `SELECT f.entity_id,e.source_item_id,s.source,s.external_id,f.canonical_value payload
+         FROM facts f JOIN candidate_facts c ON c.id=f.chosen_candidate_id
+         JOIN evidence e ON e.id=c.evidence_id JOIN source_items s ON s.id=e.source_item_id
+         WHERE f.attribute='event_payload'`)).rows;
+      await client.query('DELETE FROM events');
+      for(const row of eventFacts)await client.query(
+        `INSERT INTO events(id,entity_id,source_item_id,source_name,external_uid,title,description,starts_at,ends_at,all_day)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [row.source_item_id,row.entity_id,row.source_item_id,row.source,row.external_id,row.payload.title,
+          row.payload.description,row.payload.startAt,row.payload.endAt,row.payload.allDay]);
+      return {courses:courseFacts.length,tasks:taskFacts.length,events:eventFacts.length};
+    });
   }
 
   async pendingCandidates() {

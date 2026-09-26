@@ -23,6 +23,8 @@ This branch lives in `D:\Desktop\Files\canvas-study-dashboard-v1`, a worktree of
 
 Use a named administrator shell with `KERNEL_DATABASE_URL` set. `npm run kernel:review -- list`, `show <candidate-id>`, `link <candidate-id> <task-id> "reason"`, `accept <candidate-id> "reason"`, and `reject <candidate-id> "reason"` read and write through `KernelService`. Link an unassigned mail claim before accepting it as a task deadline. The reason and OS actor are stored with the prior and selected values. AI mail claims, ambiguous dates and cancellation claims stay pending until reviewed. A missing source never constitutes cancellation.
 
+For a maintenance-window projection repair, stop web and worker writers, run `npm run kernel:migrate -- --rebuild-projections`, compare the returned counts with the prior snapshot, and then restart writers. This rebuilds course, task and event projections from PostgreSQL canonical facts and evidence; it does not import SQLite again.
+
 ## Delivery evidence
 
 Report four independent states: code complete (commit and PR), tests passed (CI run and restore exercise), services deployed (actual container IDs and health output), and production switched (live kernel reads/writes, final parity checks and release status). If credentials, server capacity, approval or restore verification are missing, label the affected state **blocked** and name the missing item. Do not infer deployment from this runbook or Compose files.

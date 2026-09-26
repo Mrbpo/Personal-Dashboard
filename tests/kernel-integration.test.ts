@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
-import { claimIngestionJob, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
+import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
 
 test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});
@@ -46,6 +46,14 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(Number((await kernelPool().query(
     `SELECT count(*) FROM fact_versions WHERE fact_id=(SELECT id FROM facts WHERE entity_id=$1 AND attribute='due')`,
     [tasks[0].entity_id])).rows[0].count),2);
+  await kernel.completeSourceScan('canvas',courseId,[]);
+  const before=(await kernel.taskRows(courseId))[0];
+  assert.equal(before.source_missing,true);
+  await kernel.rebuildProjections();
+  const rebuilt=(await kernel.taskRows(courseId))[0];
+  assert.equal(rebuilt.source_missing,true);
+  assert.equal(rebuilt.due_at,before.due_at);
+  assert.equal(new Date(rebuilt.cancelled_at).toISOString(),new Date(before.cancelled_at).toISOString());
 });
 
 test('persistent jobs recover expired leases and failed transactions roll back',async()=>{
@@ -55,10 +63,18 @@ test('persistent jobs recover expired leases and failed transactions roll back',
   assert.equal(await queueIngestionJob('test','test','unit',{value:1},key),id);
   const claimed=await claimIngestionJob();
   assert.equal(claimed?.id,id);
-  await finishIngestionJob(id,claimed!.lease_token,'retry');
+  await kernelPool().query(`UPDATE ingestion_jobs SET lease_until=now()-interval '1 second' WHERE id=$1`,[id]);
+  const reclaimed=await claimIngestionJob();
+  assert.equal(reclaimed?.id,id);
+  assert.notEqual(reclaimed?.lease_token,claimed?.lease_token);
+  await finishIngestionJob(id,claimed!.lease_token);
+  assert.equal((await kernelPool().query('SELECT state FROM ingestion_jobs WHERE id=$1',[id])).rows[0].state,'running');
+  await finishIngestionJob(id,reclaimed!.lease_token,'retry');
   const row=(await kernelPool().query('SELECT state,attempts FROM ingestion_jobs WHERE id=$1',[id])).rows[0];
   assert.equal(row.state,'queued');
-  assert.equal(row.attempts,1);
+  assert.equal(row.attempts,2);
+  await assert.rejects(completeSourcePage('test',key,'cursor',false));
+  assert.equal((await kernelPool().query('SELECT cursor_value FROM source_status WHERE source=$1 AND scope=$2',['test',key])).rowCount,0);
   const marker=`rollback:${randomUUID()}`;
   await assert.rejects(kernelTransaction(async client=>{
     await client.query(`INSERT INTO academic_terms(id,name) VALUES ($1,'test')`,[marker]);
