@@ -57,6 +57,16 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(rebuilt.source_missing,true);
   assert.equal(rebuilt.due_at,before.due_at);
   assert.equal(new Date(rebuilt.cancelled_at).toISOString(),new Date(before.cancelled_at).toISOString());
+  await kernel.ingestMailAnalysis({id:`unlinked:${randomUUID()}`,account:'test@example.com',
+    sender:'instructor@example.edu',subject:'Revised tutorial date',body:'Due October 15',
+    receivedAt:'2026-09-23T12:00:00Z',hash:randomUUID()},
+    {deadlines:[{at:'2026-10-15',text:'Due October 15',confidence:0.9,evidence:'Due October 15'}]});
+  const unlinked=(await kernel.pendingCandidates()).find(row=>row.attribute==='due'&&row.entity_kind==='mail_claim');
+  assert.ok(unlinked);
+  await assert.rejects(kernel.adjudicate(unlinked.id,'accept','Verified message','test-admin'),/Link this claim/);
+  const linkedId=await kernel.linkCandidate(unlinked.id,tasks[0].id,'Same assignment URL confirmed externally','test-admin');
+  await kernel.adjudicate(linkedId,'accept','Date confirmed by instructor','test-admin');
+  assert.equal((await kernel.taskRows(courseId))[0].due_at,'2026-10-15');
 });
 
 test('persistent jobs recover expired leases and failed transactions roll back',async()=>{
@@ -84,6 +94,38 @@ test('persistent jobs recover expired leases and failed transactions roll back',
     throw new Error('abort');
   }));
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM academic_terms WHERE id=$1',[marker])).rows[0].count),0);
+});
+
+test('legacy core import preserves provenance, task status, date-only deadlines and events',async()=>{
+  await migrateKernel();
+  const suffix=randomUUID(),courseId=`legacy:${suffix}`,sourceItemId=`legacy-source:${suffix}`;
+  await kernel.upsertCourse({id:courseId,name:'Legacy course',course_code:'LEG101'},'legacy_import');
+  const row={id:`${sourceItemId}:0`,course_id:courseId,source_item_id:sourceItemId,
+    source_type:'assignment',source_id:'old-42',source_url:null,title:'Old tutorial',
+    action:'Submit old tutorial',requirements_json:'[]',start_at:null,due_at:'2026-10-05',
+    unlock_at:null,lock_at:null,canvas_status:'upcoming',urgency:'upcoming',
+    confidence:'certain',evidence:'legacy row',estimated_minutes:30,points_possible:10,
+    prerequisite_blocked:0,updated_at:'2026-09-20T00:00:00Z'};
+  await kernel.importLegacyTask(row,'completed');
+  await kernel.importLegacyTask(row,'completed');
+  await kernel.importLegacySource({id:sourceItemId,course_id:courseId,source_type:'assignment',
+    source_id:'old-42',source_url:null,content_hash:'old-hash',remote_updated_at:null,
+    is_active:0,missing_at:'2026-09-21T00:00:00Z'});
+  const task=(await kernel.taskRows(courseId))[0];
+  assert.equal(task.local_status,'completed');
+  assert.equal(task.source_missing,true);
+  assert.equal(task.due_at,'2026-10-05');
+  assert.equal(task.due_precision,'date');
+  assert.equal(task.due_timezone,null);
+  assert.equal(Number((await kernelPool().query(
+    `SELECT count(*) FROM evidence WHERE source='legacy_import' AND source_item_id=$1`,[sourceItemId])).rows[0].count),3);
+  await kernel.ingestEvent('old-ics',{uid:`event-${suffix}`,title:'Old event',description:'Imported calendar row',
+    startAt:'2026-10-01T12:00:00Z',endAt:'2026-10-01T13:00:00Z',allDay:false},'legacy_import');
+  assert.equal((await kernel.listEvents('2026-10-01T00:00:00Z','2026-10-02T00:00:00Z')).some(
+    event=>event.uid===`event-${suffix}`),true);
+  await kernel.rebuildProjections();
+  assert.equal((await kernel.taskRows(courseId))[0].source_missing,true);
+  assert.equal((await kernel.taskRows(courseId))[0].local_status,'completed');
 });
 
 test('Docling failure keeps the original and retry commits parsed evidence',async()=>{
