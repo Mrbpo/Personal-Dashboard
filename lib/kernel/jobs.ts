@@ -113,3 +113,18 @@ export async function finishOutboxJob(id:string,token:string,error?:string):Prom
      last_error=$3,available_at=CASE WHEN $3::text IS NULL THEN now() ELSE now()+make_interval(secs=>LEAST(3600,30*power(2,attempts)::int)) END,
      lease_until=NULL,lease_token=NULL WHERE id=$1 AND lease_token=$2`,[id,token,error??null]);
 }
+
+export async function listOutboxJobs(){
+  const rows=(await kernelPool().query(
+    `SELECT id,kind,state status,attempts,last_error error,
+      floor(extract(epoch from available_at)*1000)::bigint updated_at
+     FROM kernel_outbox ORDER BY available_at DESC LIMIT 30`)).rows;
+  return rows.map(row=>({...row,updated_at:Number(row.updated_at)}));
+}
+
+export async function retryOutboxJob(id:string):Promise<boolean>{
+  const result=await kernelPool().query(
+    `UPDATE kernel_outbox SET state='queued',attempts=0,last_error=NULL,available_at=now(),
+      lease_until=NULL,lease_token=NULL WHERE id=$1 AND state='failed'`,[id]);
+  return result.rowCount===1;
+}

@@ -1,5 +1,5 @@
 import { database as db } from './database.ts';
-import {listIngestionJobs,queueIngestionJob} from './kernel/jobs.ts';
+import {listIngestionJobs,listOutboxJobs,queueIngestionJob} from './kernel/jobs.ts';
 export async function acquireLease(id:string,token:string,now=Date.now(),ttl=180000) {
  return Boolean(await db.prepare(`INSERT INTO service_leases VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE service_leases.expires_at<? OR service_leases.token=? RETURNING id`).bind(id,token,now+ttl,now,token).first());
 }
@@ -24,7 +24,7 @@ export async function claimJob(now=Date.now()) {
 export async function finishJob(id:string,token:string,error?:string) {await db.prepare(`UPDATE background_jobs SET status=?,error=?,available_at=?,lease_until=NULL,updated_at=? WHERE id=? AND lease_token=?`).bind(error?'failed':'complete',error||null,Date.now(),Date.now(),id,token).run();}
 export async function listJobs(){
  const legacy=(await db.prepare('SELECT id,kind,status,attempts,error,updated_at FROM background_jobs ORDER BY updated_at DESC LIMIT 60').all()).results;
- const kernel=await listIngestionJobs();
- return [...legacy,...kernel].sort((a,b)=>Number(b.updated_at)-Number(a.updated_at)).slice(0,60);
+ const [kernel,outbox]=await Promise.all([listIngestionJobs(),listOutboxJobs()]);
+ return [...legacy,...kernel,...outbox].sort((a,b)=>Number(b.updated_at)-Number(a.updated_at)).slice(0,60);
 }
 export function nightKey(now=new Date()){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',hourCycle:'h23'}).formatToParts(now);const val=(t:string)=>parts.find(p=>p.type===t)?.value;return Number(val('hour'))>=3?`${val('year')}-${val('month')}-${val('day')}`:null;}

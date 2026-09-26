@@ -11,7 +11,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ ta
   }
   const target=await getTaskCanvasTarget(taskId);
   if(!target)return Response.json({error:'任务不存在'},{status:404});
-  const queued=Boolean(payload.syncCanvas && payload.status !== 'ignored');
+  const supported=['announcement','assignment','discussion','quiz','page'].includes(target.source_type)
+    && /^\d+$/.test(target.source_id);
+  const queued=Boolean(payload.syncCanvas && payload.status !== 'ignored' && supported);
   await setTaskStatus(taskId,payload.status as "active" | "completed" | "ignored",queued);
-  return Response.json({ taskId, status: payload.status, canvas: {supported:queued,synced:false,queued} });
+  return Response.json({ taskId, status: payload.status, canvas: {supported,synced:false,queued} });
 }
