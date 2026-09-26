@@ -12,6 +12,10 @@ test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});
   assert.equal(parseDeadline('2026-09-25T12:30').precision,null);
   assert.equal(parseDeadline('2026-09-25T12:30:00Z').timezone,'Etc/UTC');
+  assert.deepEqual(parseDeadline('2026-09-25T23:59:00-04:00','America/Toronto'),{
+    date:'2026-09-25',at:'2026-09-26T03:59:00.000Z',localTime:'23:59:00',
+    timezone:'America/Toronto',precision:'second',original:'2026-09-25T23:59:00-04:00'});
+  assert.equal(parseDeadline('2026-09-25T23:59:00-05:00','America/Toronto').precision,null);
 });
 
 test('kernel ingestion is idempotent, tracks source absence, resolves newer Canvas evidence and reviews cancellation',async()=>{
@@ -27,7 +31,9 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(tasks.length,1);
   assert.equal(tasks[0].due_at,'2026-09-25T23:59:00.000Z');
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_item_versions WHERE source_item_id=$1',[sourceId])).rows[0].count),1);
-  await kernel.completeSourceScan('canvas',courseId,[]);
+  assert.equal(await kernel.completeSourceScan('canvas',courseId,[],null,'2026-09-20T00:00:00Z'),0);
+  assert.equal((await kernel.taskRows(courseId))[0].source_missing,false);
+  await kernel.completeSourceScan('canvas',courseId,[],null,'2100-01-01T00:00:00Z');
   tasks=await kernel.taskRows(courseId);
   assert.equal(tasks[0].source_missing,true);
   assert.equal(tasks[0].due_at,'2026-09-25T23:59:00.000Z');
@@ -56,7 +62,7 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(dueHistory[0].valid_from.toISOString(),'2026-09-20T12:00:00.000Z');
   assert.equal(dueHistory[0].valid_to?.toISOString(),'2026-09-21T12:00:00.000Z');
   assert.equal(dueHistory[1].valid_from.toISOString(),'2026-09-21T12:00:00.000Z');
-  await kernel.completeSourceScan('canvas',courseId,[]);
+  await kernel.completeSourceScan('canvas',courseId,[],null,'2100-01-01T00:00:00Z');
   const before=(await kernel.taskRows(courseId))[0];
   assert.equal(before.source_missing,true);
   await kernel.rebuildProjections();
@@ -107,6 +113,8 @@ test('legacy core import preserves provenance, task status, date-only deadlines 
   await migrateKernel();
   const suffix=randomUUID(),courseId=`legacy:${suffix}`,sourceItemId=`legacy-source:${suffix}`;
   await kernel.upsertCourse({id:courseId,name:'Legacy course',course_code:'LEG101'},'legacy_import');
+  await kernel.upsertCourse({id:`disabled:${suffix}`,name:'Disabled legacy',code:'OFF101',enabled:0},'legacy_import');
+  assert.equal((await kernel.getCourse(`disabled:${suffix}`))?.enabled,false);
   const row={id:`${sourceItemId}:0`,course_id:courseId,source_item_id:sourceItemId,
     source_type:'assignment',source_id:'old-42',source_url:null,title:'Old tutorial',
     action:'Submit old tutorial',requirements_json:'[]',start_at:null,due_at:'2026-10-05',

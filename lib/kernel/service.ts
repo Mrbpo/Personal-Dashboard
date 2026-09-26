@@ -35,9 +35,22 @@ export function parseDeadline(raw: string | null, timezone: string | null = null
   if (!match || !Number.isFinite(Date.parse(raw))) return { date: null, at: null, localTime: null, timezone: null, precision: null, original: raw };
   const precision = match[4] !== undefined ? 'second' : match[3] !== undefined ? 'minute' : 'hour';
   const instant = new Date(raw).toISOString();
-  // Without a trusted course zone, normalize the explicit instant to the IANA UTC zone.
-  // The source's offset and wording remain in original for later interpretation.
-  return { date: instant.slice(0,10), at: instant, localTime: instant.slice(11,19), timezone: timezone ?? 'Etc/UTC', precision, original: raw };
+  // An explicit offset identifies the instant. Preserve local wall time in a trusted IANA zone;
+  // otherwise use the IANA UTC zone and retain the source wording in original.
+  if(timezone){
+    try{
+      const parts=new Intl.DateTimeFormat('en-CA',{timeZone:timezone,year:'numeric',month:'2-digit',
+        day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(instant));
+      const part=(type:string)=>parts.find(item=>item.type===type)?.value||'';
+      const localDate=`${part('year')}-${part('month')}-${part('day')}`;
+      const localTime=`${part('hour')}:${part('minute')}:${part('second')}`;
+      if(`${localDate}T${localTime}`!==`${match[1]}T${match[2]}:${match[3]??'00'}:${match[4]??'00'}`)
+        return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};
+      return {date:localDate,at:instant,localTime,timezone,precision,original:raw};
+    }catch{return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};}
+  }
+  return {date:instant.slice(0,10),at:instant,localTime:instant.slice(11,19),
+    timezone:'Etc/UTC',precision,original:raw};
 }
 
 async function sourceVersion(client: PoolClient, input: {
@@ -216,7 +229,8 @@ export class KernelService {
     const term = course.term as Json | undefined;
     const termName = String(term?.name ?? course.term_name ?? '').trim();
     const termId = termName ? `term:${String(term?.id ?? termName).toLowerCase()}` : null;
-    const raw = { id, termId, name: course.name ?? course.course_code ?? '未命名课程', enabled: course.enabled !== false,
+    const raw = { id, termId, name: course.name ?? course.course_code ?? '未命名课程',
+      enabled: course.enabled !== false && course.enabled !== 0,
       code: course.course_code ?? course.code ?? course.name ?? id, termName,
       startsAt: course.start_at ?? term?.start_at ?? null, endsAt: course.end_at ?? term?.end_at ?? null };
     const hash = stableId(JSON.stringify(raw));
@@ -309,15 +323,17 @@ export class KernelService {
         prerequisiteBlocked:Boolean(row.prerequisite_blocked)};
       await recordCandidate(client,{entityId,attribute:'task_payload',value:payload,sourceVersionId:version,
         source:'legacy_import',sourceItemId,originalExcerpt:JSON.stringify(row).slice(0,4000),confidence:0.8,
-        authority:'legacy_import',locator:`task_payload:${id}`,acquiredAt});
+        authority:'legacy_import',locator:`task_payload:${id}`,acquiredAt,publishedAt:iso(row.updated_at)});
       if(row.due_at){const due=parseDeadline(String(row.due_at));await recordCandidate(client,{entityId,attribute:'due',
         value:due,sourceVersionId:version,source:'legacy_import',sourceItemId,originalExcerpt:String(row.due_at),
-        confidence:0.8,authority:due.precision?'legacy_import':'ai',locator:`due:${id}`,acquiredAt});}
+        confidence:0.8,authority:due.precision?'legacy_import':'ai',locator:`due:${id}`,acquiredAt,
+        publishedAt:iso(row.updated_at)});}
       await projectTask(client,entityId,sourceItemId);
       if(override && ['active','completed','ignored'].includes(override)){
         await recordCandidate(client,{entityId,attribute:'local_status',value:override,sourceVersionId:version,
           source:'legacy_import',sourceItemId,originalExcerpt:JSON.stringify({taskId:id,override}),
-          confidence:1,authority:'legacy_import',locator:`local_status:${id}`,acquiredAt});
+          confidence:1,authority:'legacy_import',locator:`local_status:${id}`,acquiredAt,
+          publishedAt:iso(row.updated_at)});
         await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',[id,override]);
       }
     });
@@ -396,10 +412,12 @@ export class KernelService {
     });
   }
 
-  async completeSourceScan(source: string, scope: string, seenIds: string[], cursor: string | null = null): Promise<number> {
+  async completeSourceScan(source: string, scope: string, seenIds: string[],
+    cursor: string | null = null, scanStartedAt = new Date().toISOString()): Promise<number> {
     return kernelTransaction(async client => {
       const current=await client.query<{id:string}>(
-        `SELECT id FROM source_items WHERE source=$1 AND scope=$2 AND state='active' FOR UPDATE`,[source,scope]);
+        `SELECT id FROM source_items WHERE source=$1 AND scope=$2 AND state='active'
+         AND last_seen_at<$3 FOR UPDATE`,[source,scope,scanStartedAt]);
       const seen=new Set(seenIds);
       const missing=current.rows.filter(row=>!seen.has(row.id));
       for (const item of missing) {

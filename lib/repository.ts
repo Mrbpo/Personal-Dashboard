@@ -115,9 +115,9 @@ export async function saveSource(source: CanvasSource, analysis: ExtractedAnalys
   return { changed };
 }
 
-export async function reconcileCourseSources(courseId: string, seenIds: string[]) {
+export async function reconcileCourseSources(courseId: string, seenIds: string[], scanStartedAt: string) {
   const db = getDatabase();
-  const current = await db.prepare("SELECT id, title FROM source_items WHERE course_id=? AND is_active=1").bind(courseId).all<D1Row>();
+  const current = await db.prepare("SELECT id, title FROM source_items WHERE course_id=? AND is_active=1 AND last_seen_at<?").bind(courseId,scanStartedAt).all<D1Row>();
   const seen = new Set(seenIds);
   const missing = current.results.filter((row) => !seen.has(String(row.id)));
   const now = new Date().toISOString();
@@ -128,7 +128,7 @@ export async function reconcileCourseSources(courseId: string, seenIds: string[]
         .bind(courseId, row.id, row.title, JSON.stringify({ active: true }), JSON.stringify({ active: false }), now),
     ]);
   }
-  await kernel.completeSourceScan('canvas',courseId,seenIds);
+  await kernel.completeSourceScan('canvas',courseId,seenIds,null,scanStartedAt);
   return missing.length;
 }
 
@@ -544,7 +544,8 @@ export async function savePiazzaPost(post: { id: string; courseId: string; netwo
   await kernel.ingestRawSource({id:`piazza:${post.id}`,source:'piazza',scope:post.networkId,
     externalId:post.postNumber,courseId:post.courseId,sourceUrl:post.sourceUrl,
     contentHash:post.contentHash,metadata:{id:post.id,title:post.title,kind:post.kind,
-      folders:post.folders,courseId:post.courseId},rawUri:`sqlite-piazza://${post.id}`,
+      folders:post.folders,courseId:post.courseId,createdAt:post.createdAt,updatedAt:post.updatedAt},
+    rawUri:`sqlite-piazza://${post.id}`,
     excerpt:`${post.title}\n${post.body}`.slice(0,4000),publishedAt:post.createdAt,
     remoteUpdatedAt:post.updatedAt});
 }

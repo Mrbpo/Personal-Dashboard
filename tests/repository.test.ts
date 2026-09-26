@@ -74,7 +74,7 @@ test("repository stores tasks, changes, disappearance and capacity plans", async
   await repo.saveSource(changed, analysis, await repo.hashSource(changed), "complete");
   assert.equal((await repo.listChanges())[0].type, "dates_updated");
 
-  const missing = await repo.reconcileCourseSources("course-1", []);
+  const missing = await repo.reconcileCourseSources("course-1", [],'2100-01-01T00:00:00Z');
   assert.equal(missing, 1);
   tasks = await repo.listTasks();
   assert.notEqual(tasks[0].canvasStatus, "possibly_superseded");

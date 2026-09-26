@@ -22,6 +22,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
 
   await updateSyncCourse(runId, courseId, "running");
   try {
+    const scanStartedAt=new Date().toISOString();
     const { sources } = await getCourseSources(courseId);
 
     let analyzed = 0;
@@ -60,7 +61,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
       if (["externaltool", "externalurl"].includes(source.sourceType)) analysisStatus = "external_unreadable";
       await saveSource(source, analysis, hash, analysisStatus);
     }
-    const missing = await reconcileCourseSources(courseId, sources.map((source) => source.id));
+    const missing = await reconcileCourseSources(courseId, sources.map((source) => source.id),scanStartedAt);
     await markCourseSynced(courseId);
     await rebuildCourseSummary(courseId);
     await updateSyncCourse(runId, courseId, "complete");

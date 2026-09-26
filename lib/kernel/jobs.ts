@@ -54,6 +54,10 @@ export async function claimIngestionJob(): Promise<IngestionJob | null> {
     await client.query(
       `UPDATE ingestion_jobs SET state='running',lease_token=$2,lease_until=now()+interval '3 minutes',
        attempts=attempts+1,updated_at=now() WHERE id=$1`, [job.id, token]);
+    if(['canvas','canvas-course','gmail','piazza'].includes(job.kind))await client.query(
+      `INSERT INTO source_status(source,scope,last_started_at,state) VALUES ($1,$2,now(),'running')
+       ON CONFLICT(source,scope) DO UPDATE SET last_started_at=now(),state='running'`,
+      [job.source,job.scope]);
     return { ...job, attempts: job.attempts + 1, lease_token: token };
   });
 }
@@ -66,12 +70,19 @@ export async function renewIngestionJob(id: string, token: string, stage: string
 }
 
 export async function finishIngestionJob(id: string, token: string, error?: string): Promise<void> {
-  await kernelPool().query(
-    `UPDATE ingestion_jobs SET state=CASE WHEN $3::text IS NULL THEN 'complete' WHEN attempts>=5 THEN 'failed' ELSE 'queued' END,
-     last_error=$3,stage=CASE WHEN $3::text IS NULL THEN 'complete' ELSE stage END,
-     available_at=CASE WHEN $3::text IS NULL THEN now() ELSE now()+make_interval(secs=>LEAST(3600,30*power(2,attempts)::int)) END,
-     lease_until=NULL,lease_token=NULL,updated_at=now()
-     WHERE id=$1 AND lease_token=$2`, [id, token, error ?? null]);
+  await kernelTransaction(async client=>{
+    const result=await client.query<{source:string;scope:string;kind:string}>(
+      `UPDATE ingestion_jobs SET state=CASE WHEN $3::text IS NULL THEN 'complete' WHEN attempts>=5 THEN 'failed' ELSE 'queued' END,
+       last_error=$3,stage=CASE WHEN $3::text IS NULL THEN 'complete' ELSE stage END,
+       available_at=CASE WHEN $3::text IS NULL THEN now() ELSE now()+make_interval(secs=>LEAST(3600,30*power(2,attempts)::int)) END,
+       lease_until=NULL,lease_token=NULL,updated_at=now()
+       WHERE id=$1 AND lease_token=$2 RETURNING source,scope,kind`, [id, token, error ?? null]);
+    const job=result.rows[0];
+    if(job&&['canvas','canvas-course','gmail','piazza'].includes(job.kind))await client.query(
+      `UPDATE source_status SET state=$3,last_error=$4,
+       last_completed_at=CASE WHEN $4::text IS NULL THEN now() ELSE last_completed_at END
+       WHERE source=$1 AND scope=$2`,[job.source,job.scope,error?'error':'idle',error??null]);
+  });
 }
 
 export async function completeSourcePage(source: string, scope: string, cursor: string | null, completed: boolean): Promise<void> {
