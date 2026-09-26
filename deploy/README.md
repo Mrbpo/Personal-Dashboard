@@ -1,5 +1,7 @@
 # 私有服务器上线手册（尚未执行）
 
+v1 PostgreSQL kernel 的单独部署、迁移、备份和验收步骤见 [v1 kernel runbook](../docs/v1-kernel-runbook.md)。
+
 本地上传、版本号和正式发布命令见 [发布操作说明](../docs/release-guide.md)。设置页支持按语义版本号检查更新；检查本身不会部署。
 
 ## 先决条件

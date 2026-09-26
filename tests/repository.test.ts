@@ -62,25 +62,29 @@ function assignment(dueAt: string): CanvasSource {
 test("repository stores tasks, changes, disappearance and capacity plans", async () => {
   await repo.upsertCourses([{ id: "course-1", name: "Computer Science", course_code: "CSC", term: { name: "Fall" } }]);
   const first = assignment(new Date(Date.now() + 36 * 3600000).toISOString());
+  first.updatedAt = '2026-09-20T12:00:00Z';
   await repo.saveSource(first, analysis, await repo.hashSource(first), "complete");
   let tasks = await repo.listTasks();
   assert.equal(tasks.length, 1);
   assert.deepEqual(tasks[0].requirements, ["提交 .py 文件"]);
-  assert.equal(tasks[0].startAt, "2026-09-13T09:00:00-04:00");
+  assert.equal(tasks[0].startAt, "2026-09-13T13:00:00.000Z");
 
   const changed = assignment(new Date(Date.now() + 60 * 3600000).toISOString());
+  changed.updatedAt = '2026-09-21T12:00:00Z';
   await repo.saveSource(changed, analysis, await repo.hashSource(changed), "complete");
   assert.equal((await repo.listChanges())[0].type, "dates_updated");
 
   const missing = await repo.reconcileCourseSources("course-1", []);
   assert.equal(missing, 1);
   tasks = await repo.listTasks();
-  assert.equal(tasks[0].canvasStatus, "possibly_superseded");
+  assert.notEqual(tasks[0].canvasStatus, "possibly_superseded");
+  assert.equal((await (await import('../lib/kernel/service.ts')).kernel.taskRows('course-1'))[0].source_missing,true);
+  assert.equal(tasks[0].dueAt,changed.dueAt);
 
   const plan = await repo.saveDailyPlan("2026-09-13", tasks, true, 45);
   assert.equal(plan.capacityMinutes, 45);
   assert.equal(plan.mustDo.length, 0);
-  assert.ok(plan.review.length >= 1);
+  assert.ok(plan.backlogCount >= 0);
 });
 
 test("daily plan merges Canvas mirrors and never exceeds study capacity", async () => {

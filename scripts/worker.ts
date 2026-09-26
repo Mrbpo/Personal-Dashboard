@@ -13,6 +13,11 @@ import {serviceValue} from '../lib/service-vault.ts';
 import {indexMemories} from '../lib/tutor-memory.ts';
 import {recoverSketchArchiveClaims} from '../lib/sketchbooks.ts';
 import {enqueueCodexMaintenance} from '../lib/codex-maintenance.ts';
+import {claimIngestionJob,finishIngestionJob,renewIngestionJob} from '../lib/kernel/jobs.ts';
+import {convertDocumentWithDocling} from '../lib/kernel/docling.ts';
+import {claimOutboxJob,finishOutboxJob} from '../lib/kernel/jobs.ts';
+import {kernel} from '../lib/kernel/service.ts';
+import {setCanvasPlannerComplete} from '../lib/canvas.ts';
 const owner='local-owner';let stopping=false,cleanedLegacyQueue=false,queuedDocumentBackfill=false,lastSketchClaimRecovery=0;const reparseOldPdf=process.env.PDF_FORMULA_BACKFILL==='true';process.on('SIGTERM',()=>{stopping=true;});process.on('SIGINT',()=>{stopping=true;});
 type PiazzaArchiveRow={id:string;course_id:string;title:string;body:string};
 type PendingDocumentRow={id:string;owner_id:string};
@@ -25,6 +30,38 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  if((await getIntegrationConnection('gmail'))?.status==='connected')await enqueue('gmail',{owner},`gmail:${Math.floor(now/900000)}`);
  const piazza=await getIntegrationConnection('piazza');if(piazza&&(['connected','error'].includes(piazza.status)||piazza.status==='needs_reconnect'&&(await getPiazzaAutoLoginStatus()).enabled))await enqueue('piazza',{owner},`piazza:${Math.floor(now/1800000)}`);
  const night=nightKey();if(night)await enqueue('night',{owner},`night:${night}`);
+ }
+ const kernelJob=await claimIngestionJob();
+ if(kernelJob){
+  const renewKernel=setInterval(()=>{void renewIngestionJob(kernelJob.id,kernelJob.lease_token,'parsing');},30000);
+  try{
+   if(kernelJob.kind==='docling_document'){
+    const payload=kernelJob.payload as {owner:string;id:string};
+    await convertDocumentWithDocling(payload.owner,payload.id);
+   }else throw new Error(`Unsupported kernel job: ${kernelJob.kind}`);
+   await finishIngestionJob(kernelJob.id,kernelJob.lease_token);
+  }catch(error){
+   const message=error instanceof Error?error.message:'Kernel job failed';
+   await finishIngestionJob(kernelJob.id,kernelJob.lease_token,message);
+   if(kernelJob.kind==='docling_document'&&kernelJob.attempts>=5){
+    const payload=kernelJob.payload as {id:string};
+    await db.prepare("UPDATE library_documents SET status='error',error=? WHERE id=?").bind('文档解析失败，请检查 Docling 服务',payload.id).run();
+   }
+  }
+  finally{clearInterval(renewKernel);}
+  return;
+ }
+ const outboxJob=await claimOutboxJob();
+ if(outboxJob){
+  try{
+   if(outboxJob.kind!=='canvas_task_status')throw new Error(`Unsupported outbox job: ${outboxJob.kind}`);
+   const payload=outboxJob.payload as {taskId:string;status:string};
+   const target=await kernel.taskTarget(payload.taskId);
+   if(!target)throw new Error('Task disappeared before Canvas sync');
+   await setCanvasPlannerComplete(target.source_type,target.source_id,payload.status==='completed');
+   await finishOutboxJob(outboxJob.id,outboxJob.lease_token);
+  }catch(error){await finishOutboxJob(outboxJob.id,outboxJob.lease_token,error instanceof Error?error.message:'Canvas sync failed');}
+  return;
  }
  const job=await claimJob();if(!job)return;const renew=setInterval(()=>{void db.batch([db.prepare('UPDATE background_jobs SET lease_until=? WHERE id=? AND lease_token=?').bind(Date.now()+180000,job.id,job.lease_token),db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now())]);},30000);
  try{const p=JSON.parse(job.payload);switch(job.kind){case 'memory-index':await indexMemories(p.owner);break;case 'index':await indexDocument(p.owner,p.id,Boolean(p.forcePdfFormulaReparse));await embedMissing(p.owner);break;case 'embed':await embedMissing(p.owner);break;case 'canvas':await archiveCanvas(p.owner);break;case 'canvas-course':await archiveCanvasCourse(p.owner,p.course);break;case 'gmail':{const r=await syncGmail();if(r.more||r.rescan)await enqueue('gmail',p);break;}case 'mail-intelligence':await analyzeMailIntelligence(p.owner,p.id,Boolean(p.force));break;case 'mail-night-maintenance':{const r=await queueNightMailMaintenance(p.owner,p.night);if(r.more)await enqueue('mail-night-maintenance',p);break;}case 'piazza-ai-week':await generatePiazzaWeekSummary(p.weekStart);break;case 'piazza':await syncPiazza();{const posts=(await db.prepare('SELECT id,course_id,title,body FROM piazza_posts WHERE is_active=1').all<PiazzaArchiveRow>()).results;for(const post of posts){const id=await saveDocument(p.owner,post.course_id,'piazza',post.id,post.title+'.txt','text/plain',Buffer.from(post.body));await enqueue('index',{owner:p.owner,id},`index:${id}`);}}break;case 'night':{await enqueue('memory-index',{owner:p.owner});const gmail=await getIntegrationConnection('gmail');if(gmail?.status==='connected'){const night=nightKey()||new Date().toISOString().slice(0,10),mail=await queueNightMailMaintenance(p.owner,night);if(mail.more)await enqueue('mail-night-maintenance',{owner:p.owner,night});}await collectUnusedBlobs();const docs=(await db.prepare("SELECT d.id,d.owner_id FROM library_documents d WHERE d.deleted=0 AND ((d.status!='ready' AND (d.status='pending' OR d.mime LIKE 'text/%' OR d.mime LIKE 'image/%' OR d.mime IN ('application/pdf','application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/octet-stream'))) OR (?=1 AND d.mime='application/pdf' AND NOT EXISTS (SELECT 1 FROM library_parse_pages p WHERE p.document_id=d.id AND p.parser=?))) LIMIT 100").bind(Number(reparseOldPdf),PDF_PARSER_VERSION).all<PendingDocumentRow>()).results;for(const d of docs)await enqueue('index',{owner:d.owner_id,id:d.id},`index:${d.id}`,true);for(let i=0;i<20&&!stopping;i++){if(!(await embedMissing(p.owner)))break;}break;}default:throw new Error('未知任务');}await finishJob(job.id,job.lease_token);}

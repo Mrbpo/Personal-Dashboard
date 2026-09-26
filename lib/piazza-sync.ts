@@ -1,11 +1,11 @@
 import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaCookies, loginPiazza, normalizePiazzaPost, piazzaRpc, type PiazzaClass } from "./piazza.ts";
 import { countPiazzaPosts, getIntegrationConnection, listCourseSettings, saveIntegrationConnection, savePiazzaPost, updateIntegrationStatus } from "./repository.ts";
 import { getPiazzaDailySummary, piazzaDate, piazzaTimezone } from "./piazza-digest.ts";
-import { database as db } from "./database.ts";
 import { acquireLease, enqueue, releaseLease } from "./jobs.ts";
 import { piazzaWeekStart } from "./piazza-ai.ts";
 import { serviceValue } from "./service-vault.ts";
 import { deletePiazzaAutoLogin, getPiazzaAutoLogin, getPiazzaAutoLoginStatus, markPiazzaAutoLoginAttempt, markPiazzaAutoLoginResult, savePiazzaAutoLogin } from "./piazza-auto-login.ts";
+import {kernel} from './kernel/service.ts';
 
 type FeedItem = { id?: string | number; cid?: string | number; nr?: string | number; modified?: string; updated?: string };
 
@@ -19,11 +19,7 @@ function mapClasses(classes: PiazzaClass[], courses: Awaited<ReturnType<typeof l
 
 async function ensurePiazzaOnlyCourses(classes: ReturnType<typeof mapClasses>) {
   const standalone = classes.filter(item => item.courseId?.startsWith("piazza:"));
-  if (!standalone.length) return;
-  const now = new Date().toISOString();
-  await db.batch(standalone.map(item => db.prepare(`INSERT INTO courses (id,name,code,term_name,enabled,updated_at)
-    VALUES (?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,term_name=excluded.term_name,updated_at=excluded.updated_at`)
-    .bind(item.courseId!, item.name, item.courseCode!, item.term, now)));
+  for(const item of standalone)await kernel.upsertCourse({id:item.courseId,name:item.name,code:item.courseCode,term_name:item.term,enabled:false},'piazza');
 }
 
 function sleep(milliseconds: number) {

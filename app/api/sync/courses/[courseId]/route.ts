@@ -5,11 +5,9 @@ import {
   getStoredSource,
   hashSource,
   markCourseSynced,
-  saveAssignment,
   rebuildCourseSummary,
   reconcileCourseSources,
   saveSource,
-  touchSource,
   updateSyncCourse,
 } from "@/lib/repository";
 
@@ -24,8 +22,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
 
   await updateSyncCourse(runId, courseId, "running");
   try {
-    const { sources, assignments } = await getCourseSources(courseId);
-    for (const assignment of assignments) await saveAssignment(courseId, assignment);
+    const { sources } = await getCourseSources(courseId);
 
     let analyzed = 0;
     let attempted = 0;
@@ -41,7 +38,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
       const stored = await getStoredSource(source.id);
       if (stored?.content_hash === hash && stored.extraction_version >= 5 && (stored.analysis_status === "complete" || !hasOpenAI())) {
         unchanged += 1;
-        await touchSource(source.id);
+        await saveSource(source,stored.analysis_json?JSON.parse(stored.analysis_json):null,hash,stored.analysis_status);
         continue;
       }
 

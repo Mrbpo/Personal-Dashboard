@@ -30,30 +30,43 @@ if test -f /srv/study/current-version; then previous=$(cat /srv/study/current-ve
 export APP_VERSION="$sha"
 compose=(docker compose -f /srv/study/compose.yml)
 printf '{"version":"%s","status":"deploying"}\n' "$sha" > /srv/study/status/current.json
+cutover_started=0
 rollback() {
   "${compose[@]}" stop worker web || true
   # The stopped worker can leave its short-lived primary lease behind when npm
   # receives SIGTERM before the Node child. No executor is running here, so the
   # lease is safe to clear before restoring the previous worker.
   "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();" || true
-  if [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then APP_VERSION="$previous" "${compose[@]}" up -d web worker proxy; fi
-  printf '{"version":"%s","previous":"%s","status":"failed"}\n' "$sha" "$previous" > /srv/study/status/current.json
+  if test "$cutover_started" = 0 && [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then
+    APP_VERSION="$previous" "${compose[@]}" up -d web worker proxy
+    printf '{"version":"%s","previous":"%s","status":"failed_before_cutover"}\n' "$sha" "$previous" > /srv/study/status/current.json
+  else
+    # A v1 writer may have committed PostgreSQL changes. Never roll back to v0 automatically.
+    printf '{"version":"%s","previous":"%s","status":"blocked_after_cutover"}\n' "$sha" "$previous" > /srv/study/status/current.json
+  fi
 }
 trap 'rollback' ERR
+"${compose[@]}" up -d postgres docling
+"${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
+"${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 if test -n "$previous"; then APP_VERSION="$previous" "${compose[@]}" stop worker web; fi
 bash /srv/study/backup.sh
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
 # All old executors are stopped. Clear only the executor lease so the new
 # worker can become primary immediately; job leases and progress are retained.
 "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
 started=$(date +%s%3N)
 "${compose[@]}" up -d web worker proxy
+cutover_started=1
 healthy=0
 for n in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:3000/api/health/live >/dev/null && "${compose[@]}" exec -T worker node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; const r=await database.prepare(\"SELECT heartbeat FROM worker_state WHERE id='primary'\").first();const s=await database.prepare('SELECT MAX(version) AS v FROM schema_releases').first();process.exit(r && r.heartbeat>$started && Date.now()-r.heartbeat<15000 && s.v===1?0:1);"; then healthy=1; break; fi
+  if curl -fsS http://127.0.0.1:3000/api/health/live >/dev/null && "${compose[@]}" exec -T worker node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts';import {kernelPool} from './lib/kernel/db.ts';const r=await database.prepare(\"SELECT heartbeat FROM worker_state WHERE id='primary'\").first();const s=await database.prepare('SELECT MAX(version) AS v FROM schema_releases').first();const k=await kernelPool().query('SELECT MAX(version) AS v FROM kernel_migrations');process.exit(r && r.heartbeat>$started && Date.now()-r.heartbeat<15000 && s.v===1 && k.rows[0].v===1?0:1);" && "${compose[@]}" exec -T worker node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then healthy=1; break; fi
   sleep 2
 done
 test "$healthy" = 1
 printf '%s' "$sha" > /srv/study/current-version
-printf '{"version":"%s","previous":"%s","status":"complete","at":"%s"}\n' "$sha" "$previous" "$(date -u +%FT%TZ)" > /srv/study/status/current.json
+printf '{"version":"%s","previous":"%s","status":"production_switched","at":"%s"}\n' "$sha" "$previous" "$(date -u +%FT%TZ)" > /srv/study/status/current.json
 trap - ERR
