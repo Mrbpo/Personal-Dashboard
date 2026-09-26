@@ -18,6 +18,7 @@ const {database:db,mailSearchIndexAvailable}=await import('../lib/database.ts');
 const {saveIntegrationConnection}=await import('../lib/repository.ts');
 const {seal}=await import('../lib/service-vault.ts');
 const {archiveMail}=await import('../lib/mail-library.ts');
+const {kernel}=await import('../lib/kernel/service.ts');
 const library=await import('../lib/library.ts');
 const {searchRelatedMail}=await import('../lib/mail-intelligence.ts');
 const {ensureMailEmbedding,retireMailEmbedding}=await import('../lib/mail-embedding.ts');
@@ -34,7 +35,7 @@ test('archived mail shares one subject/body vector, keeps full-text tail recall,
  };
  try{
   await saveIntegrationConnection('gmail',seal({refresh:'test-refresh'}),{owner:'alice',email:'alice@example.invalid'});
-  await db.prepare("INSERT INTO courses (id,name,code,updated_at) VALUES ('chem','Chemistry','CHMA10','now')").run();
+  await kernel.upsertCourse({id:'chem',name:'Chemistry',course_code:'CHMA10'});
   const subject='CHMA10 schedule',body='lecture overview '.repeat(450)+' quarterfactverified '+'lecture overview '.repeat(1350)+' tailfactconfirmed';
   await db.prepare('INSERT INTO mail_messages (id,account,thread_id,subject,sender,body,received_at,category,attachments_json,hash) VALUES (?,?,?,?,?,?,?,?,?,?)').bind('mail-new','alice@example.invalid','thread-1',subject,'teacher@example.edu',body,'2026-09-23T12:00:00Z','学习',JSON.stringify([{id:'att-1',name:'notes.txt',size:30,mime:'text/plain'}]),sha(subject,body)).run();
   await db.prepare('INSERT INTO mail_messages (id,account,thread_id,subject,sender,body,received_at,category,attachments_json,hash) VALUES (?,?,?,?,?,?,?,?,?,?)').bind('mail-old','alice@example.invalid','thread-2','Old announcement','other@example.edu','A past message says tailfactconfirmed was checked.','2020-01-01T12:00:00Z','学习','[]',sha('Old announcement','A past message says tailfactconfirmed was checked.')).run();
@@ -91,7 +92,7 @@ test('archived mail shares one subject/body vector, keeps full-text tail recall,
   assert.equal((await db.prepare('SELECT COUNT(*) n FROM library_mail_sources WHERE document_id=?').bind(attachment.id).first<{n:number}>())?.n,0);
   assert.equal((await library.searchLibrary('alice','independent attachment keyword','chem',false))[0]?.document_id,attachment.id);
 
-  await db.prepare("INSERT INTO courses (id,name,code,updated_at) VALUES ('bio','Biology','BIOA01','now')").run();
+  await kernel.upsertCourse({id:'bio',name:'Biology',course_code:'BIOA01'});
   const secondArchive=await archiveMail('alice','mail-new','bio');
   await library.indexDocument('alice',secondArchive.id);
   assert.equal(await library.embedMissing('alice'),0,'two course archives share the same mail vector');

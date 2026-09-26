@@ -21,7 +21,7 @@ This branch lives in `D:\Desktop\Files\canvas-study-dashboard-v1`, a worktree of
 
 ## Manual fact review
 
-Use a named administrator shell with `KERNEL_DATABASE_URL` set. `npm run kernel:review -- list`, `show <candidate-id>`, `accept <candidate-id> "reason"`, and `reject <candidate-id> "reason"` read and write through `KernelService`. The reason and OS actor are stored with the prior and selected values. AI mail claims, ambiguous dates and cancellation claims stay pending until reviewed. A missing source never constitutes cancellation.
+Use a named administrator shell with `KERNEL_DATABASE_URL` set. `npm run kernel:review -- list`, `show <candidate-id>`, `link <candidate-id> <task-id> "reason"`, `accept <candidate-id> "reason"`, and `reject <candidate-id> "reason"` read and write through `KernelService`. Link an unassigned mail claim before accepting it as a task deadline. The reason and OS actor are stored with the prior and selected values. AI mail claims, ambiguous dates and cancellation claims stay pending until reviewed. A missing source never constitutes cancellation.
 
 ## Delivery evidence
 

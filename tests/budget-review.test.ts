@@ -5,6 +5,7 @@ process.env.AI_MONTHLY_BUDGET='1';
 const {reserveBudget,budgetStatus}=await import('../lib/ai-budget.ts');
 const {database:db}=await import('../lib/database.ts');
 const {confirmReview}=await import('../lib/review-schedule.ts');
+const {kernel}=await import('../lib/kernel/service.ts');
 test('concurrent requests reserve funds atomically without overspending the monthly cap',async()=>{
  const results=await Promise.allSettled([reserveBudget(.6,'test'),reserveBudget(.6,'test')]);
  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal((await budgetStatus()).used,.6);
@@ -22,5 +23,5 @@ test('review confirmation verifies source ownership and does not overwrite confl
  await assert.rejects(confirmReview('bob',input));
  const first=await confirmReview('alice',input);assert.equal((await confirmReview('alice',input)).id,first.id);
  await assert.rejects(confirmReview('alice',{...input,title:'Other',start:'2026-09-20T12:15:00Z'}),/重叠/);
- assert.equal((await db.prepare('SELECT COUNT(*) n FROM schedule_events').first<{n:number}>())?.n,1);
+ assert.equal((await kernel.listEvents('2026-09-20T00:00:00Z','2026-09-21T00:00:00Z')).length,1);
 });

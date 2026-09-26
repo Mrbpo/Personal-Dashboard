@@ -41,11 +41,12 @@ const counts={
   courses:Number((await pg.query('SELECT count(*) FROM courses')).rows[0].count),
   sources:Number((await pg.query("SELECT count(*) FROM source_items WHERE source='canvas' AND scope!='courses'")).rows[0].count),
   tasks:Number((await pg.query('SELECT count(*) FROM tasks')).rows[0].count),
+  taskCandidates:Number((await pg.query("SELECT count(*) FROM candidate_facts WHERE attribute='task_payload'")).rows[0].count),
   events:Number((await pg.query('SELECT count(*) FROM events')).rows[0].count),
 };
 const expected={courses:courses.length,sources:sources.length,tasks:tasks.length,events:events.length};
 console.log(JSON.stringify({expected,counts}));
-if(Object.entries(expected).some(([key,value])=>counts[key as keyof typeof counts]<value)){
+if(counts.courses<expected.courses||counts.sources<expected.sources||counts.taskCandidates<expected.tasks||counts.events<expected.events){
   throw new Error('Kernel migration count mismatch; do not switch production traffic');
 }
 await pg.query("INSERT INTO kernel_imports(name,counts) VALUES ('v0-final-snapshot',$1) ON CONFLICT DO NOTHING",[JSON.stringify({expected,counts})]);

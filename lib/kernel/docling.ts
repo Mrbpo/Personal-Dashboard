@@ -58,6 +58,9 @@ export async function convertDocumentWithDocling(owner: string, id: string): Pro
   const chunks=pages.flatMap(page=>splitText(page.text).map(body=>({locator:page.locator,body})));
   // Search chunks are a rebuildable cache. The original blob and provenance remain available.
   await legacy.batch([
+    legacy.prepare("DELETE FROM library_parse_pages WHERE document_id=? AND parser='docling-v1'").bind(id),
+    ...pages.map((page,index)=>legacy.prepare('INSERT INTO library_parse_pages(document_id,parser,page,body) VALUES (?,?,?,?)')
+      .bind(id,'docling-v1',index,page.text)),
     legacy.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),
     legacy.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),
     ...chunks.map((chunk,index)=>legacy.prepare('INSERT INTO library_chunks(id,document_id,position,locator,body,hash) VALUES (?,?,?,?,?,?)')

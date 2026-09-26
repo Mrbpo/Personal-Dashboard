@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS adjudications (
   id bigserial PRIMARY KEY,
   candidate_id text NOT NULL REFERENCES candidate_facts(id),
   actor text NOT NULL,
-  decision text NOT NULL CHECK (decision IN ('accept','reject')),
+  decision text NOT NULL CHECK (decision IN ('accept','reject','link')),
   reason text NOT NULL,
   before_value jsonb,
   after_value jsonb,

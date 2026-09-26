@@ -50,14 +50,14 @@ export async function previewDocument(owner:string,id:string) {
   let text='',pages:Array<{page:number;locator:string;text:string}>=[];
   if(document.mime.startsWith('text/')) text=(await readBlob(document.hash)).toString('utf8');
   else if(document.mime==='application/pdf'){
-    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 ELSE 1 END LIMIT 1000").bind(id,PDF_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
+    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN ('docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser='docling-v1' THEN 0 WHEN parser=? THEN 1 ELSE 2 END LIMIT 1000").bind(id,PDF_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
     const job=await db.prepare('SELECT status,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;payload:string}>();
     const explicitUnfinished=job&&['queued','running','failed'].includes(job.status)&&JSON.parse(job.payload).forcePdfFormulaReparse===true;
     const preserveOld=document.status!=='ready'||explicitUnfinished;
     const best=new Map<number,{page:number;body:string;parser:string}>();
     for(const item of parsed)if(!best.has(item.page)||(preserveOld&&item.parser==='pdf-page-v2'))best.set(item.page,item);
     pages=[...best.values()].map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
-    const hasOld=parsed.some(item=>item.parser==='pdf-page-v2'),hasCurrent=parsed.some(item=>item.parser===PDF_PARSER_VERSION);
+    const hasOld=parsed.some(item=>item.parser==='pdf-page-v2'),hasCurrent=parsed.some(item=>item.parser===PDF_PARSER_VERSION||item.parser==='docling-v1');
     if(document.status!=='ready'||(!hasOld&&!hasCurrent)||(process.env.PDF_FORMULA_BACKFILL==='true'&&!hasCurrent))await enqueue('index',{owner,id},`index:${id}`,true);
   }
   else if(!document.mime.startsWith('image/')&&document.mime!=='application/pdf'){

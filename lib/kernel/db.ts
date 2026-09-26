@@ -10,7 +10,7 @@ export function kernelPool(): Pool {
     if (!connectionString) throw new Error('KERNEL_DATABASE_URL is required for v1 core data');
     const schema=process.env.KERNEL_SCHEMA;
     if(schema && !/^[a-z][a-z0-9_]{0,62}$/.test(schema))throw new Error('Invalid KERNEL_SCHEMA');
-    pool = new Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000,
+    pool = new Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, allowExitOnIdle:true,
       options:schema?`-c search_path=${schema}`:undefined });
   }
   return pool;

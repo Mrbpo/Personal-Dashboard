@@ -281,8 +281,11 @@ export class KernelService {
         externalId:`${row.source_type}:${row.source_id}`,courseId:String(row.course_id),
         sourceUrl:row.source_url as string|null,contentHash:`legacy-source:${row.content_hash}`,
         raw:row,acquiredAt,remoteUpdatedAt:iso(row.remote_updated_at)});
-      if(!row.is_active)await client.query(
-        `UPDATE source_items SET state='missing',missing_at=$2 WHERE id=$1`,[id,safeDate(row.missing_at)??acquiredAt]);
+      if(!row.is_active){
+        await client.query(`UPDATE source_items SET state='missing',missing_at=$2 WHERE id=$1`,
+          [id,safeDate(row.missing_at)??acquiredAt]);
+        await client.query('UPDATE tasks SET source_missing=true WHERE source_item_id=$1',[id]);
+      }
     });
   }
 
@@ -477,7 +480,9 @@ export class KernelService {
   async pendingCandidates() {
     return (await kernelPool().query(
       `SELECT c.id,c.entity_id,c.attribute,c.value,c.authority,c.created_at,e.source,e.original_excerpt,
-       f.canonical_value FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+       en.kind entity_kind,t.id task_id,co.code course_code,f.canonical_value FROM candidate_facts c
+       JOIN evidence e ON e.id=c.evidence_id JOIN entities en ON en.id=c.entity_id
+       LEFT JOIN tasks t ON t.entity_id=c.entity_id LEFT JOIN courses co ON co.id=en.course_id
        LEFT JOIN facts f ON f.entity_id=c.entity_id AND f.attribute=c.attribute
        WHERE c.status='pending' ORDER BY c.created_at LIMIT 100`)).rows;
   }
@@ -485,16 +490,22 @@ export class KernelService {
   async candidate(id: string) {
     return (await kernelPool().query(
       `SELECT c.*,e.source,e.original_excerpt,e.acquired_at,e.published_at,e.confidence,
-       f.canonical_value FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+       en.kind entity_kind,t.id task_id,co.code course_code,f.canonical_value FROM candidate_facts c
+       JOIN evidence e ON e.id=c.evidence_id JOIN entities en ON en.id=c.entity_id
+       LEFT JOIN tasks t ON t.entity_id=c.entity_id LEFT JOIN courses co ON co.id=en.course_id
        LEFT JOIN facts f ON f.entity_id=c.entity_id AND f.attribute=c.attribute WHERE c.id=$1`,[id])).rows[0] ?? null;
   }
 
   async adjudicate(id: string, decision: 'accept'|'reject', reason: string, actor: string) {
     if (!reason.trim() || !actor.trim()) throw new Error('Actor and reason are required');
     await kernelTransaction(async client => {
-      const candidate=(await client.query<{entity_id:string;attribute:string;value:unknown;status:string}>(
-        'SELECT entity_id,attribute,value,status FROM candidate_facts WHERE id=$1 FOR UPDATE',[id])).rows[0];
+      const candidate=(await client.query<{entity_id:string;attribute:string;value:unknown;status:string;kind:string}>(
+        `SELECT c.entity_id,c.attribute,c.value,c.status,e.kind FROM candidate_facts c
+         JOIN entities e ON e.id=c.entity_id WHERE c.id=$1 FOR UPDATE OF c`,[id])).rows[0];
       if (!candidate || candidate.status!=='pending') throw new Error('Candidate is not pending');
+      if(decision==='accept' && ['due','cancelled'].includes(candidate.attribute) && candidate.kind!=='task'){
+        throw new Error('Link this claim to a task before accepting it');
+      }
       const before=(await client.query<{canonical_value:unknown}>(
         'SELECT canonical_value FROM facts WHERE entity_id=$1 AND attribute=$2 FOR UPDATE',
         [candidate.entity_id,candidate.attribute])).rows[0]?.canonical_value ?? null;
@@ -510,6 +521,30 @@ export class KernelService {
           [id])).rows[0];
         if (item) await projectTask(client,candidate.entity_id,item.id);
       }
+    });
+  }
+
+  async linkCandidate(id:string,taskId:string,reason:string,actor:string):Promise<string>{
+    if(!reason.trim()||!actor.trim())throw new Error('Actor and reason are required');
+    return kernelTransaction(async client=>{
+      const candidate=(await client.query<{entity_id:string;attribute:string;value:unknown;evidence_id:string;status:string;authority:string}>(
+        'SELECT entity_id,attribute,value,evidence_id,status,authority FROM candidate_facts WHERE id=$1 FOR UPDATE',[id])).rows[0];
+      if(!candidate||candidate.status!=='pending')throw new Error('Candidate is not pending');
+      const target=(await client.query<{entity_id:string}>(
+        'SELECT entity_id FROM tasks WHERE id=$1',[taskId])).rows[0];
+      if(!target)throw new Error('Target task not found');
+      await client.query('SELECT id FROM entities WHERE id=$1 FOR UPDATE',[target.entity_id]);
+      const linkedId=stableId(target.entity_id,candidate.attribute,candidate.evidence_id);
+      await client.query(
+        `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority)
+         VALUES ($1,$2,$3,$4,$5,'pending',$6) ON CONFLICT(id) DO NOTHING`,
+        [linkedId,target.entity_id,candidate.attribute,JSON.stringify(candidate.value),candidate.evidence_id,candidate.authority]);
+      await client.query(`UPDATE candidate_facts SET status='superseded',reason=$2,decided_at=now() WHERE id=$1`,[id,`linked to ${taskId}`]);
+      await client.query(
+        `INSERT INTO adjudications(candidate_id,actor,decision,reason,before_value,after_value)
+         VALUES ($1,$2,'link',$3,$4,$5)`,[id,actor,reason,
+          JSON.stringify({entityId:candidate.entity_id}),JSON.stringify({entityId:target.entity_id,taskId,linkedId})]);
+      return linkedId;
     });
   }
 }
