@@ -18,6 +18,28 @@ test('deadline precision never fabricates a time',()=>{
   assert.equal(parseDeadline('2026-09-25T23:59:00-05:00','America/Toronto').precision,null);
 });
 
+test('AI extraction remains reviewable and cannot replace a Canvas assignment',async()=>{
+  await migrateKernel();
+  const courseId=`ai-review:${randomUUID()}`;
+  await kernel.upsertCourse({id:courseId,name:'AI review',course_code:'AIR101'});
+  const source={id:`${courseId}:assignment:1`,courseId,sourceType:'assignment',sourceId:'1',
+    title:'Original assignment',body:'Submit the original assignment',sourceUrl:null,
+    updatedAt:'2026-09-20T12:00:00Z',dueAt:'2026-09-25',unlockAt:null,lockAt:null};
+  const analysis={summary:'AI suggestion',actions:[{title:'Renamed by AI',action:'Add invented steps',
+    requirements:['Invented requirement'],recommendedStartAt:'2026-09-22T09:00:00Z',
+    inferredDueAt:'2026-09-24',confidence:'certain' as const,evidence:'AI interpretation',
+    estimatedMinutes:30,possiblyCancelled:true}],notes:[]};
+  await kernel.ingestCanvasSource(source,analysis,'original-hash');
+  const task=(await kernel.taskRows(courseId))[0];
+  assert.equal(task.title,'Original assignment');
+  assert.equal(task.due_at,'2026-09-25');
+  assert.equal(task.cancelled_at,null);
+  assert.deepEqual(task.requirements,[]);
+  const pending=(await kernel.pendingCandidates()).filter(row=>row.entity_id===task.entity_id);
+  assert.ok(pending.some(row=>row.attribute==='task_payload'&&row.authority==='ai'));
+  assert.ok(pending.some(row=>row.attribute==='due'&&row.authority==='ai'));
+});
+
 test('kernel ingestion is idempotent, tracks source absence, resolves newer Canvas evidence and reviews cancellation',async()=>{
   await migrateKernel();
   const courseId=`test:${randomUUID()}`,sourceId=`${courseId}:assignment:42`;

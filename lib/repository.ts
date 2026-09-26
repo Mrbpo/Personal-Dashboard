@@ -121,6 +121,7 @@ export async function reconcileCourseSources(courseId: string, seenIds: string[]
   const seen = new Set(seenIds);
   const missing = current.results.filter((row) => !seen.has(String(row.id)));
   const now = new Date().toISOString();
+  await kernel.completeSourceScan('canvas',courseId,seenIds,null,scanStartedAt);
   for (const row of missing) {
     await db.batch([
       db.prepare("UPDATE source_items SET is_active=0, missing_at=? WHERE id=?").bind(now, row.id),
@@ -128,7 +129,6 @@ export async function reconcileCourseSources(courseId: string, seenIds: string[]
         .bind(courseId, row.id, row.title, JSON.stringify({ active: true }), JSON.stringify({ active: false }), now),
     ]);
   }
-  await kernel.completeSourceScan('canvas',courseId,seenIds,null,scanStartedAt);
   return missing.length;
 }
 

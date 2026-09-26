@@ -112,6 +112,15 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
       (due.precision!==null&&due.precision!=='date'&&(!due.at||!due.timezone||!due.localTime)))
       throw new Error('Invalid deadline candidate');
   }
+  if(input.attribute==='task_payload'){
+    const value=input.value as Json | null;
+    if(!value||typeof value!=='object'||Array.isArray(value)||
+      !['id','courseId','sourceType','sourceId','title','action'].every(key=>typeof value[key]==='string'&&String(value[key]).trim())||
+      !Array.isArray(value.requirements)||!value.requirements.every(item=>typeof item==='string')||
+      (value.startAt!=null&&safeDate(value.startAt)===null)||
+      (value.estimatedMinutes!=null&&(!Number.isFinite(value.estimatedMinutes)||Number(value.estimatedMinutes)<0)))
+      throw new Error('Invalid task candidate');
+  }
   await client.query('SELECT id FROM entities WHERE id=$1 FOR UPDATE',[input.entityId]);
   const evidenceId = stableId(input.sourceVersionId,input.locator);
   await client.query(
@@ -262,37 +271,59 @@ export class KernelService {
 
   async ingestCanvasSource(source: CanvasSource, analysis: ExtractedAnalysis | null, hash: string, provenance: 'canvas'|'legacy_import' = 'canvas'): Promise<void> {
     const acquiredAt=new Date().toISOString();
-    const raw={...source,analysis};
+    const raw=source;
     await kernelTransaction(async client => {
       const version=await sourceVersion(client,{id:source.id,source:'canvas',scope:source.courseId,
         externalId:`${source.sourceType}:${source.sourceId}`,courseId:source.courseId,sourceUrl:source.sourceUrl,
         contentHash:provenance==='legacy_import'?`legacy:${hash}`:hash,raw,acquiredAt,remoteUpdatedAt:source.updatedAt});
-      const actions=analysis?.actions?.length ? analysis.actions :
-        source.sourceType==='assignment' || source.dueAt ? [{title:source.title,action:`完成并提交 ${source.title}`,
-          requirements:[],recommendedStartAt:null,inferredDueAt:null,confidence:'certain' as const,
-          evidence:source.body.slice(0,220),estimatedMinutes:null,possiblyCancelled:false}] : [];
+      const deterministic=['assignment','quiz'].includes(source.sourceType) || Boolean(source.dueAt);
+      const aiActions=analysis?.actions||[];
+      const baseAction={title:source.title,action:`完成并提交 ${source.title}`,requirements:[],
+        recommendedStartAt:null,inferredDueAt:null,confidence:'certain' as const,
+        evidence:source.body.slice(0,220),estimatedMinutes:null,possiblyCancelled:false};
+      const actions=deterministic?[baseAction]:aiActions;
       for (const [index,action] of actions.entries()) {
         const identityKey=source.sourceUrl && ['assignment','quiz','planner'].includes(source.sourceType)
           ? `${source.courseId}|${source.sourceUrl.replace(/\?.*$/,'')}` : `${source.courseId}|${source.sourceType}|${source.sourceId}|${index}`;
         const entityId=stableId('task',identityKey);
         await entity(client,entityId,'task',identityKey,source.courseId,null);
-        const deterministic=source.sourceType==='assignment' || Boolean(source.dueAt);
-        const payload={id:`${source.id}:${index}`,courseId:source.courseId,sourceType:source.sourceType,
-          sourceId:source.sourceId,sourceUrl:source.sourceUrl,title:action.title || source.title,action:action.action,
-          requirements:action.requirements,startAt:action.recommendedStartAt,unlockAt:source.unlockAt,lockAt:source.lockAt,
+        const payloadFor=(candidate:typeof action)=>({id:`${source.id}:${index}`,courseId:source.courseId,sourceType:source.sourceType,
+          sourceId:source.sourceId,sourceUrl:source.sourceUrl,title:candidate.title || source.title,action:candidate.action,
+          requirements:candidate.requirements,startAt:candidate.recommendedStartAt,unlockAt:source.unlockAt,lockAt:source.lockAt,
           canvasStatus:source.submissionState==='submitted'?'completed':'upcoming',urgency:'upcoming',
-          confidence:action.confidence,evidence:action.evidence || '',estimatedMinutes:action.estimatedMinutes,
-          pointsPossible:source.pointsPossible ?? null,prerequisiteBlocked:Boolean(source.prerequisiteBlocked)};
+          confidence:candidate.confidence,evidence:candidate.evidence || '',estimatedMinutes:candidate.estimatedMinutes,
+          pointsPossible:source.pointsPossible ?? null,prerequisiteBlocked:Boolean(source.prerequisiteBlocked)});
+        const payload=payloadFor(action);
         await recordCandidate(client,{entityId,attribute:'task_payload',value:payload,sourceVersionId:version,
           source:provenance,sourceItemId:source.id,originalExcerpt:source.body.slice(0,2000)||source.title,
-          confidence:deterministic?1:0.5,authority:deterministic?provenance:'ai',locator:`task_payload:${index}`,
+          confidence:deterministic?1:0.5,authority:deterministic?provenance:'ai',
+          locator:deterministic?`task_payload:${index}`:`ai_task_payload:${index}:${stableId(JSON.stringify(payload))}`,
           acquiredAt,publishedAt:source.updatedAt});
-        const rawDue=source.dueAt || action.inferredDueAt;
+        const rawDue=deterministic?source.dueAt:action.inferredDueAt;
         if (rawDue) {
           const due=parseDeadline(rawDue);
           await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,source:provenance,
             sourceItemId:source.id,originalExcerpt:rawDue,confidence:source.dueAt?1:0.5,
-            authority:source.dueAt&&due.precision?provenance:'ai',locator:`due:${index}`,acquiredAt,publishedAt:source.updatedAt});
+            authority:source.dueAt&&due.precision?provenance:'ai',
+            locator:deterministic?`due:${index}`:`ai_due:${index}:${stableId(JSON.stringify(due))}`,
+            acquiredAt,publishedAt:source.updatedAt});
+        }
+        if(deterministic)for(const [aiIndex,aiAction] of aiActions.entries()){
+          const aiPayload=payloadFor(aiAction);
+          if(JSON.stringify(aiPayload)!==JSON.stringify(payload))await recordCandidate(client,{
+            entityId,attribute:'task_payload',value:aiPayload,sourceVersionId:version,source:provenance,
+            sourceItemId:source.id,originalExcerpt:(aiAction.evidence||source.body).slice(0,2000),
+            confidence:aiAction.confidence==='certain'?0.8:0.5,authority:'ai',
+            locator:`ai_task_payload:${index}:${aiIndex}:${stableId(JSON.stringify(aiPayload))}`,
+            acquiredAt,publishedAt:source.updatedAt});
+          if(aiAction.inferredDueAt){
+            const due=parseDeadline(aiAction.inferredDueAt);
+            await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,
+              source:provenance,sourceItemId:source.id,originalExcerpt:(aiAction.evidence||aiAction.inferredDueAt).slice(0,2000),
+              confidence:0.5,authority:'ai',
+              locator:`ai_due:${index}:${aiIndex}:${stableId(JSON.stringify(due))}`,
+              acquiredAt,publishedAt:source.updatedAt});
+          }
         }
         // AI's possiblyCancelled flag is deliberately not interpreted as an authoritative cancellation.
         await projectTask(client,entityId,source.id);

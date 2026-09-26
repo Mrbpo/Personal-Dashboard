@@ -23,6 +23,8 @@ Canvas announcement and planner feeds are requested for a moving date window. Th
 4. The receiver starts v1 web and worker and checks the website, both databases, the worker heartbeat and Docling. Only successful checks record `production_switched`. A failure after v1 starts is reported as `blocked_after_cutover`; the script never silently starts a v0 writer against divergent data.
 5. Run `verify-backup.sh` against the encrypted local copy. It checks file hashes and SQLite integrity, verifies referenced original blobs, and restores the PostgreSQL dump into a disposable database. Separately verify off-server object retrieval and a full restore on an isolated host before declaring disaster recovery tested.
 
+Before cutover, compare date-only deadlines in the API (`dueDate` and `duePrecision: date`) with the existing calendar in the configured timezone. The kernel does not invent a clock time for these deadlines. A wrong day or hour in the unchanged UI blocks production acceptance and needs a separately scoped rendering fix.
+
 ## Manual fact review
 
 Use a named administrator shell with `KERNEL_DATABASE_URL` set. `npm run kernel:review -- list`, `show <candidate-id>`, `link <candidate-id> <task-id> "reason"`, `accept <candidate-id> "reason"`, and `reject <candidate-id> "reason"` read and write through `KernelService`. Link an unassigned mail claim before accepting it as a task deadline. The reason and OS actor are stored with the prior and selected values. AI mail claims, ambiguous dates and cancellation claims stay pending until reviewed. A missing source never constitutes cancellation.
