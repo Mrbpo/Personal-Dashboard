@@ -14,6 +14,7 @@ Canvas announcement and planner feeds are requested for a moving date window. Th
 - Set `S3_BUCKET`, `S3_ENDPOINT` (HTTPS) and optionally `S3_PREFIX` plus AWS credentials in `/srv/study/backup-s3.env` (0600). Give this account write/read only to the backup prefix. Configure retention at the object store separately.
 - Keep `/srv/study/backup.recipient` as the public age recipient. Keep `/srv/study/backup.identity` root-only for restore verification and an independent offline copy of that private key. The private key is not inside its own encrypted archive.
 - Install the root-owned `study-kernel-backup.service` and `study-kernel-backup.timer` under `/etc/systemd/system`, enable the timer, and inspect its first successful run. A script alone does not schedule daily backups.
+- After copying the units, run `systemctl daemon-reload`, `systemctl enable --now study-kernel-backup.timer`, `systemctl list-timers study-kernel-backup.timer`, and a supervised `systemctl start study-kernel-backup.service`. Confirm the offsite object and restore result before relying on the schedule.
 - PostgreSQL and Docling expose no host port. The app uses `DOCLING_URL=http://docling:5001` on the Compose network. Review memory and disk headroom before pulling the Docling image.
 
 ## Deployment sequence
