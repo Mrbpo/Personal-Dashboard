@@ -160,7 +160,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
     optional(canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "?include[]=syllabus_body&include[]=term").then((result) => result.data),{}),
   ]);
   const foldersById = new Map(courseFolders.map((folder) => [String(folder.id), folder]));
-  const pages = await Promise.all(pageIndex.map((page) => canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "/pages/" + encodeURIComponent(page.url)).then((result) => result.data).catch(() => page)));
+  const pages = await Promise.all(pageIndex.map((page) => canvasRequest<JsonObject>("/api/v1/courses/" + courseId + "/pages/" + encodeURIComponent(page.url)).then((result) => result.data).catch(() => { complete=false; return page; })));
   const plannerCompletion = new Map(planner.map((item) => [`${String(item.plannable_type || "").toLowerCase()}:${String(item.plannable_id ?? item.plannable?.id ?? "")}`, Boolean(item.planner_override?.marked_complete)]));
 
   const canvasSource = (type: string, item: JsonObject) => {
@@ -206,7 +206,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       const type = String(item.type || "module_item").toLowerCase();
       let detail = item;
       if (item.url && typeof item.url === "string" && item.url.startsWith(baseUrl + "/api/")) {
-        detail = await canvasRequest<JsonObject>(item.url).then((result) => result.data).catch(() => item);
+        detail = await canvasRequest<JsonObject>(item.url).then((result) => result.data).catch(() => { complete=false; return item; });
       }
       const source = sourceFromObject(courseId, type, { ...(item.content_details || {}), ...detail, title: item.title ?? detail.title, html_url: item.html_url ?? detail.html_url, locked_for_user: item.locked_for_user, module_name: courseModule.name });
       const moduleContext = [

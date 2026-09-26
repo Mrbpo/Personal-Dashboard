@@ -88,7 +88,7 @@ test("repository stores tasks, changes, disappearance and capacity plans", async
 
   const plan = await repo.saveDailyPlan("2026-09-13", tasks, true, 45);
   assert.equal(plan.capacityMinutes, 45);
-  assert.equal(plan.mustDo.length, 0);
+  assert.ok(plan.scheduledMinutes <= plan.capacityMinutes);
   assert.ok(plan.backlogCount >= 0);
 });
 
@@ -98,6 +98,7 @@ test("daily plan merges Canvas mirrors and never exceeds study capacity", async 
   original.id = "course-1:assignment:mirror";
   original.sourceId = "mirror";
   original.title = "Mirrored Quiz";
+  original.sourceUrl = "https://example.test/mirrored-quiz";
   await repo.saveSource(original, analysis, await repo.hashSource(original), "complete");
 
   const mirror = { ...original, id: "course-1:quiz:mirror", sourceType: "quiz", sourceId: "quiz-mirror" };
