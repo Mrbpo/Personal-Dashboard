@@ -541,6 +541,12 @@ export async function savePiazzaPost(post: { id: string; courseId: string; netwo
        source_url=excluded.source_url, folders_json=excluded.folders_json, content_hash=excluded.content_hash,
        remote_updated_at=excluded.remote_updated_at, synced_at=excluded.synced_at, is_active=1`
   ).bind(post.id, post.courseId, post.networkId, post.postNumber, post.title, post.body, post.answer, post.kind, post.createdAt, post.sourceUrl, JSON.stringify(post.folders), post.contentHash, post.updatedAt, new Date().toISOString()).run();
+  await kernel.ingestRawSource({id:`piazza:${post.id}`,source:'piazza',scope:post.networkId,
+    externalId:post.postNumber,courseId:post.courseId,sourceUrl:post.sourceUrl,
+    contentHash:post.contentHash,metadata:{id:post.id,title:post.title,kind:post.kind,
+      folders:post.folders,courseId:post.courseId},rawUri:`sqlite-piazza://${post.id}`,
+    excerpt:`${post.title}\n${post.body}`.slice(0,4000),publishedAt:post.createdAt,
+    remoteUpdatedAt:post.updatedAt});
 }
 
 export async function getPiazzaPostState(id: string) {

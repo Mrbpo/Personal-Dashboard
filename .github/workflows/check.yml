@@ -36,4 +36,4 @@ jobs:
       - name: Build and smoke-test the production container
         run: |
           docker build --build-arg APP_VERSION="$GITHUB_SHA" -t "study-cabinet:$GITHUB_SHA" .
-          docker run --rm --network none "study-cabinet:$GITHUB_SHA" node --experimental-strip-types scripts/smoke-production.mjs
+          bash deploy/smoke-container.sh "study-cabinet:$GITHUB_SHA"

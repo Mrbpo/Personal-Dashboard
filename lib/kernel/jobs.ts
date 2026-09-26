@@ -3,13 +3,43 @@ import { kernelPool, kernelTransaction } from './db.ts';
 
 export type IngestionJob = { id: string; kind: string; source: string; scope: string; payload: unknown; attempts: number; lease_token: string };
 
-export async function queueIngestionJob(kind: string, source: string, scope: string, payload: unknown, idempotencyKey: string): Promise<string> {
+export async function queueIngestionJob(kind: string, source: string, scope: string, payload: unknown, idempotencyKey: string, reviveTerminal=false): Promise<string> {
   const id = randomUUID();
   const result = await kernelPool().query<{ id: string }>(
     `INSERT INTO ingestion_jobs(id,kind,source,scope,payload,idempotency_key)
-     VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(idempotency_key) DO UPDATE SET updated_at=now() RETURNING id`,
-    [id, kind, source, scope, JSON.stringify(payload), idempotencyKey]);
+     VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(idempotency_key) DO UPDATE SET
+     updated_at=now(),payload=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
+       THEN excluded.payload ELSE ingestion_jobs.payload END,
+     state=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
+       THEN 'queued' ELSE ingestion_jobs.state END,
+     attempts=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
+       THEN 0 ELSE ingestion_jobs.attempts END,
+     available_at=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
+       THEN now() ELSE ingestion_jobs.available_at END,
+     last_error=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
+       THEN NULL ELSE ingestion_jobs.last_error END RETURNING id`,
+    [id, kind, source, scope, JSON.stringify(payload), idempotencyKey, reviveTerminal]);
   return result.rows[0].id;
+}
+
+export async function listIngestionJobs(){
+  const rows=(await kernelPool().query(
+    `SELECT id,kind,state status,attempts,last_error error,
+      floor(extract(epoch from updated_at)*1000)::bigint updated_at
+     FROM ingestion_jobs ORDER BY updated_at DESC LIMIT 60`)).rows;
+  return rows.map(row=>({...row,updated_at:Number(row.updated_at)}));
+}
+
+export async function retryIngestionJob(id:string):Promise<boolean>{
+  const result=await kernelPool().query(
+    `UPDATE ingestion_jobs SET state='queued',attempts=0,last_error=NULL,available_at=now(),
+      lease_until=NULL,lease_token=NULL,updated_at=now() WHERE id=$1 AND state='failed'`,[id]);
+  return result.rowCount===1;
+}
+
+export async function hasRunningIngestionJob(kind:string):Promise<boolean>{
+  return (await kernelPool().query(
+    `SELECT 1 FROM ingestion_jobs WHERE kind=$1 AND state='running' AND lease_until>now() LIMIT 1`,[kind])).rowCount===1;
 }
 
 export async function claimIngestionJob(): Promise<IngestionJob | null> {

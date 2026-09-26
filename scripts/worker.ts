@@ -35,10 +35,27 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  if(kernelJob){
   const renewKernel=setInterval(()=>{void renewIngestionJob(kernelJob.id,kernelJob.lease_token,'parsing');},30000);
   try{
-   if(kernelJob.kind==='docling_document'){
-    const payload=kernelJob.payload as {owner:string;id:string};
-    await convertDocumentWithDocling(payload.owner,payload.id);
-   }else throw new Error(`Unsupported kernel job: ${kernelJob.kind}`);
+   const payload=kernelJob.payload as {owner:string;id?:string;course?:string};
+   switch(kernelJob.kind){
+    case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id));break;
+    case 'canvas': await archiveCanvas(payload.owner);break;
+    case 'canvas-course': await archiveCanvasCourse(payload.owner,String(payload.course));break;
+    case 'gmail':{
+     const result=await syncGmail();
+     if(result.more||result.rescan)await enqueue('gmail',{owner:payload.owner});
+     break;
+    }
+    case 'piazza':{
+     await syncPiazza();
+     const posts=(await db.prepare('SELECT id,course_id,title,body FROM piazza_posts WHERE is_active=1').all<PiazzaArchiveRow>()).results;
+     for(const post of posts){
+      const id=await saveDocument(payload.owner,post.course_id,'piazza',post.id,post.title+'.txt','text/plain',Buffer.from(post.body));
+      await enqueue('index',{owner:payload.owner,id},`index:${id}`);
+     }
+     break;
+    }
+    default: throw new Error(`Unsupported kernel job: ${kernelJob.kind}`);
+   }
    await finishIngestionJob(kernelJob.id,kernelJob.lease_token);
   }catch(error){
    const message=error instanceof Error?error.message:'Kernel job failed';
@@ -47,6 +64,8 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
     const payload=kernelJob.payload as {id:string};
     await db.prepare("UPDATE library_documents SET status='error',error=? WHERE id=?").bind('文档解析失败，请检查 Docling 服务',payload.id).run();
    }
+   if(kernelJob.kind==='gmail'&&kernelJob.attempts>=5)
+    await db.prepare("UPDATE mail_sync SET import_status='error' WHERE import_status='running'").run();
   }
   finally{clearInterval(renewKernel);}
   return;

@@ -78,6 +78,17 @@ async function acceptCandidate(client: PoolClient, candidateId: string, reason: 
 }
 
 async function recordCandidate(client: PoolClient, input: CandidateInput): Promise<string> {
+  if(!Number.isFinite(input.confidence)||input.confidence<0||input.confidence>1)
+    throw new Error('Candidate confidence must be between 0 and 1');
+  if(!['course_payload','enabled','task_payload','due','cancelled','local_status','event_payload'].includes(input.attribute))
+    throw new Error('Unsupported canonical attribute');
+  if(input.attribute==='due'){
+    const due=input.value as Deadline;
+    if(!due||typeof due.original!=='string'||
+      (due.precision==='date'&&(!due.date||due.at!==null))||
+      (due.precision!==null&&due.precision!=='date'&&(!due.at||!due.timezone||!due.localTime)))
+      throw new Error('Invalid deadline candidate');
+  }
   await client.query('SELECT id FROM entities WHERE id=$1 FOR UPDATE',[input.entityId]);
   const evidenceId = stableId(input.sourceVersionId,input.locator);
   await client.query(
@@ -169,6 +180,26 @@ async function projectTask(client: PoolClient, entityId: string, sourceItemId: s
 }
 
 export class KernelService {
+  async ingestRawSource(input:{id:string;source:string;scope:string;externalId:string;
+    courseId?:string|null;sourceUrl?:string|null;contentHash:string;metadata:Json;
+    rawUri:string;excerpt:string;publishedAt?:string|null;remoteUpdatedAt?:string|null}):Promise<void>{
+    const acquiredAt=new Date().toISOString();
+    await kernelTransaction(async client=>{
+      const version=await sourceVersion(client,{id:input.id,source:input.source,scope:input.scope,
+        externalId:input.externalId,courseId:input.courseId,sourceUrl:input.sourceUrl,
+        contentHash:input.contentHash,raw:input.metadata,rawUri:input.rawUri,
+        rawSha256:input.contentHash,acquiredAt,publishedAt:input.publishedAt,
+        remoteUpdatedAt:input.remoteUpdatedAt});
+      const evidenceId=stableId(version,'raw');
+      await client.query(
+        `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,published_at,
+          original_excerpt,parsed_value,confidence,locator)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,'raw') ON CONFLICT(id) DO NOTHING`,
+        [evidenceId,version,input.source,input.id,acquiredAt,safeDate(input.publishedAt),
+          input.excerpt.slice(0,4000),JSON.stringify(input.metadata)]);
+    });
+  }
+
   async upsertCourse(course: Json, source = 'canvas'): Promise<void> {
     const id = String(course.id);
     const term = course.term as Json | undefined;
@@ -332,6 +363,7 @@ export class KernelService {
         if(matches.length===1)matchedTask=matches[0];
       }
       for(const [index,claim] of analysis.deadlines.entries()){
+        if(!claim.at)continue;
         const entityId=matchedTask?.entity_id||stableId('mail_claim',sourceItemId,String(index));
         if(!matchedTask)await entity(client,entityId,'mail_claim',`${sourceItemId}:${index}`,null,null);
         const due=parseDeadline(claim.at);
@@ -548,6 +580,9 @@ export class KernelService {
       if (!candidate || candidate.status!=='pending') throw new Error('Candidate is not pending');
       if(decision==='accept' && ['due','cancelled'].includes(candidate.attribute) && candidate.kind!=='task'){
         throw new Error('Link this claim to a task before accepting it');
+      }
+      if(decision==='accept' && candidate.attribute==='due' && !(candidate.value as Deadline)?.precision){
+        throw new Error('Deadline needs an unambiguous date or time before acceptance');
       }
       const before=(await client.query<{canonical_value:unknown}>(
         'SELECT canonical_value FROM facts WHERE entity_id=$1 AND attribute=$2 FOR UPDATE',

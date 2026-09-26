@@ -2,10 +2,11 @@ import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaC
 import { countPiazzaPosts, getIntegrationConnection, listCourseSettings, saveIntegrationConnection, savePiazzaPost, updateIntegrationStatus } from "./repository.ts";
 import { getPiazzaDailySummary, piazzaDate, piazzaTimezone } from "./piazza-digest.ts";
 import { acquireLease, enqueue, releaseLease } from "./jobs.ts";
+import {completeSourcePage} from './kernel/jobs.ts';
+import {kernel} from './kernel/service.ts';
 import { piazzaWeekStart } from "./piazza-ai.ts";
 import { serviceValue } from "./service-vault.ts";
 import { deletePiazzaAutoLogin, getPiazzaAutoLogin, getPiazzaAutoLoginStatus, markPiazzaAutoLoginAttempt, markPiazzaAutoLoginResult, savePiazzaAutoLogin } from "./piazza-auto-login.ts";
-import {kernel} from './kernel/service.ts';
 
 type FeedItem = { id?: string | number; cid?: string | number; nr?: string | number; modified?: string; updated?: string };
 
@@ -118,7 +119,8 @@ async function runSyncPiazza() {
       try {
         const seen = new Set<string>();
         // Refresh the newest page, then progressively backfill older pages across runs.
-        const olderOffset = Math.max(30, Number(archiveOffsets[item.nid]) || 30);
+        const checkpoint=await kernel.sourceCursor('piazza',item.nid);
+        const olderOffset = Math.max(30, Number(checkpoint?.archiveOffset ?? archiveOffsets[item.nid]) || 30);
         for (const offset of [0, olderOffset, olderOffset + 30]) {
         const feedResult = await rpc<any>("network.get_my_feed", { limit: 30, offset, sort: "updated" }, item.nid);
         if (!Array.isArray(feedResult?.feed)) throw new Error("PIAZZA_FEED_INVALID");
@@ -138,6 +140,7 @@ async function runSyncPiazza() {
         archiveOffsets[item.nid] = offset + 30;
         if (feed.length < 30) { archiveOffsets[item.nid] = 30; break; }
         }
+        await completeSourcePage('piazza',item.nid,JSON.stringify({archiveOffset:archiveOffsets[item.nid]}),true);
         results.push({ nid: item.nid, courseCode: item.courseCode, imported: courseImported });
       } catch (error) {
         const code = error instanceof Error ? error.message : "PIAZZA_SYNC_FAILED";
