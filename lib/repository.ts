@@ -2,6 +2,7 @@ import type { CanvasSource, ExtractedAnalysis, LearningTask } from "./domain.ts"
 import { classifyCanvasStatus, priorityScore, statusLabels, urgencyForStatus, urgencyForTask } from "./task-rules.ts";
 import { database, searchIndexAvailable } from "./database.ts";
 import { activitySearchAliases, ftsMatchTerms } from "./search-vocabulary.ts";
+import { kernel } from './kernel/service.ts';
 
 type D1Row = Record<string, any>;
 const EXTRACTION_VERSION = 5;
@@ -34,15 +35,7 @@ export async function touchSource(id: string) {
 }
 
 export async function upsertCourses(items: D1Row[]) {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const statements = items.map((course) => db.prepare(
-    `INSERT INTO courses (id, name, code, term_name, start_at, end_at, enabled, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-     ON CONFLICT(id) DO UPDATE SET name=excluded.name, code=excluded.code,
-       term_name=excluded.term_name, start_at=excluded.start_at, end_at=excluded.end_at, updated_at=excluded.updated_at`
-  ).bind(String(course.id), course.name || course.course_code || "未命名课程", course.course_code || course.name || String(course.id), course.term?.name ?? null, course.start_at ?? course.term?.start_at ?? null, course.end_at ?? course.term?.end_at ?? null, now));
-  if (statements.length) await db.batch(statements);
+  for (const course of items) await kernel.upsertCourse(course);
 }
 
 export async function startSyncRun(runId: string, courseIds: string[]) {
@@ -118,46 +111,20 @@ export async function saveSource(source: CanvasSource, analysis: ExtractedAnalys
     analysisStatus, EXTRACTION_VERSION, now, now
   ).run();
 
-  const snippets = source.body.split(/\n+|(?<=[.!?。！？])\s+/).map((item) => item.trim()).filter((item) => item.length >= 12).slice(0, 3);
-  const looksActionable = ["announcement", "page", "discussion"].includes(source.sourceType) && /\b(due|submit|complete|read|quiz|test|exam|deadline|required|before next class)\b|截止|提交|完成|阅读|测验|考试|必须|课前/i.test(source.title + " " + source.body);
-  const looksCancelled = /\b(cancelled|canceled|replaced|no longer required|postponed)\b|取消|作废|替代|延期/i.test(source.title + " " + source.body);
-  const actions = analysis?.actions?.length
-    ? analysis.actions
-    : source.sourceType === "assignment" || Boolean(source.dueAt) || looksActionable
-      ? [{ title: source.title, action: source.sourceType === "assignment" ? "完成并提交 " + source.title : "查看并处理：" + source.title, requirements: snippets, recommendedStartAt: null, inferredDueAt: null, confidence: (source.dueAt || source.sourceType === "assignment" ? "certain" : "inferred") as "certain" | "inferred", evidence: source.body.slice(0, 220), estimatedMinutes: null, possiblyCancelled: looksCancelled }]
-      : [];
-
-  await db.prepare("DELETE FROM tasks WHERE source_item_id=?").bind(source.id).run();
-  const taskStatements = actions.map((action, index) => {
-    let status = classifyCanvasStatus(source);
-    if (action.possiblyCancelled) status = "possibly_superseded";
-    const taskId = source.id + ":" + index;
-    return db.prepare(
-      `INSERT INTO tasks
-       (id, course_id, source_item_id, source_type, source_id, source_url, title, action, requirements_json,
-        start_at, due_at, unlock_at, lock_at, canvas_status, urgency, confidence, evidence, estimated_minutes, points_possible, prerequisite_blocked, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      taskId, source.courseId, source.id, source.sourceType, source.sourceId, source.sourceUrl,
-      action.title || source.title, action.action, JSON.stringify(action.requirements || []),
-      action.recommendedStartAt || null, source.dueAt || action.inferredDueAt, source.unlockAt, source.lockAt, status, urgencyForStatus(status),
-      action.confidence, action.evidence || "", action.estimatedMinutes, source.pointsPossible ?? null, source.prerequisiteBlocked ? 1 : 0, now
-    );
-  });
-  if (taskStatements.length) await db.batch(taskStatements);
+  await kernel.ingestCanvasSource(source, analysis, hash);
   return { changed };
 }
 
-export async function reconcileCourseSources(courseId: string, seenIds: string[]) {
+export async function reconcileCourseSources(courseId: string, seenIds: string[], scanStartedAt: string) {
   const db = getDatabase();
-  const current = await db.prepare("SELECT id, title FROM source_items WHERE course_id=? AND is_active=1").bind(courseId).all<D1Row>();
+  const current = await db.prepare("SELECT id, title FROM source_items WHERE course_id=? AND is_active=1 AND last_seen_at<? AND source_type NOT IN ('announcement','planner')").bind(courseId,scanStartedAt).all<D1Row>();
   const seen = new Set(seenIds);
   const missing = current.results.filter((row) => !seen.has(String(row.id)));
   const now = new Date().toISOString();
+  await kernel.completeSourceScan('canvas',courseId,seenIds,null,scanStartedAt);
   for (const row of missing) {
     await db.batch([
       db.prepare("UPDATE source_items SET is_active=0, missing_at=? WHERE id=?").bind(now, row.id),
-      db.prepare("UPDATE tasks SET canvas_status='possibly_superseded', urgency='review', updated_at=? WHERE source_item_id=?").bind(now, row.id),
       db.prepare("INSERT INTO changes (course_id, source_item_id, change_type, title, before_json, after_json, detected_at) VALUES (?, ?, 'source_missing', ?, ?, ?, ?)")
         .bind(courseId, row.id, row.title, JSON.stringify({ active: true }), JSON.stringify({ active: false }), now),
     ]);
@@ -166,24 +133,12 @@ export async function reconcileCourseSources(courseId: string, seenIds: string[]
 }
 
 export async function saveAssignment(courseId: string, assignment: D1Row) {
-  await getDatabase().prepare(
-    `INSERT INTO assignments
-     (id, course_id, name, description, html_url, due_at, unlock_at, lock_at, points_possible, submission_state, submitted_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, html_url=excluded.html_url,
-       due_at=excluded.due_at, unlock_at=excluded.unlock_at, lock_at=excluded.lock_at,
-       points_possible=excluded.points_possible, submission_state=excluded.submission_state,
-       submitted_at=excluded.submitted_at, updated_at=excluded.updated_at`
-  ).bind(
-    String(assignment.id), courseId, assignment.name || "未命名作业", assignment.description || "",
-    assignment.html_url ?? null, assignment.due_at ?? null, assignment.unlock_at ?? null, assignment.lock_at ?? null,
-    assignment.points_possible ?? null, assignment.submission?.workflow_state ?? null,
-    assignment.submission?.submitted_at ?? null, assignment.updated_at || new Date().toISOString()
-  ).run();
+  // Canvas assignments are ingested as source items; this legacy entry point remains a no-op.
+  void courseId; void assignment;
 }
 
 export async function markCourseSynced(courseId: string) {
-  await getDatabase().prepare("UPDATE courses SET synced_at=? WHERE id=?").bind(new Date().toISOString(), courseId).run();
+  await kernel.markCourseSynced(courseId);
 }
 
 export async function saveCourseSummary(courseId: string, summary: string, priorities: string[], risks: string[], aiAvailable: boolean) {
@@ -207,16 +162,8 @@ export async function rebuildCourseSummary(courseId: string) {
 }
 
 export async function listTasks(): Promise<LearningTask[]> {
-  const result = await getDatabase().prepare(
-    `SELECT t.*, c.code course_code, c.name course_name, s.analysis_status, COALESCE(o.local_status, 'active') local_status
-     FROM tasks t JOIN courses c ON c.id=t.course_id
-     JOIN source_items s ON s.id=t.source_item_id
-     LEFT JOIN task_overrides o ON o.task_id=t.id
-     WHERE c.enabled=1 AND COALESCE(o.local_status, 'active') != 'ignored'
-     ORDER BY CASE t.urgency WHEN 'urgent' THEN 1 WHEN 'soon' THEN 2 WHEN 'upcoming' THEN 3 ELSE 4 END,
-       t.due_at IS NULL, t.due_at`
-  ).all<D1Row>();
-  return deduplicateTasks(result.results.map(rowToTask)).sort((a, b) => b.priorityScore - a.priorityScore);
+  const [rows,settings]=await Promise.all([kernel.taskRows(),getSettings('local-owner')]);
+  return deduplicateTasks(rows.map(row=>rowToTask(row,settings.timezone))).sort((a, b) => b.priorityScore - a.priorityScore);
 }
 
 function deduplicateTasks(tasks: LearningTask[]) {
@@ -237,8 +184,8 @@ function deduplicateTasks(tasks: LearningTask[]) {
   return [...passthrough, ...selected.values()];
 }
 
-function rowToTask(row: D1Row): LearningTask {
-  const liveStatus = ["completed", "possibly_superseded"].includes(row.canvas_status)
+function rowToTask(row: D1Row, timezone='America/Toronto'): LearningTask {
+  let liveStatus = ["completed", "possibly_superseded"].includes(row.canvas_status)
     ? row.canvas_status
     : classifyCanvasStatus({
         id: row.source_item_id, courseId: row.course_id, sourceType: row.source_type,
@@ -246,14 +193,25 @@ function rowToTask(row: D1Row): LearningTask {
         updatedAt: row.updated_at, dueAt: row.due_at, unlockAt: row.unlock_at, lockAt: row.lock_at,
         pointsPossible: row.points_possible, prerequisiteBlocked: Boolean(row.prerequisite_blocked),
       });
-  const score = priorityScore({ canvasStatus: liveStatus, dueAt: row.due_at, lockAt: row.lock_at, pointsPossible: row.points_possible, prerequisiteBlocked: Boolean(row.prerequisite_blocked) });
+  if(row.due_precision==='date' && row.due_date && !['completed','possibly_superseded','locked','not_open'].includes(liveStatus)){
+    const zone=row.due_timezone||timezone;
+    const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(part=>[part.type,part.value]));
+    const today=`${parts.year}-${parts.month}-${parts.day}`;
+    const days=(Date.parse(`${row.due_date}T00:00:00Z`)-Date.parse(`${today}T00:00:00Z`))/86400000;
+    liveStatus=days<0?'overdue_open':days===0?'due_today':days<=3?'due_soon':'upcoming';
+  }
+  const exactDue=row.due_precision==='date'?null:row.due_at;
+  const score = priorityScore({ canvasStatus: liveStatus, dueAt: exactDue, lockAt: row.lock_at, pointsPossible: row.points_possible, prerequisiteBlocked: Boolean(row.prerequisite_blocked) });
   return {
     id: row.id, courseId: row.course_id, courseCode: row.course_code, courseName: row.course_name,
     sourceType: row.source_type, sourceId: row.source_id, sourceUrl: row.source_url,
     title: row.title, action: row.action, requirements: JSON.parse(row.requirements_json || "[]"),
-    startAt: row.start_at, dueAt: row.due_at, unlockAt: row.unlock_at, lockAt: row.lock_at,
+    startAt: row.start_at, dueAt: row.due_at,dueDate:row.due_date??null,
+    duePrecision:row.due_precision??null,dueTimezone:row.due_timezone??null,
+    dueLocalTime:row.due_local_time??null,dueOriginal:row.due_original??null,
+    unlockAt: row.unlock_at, lockAt: row.lock_at,
     canvasStatus: liveStatus, localStatus: row.local_status,
-    urgency: urgencyForTask(liveStatus, row.due_at), confidence: row.confidence, analysisStatus: row.analysis_status, evidence: row.evidence,
+    urgency: row.due_precision==='date'?urgencyForStatus(liveStatus):urgencyForTask(liveStatus, row.due_at), confidence: row.confidence, analysisStatus: row.analysis_status, evidence: row.evidence,
     estimatedMinutes: row.estimated_minutes, pointsPossible: row.points_possible,
     prerequisiteBlocked: Boolean(row.prerequisite_blocked), priorityScore: score, updatedAt: row.updated_at,
   };
@@ -263,8 +221,8 @@ export async function dashboardData(date: string) {
   const db = getDatabase();
   const [tasks, courseRows, changeRows, syncRow] = await Promise.all([
     listTasks(),
-    db.prepare("SELECT * FROM courses WHERE enabled=1 ORDER BY code").all<D1Row>(),
-    db.prepare(`SELECT ch.*, c.code course_code FROM changes ch JOIN courses c ON c.id=ch.course_id
+    kernel.listCourses(),
+    db.prepare(`SELECT ch.* FROM changes ch
       WHERE ch.change_type IN ('dates_updated', 'source_missing', 'restored', 'attachment_updated', 'prerequisite_updated')
       ORDER BY detected_at DESC LIMIT 8`).all<D1Row>(),
     db.prepare("SELECT * FROM sync_runs ORDER BY started_at DESC LIMIT 1").first<D1Row>(),
@@ -273,8 +231,8 @@ export async function dashboardData(date: string) {
   return {
     date,
     tasks,
-    courses: courseRows.results.map((row) => ({ id: row.id, code: row.code, name: row.name, syncedAt: row.synced_at })),
-    changes: changeRows.results.map((row) => ({ id: row.id, courseId: row.course_id, courseCode: row.course_code, title: row.title, type: row.change_type, detectedAt: row.detected_at })),
+    courses: courseRows.filter(row=>row.enabled).map((row) => ({ id: row.id, code: row.code, name: row.name, syncedAt: row.synced_at })),
+    changes: changeRows.results.map((row) => ({ id: row.id, courseId: row.course_id, courseCode: courseRows.find(c=>c.id===row.course_id)?.code||'', title: row.title, type: row.change_type, detectedAt: row.detected_at })),
     lastSync: syncRow ? { id: syncRow.id, status: syncRow.status, startedAt: syncRow.started_at, finishedAt: syncRow.finished_at } : null,
     plan: plan ? JSON.parse(plan.plan_json) : null,
     aiAvailable: plan ? Boolean(plan.ai_available) : null,
@@ -319,31 +277,28 @@ export async function ensureDailyPlan(date: string, aiAvailable: boolean, dailyM
   return saveDailyPlan(date, tasks, aiAvailable, dailyMinutes);
 }
 
-export async function setTaskStatus(taskId: string, status: "active" | "completed" | "ignored") {
-  await getDatabase().prepare(
-    `INSERT INTO task_overrides (task_id, local_status, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(task_id) DO UPDATE SET local_status=excluded.local_status, updated_at=excluded.updated_at`
-  ).bind(taskId, status, new Date().toISOString()).run();
+export async function setTaskStatus(taskId: string, status: "active" | "completed" | "ignored", syncCanvas=false) {
+  await kernel.setTaskStatus(taskId,status,syncCanvas);
 }
 
 export async function getTaskCanvasTarget(taskId: string) {
-  return getDatabase().prepare("SELECT source_type, source_id FROM tasks WHERE id=?").bind(taskId).first<{ source_type: string; source_id: string }>();
+  return kernel.taskTarget(taskId);
 }
 
 export async function getCourseDetail(courseId: string) {
   const db = getDatabase();
-  const course = await db.prepare("SELECT * FROM courses WHERE id=? OR code=?").bind(courseId, courseId).first<D1Row>();
+  const course = await kernel.getCourse(courseId);
   if (!course) return null;
-  const [taskRows, sourceRows, piazzaRows, summary] = await Promise.all([
-    db.prepare(`SELECT t.*, c.code course_code, c.name course_name, s.analysis_status, COALESCE(o.local_status, 'active') local_status
-      FROM tasks t JOIN courses c ON c.id=t.course_id JOIN source_items s ON s.id=t.source_item_id LEFT JOIN task_overrides o ON o.task_id=t.id WHERE t.course_id=? ORDER BY t.due_at IS NULL, t.due_at`).bind(course.id).all<D1Row>(),
+  const [taskRows, sourceRows, piazzaRows, summary,settings] = await Promise.all([
+    kernel.taskRows(course.id),
     db.prepare("SELECT id, source_type, title, body, source_url, remote_updated_at, analysis_status, dates_json, is_active, missing_at FROM source_items WHERE course_id=? ORDER BY is_active DESC, CASE source_type WHEN 'announcement' THEN 1 WHEN 'assignment' THEN 2 WHEN 'module' THEN 3 WHEN 'page' THEN 4 WHEN 'quiz' THEN 5 WHEN 'discussion' THEN 6 WHEN 'file' THEN 7 ELSE 8 END, last_seen_at DESC LIMIT 500").bind(course.id).all<D1Row>(),
     db.prepare("SELECT id, title, body, source_url, remote_updated_at, is_active FROM piazza_posts WHERE course_id=? ORDER BY remote_updated_at DESC LIMIT 200").bind(course.id).all<D1Row>(),
     db.prepare("SELECT * FROM course_summaries WHERE course_id=?").bind(course.id).first<D1Row>(),
+    getSettings('local-owner'),
   ]);
   return {
     course: { id: course.id, code: course.code, name: course.name, termName: course.term_name, syncedAt: course.synced_at },
-    tasks: deduplicateTasks(taskRows.results.map(rowToTask)).sort((a, b) => b.priorityScore - a.priorityScore),
+    tasks: deduplicateTasks(taskRows.map(row=>rowToTask(row,settings.timezone))).sort((a, b) => b.priorityScore - a.priorityScore),
     sources: [
       ...piazzaRows.results.map((row) => ({ id: row.id, type: "piazza", title: row.title, body: String(row.body || ""), excerpt: String(row.body || "").slice(0, 420), url: row.source_url, updatedAt: row.remote_updated_at, analysisStatus: "imported", dates: {}, active: Boolean(row.is_active), missingAt: null })),
       ...sourceRows.results.map((row) => ({ id: row.id, type: row.source_type, title: row.title, body: String(row.body || ""), excerpt: String(row.body || "").slice(0, 420), url: row.source_url, updatedAt: row.remote_updated_at, analysisStatus: row.analysis_status, dates: JSON.parse(row.dates_json || "{}"), active: Boolean(row.is_active), missingAt: row.missing_at })),
@@ -353,11 +308,12 @@ export async function getCourseDetail(courseId: string) {
 }
 
 export async function listChanges() {
-  const result = await getDatabase().prepare(
-    `SELECT ch.*, c.code course_code, c.name course_name FROM changes ch JOIN courses c ON c.id=ch.course_id ORDER BY detected_at DESC LIMIT 100`
-  ).all<D1Row>();
+  const [result,courses] = await Promise.all([
+    getDatabase().prepare('SELECT * FROM changes ORDER BY detected_at DESC LIMIT 100').all<D1Row>(),
+    kernel.listCourses(),
+  ]);
   return result.results.map((row) => ({
-    id: row.id, courseId: row.course_id, courseCode: row.course_code, courseName: row.course_name,
+    id: row.id, courseId: row.course_id, courseCode: courses.find(c=>c.id===row.course_id)?.code||'', courseName: courses.find(c=>c.id===row.course_id)?.name||'',
     title: row.title, type: row.change_type, before: row.before_json ? JSON.parse(row.before_json) : null,
     after: row.after_json ? JSON.parse(row.after_json) : null, detectedAt: row.detected_at,
   }));
@@ -377,13 +333,11 @@ export async function saveSettings(ownerId: string, timezone: string, dailyMinut
 }
 
 export async function listCourseSettings() {
-  const result = await getDatabase().prepare("SELECT id, code, name, enabled FROM courses ORDER BY code").all<D1Row>();
-  return result.results.map((row) => ({ id: row.id, code: row.code, name: row.name, enabled: Boolean(row.enabled) }));
+  return (await kernel.listCourses()).map(row => ({ id: row.id, code: row.code, name: row.name, enabled: Boolean(row.enabled) }));
 }
 
 export async function setCourseEnabled(courseId: string, enabled: boolean) {
-  await getDatabase().prepare("UPDATE courses SET enabled=?, updated_at=? WHERE id=?")
-    .bind(enabled ? 1 : 0, new Date().toISOString(), courseId).run();
+  await kernel.setCourseEnabled(courseId,enabled);
 }
 
 export type ImportedScheduleEvent = {
@@ -396,32 +350,12 @@ export type ImportedScheduleEvent = {
 };
 
 export async function saveScheduleEvents(sourceName: string, events: ImportedScheduleEvent[]) {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const statements = events.map((event) => db.prepare(
-    `INSERT INTO schedule_events (id, external_uid, source_name, title, description, start_at, end_at, all_day, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(source_name, external_uid) DO UPDATE SET title=excluded.title, description=excluded.description,
-       start_at=excluded.start_at, end_at=excluded.end_at, all_day=excluded.all_day, updated_at=excluded.updated_at`
-  ).bind(`${sourceName}:${event.uid}`, event.uid, sourceName, event.title, event.description, event.startAt, event.endAt, event.allDay ? 1 : 0, now));
-  if (statements.length) await db.batch(statements);
+  for (const event of events) await kernel.ingestEvent(sourceName,event);
   return events.length;
 }
 
 export async function listScheduleEvents(startAt: string, endAt: string) {
-  const result = await getDatabase().prepare(
-    "SELECT * FROM schedule_events WHERE end_at>=? AND start_at<=? ORDER BY start_at, end_at"
-  ).bind(startAt, endAt).all<D1Row>();
-  return result.results.map((row) => ({
-    id: row.id,
-    uid: row.external_uid,
-    sourceName: row.source_name,
-    title: row.title,
-    description: row.description,
-    startAt: row.start_at,
-    endAt: row.end_at,
-    allDay: Boolean(row.all_day),
-  }));
+  return kernel.listEvents(startAt,endAt);
 }
 
 export type CourseSearchResult = {
@@ -455,9 +389,12 @@ export async function searchCourseContent(question: string, courseId?: string, l
   const terms = searchTerms(question);
   if (!terms.length) return [];
   const db = getDatabase();
+  const courses = (await kernel.listCourses()).filter(row=>row.enabled);
+  const courseMap = new Map(courses.map(row=>[row.id,row]));
+  const scopedCourseId = courseId ? courses.find(row=>row.id===courseId||row.code===courseId)?.id ?? '__unknown__' : '';
   const indexed = await searchIndexAvailable();
   const match = ftsMatchTerms(terms);
-  const broadSummary = summary && Boolean(requestedCodes.length || courseId || piazzaOnly);
+  const broadSummary = summary && Boolean(requestedCodes.length || scopedCourseId || piazzaOnly);
   const useIndex = indexed && Boolean(match) && !broadSummary;
   const fallbackTerms = terms.filter((term) => term.length >= 2).slice(0, 12);
   const likeFilter = (alias: string, columns: string[]) => fallbackTerms.map(() => `(${columns.map((column) => `lower(${alias}.${column}) LIKE ?`).join(' OR ')})`).join(' OR ');
@@ -465,21 +402,21 @@ export async function searchCourseContent(question: string, courseId?: string, l
   const candidateLimit = Math.min(1800, Math.max(600, limit * 12));
   const queryRows = async (withIndex: boolean) => {
     const canvasRows = piazzaOnly ? { results: [] as D1Row[] } : await db.prepare(
-    `SELECT s.id, s.course_id, c.code course_code, s.source_type, s.title, s.body, s.source_url,
+    `SELECT s.id, s.course_id, '' course_code, s.source_type, s.title, s.body, s.source_url,
       s.remote_updated_at, s.analysis_json, '' answer, '' kind
-     FROM source_items s JOIN courses c ON c.id=s.course_id ${withIndex ? 'JOIN source_items_fts ON source_items_fts.rowid=s.rowid' : ''}
-     WHERE s.is_active=1 AND c.enabled=1 ${courseId ? "AND (s.course_id=? OR c.code=?)" : ""}
+     FROM source_items s ${withIndex ? 'JOIN source_items_fts ON source_items_fts.rowid=s.rowid' : ''}
+     WHERE s.is_active=1 ${scopedCourseId ? "AND s.course_id=?" : ""}
      ${withIndex ? 'AND source_items_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('s',['title','body','analysis_json'])})` : ''}
      ORDER BY ${withIndex ? 'bm25(source_items_fts,10.0,2.0,1.0)' : 's.last_seen_at DESC'} LIMIT ?`
-    ).bind(...(courseId ? [courseId, courseId] : []),...(withIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
+    ).bind(...(scopedCourseId ? [scopedCourseId] : []),...(withIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
     const piazzaRows = await db.prepare(
-    `SELECT p.id, p.course_id, c.code course_code, 'piazza' source_type, p.title, p.body, p.source_url,
+    `SELECT p.id, p.course_id, '' course_code, 'piazza' source_type, p.title, p.body, p.source_url,
       p.remote_updated_at, NULL analysis_json, p.answer, p.kind
-     FROM piazza_posts p JOIN courses c ON c.id=p.course_id ${withIndex ? 'JOIN piazza_posts_fts ON piazza_posts_fts.rowid=p.rowid' : ''}
-     WHERE p.is_active=1 AND c.enabled=1 ${courseId ? "AND (p.course_id=? OR c.code=?)" : ""}
+     FROM piazza_posts p ${withIndex ? 'JOIN piazza_posts_fts ON piazza_posts_fts.rowid=p.rowid' : ''}
+     WHERE p.is_active=1 ${scopedCourseId ? "AND p.course_id=?" : ""}
      ${withIndex ? 'AND piazza_posts_fts MATCH ?' : !broadSummary ? `AND (${likeFilter('p',['title','body','answer'])})` : ''}
      ORDER BY ${withIndex ? 'bm25(piazza_posts_fts,10.0,1.0,6.0)' : 'p.remote_updated_at DESC'} LIMIT ?`
-    ).bind(...(courseId ? [courseId, courseId] : []),...(withIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
+    ).bind(...(scopedCourseId ? [scopedCourseId] : []),...(withIndex ? [match] : broadSummary ? [] : likeArgs(3)),candidateLimit).all<D1Row>();
     return { canvasRows, piazzaRows };
   };
   let searched: Awaited<ReturnType<typeof queryRows>>;
@@ -490,13 +427,16 @@ export async function searchCourseContent(question: string, courseId?: string, l
     console.warn('[course-search] FTS query failed; using scoped keyword fallback');
   }
   const { canvasRows, piazzaRows } = searched;
-  const scheduleRows = courseId ? { results: [] as D1Row[] } : await db.prepare(
-    `SELECT id, 'schedule' course_id, '个人日程' course_code, 'schedule' source_type, title,
-      (description || '\n开始：' || start_at || '\n结束：' || end_at) body, NULL source_url,
-      updated_at remote_updated_at, NULL analysis_json, '' answer, '' kind
-     FROM schedule_events ORDER BY start_at DESC LIMIT 1000`
-  ).all<D1Row>();
-  const rows = { results: [...canvasRows.results, ...piazzaRows.results, ...scheduleRows.results].filter((row) => {
+  const scheduleRows = courseId ? [] : (await kernel.listEvents('1970-01-01T00:00:00Z','9999-12-31T00:00:00Z')).slice(-1000).map(event=>({
+    id:event.id,course_id:'schedule',course_code:'个人日程',source_type:'schedule',title:event.title,
+    body:`${event.description}\n开始：${event.startAt}\n结束：${event.endAt}`,source_url:null,
+    remote_updated_at:null,analysis_json:null,answer:'',kind:'' }));
+  const rows = { results: [...canvasRows.results, ...piazzaRows.results, ...scheduleRows].filter((row) => {
+    if(row.course_id!=='schedule'){
+      const course=courseMap.get(String(row.course_id));
+      if(!course)return false;
+      row.course_code=course.code;
+    }
     const code = String(row.course_code).toUpperCase().replace(/\s/g, "").match(/[A-Z]{2,}\d+/)?.[0];
     return (!requestedCodes.length || requestedCodes.includes(code || "")) && (!piazzaOnly || row.source_type === "piazza");
   }) };
@@ -604,6 +544,13 @@ export async function savePiazzaPost(post: { id: string; courseId: string; netwo
        source_url=excluded.source_url, folders_json=excluded.folders_json, content_hash=excluded.content_hash,
        remote_updated_at=excluded.remote_updated_at, synced_at=excluded.synced_at, is_active=1`
   ).bind(post.id, post.courseId, post.networkId, post.postNumber, post.title, post.body, post.answer, post.kind, post.createdAt, post.sourceUrl, JSON.stringify(post.folders), post.contentHash, post.updatedAt, new Date().toISOString()).run();
+  await kernel.ingestRawSource({id:`piazza:${post.id}`,source:'piazza',scope:post.networkId,
+    externalId:post.postNumber,courseId:post.courseId,sourceUrl:post.sourceUrl,
+    contentHash:post.contentHash,metadata:{id:post.id,title:post.title,kind:post.kind,
+      folders:post.folders,courseId:post.courseId,createdAt:post.createdAt,updatedAt:post.updatedAt},
+    rawUri:`sqlite-piazza://${post.id}`,
+    excerpt:`${post.title}\n${post.body}`.slice(0,4000),publishedAt:post.createdAt,
+    remoteUpdatedAt:post.updatedAt});
 }
 
 export async function getPiazzaPostState(id: string) {

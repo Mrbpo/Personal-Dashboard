@@ -1,8 +1,9 @@
 import { baseCourseCode, classesFromStatus, decryptPiazzaCookies, encryptPiazzaCookies, loginPiazza, normalizePiazzaPost, piazzaRpc, type PiazzaClass } from "./piazza.ts";
 import { countPiazzaPosts, getIntegrationConnection, listCourseSettings, saveIntegrationConnection, savePiazzaPost, updateIntegrationStatus } from "./repository.ts";
 import { getPiazzaDailySummary, piazzaDate, piazzaTimezone } from "./piazza-digest.ts";
-import { database as db } from "./database.ts";
 import { acquireLease, enqueue, releaseLease } from "./jobs.ts";
+import {completeSourcePage} from './kernel/jobs.ts';
+import {kernel} from './kernel/service.ts';
 import { piazzaWeekStart } from "./piazza-ai.ts";
 import { serviceValue } from "./service-vault.ts";
 import { deletePiazzaAutoLogin, getPiazzaAutoLogin, getPiazzaAutoLoginStatus, markPiazzaAutoLoginAttempt, markPiazzaAutoLoginResult, savePiazzaAutoLogin } from "./piazza-auto-login.ts";
@@ -19,11 +20,7 @@ function mapClasses(classes: PiazzaClass[], courses: Awaited<ReturnType<typeof l
 
 async function ensurePiazzaOnlyCourses(classes: ReturnType<typeof mapClasses>) {
   const standalone = classes.filter(item => item.courseId?.startsWith("piazza:"));
-  if (!standalone.length) return;
-  const now = new Date().toISOString();
-  await db.batch(standalone.map(item => db.prepare(`INSERT INTO courses (id,name,code,term_name,enabled,updated_at)
-    VALUES (?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,term_name=excluded.term_name,updated_at=excluded.updated_at`)
-    .bind(item.courseId!, item.name, item.courseCode!, item.term, now)));
+  for(const item of standalone)await kernel.upsertCourse({id:item.courseId,name:item.name,code:item.courseCode,term_name:item.term,enabled:false},'piazza');
 }
 
 function sleep(milliseconds: number) {
@@ -122,7 +119,8 @@ async function runSyncPiazza() {
       try {
         const seen = new Set<string>();
         // Refresh the newest page, then progressively backfill older pages across runs.
-        const olderOffset = Math.max(30, Number(archiveOffsets[item.nid]) || 30);
+        const checkpoint=await kernel.sourceCursor('piazza',item.nid);
+        const olderOffset = Math.max(30, Number(checkpoint?.archiveOffset ?? archiveOffsets[item.nid]) || 30);
         for (const offset of [0, olderOffset, olderOffset + 30]) {
         const feedResult = await rpc<any>("network.get_my_feed", { limit: 30, offset, sort: "updated" }, item.nid);
         if (!Array.isArray(feedResult?.feed)) throw new Error("PIAZZA_FEED_INVALID");
@@ -142,6 +140,7 @@ async function runSyncPiazza() {
         archiveOffsets[item.nid] = offset + 30;
         if (feed.length < 30) { archiveOffsets[item.nid] = 30; break; }
         }
+        await completeSourcePage('piazza',item.nid,JSON.stringify({archiveOffset:archiveOffsets[item.nid]}),true);
         results.push({ nid: item.nid, courseCode: item.courseCode, imported: courseImported });
       } catch (error) {
         const code = error instanceof Error ? error.message : "PIAZZA_SYNC_FAILED";

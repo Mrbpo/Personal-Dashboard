@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Study Cabinet encrypted offsite backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=study-kernel-backup.service
+
+[Install]
+WantedBy=timers.target

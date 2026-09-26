@@ -1,4 +1,6 @@
-# 私有服务器上线手册（尚未执行）
+# 历史 v0 上线手册（归档参考）
+
+v1 PostgreSQL kernel 的部署、迁移、备份、systemd 定时器和切换验收以 [v1 kernel runbook](../docs/v1-kernel-runbook.md) 为准。以下是旧版 v0 计划，包含已经过时的仓库与备份时间描述，不能作为 v1 操作步骤。
 
 本地上传、版本号和正式发布命令见 [发布操作说明](../docs/release-guide.md)。设置页支持按语义版本号检查更新；检查本身不会部署。
 

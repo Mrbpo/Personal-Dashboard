@@ -1,0 +1,11 @@
+[Unit]
+Description=Encrypted offsite backup of Study Cabinet kernel and retained stores
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /srv/study/daily-backup.sh
+User=root
+Group=root
+

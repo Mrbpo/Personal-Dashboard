@@ -1,6 +1,7 @@
 import {database as db} from './database.ts';
 import {getIntegrationConnection} from './repository.ts';
 import {digest} from './library.ts';
+import {kernel} from './kernel/service.ts';
 
 // Only an explicit, owner-confirmed time creates an event. AI text never supplies commands.
 export async function confirmReview(owner:string,value:{source:string;id:string;title:string;start:string;minutes:number}) {
@@ -18,9 +19,9 @@ export async function confirmReview(owner:string,value:{source:string;id:string;
  }
  const end=new Date(start.getTime()+minutes*60000).toISOString(),at=start.toISOString();
  const id=digest([owner,value.source,value.id,value.title.trim(),at].join('\0'));
- const existing=await db.prepare('SELECT id FROM schedule_events WHERE id=?').bind(id).first();if(existing)return {id};
- const conflict=await db.prepare('SELECT id FROM schedule_events WHERE start_at<? AND end_at>? LIMIT 1').bind(end,at).first();
+ const existing=(await kernel.listEvents(at,end)).find(event=>event.id===`event:已确认学习建议:${id}`);if(existing)return {id};
+ const conflict=(await kernel.listEvents(at,end)).find(event=>event.startAt<end&&event.endAt>at);
  if(conflict)throw new Error('这个时间与已有日程重叠，请调整时间；原日程未改变');
- await db.prepare('INSERT OR IGNORE INTO schedule_events (id,external_uid,source_name,title,description,start_at,end_at,all_day,updated_at) VALUES (?,?,?,?,?,?,?,0,?)').bind(id,id,'已确认学习建议',value.title.trim(),`来源：${value.source}/${value.id}\n${text.slice(0,2000)}`,at,end,new Date().toISOString()).run();
+ await kernel.ingestEvent('已确认学习建议',{uid:id,title:value.title.trim(),description:`来源：${value.source}/${value.id}\n${text.slice(0,2000)}`,startAt:at,endAt:end,allDay:false});
  return {id};
 }

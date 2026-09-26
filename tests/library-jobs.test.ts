@@ -6,6 +6,8 @@ const {database:db}=await import('../lib/database.ts');
 const lib=await import('../lib/library.ts');
 const jobs=await import('../lib/jobs.ts');
 const parser=await import('../lib/document-parser.ts');
+const {kernel}=await import('../lib/kernel/service.ts');
+const {claimIngestionJob,finishIngestionJob}=await import('../lib/kernel/jobs.ts');
 test('DOCX text is extracted locally without an AI request',async()=>{
  const zip=new JSZip();
  zip.file('[Content_Types].xml','<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
@@ -22,7 +24,8 @@ test('DOCX text is extracted locally without an AI request',async()=>{
  }finally{globalThis.fetch=original;}
 });
 test('library versions isolate owners and courses, deduplicate and hide deletions',async()=>{
- await db.prepare("INSERT INTO courses (id,name,code,updated_at) VALUES ('chem','Chemistry','CHMA10H3','now'),('stats','Statistics','STAB22H3','now')").run();
+ await kernel.upsertCourse({id:'chem',name:'Chemistry',course_code:'CHMA10H3'});
+ await kernel.upsertCourse({id:'stats',name:'Statistics',course_code:'STAB22H3'});
  const first=await lib.saveDocument('alice','chem','upload','notes.txt','notes.txt','text/plain',Buffer.from('molarity first'));
  assert.equal(first,await lib.saveDocument('alice','chem','upload','notes.txt','notes.txt','text/plain',Buffer.from('molarity first')));
  const other=await lib.saveDocument('alice','stats','upload','notes.txt','notes.txt','text/plain',Buffer.from('molarity first'));
@@ -59,7 +62,7 @@ test('strict library search requires every filename keyword and respects course 
 test('syllabus dates identify the current week and recommend matching classroom files',async()=>{
  const now=new Date('2026-09-21T14:00:00-04:00');
  assert.equal(lib.syllabusWeekForDate('Week 1 — Sep 7\nWeek 2 — Sep 14\nWeek 3 — Sep 21',now)?.week,3);
- await db.prepare("INSERT INTO courses (id,name,code,start_at,updated_at) VALUES ('math-rec','Calculus','MATA29','2026-09-07T12:00:00Z','now')").run();
+ await kernel.upsertCourse({id:'math-rec',name:'Calculus',course_code:'MATA29',start_at:'2026-09-07T12:00:00Z'});
  await db.prepare("INSERT INTO source_items (id,course_id,source_type,source_id,title,body,source_url,content_hash,remote_updated_at,dates_json,analysis_json,analysis_status,extraction_version,first_seen_at,last_seen_at,is_active,missing_at) VALUES ('math-rec:syllabus','math-rec','syllabus','syllabus','Course Syllabus','Week 1 — Sep 7\nWeek 2 — Sep 14\nWeek 3 — Sep 21',NULL,'hash',NULL,'{}',NULL,'rule_only',1,'now','now',1,NULL)").run();
  const blank=await lib.saveDocument('recommend-owner','math-rec','canvas','blank','Week 3 Lecture Notes Blank.pdf','application/pdf',Buffer.from('%PDF-1.4 blank'),'Modules/Week 3');
  await lib.saveDocument('recommend-owner','math-rec','canvas','answers','Week 3 Answer Key.pdf','application/pdf',Buffer.from('%PDF-1.4 answers'),'Modules/Week 3');
@@ -92,8 +95,8 @@ test('terminal document jobs can be revived without disturbing an active lease',
 test('source synchronization is not starved by an indexing backlog',async()=>{
  await jobs.enqueue('index',{id:'slow'},'index:slow');
  await jobs.enqueue('canvas',{},'canvas:priority');
- const first=await jobs.claimJob();assert.equal(first?.id,'canvas:priority');
- await jobs.finishJob(first!.id,first!.lease_token);
+ const first=await claimIngestionJob();assert.equal(first?.kind,'canvas');
+ await finishIngestionJob(first!.id,first!.lease_token);
  const second=await jobs.claimJob();assert.equal(second?.id,'index:slow');
  await jobs.finishJob(second!.id,second!.lease_token);
 });

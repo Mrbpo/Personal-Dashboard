@@ -33,6 +33,6 @@ test('FTS finds old Canvas and Piazza evidence beyond the former recency limits'
   assert.equal((await repo.searchCourseContent('covered cup','chem',8)).some((item)=>item.sourceId==='old-piazza'),false);
   await db.prepare("UPDATE piazza_posts SET is_active=0 WHERE id='old-piazza'").run();
   assert.equal((await repo.searchCourseContent('sealed calorimeter','chem',8)).length,0);
-  await db.prepare("UPDATE courses SET enabled=0 WHERE id='chem'").run();
+  await repo.setCourseEnabled('chem',false);
   assert.equal((await repo.searchCourseContent('spectrophotometry','chem',8)).length,0);
 });

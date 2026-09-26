@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { database as db } from "./database.ts";
+import {kernel} from './kernel/service.ts';
 
 type Row = { id: string; course_id: string; course_code: string; title: string; body: string; answer: string; kind: string; source_url: string | null; created_at: string | null; remote_updated_at: string | null; synced_at: string; content_hash: string };
 
@@ -28,8 +29,12 @@ function view(row: Row) {
 
 export async function getPiazzaDailySummary(date: string, timezone = "America/Toronto") {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) throw new Error("日期无效");
-  const rows = (await db.prepare(`SELECT p.*, c.code course_code FROM piazza_posts p JOIN courses c ON c.id=p.course_id
-    WHERE p.is_active=1 ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC`).all<Row>()).results;
+  const [postRows,kernelCourses]=await Promise.all([
+    db.prepare(`SELECT p.* FROM piazza_posts p WHERE p.is_active=1 ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC`).all<Row>(),
+    kernel.listCourses(),
+  ]);
+  const codes=new Map(kernelCourses.map(course=>[course.id,course.code]));
+  const rows=postRows.results.map(row=>({...row,course_code:codes.get(row.course_id)||''}));
   const recentDates = [...new Set(rows.map(row => piazzaLocalDate(row.remote_updated_at || row.created_at || row.synced_at, timezone)).filter(Boolean))].sort().reverse().slice(0, 20);
   const dailyRows = rows.filter(row => piazzaLocalDate(row.remote_updated_at || row.created_at || row.synced_at, timezone) === date);
   const hash = createHash("sha256").update(JSON.stringify(["v2", timezone, recentDates, ...dailyRows.map(row => [row.id, row.content_hash])])).digest("hex");
@@ -64,8 +69,12 @@ export async function searchConfirmedPiazzaAnswers(query: string, courseId = "",
   }
   const where = conditions.join(" AND ");
   const count = await db.prepare(`SELECT COUNT(*) count FROM piazza_posts p WHERE ${where}`).bind(...args).first<{ count: number }>();
-  const rows = (await db.prepare(`SELECT p.*,c.code course_code FROM piazza_posts p JOIN courses c ON c.id=p.course_id
-    WHERE ${where} ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC LIMIT ? OFFSET ?`)
-    .bind(...args, safeLimit, safeOffset).all<Row>()).results;
+  const [postRows,courses]=await Promise.all([
+    db.prepare(`SELECT p.* FROM piazza_posts p WHERE ${where} ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC LIMIT ? OFFSET ?`)
+      .bind(...args, safeLimit, safeOffset).all<Row>(),
+    kernel.listCourses(),
+  ]);
+  const codes=new Map(courses.map(course=>[course.id,course.code]));
+  const rows=postRows.results.map(row=>({...row,course_code:codes.get(row.course_id)||''}));
   return { total: Number(count?.count || 0), items: rows.map(view), nextOffset: safeOffset + rows.length < Number(count?.count || 0) ? safeOffset + rows.length : null };
 }

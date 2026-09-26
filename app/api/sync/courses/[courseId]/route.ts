@@ -1,15 +1,14 @@
 import { getCourseSources } from "@/lib/canvas";
 import { analyzeSource, analyzeSourceFile, hasOpenAI } from "@/lib/openai-analysis";
 import { requireOwnerApi } from "@/lib/authz";
+import {kernel} from '@/lib/kernel/service';
 import {
   getStoredSource,
   hashSource,
   markCourseSynced,
-  saveAssignment,
   rebuildCourseSummary,
   reconcileCourseSources,
   saveSource,
-  touchSource,
   updateSyncCourse,
 } from "@/lib/repository";
 
@@ -24,8 +23,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
 
   await updateSyncCourse(runId, courseId, "running");
   try {
-    const { sources, assignments } = await getCourseSources(courseId);
-    for (const assignment of assignments) await saveAssignment(courseId, assignment);
+    const scanStartedAt=new Date().toISOString();
+    const { sources,complete } = await getCourseSources(courseId);
 
     let analyzed = 0;
     let attempted = 0;
@@ -41,7 +40,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
       const stored = await getStoredSource(source.id);
       if (stored?.content_hash === hash && stored.extraction_version >= 5 && (stored.analysis_status === "complete" || !hasOpenAI())) {
         unchanged += 1;
-        await touchSource(source.id);
+        await saveSource(source,stored.analysis_json?JSON.parse(stored.analysis_json):null,hash,stored.analysis_status);
         continue;
       }
 
@@ -63,13 +62,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ cou
       if (["externaltool", "externalurl"].includes(source.sourceType)) analysisStatus = "external_unreadable";
       await saveSource(source, analysis, hash, analysisStatus);
     }
-    const missing = await reconcileCourseSources(courseId, sources.map((source) => source.id));
+    if(!complete)throw new Error('CANVAS_PARTIAL_SCAN');
+    const missing = await reconcileCourseSources(courseId, sources.map((source) => source.id),scanStartedAt);
     await markCourseSynced(courseId);
     await rebuildCourseSummary(courseId);
     await updateSyncCourse(runId, courseId, "complete");
     return Response.json({ courseId, sourceCount: sources.length, analyzed, attempted, unchanged, aiFailures, missing });
   } catch (error) {
     const message = error instanceof Error ? error.message : "COURSE_SYNC_FAILED";
+    await kernel.noteSourceFailure('canvas',courseId,message);
     await updateSyncCourse(runId, courseId, "failed", message);
     return Response.json({ error: message, courseId }, { status: 502 });
   }

@@ -4,6 +4,7 @@ import { database as db } from "./database.ts";
 import { acquireLease, releaseLease } from "./jobs.ts";
 import { piazzaLocalDate, piazzaTimezone } from "./piazza-digest.ts";
 import { serviceValue } from "./service-vault.ts";
+import {kernel} from './kernel/service.ts';
 
 type PostRow = { id: string; course_id: string; course_code: string; title: string; body: string; answer: string; kind: string; source_url: string | null; created_at: string | null; remote_updated_at: string | null; synced_at: string; content_hash: string };
 type Point = { text: string; refs: string[]; category: "update" | "answer" | "open" };
@@ -27,8 +28,12 @@ export function piazzaWeekStart(day: string) {
 }
 
 async function allPosts() {
-  return (await db.prepare(`SELECT p.*,c.code course_code FROM piazza_posts p JOIN courses c ON c.id=p.course_id
-    WHERE p.is_active=1 ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC`).all<PostRow>()).results;
+  const [rows,courses]=await Promise.all([
+    db.prepare(`SELECT p.* FROM piazza_posts p WHERE p.is_active=1 ORDER BY COALESCE(p.remote_updated_at,p.created_at,p.synced_at) DESC,p.id DESC`).all<PostRow>(),
+    kernel.listCourses(),
+  ]);
+  const codes=new Map(courses.map(c=>[c.id,c.code]));
+  return rows.results.map(row=>({...row,course_code:codes.get(row.course_id)||''}));
 }
 
 function postDay(post: PostRow, timezone: string) {

@@ -7,6 +7,8 @@ import { serviceValue } from './service-vault.ts';
 import { acquireLease,enqueue,releaseLease } from './jobs.ts';
 import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
 import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
+import {queueIngestionJob} from './kernel/jobs.ts';
+import {kernel} from './kernel/service.ts';
 import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
 export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
@@ -48,14 +50,14 @@ export async function previewDocument(owner:string,id:string) {
   let text='',pages:Array<{page:number;locator:string;text:string}>=[];
   if(document.mime.startsWith('text/')) text=(await readBlob(document.hash)).toString('utf8');
   else if(document.mime==='application/pdf'){
-    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 ELSE 1 END LIMIT 1000").bind(id,PDF_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
+    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN ('docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser='docling-v1' THEN 0 WHEN parser=? THEN 1 ELSE 2 END LIMIT 1000").bind(id,PDF_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
     const job=await db.prepare('SELECT status,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;payload:string}>();
     const explicitUnfinished=job&&['queued','running','failed'].includes(job.status)&&JSON.parse(job.payload).forcePdfFormulaReparse===true;
     const preserveOld=document.status!=='ready'||explicitUnfinished;
     const best=new Map<number,{page:number;body:string;parser:string}>();
     for(const item of parsed)if(!best.has(item.page)||(preserveOld&&item.parser==='pdf-page-v2'))best.set(item.page,item);
     pages=[...best.values()].map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
-    const hasOld=parsed.some(item=>item.parser==='pdf-page-v2'),hasCurrent=parsed.some(item=>item.parser===PDF_PARSER_VERSION);
+    const hasOld=parsed.some(item=>item.parser==='pdf-page-v2'),hasCurrent=parsed.some(item=>item.parser===PDF_PARSER_VERSION||item.parser==='docling-v1');
     if(document.status!=='ready'||(!hasOld&&!hasCurrent)||(process.env.PDF_FORMULA_BACKFILL==='true'&&!hasCurrent))await enqueue('index',{owner,id},`index:${id}`,true);
   }
   else if(!document.mime.startsWith('image/')&&document.mime!=='application/pdf'){
@@ -74,6 +76,10 @@ export async function hideRemoteDocuments(owner:string,course:string,origin:stri
 export function splitText(text:string) {const out:string[]=[];for(let i=0;i<text.length;i+=1400){out.push(text.slice(i,i+1600));if(i+1600>=text.length)break;}return out;}
 export async function indexDocument(owner:string,id:string,forcePdfFormulaReparse=false) {
   const d=await getDocument(owner,id);
+  if(d.mime==='application/pdf' && process.env.DOCLING_URL){
+    await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id},`docling:${id}:${d.hash}:v1`);
+    return;
+  }
   if(d.mime==='application/pdf'&&d.status==='ready'&&!forcePdfFormulaReparse&&process.env.PDF_FORMULA_BACKFILL!=='true'){
     const old=await db.prepare("SELECT 1 ok FROM library_parse_pages WHERE document_id=? AND parser='pdf-page-v2' LIMIT 1").bind(id).first();
     if(old)return;
@@ -153,7 +159,7 @@ type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:bo
 export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string};
 type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
-  if(!course){const code=query.toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await db.prepare('SELECT id,code FROM courses WHERE enabled=1').all<{id:string;code:string}>()).results;course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
+  if(!course){const code=query.toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await kernel.listCourses()).filter(c=>c.enabled);course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
 
   const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(30,options.limit||8));
   const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0)`;
@@ -239,8 +245,8 @@ export async function recommendLibraryForNow(owner:string,course:string,now=new 
   const [documents,sources,tasks,courseRow]=await Promise.all([
     listDocuments(owner).then(items=>items.filter(item=>item.course_id===course)),
     db.prepare("SELECT title,body,source_type,dates_json,remote_updated_at FROM source_items WHERE course_id=? AND is_active=1 ORDER BY last_seen_at DESC LIMIT 1000").bind(course).all<{title:string;body:string;source_type:string;dates_json:string;remote_updated_at:string|null}>().then(result=>result.results),
-    db.prepare("SELECT title,action,evidence,start_at,due_at,canvas_status FROM tasks WHERE course_id=? AND canvas_status NOT IN ('completed','possibly_superseded') ORDER BY due_at LIMIT 100").bind(course).all<{title:string;action:string;evidence:string;start_at:string|null;due_at:string|null;canvas_status:string}>().then(result=>result.results),
-    db.prepare('SELECT code,name,start_at FROM courses WHERE id=?').bind(course).first<{code:string;name:string;start_at:string|null}>(),
+    kernel.taskRows(course).then(rows=>rows.filter(row=>!['completed','possibly_superseded'].includes(row.canvas_status)).slice(0,100)),
+    kernel.getCourse(course),
   ]);
   const syllabus=sources.filter(source=>source.source_type==='syllabus'||/syllabus|课程大纲/i.test(source.title+' '+source.body)).map(source=>source.body).join('\n');
   const explicit=syllabusWeekForDate(syllabus,now);let week=explicit?.week||null;const basis:string[]=[];
