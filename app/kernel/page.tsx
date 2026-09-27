@@ -70,7 +70,7 @@ export default async function KernelPage() {
 
     <section aria-labelledby="tasks-heading">
       <h2 id="tasks-heading">任务 <span>{tasks.length}</span></h2>
-      <p className={styles.muted}>显示启用课程中的所有任务，包括已忽略任务。状态仅保存在本地。</p>
+      <p className={styles.muted}>显示启用课程中的所有任务，包括已忽略任务。此处修改仅更新内核任务状态，不同步 Canvas。</p>
       {tasks.length === 0 ? <p className={styles.empty}>暂无任务。</p> :
         <ul className={styles.records}>{tasks.map(task => <li key={task.id}>
           <h3>{task.title}</h3>

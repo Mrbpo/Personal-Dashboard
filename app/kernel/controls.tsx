@@ -24,7 +24,7 @@ export function TaskStatusControl({ taskId, current }: { taskId: string; current
     finally { setBusy(false); }
   }
   return <form className={styles.control} onSubmit={submit}>
-    <label>本地状态 <select value={status} onChange={event => setStatus(event.target.value)} disabled={busy}>
+    <label>任务状态 <select value={status} onChange={event => setStatus(event.target.value)} disabled={busy}>
       <option value="active">进行中</option><option value="completed">已完成</option><option value="ignored">忽略</option>
     </select></label>
     <button type="submit" disabled={busy || status === current}>{busy ? '保存中…' : '保存'}</button>
