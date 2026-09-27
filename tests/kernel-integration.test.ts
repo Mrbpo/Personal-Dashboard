@@ -41,6 +41,13 @@ test('AI extraction remains reviewable and cannot replace a Canvas assignment',a
   const pending=(await kernel.pendingCandidates()).filter(row=>row.entity_id===task.entity_id);
   assert.ok(pending.some(row=>row.attribute==='task_payload'&&row.authority==='ai'));
   assert.ok(pending.some(row=>row.attribute==='due'&&row.authority==='ai'));
+  const evidence=await kernel.canonicalEvidence([courseId],[task.id],[]);
+  assert.ok(evidence.some(row=>row.entity_kind==='task'&&row.attribute==='task_payload'&&row.source==='canvas'));
+  assert.ok(evidence.some(row=>row.entity_kind==='task'&&row.attribute==='due'&&row.source==='canvas'));
+  assert.ok(!evidence.some(row=>row.authority==='ai'));
+  await kernel.setTaskStatus(task.id,'ignored');
+  assert.ok(!(await kernel.taskRows(courseId)).some(row=>row.id===task.id));
+  assert.ok((await kernel.taskRows(courseId,true)).some(row=>row.id===task.id&&row.local_status==='ignored'));
 });
 
 test('kernel ingestion is idempotent, tracks source absence, resolves newer Canvas evidence and reviews cancellation',async()=>{
@@ -73,6 +80,10 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal(tasks[0].source_missing,false);
   assert.equal(tasks[0].due_at,'2026-09-30T23:59:00.000Z');
   assert.equal(tasks[0].cancelled_at,null);
+  const currentDueEvidence=(await kernel.canonicalEvidence([], [tasks[0].id], []))
+    .filter(row=>row.attribute==='due');
+  assert.ok(currentDueEvidence.some(row=>row.original_excerpt==='2026-09-30T23:59:00Z'));
+  assert.ok(!currentDueEvidence.some(row=>row.original_excerpt==='2026-09-25T23:59:00Z'));
   const emailId=`mail:${randomUUID()}`;
   await kernel.ingestMailAnalysis({id:emailId,account:'test@example.com',sender:'instructor@example.edu',
     subject:'Tutorial 2',body:'Tutorial 2 is cancelled',receivedAt:'2026-09-22T12:00:00Z',hash:randomUUID()},
@@ -83,6 +94,11 @@ test('kernel ingestion is idempotent, tracks source absence, resolves newer Canv
   assert.equal((await kernel.taskRows(courseId))[0].cancelled_at,null);
   await kernel.adjudicate(pending.id,'accept','Confirmed against the instructor announcement','test-admin');
   assert.ok((await kernel.taskRows(courseId))[0].cancelled_at);
+  const audit=(await kernelPool().query<{actor:string;before_value:unknown;after_value:unknown}>(
+    'SELECT actor,before_value,after_value FROM adjudications WHERE candidate_id=$1',[pending.id])).rows[0];
+  assert.equal(audit.actor,'test-admin');
+  assert.equal(audit.before_value,null);
+  assert.equal(audit.after_value,true);
   assert.equal(Number((await kernelPool().query(
     `SELECT count(*) FROM fact_versions WHERE fact_id=(SELECT id FROM facts WHERE entity_id=$1 AND attribute='due')`,
     [tasks[0].entity_id])).rows[0].count),2);
