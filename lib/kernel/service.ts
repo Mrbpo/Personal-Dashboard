@@ -527,12 +527,12 @@ export class KernelService {
     return row?.cursor_value?JSON.parse(row.cursor_value) as Record<string,unknown>:null;
   }
 
-  async taskRows(courseId?: string) {
+  async taskRows(courseId?: string, includeIgnored=false) {
     const result=await kernelPool().query(
       `SELECT t.*,c.code course_code,c.name course_name,'complete' analysis_status
        FROM tasks t JOIN courses c ON c.id=t.course_id
-       WHERE c.enabled=true AND t.local_status!='ignored' AND ($1::text IS NULL OR t.course_id=$1)
-       ORDER BY t.due_at NULLS LAST,t.due_date NULLS LAST`,[courseId ?? null]);
+       WHERE c.enabled=true AND ($2::boolean OR t.local_status!='ignored') AND ($1::text IS NULL OR t.course_id=$1)
+       ORDER BY t.due_at NULLS LAST,t.due_date NULLS LAST`,[courseId ?? null,includeIgnored]);
     return result.rows.map(row=>({ ...row,requirements_json:JSON.stringify(row.requirements),
       evidence:row.evidence_excerpt,local_status:row.local_status,points_possible:row.points_possible==null?null:Number(row.points_possible),
       prerequisite_blocked:Number(row.prerequisite_blocked),start_at:iso(row.start_at),due_date:dateOnly(row.due_date),
@@ -642,6 +642,30 @@ export class KernelService {
        LEFT JOIN tasks t ON t.entity_id=c.entity_id LEFT JOIN courses co ON co.id=en.course_id
        LEFT JOIN facts f ON f.entity_id=c.entity_id AND f.attribute=c.attribute
        WHERE c.status='pending' ORDER BY c.created_at LIMIT 100`)).rows;
+  }
+
+  async canonicalEvidence(courseIds: string[], taskIds: string[], eventIds: string[]) {
+    const result=await kernelPool().query<{
+      entity_kind:string;entity_key:string;task_id:string|null;attribute:string;source:string;
+      source_url:string|null;original_excerpt:string;locator:string|null;authority:string;
+      acquired_at:Date;published_at:Date|null;confidence:string;
+    }>(
+      `SELECT en.kind entity_kind,en.identity_key entity_key,t.id task_id,f.attribute,e.source,
+       si.source_url,e.original_excerpt,e.locator,c.authority,e.acquired_at,e.published_at,e.confidence
+       FROM facts f JOIN entities en ON en.id=f.entity_id
+       JOIN fact_evidence fe ON fe.fact_id=f.id
+       JOIN evidence e ON e.id=fe.evidence_id
+       JOIN candidate_facts c ON c.id=fe.candidate_id
+       JOIN source_items si ON si.id=e.source_item_id
+       LEFT JOIN tasks t ON t.entity_id=en.id
+       WHERE e.parsed_value=f.canonical_value AND (
+          (en.kind='course' AND en.identity_key=ANY($1::text[]))
+          OR (en.kind='task' AND t.id=ANY($2::text[]))
+          OR (en.kind='event' AND en.identity_key=ANY($3::text[])))
+       ORDER BY en.kind,en.identity_key,f.attribute,e.acquired_at DESC`,
+      [courseIds,taskIds,eventIds]);
+    return result.rows.map(row=>({...row,acquired_at:iso(row.acquired_at)!,
+      published_at:iso(row.published_at),confidence:Number(row.confidence)}));
   }
 
   async candidate(id: string) {

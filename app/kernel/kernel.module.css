@@ -1,0 +1,41 @@
+.kernel {
+  min-height: 100vh;
+  padding: 24px max(24px, calc((100vw - 1080px) / 2));
+  background: #fff;
+  color: #111;
+  font: 15px/1.5 Arial, sans-serif;
+  overflow-wrap: anywhere;
+}
+
+.kernel h1 { font-size: 28px; font-weight: 700; margin: 0; }
+.kernel h2 { font-size: 20px; font-weight: 700; margin: 0 0 8px; }
+.kernel h2 span { font-size: 14px; font-weight: 400; }
+.kernel h3 { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
+.kernel h1, .kernel h2, .kernel h3 { font-family: Arial, sans-serif; }
+.kernel p { margin: 4px 0; }
+.kernel a { color: #0645ad; text-decoration: underline; }
+.kernel button { border: 1px solid #777; padding: 5px 12px; cursor: pointer; }
+.header { border-bottom: 1px solid #ccc; padding-bottom: 16px; margin-bottom: 24px; }
+.header p, .muted { color: #555; }
+.kernel section { margin-bottom: 32px; }
+.records { list-style: none; margin: 0; padding: 0; border-top: 1px solid #ddd; }
+.records > li { padding: 12px 0; border-bottom: 1px solid #ddd; }
+.empty { padding: 12px 0; border-top: 1px solid #ddd; }
+.evidence { margin-top: 8px; }
+.evidence summary { cursor: pointer; }
+.evidenceGroup { margin: 8px 0 0 16px; }
+.evidenceGroup ul { padding-left: 20px; }
+.evidenceGroup li { margin: 6px 0; }
+.kernel blockquote { border-left: 2px solid #aaa; margin: 6px 0; padding-left: 10px; white-space: pre-wrap; }
+.kernel small { color: #555; }
+.value { font-family: Consolas, monospace; white-space: pre-wrap; }
+.control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.control label { display: flex; align-items: center; gap: 6px; }
+.control input, .control select { border: 1px solid #888; background: #fff; color: #111; padding: 5px; max-width: 100%; }
+.control input { width: min(300px, 55vw); }
+.control button:disabled { opacity: .45; cursor: default; }
+
+@media (max-width: 700px) {
+  .kernel { padding: 18px; font-size: 14px; }
+  .kernel h1 { font-size: 24px; }
+}
