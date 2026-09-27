@@ -56,8 +56,9 @@ services:
       retries: 12
     security_opt: ['no-new-privileges:true']
   docling:
-    image: ghcr.io/docling-project/docling-serve:v1.35.0
+    image: ghcr.io/docling-project/docling-serve-cpu:v1.35.0
     restart: unless-stopped
+    mem_limit: '2147483648'
     environment:
       DOCLING_SERVE_HOST: 0.0.0.0
       DOCLING_SERVE_PORT: '5001'

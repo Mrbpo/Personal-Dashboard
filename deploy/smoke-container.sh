@@ -19,7 +19,7 @@ docker run -d --rm --name "$database_container" --network "$network" \
   -e POSTGRES_PASSWORD=smoke-password postgres:18.6 >/dev/null
 ready=0
 for _ in $(seq 1 30); do
-  if docker exec "$database_container" pg_isready -U study_kernel -d study_kernel >/dev/null 2>&1; then
+  if docker exec "$database_container" pg_isready -h 127.0.0.1 -U study_kernel -d study_kernel >/dev/null 2>&1; then
     ready=1
     break
   fi
