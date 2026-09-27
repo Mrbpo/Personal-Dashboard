@@ -15,7 +15,7 @@ Canvas announcement and planner feeds are requested for a moving date window. Th
 - Keep `/srv/study/backup.recipient` as the public age recipient. Keep `/srv/study/backup.identity` root-only for restore verification and an independent offline copy of that private key. The private key is not inside its own encrypted archive.
 - Install the root-owned `study-kernel-backup.service` and `study-kernel-backup.timer` under `/etc/systemd/system`, enable the timer, and inspect its first successful run. A script alone does not schedule daily backups.
 - After copying the units, run `systemctl daemon-reload`, `systemctl enable --now study-kernel-backup.timer`, `systemctl list-timers study-kernel-backup.timer`, and a supervised `systemctl start study-kernel-backup.service`. Confirm the offsite object and restore result before relying on the schedule.
-- PostgreSQL and Docling expose no host port. The app uses `DOCLING_URL=http://docling:5001` on the Compose network. Review memory and disk headroom before pulling the Docling image.
+- PostgreSQL and Docling expose no host port. The app uses `DOCLING_URL=http://docling:5001` on the Compose network. Docling uses the official CPU image at v1.35.0 with a 2 GiB (`2147483648` byte) memory limit on the 4 GB CPU-only host. A synthetic PDF converted within this limit; capacity for complex PDFs remains unverified and needs production acceptance. Review memory and disk headroom before pulling the image.
 
 ## Deployment sequence
 
