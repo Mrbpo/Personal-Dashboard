@@ -22,11 +22,13 @@ test('equal numeric IDs in different Canvas types and courses stay separate',()=
   assert.notEqual(canvasTaskIdentity(assignment,0),canvasTaskIdentity(source('planner','42'),0));
 });
 
-test('inconsistent planner reference or URL cannot prove identity',()=>{
-  const planner=source('planner','900',{plannableType:'quiz',plannableId:'42',
-    sourceUrl:'https://canvas.example/courses/7/assignments/42'});
-  assert.equal(canvasTaskReference(planner),null);
-  assert.notEqual(canvasTaskIdentity(planner,0),canvasTaskIdentity(source('quiz','42'),0));
-  assert.deepEqual(canvasTaskReference(source('planner','900',{
-    sourceUrl:'https://canvas.example/courses/7/assignments/42'})),{type:'assignment',id:'42'});
+test('untyped or unsupported planner references remain separate despite URL shape',()=>{
+  const external=source('planner','900',{
+    sourceUrl:'https://external.example/courses/7/assignments/42'});
+  assert.equal(canvasTaskReference(external),null);
+  assert.notEqual(canvasTaskIdentity(external,0),canvasTaskIdentity(source('assignment','42'),0));
+  assert.equal(canvasTaskReference(source('planner','900',{
+    sourceUrl:'https://canvas.example/courses/7/assignments/42'})),null);
+  assert.equal(canvasTaskReference(source('planner','900',{
+    plannableType:'file',plannableId:'42'})),null);
 });

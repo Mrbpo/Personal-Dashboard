@@ -219,17 +219,24 @@ async function canvasTaskEntity(client: PoolClient, source: CanvasSource, index:
   }
   // Serialize this typed reference so planner-first and assignment-first scans choose one entity.
   await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[identityKey]);
+  if(source.sourceType==='planner'){
+    const separation=(await client.query<{planner_entity_id:string}>(
+      `SELECT s.planner_entity_id FROM canvas_task_separations s
+       JOIN entities e ON e.id=s.planner_entity_id AND e.merged_into IS NULL
+       WHERE s.planner_source_item_id=$1 AND s.action_index=$2`,[source.id,index])).rows[0];
+    if(separation)return separation.planner_entity_id;
+  }
   const mapped=(await client.query<{entity_id:string}>(
     `SELECT entity_id FROM canvas_task_identity WHERE course_id=$1 AND reference_type=$2
      AND reference_id=$3 AND action_index=$4`,[source.courseId,ref.type,ref.id,index])).rows[0];
   if (mapped) return mapped.entity_id;
-  const existing=(await client.query<{entity_id:string}>(
+  const existing=index===0?(await client.query<{entity_id:string}>(
     `SELECT t.entity_id FROM tasks t JOIN entities e ON e.id=t.entity_id
      WHERE t.course_id=$1 AND e.merged_into IS NULL AND
        ((t.source_type=$2 AND t.source_id=$3) OR
         (t.source_type='planner' AND t.source_item_id=$4))
      ORDER BY CASE WHEN t.source_type=$2 THEN 0 ELSE 1 END,t.id LIMIT 1`,
-    [source.courseId,ref.type,ref.id,source.id])).rows[0];
+    [source.courseId,ref.type,ref.id,source.id])).rows[0]:undefined;
   const byKey=(await client.query<{id:string}>(
     `SELECT id FROM entities WHERE owner_id='local-owner' AND kind='task' AND identity_key=$1
      AND merged_into IS NULL`,[identityKey])).rows[0];
@@ -292,8 +299,11 @@ export class KernelService {
     const rows=(await kernelPool().query<{
       id:string;entity_id:string;course_id:string;source_id:string;source_item_id:string;
       source_url:string|null;local_status:string;raw_value:CanvasSource|null;
+      separation_reason:string|null;
     }>(`SELECT t.id,t.entity_id,t.course_id,t.source_id,t.source_item_id,t.source_url,t.local_status,
-       v.raw_value FROM tasks t JOIN entities en ON en.id=t.entity_id
+       v.raw_value,sep.reason separation_reason FROM tasks t JOIN entities en ON en.id=t.entity_id
+       LEFT JOIN canvas_task_separations sep ON sep.planner_source_item_id=t.source_item_id
+         AND t.id=t.source_item_id||':'||sep.action_index::text
        LEFT JOIN LATERAL (SELECT raw_value FROM source_item_versions
          WHERE source_item_id=t.source_item_id ORDER BY acquired_at DESC,id DESC LIMIT 1) v ON true
        WHERE t.source_type='planner' AND en.merged_into IS NULL ORDER BY t.course_id,t.id`)).rows;
@@ -311,10 +321,15 @@ export class KernelService {
       const candidates=direct.filter(item=>item.course_id===planner.course_id &&
         item.source_id===(ref?.id||planner.source_id) && (!ref||item.source_type===ref.type) &&
         item.entity_id!==planner.entity_id);
-      if(ref && candidates.length===1)verified.push({plannerTaskId:planner.id,directTaskId:candidates[0].id,
+      const index=Number(planner.id.slice(planner.source_item_id.length+1));
+      if(ref && candidates.length===1 && !planner.separation_reason &&
+        planner.id.startsWith(`${planner.source_item_id}:`) && index===0)
+        verified.push({plannerTaskId:planner.id,directTaskId:candidates[0].id,
         courseId:planner.course_id,reference:`${ref.type}:${ref.id}`});
-      else if(candidates.length || !ref)unresolved.push({plannerTaskId:planner.id,courseId:planner.course_id,
-        reason:ref?'multiple direct objects share the reference':'missing reliable typed reference',
+      else if(candidates.length || !ref || planner.separation_reason)unresolved.push({plannerTaskId:planner.id,courseId:planner.course_id,
+        reason:planner.separation_reason?'explicitly separated after rollback':
+          ref&&index!==0?'additional planner action requires adjudication':
+          ref?'multiple direct objects share the reference':'missing reliable typed reference',
         possibleTaskIds:candidates.map(item=>item.id)});
     }
     const activeCount=Number((await kernelPool().query(
@@ -346,8 +361,14 @@ export class KernelService {
       if(!reference && !manual)throw new Error('Typed Canvas reference is missing; explicit adjudication required');
       if(planner.local_status!=='active'&&direct.local_status!=='active'&&planner.local_status!==direct.local_status)
         throw new Error('Conflicting local statuses require separate adjudication');
+      const actionIndex=planner.id.startsWith(`${planner.source_item_id}:`)
+        ?Number(planner.id.slice(planner.source_item_id.length+1)):NaN;
+      if(!Number.isInteger(actionIndex)||actionIndex<0)
+        throw new Error('Planner action index is not verifiable');
+      if(actionIndex!==0&&!manual)throw new Error('Additional planner action requires explicit adjudication');
       const addedEvidence:Array<{factId:string;evidenceId:string}>=[];
       const copiedCandidates:string[]=[];
+      const createdFactIds:string[]=[];
       const sourceCandidates=(await client.query<{
         attribute:string;value:unknown;evidence_id:string;authority:string;
       }>(`SELECT attribute,value,evidence_id,authority FROM candidate_facts WHERE entity_id=$1
@@ -377,6 +398,7 @@ export class KernelService {
             targetFact=(await client.query<{id:string;canonical_value:unknown}>(
               'SELECT id,canonical_value FROM facts WHERE entity_id=$1 AND attribute=$2',
               [direct.entity_id,sourceFact.attribute])).rows[0];
+            if(targetFact)createdFactIds.push(targetFact.id);
           }
         }
         if(targetFact){
@@ -421,14 +443,17 @@ export class KernelService {
         for(const row of added.rows)addedEvidence.push({factId:row.fact_id,evidenceId:row.evidence_id});
       }
       await client.query('UPDATE entities SET merged_into=$2 WHERE id=$1',[planner.entity_id,direct.entity_id]);
+      await client.query('DELETE FROM canvas_task_separations WHERE planner_source_item_id=$1 AND action_index=$2',
+        [planner.source_item_id,actionIndex]);
       await client.query('UPDATE canvas_task_identity SET entity_id=$2 WHERE entity_id=$1',
         [planner.entity_id,direct.entity_id]);
       await client.query('DELETE FROM tasks WHERE id=$1',[plannerTaskId]);
       await client.query(`INSERT INTO task_entity_merges(source_entity_id,target_entity_id,source_task_id,
-        target_task_id,source_status,target_status_before,added_fact_evidence,copied_candidate_ids,reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[planner.entity_id,direct.entity_id,plannerTaskId,
-        directTaskId,planner.local_status,direct.local_status,JSON.stringify(addedEvidence),
-        JSON.stringify(copiedCandidates),reason.trim()]);
+        target_task_id,action_index,source_status,target_status_before,added_fact_evidence,copied_candidate_ids,
+        created_fact_ids,reason)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,[planner.entity_id,direct.entity_id,plannerTaskId,
+        directTaskId,actionIndex,planner.local_status,direct.local_status,JSON.stringify(addedEvidence),
+        JSON.stringify(copiedCandidates),JSON.stringify(createdFactIds),reason.trim()]);
       return {plannerTaskId,directTaskId,activeCount:Number((await client.query(
         'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count)};
     });
@@ -437,18 +462,58 @@ export class KernelService {
   async unmergeCanvasTasks(plannerTaskId:string) {
     return kernelTransaction(async client=>{
       const merge=(await client.query<{source_entity_id:string;target_entity_id:string;source_task_id:string;
-        target_task_id:string;source_status:string;target_status_before:string;copied_candidate_ids:string[]}>(
+        target_task_id:string;action_index:number;source_status:string;target_status_before:string;copied_candidate_ids:string[];
+        created_fact_ids:string[];added_fact_evidence:Array<{factId:string;evidenceId:string}>}>(
         `SELECT * FROM task_entity_merges WHERE source_task_id=$1 AND rolled_back_at IS NULL
          FOR UPDATE`,[plannerTaskId])).rows[0];
       if(!merge)throw new Error('Active task merge not found');
+      for(const factId of merge.created_fact_ids){
+        const fact=(await client.query<{version:number;chosen_candidate_id:string}>(
+          'SELECT version,chosen_candidate_id FROM facts WHERE id=$1 FOR UPDATE',[factId])).rows[0];
+        const first=(await client.query<{candidate_id:string}>(
+          'SELECT candidate_id FROM fact_versions WHERE fact_id=$1 AND version=1',[factId])).rows[0];
+        if(!fact||!first)throw new Error('Merge-derived fact history changed');
+        if(fact.chosen_candidate_id===first.candidate_id){
+          const independent=(await client.query<{id:string}>(
+            `SELECT c.id FROM fact_evidence fe JOIN candidate_facts c ON c.id=fe.candidate_id
+             JOIN evidence ev ON ev.id=c.evidence_id JOIN source_items si ON si.id=ev.source_item_id
+             JOIN facts f ON f.id=fe.fact_id WHERE fe.fact_id=$1 AND c.id<>$2
+             AND c.id<>ALL($3::text[]) AND c.status='accepted' AND c.value=f.canonical_value
+             AND si.source='canvas' AND split_part(si.external_id,':',1)<>'planner'
+             ORDER BY c.created_at DESC,c.id LIMIT 1`,
+            [factId,first.candidate_id,merge.copied_candidate_ids])).rows[0];
+          if(independent)await acceptCandidate(client,independent.id,'direct Canvas evidence retained after merge rollback');
+          else if(fact.version===1){
+            await client.query('DELETE FROM fact_evidence WHERE fact_id=$1',[factId]);
+            await client.query('DELETE FROM fact_versions WHERE fact_id=$1',[factId]);
+            await client.query('DELETE FROM facts WHERE id=$1',[factId]);
+          }else throw new Error('Merge-derived fact changed; adjudicate it before rollback');
+        }
+        await client.query('DELETE FROM fact_evidence WHERE fact_id=$1 AND candidate_id=ANY($2::text[])',
+          [factId,[...merge.copied_candidate_ids,first.candidate_id]]);
+        if(!merge.copied_candidate_ids.includes(first.candidate_id))await client.query(
+          `UPDATE candidate_facts SET status='pending',reason='task merge rolled back',decided_at=NULL
+           WHERE id=$1`,[first.candidate_id]);
+      }
+      for(const link of merge.added_fact_evidence)await client.query(
+        `DELETE FROM fact_evidence WHERE fact_id=$1 AND evidence_id=$2 AND candidate_id=ANY($3::text[])`,
+        [link.factId,link.evidenceId,merge.copied_candidate_ids]);
       await client.query('UPDATE entities SET merged_into=NULL WHERE id=$1',[merge.source_entity_id]);
       await client.query(`UPDATE candidate_facts SET status='superseded',reason='task merge rolled back',decided_at=now()
-        WHERE id=ANY($1::text[]) AND status='pending'`,[merge.copied_candidate_ids]);
+        WHERE id=ANY($1::text[]) AND status IN ('pending','accepted')`,[merge.copied_candidate_ids]);
+      const target=(await client.query<{source_item_id:string}>(
+        'SELECT source_item_id FROM tasks WHERE entity_id=$1',[merge.target_entity_id])).rows[0];
+      if(target)await projectTask(client,merge.target_entity_id,target.source_item_id);
       const source=(await client.query<{source_item_id:string}>(
         `SELECT e.source_item_id FROM facts f JOIN candidate_facts c ON c.id=f.chosen_candidate_id
          JOIN evidence e ON e.id=c.evidence_id WHERE f.entity_id=$1 AND f.attribute='task_payload'`,
         [merge.source_entity_id])).rows[0];
       if(!source)throw new Error('Merged task has no source payload');
+      await client.query(`INSERT INTO canvas_task_separations(planner_source_item_id,action_index,planner_entity_id,
+        direct_entity_id,reason) VALUES ($1,$2,$3,$4,'merge rolled back') ON CONFLICT(planner_source_item_id,action_index)
+        DO UPDATE SET planner_entity_id=excluded.planner_entity_id,direct_entity_id=excluded.direct_entity_id,
+        reason=excluded.reason,created_at=now()`,
+        [source.source_item_id,merge.action_index,merge.source_entity_id,merge.target_entity_id]);
       await projectTask(client,merge.source_entity_id,source.source_item_id);
       await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',
         [plannerTaskId,merge.source_status]);

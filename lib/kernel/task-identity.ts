@@ -11,19 +11,7 @@ function validId(value: unknown): string | null {
   return /^[1-9]\d*$/.test(id) ? id : null;
 }
 
-function urlReference(source: CanvasSource): CanvasTaskReference | null {
-  if (!source.sourceUrl) return null;
-  try {
-    const url = new URL(source.sourceUrl);
-    const match = /^\/courses\/([^/]+)\/(assignments|quizzes|discussion_topics|pages)\/([^/]+)\/?$/.exec(url.pathname);
-    if (!match || match[1] !== source.courseId) return null;
-    const type = plannerTypes[({ assignments: 'assignment', quizzes: 'quiz', discussion_topics: 'discussion_topic', pages: 'wiki_page' } as Record<string,string>)[match[2]]];
-    const id = validId(match[3]);
-    return type && id ? { type, id } : null;
-  } catch { return null; }
-}
-
-/** Only Canvas's typed reference or an exact Canvas course URL proves equivalence. */
+/** Only Canvas's explicit typed planner reference proves equivalence. */
 export function canvasTaskReference(source: CanvasSource): CanvasTaskReference | null {
   if (source.sourceType !== 'planner') {
     const type = plannerTypes[source.sourceType];
@@ -32,12 +20,7 @@ export function canvasTaskReference(source: CanvasSource): CanvasTaskReference |
   }
   const type = plannerTypes[String(source.plannableType ?? '').toLowerCase()];
   const id = validId(source.plannableId);
-  const fromUrl = urlReference(source);
-  if (type && id) {
-    if (fromUrl && (fromUrl.type !== type || fromUrl.id !== id)) return null;
-    return { type, id };
-  }
-  return !source.plannableType && !source.plannableId ? fromUrl : null;
+  return type && id ? { type, id } : null;
 }
 
 export function canvasTaskIdentity(source: CanvasSource, index: number): string {

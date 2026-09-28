@@ -9,6 +9,16 @@ CREATE TABLE canvas_task_identity (
 
 CREATE INDEX canvas_task_identity_entity_idx ON canvas_task_identity(entity_id);
 
+CREATE TABLE canvas_task_separations (
+  planner_source_item_id text NOT NULL REFERENCES source_items(id),
+  action_index integer NOT NULL,
+  planner_entity_id text NOT NULL REFERENCES entities(id),
+  direct_entity_id text NOT NULL REFERENCES entities(id),
+  reason text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY(planner_source_item_id,action_index)
+);
+
 ALTER TABLE entities ADD COLUMN merged_into text REFERENCES entities(id);
 
 CREATE TABLE task_entity_merges (
@@ -16,10 +26,12 @@ CREATE TABLE task_entity_merges (
   target_entity_id text NOT NULL REFERENCES entities(id),
   source_task_id text NOT NULL,
   target_task_id text NOT NULL,
+  action_index integer NOT NULL,
   source_status text NOT NULL,
   target_status_before text NOT NULL,
   added_fact_evidence jsonb NOT NULL DEFAULT '[]',
   copied_candidate_ids jsonb NOT NULL DEFAULT '[]',
+  created_fact_ids jsonb NOT NULL DEFAULT '[]',
   reason text NOT NULL,
   applied_at timestamptz NOT NULL DEFAULT now(),
   rolled_back_at timestamptz,

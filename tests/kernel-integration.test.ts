@@ -52,6 +52,28 @@ test('typed Canvas planner and assignment resolve to one task in either arrival 
   }
 });
 
+test('extra AI actions from one planner item cannot map onto assignment action zero',async()=>{
+  await migrateKernel();
+  const courseId=`canvas-actions:${randomUUID()}`;
+  await kernel.upsertCourse({id:courseId,name:'Canvas actions',course_code:'ACT'});
+  const assignment={id:`${courseId}:assignment:42`,courseId,sourceType:'assignment',sourceId:'42',
+    title:'Lab',body:'Submit lab',sourceUrl:null,updatedAt:null,dueAt:null,unlockAt:null,lockAt:null};
+  await kernel.ingestCanvasSource(assignment,null,'assignment');
+  const planner={...assignment,id:`${courseId}:planner:900`,sourceType:'planner',sourceId:'900',
+    plannableType:'assignment',plannableId:'42'};
+  const action=(title:string)=>({title,action:`Do ${title}`,requirements:[],recommendedStartAt:null,
+    inferredDueAt:null,confidence:'inferred' as const,evidence:title,estimatedMinutes:null,possiblyCancelled:false});
+  await kernel.ingestCanvasSource(planner,{summary:'',actions:[action('Part A'),action('Part B')],notes:[]},'planner');
+  const task=(await kernel.taskRows(courseId))[0];
+  const rows=(await kernelPool().query<{entity_id:string;locator:string}>(
+    `SELECT c.entity_id,e.locator FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+     WHERE e.source_item_id=$1 AND c.attribute='task_payload' ORDER BY e.locator`,[planner.id])).rows;
+  assert.equal(rows.length,2);
+  assert.equal(rows[0].entity_id,task.entity_id);
+  assert.notEqual(rows[1].entity_id,task.entity_id);
+  assert.equal((await kernel.taskRows(courseId)).length,1);
+});
+
 test('reviewed Canvas reconciliation retains source history and local status, and can be undone',async()=>{
   await migrateKernel();
   const courseId=`canvas-merge:${randomUUID()}`;
@@ -94,6 +116,38 @@ test('reviewed Canvas reconciliation retains source history and local status, an
   assert.equal((await kernel.taskRows(courseId,true)).length,2);
   assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===plannerId)?.local_status,'completed');
   assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===assignmentId)?.local_status,'active');
+  assert.ok(!(await kernel.canonicalEvidence([], [assignmentId], []))
+    .some(row=>row.attribute==='due'&&row.source==='legacy_import'&&
+      row.source_item_id===`${courseId}:planner:42`));
+  await kernel.ingestCanvasSource({...assignment,id:`${courseId}:planner:42`,sourceType:'planner',
+    sourceUrl:null,plannableType:'assignment',plannableId:'42',body:'Planner resynced'},null,'after-rollback');
+  await kernel.ingestCanvasSource(assignment,null,'current-assignment');
+  assert.equal((await kernel.taskRows(courseId,true)).length,2);
+  assert.ok(!(await kernel.canvasDuplicateReport()).verified.some(pair=>pair.plannerTaskId===plannerId));
+});
+
+test('rollback removes a fact created only by reconciliation',async()=>{
+  await migrateKernel();
+  const courseId=`canvas-undo:${randomUUID()}`;
+  await kernel.upsertCourse({id:courseId,name:'Canvas undo',course_code:'UNDO'});
+  const base={course_id:courseId,title:'Quiz review',action:'Review quiz',requirements_json:'[]',
+    start_at:null,unlock_at:null,lock_at:null,canvas_status:'upcoming',urgency:'upcoming',
+    confidence:'certain',evidence:'legacy',estimated_minutes:null,points_possible:null,
+    prerequisite_blocked:0,updated_at:'2026-09-20T12:00:00Z'};
+  const plannerId=`${courseId}:planner:42:0`,directId=`${courseId}:assignment:42:0`;
+  await kernel.importLegacyTask({...base,id:plannerId,source_item_id:`${courseId}:planner:42`,
+    source_type:'planner',source_id:'42',source_url:null,due_at:'2026-10-01'});
+  await kernel.importLegacyTask({...base,id:directId,source_item_id:`${courseId}:assignment:42`,
+    source_type:'assignment',source_id:'42',source_url:null,due_at:null});
+  await kernel.ingestCanvasSource({id:`${courseId}:planner:42`,courseId,sourceType:'planner',
+    sourceId:'42',plannableType:'assignment',plannableId:'42',title:'Quiz review',body:'',
+    sourceUrl:null,updatedAt:null,dueAt:null,unlockAt:null,lockAt:null},null,'typed-reference');
+  await kernel.mergeCanvasTasks(plannerId,directId,'verified assignment reference');
+  assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===directId)?.due_at,'2026-10-01');
+  await kernel.unmergeCanvasTasks(plannerId);
+  const tasks=await kernel.taskRows(courseId,true);
+  assert.equal(tasks.find(task=>task.id===directId)?.due_at,null);
+  assert.equal(tasks.find(task=>task.id===plannerId)?.due_at,'2026-10-01');
 });
 
 test('AI extraction remains reviewable and cannot replace a Canvas assignment',async()=>{

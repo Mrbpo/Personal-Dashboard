@@ -2,7 +2,7 @@
 
 ## Identity rule
 
-A Canvas task uses `(course, object type, object ID, action index)`. A planner item can share an assignment, quiz, discussion, or page task only when `plannable_type` and `plannable_id` identify that object, or when an exact Canvas course URL identifies it and does not contradict the typed reference. Equal titles or equal numeric IDs across different types are insufficient. A missing or contradictory reference leaves the planner task separate for review.
+A Canvas task uses `(course, object type, object ID, action index)`. A planner item can share an assignment, quiz, discussion, or page task only when Canvas supplies both `plannable_type` and `plannable_id`. A URL alone does not prove identity because its host is not part of the normalized source contract. Equal titles or equal numeric IDs across different types are insufficient. A missing reference leaves the planner task separate for review.
 
 The normalized planner source retains the outer `plannable_type` and `plannable_id`. The source hash includes those fields and the URL, so the first sync after this change records a new source version. `canvas_task_identity` maps a verified reference to an existing entity, including entities created under the earlier URL identity rule. Direct Canvas items take priority over planner summaries for task content and deadlines; corroborating evidence remains attached. User status is stored in its separate local status fact.
 
@@ -34,4 +34,4 @@ The operation still rejects a reference that contradicts the selected direct obj
 npm run kernel:reconcile-canvas -- --rollback --planner PLANNER_TASK_ID
 ```
 
-Rollback restores the planner task and visible count. It restores the direct task's prior local status if that status was still controlled by the merge; a later user status change is retained. Historical merge evidence and fact versions remain as an audit trail. Review the report again after rollback. No production reconciliation is performed by this PR.
+Rollback restores the planner task and visible count. A persistent separation decision routes later planner syncs back to that entity while direct assignment syncs retain the direct entity. Evidence links and candidates copied solely for the merge are detached or superseded; any fact created solely by the merge is removed from the direct entity if it has not changed since. The original planner facts and their versions remain untouched. Rollback refuses to remove a merge-created fact that has since changed, so a reviewer can resolve that new history first. The direct task's prior local status is restored if it was still controlled by the merge; a later user status change is retained. Historical status transitions and the merge audit remain. Review the report again after rollback. No production reconciliation is performed by this PR.
