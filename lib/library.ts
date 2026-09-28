@@ -155,15 +155,67 @@ function lexicalText(value:string){return librarySearchTokens(value).join(' ');}
 function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return Array.isArray(parts)&&typeof parts[1]==='string'&&parts[1].endsWith('/body');}catch{return false;}}
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
-type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:boolean;embeddingTimeoutMs?:number;onTiming?:(detail:SearchTiming)=>void};
+type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;onTiming?:(detail:SearchTiming)=>void};
 export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string};
+// Find another document named in a retrieved passage. This bounded second hop
+// helps questions whose answer needs two different documents.
+export async function relatedLibraryDocuments(owner:string,query:string,seeds:Array<{documentId:string;courseId:string;body:string;title?:string}>,limit=6):Promise<LibrarySearchHit[]> {
+  const words=librarySearchTokens(query).filter(word=>word.length>=3&&!/^(what|when|which|where|who|the|and|for|with|was|were|has|have|that|this)$/.test(word));
+  const byCourse=new Map<string,typeof seeds>();
+  for(const seed of seeds.slice(0,4))if(seed.courseId&&seed.body){
+    const group=byCourse.get(seed.courseId)||[];group.push(seed);byCourse.set(seed.courseId,group);
+  }
+  const candidates:LibrarySearchHit[]=[];
+  for(const [course,group] of byCourse){
+    const passages=[query,...group.map(seed=>seed.body.slice(0,2500))];
+    const rows=(await db.prepare(`SELECT d.id document_id,d.name,d.course_id,d.folder_path,d.origin,d.origin_key,c.id,c.body,c.locator
+      FROM library_documents d JOIN library_chunks c ON c.document_id=d.id AND c.position=0
+      WHERE d.owner_id=? AND d.course_id=? AND d.deleted=0 AND d.status='ready' AND length(d.name)>=5
+      AND (${passages.map(()=>`instr(lower(?),lower(d.name))>0 OR
+        (instr(d.name,' (')>0 AND instr(lower(?),lower(substr(d.name,1,instr(d.name,' (')-1)))>0) OR
+        (instr(d.name,' ')>0 AND substr(d.name,1,instr(d.name,' ')-1) GLOB '*[0-9]*' AND
+         instr(lower(?),lower(substr(d.name,1,instr(d.name,' ')-1)))>0)`).join(' OR ')})
+      LIMIT 300`).bind(owner,course,...passages.flatMap(passage=>[passage,passage,passage])).all<CandidateRow>()).results;
+    for(const row of rows){
+      if(group.some(seed=>seed.documentId===row.document_id))continue;
+      const heading=lexicalText(row.name),body=lexicalText(row.body||'');
+      const score=words.reduce((sum,word)=>sum+(heading.includes(word)?3:0)+(body.includes(word)?1:0),0);
+      const direct=query.toLocaleLowerCase().includes(row.name.toLocaleLowerCase()) ||
+        (row.name.includes(' (')&&query.toLocaleLowerCase().includes(row.name.split(' (')[0].toLocaleLowerCase()));
+      const linked=group.some(seed=>seed.body.toLocaleLowerCase().includes(row.name.toLocaleLowerCase()));
+      candidates.push({id:row.id||`${row.document_id}:0`,document_id:row.document_id,body:row.body||'',locator:row.locator||'正文',
+        name:row.name,course_id:row.course_id,folder_path:row.folder_path,origin:row.origin,origin_key:row.origin_key,
+        score:score+(direct?40:0)+(linked?Math.min(24,row.name.length):0)+0.5,match_reason:direct?'问题中明确提及':'在已命中资料中被提及'});
+    }
+    for(const seed of group.slice(0,3))if(seed.title&&seed.title.length>=5){
+      const phrase=`"${seed.title.replaceAll('"','""')}"`;
+      try{
+        const linked=(await db.prepare(`SELECT d.id document_id,d.name,d.course_id,d.folder_path,d.origin,d.origin_key,c.id,c.body,c.locator
+          FROM library_chunks_fts JOIN library_chunks c ON c.rowid=library_chunks_fts.rowid
+          JOIN library_documents d ON d.id=c.document_id
+          WHERE library_chunks_fts MATCH ? AND d.owner_id=? AND d.course_id=? AND d.deleted=0 AND d.status='ready'
+          LIMIT 80`).bind(phrase,owner,course).all<CandidateRow>()).results;
+        for(const row of linked){
+          if(group.some(item=>item.documentId===row.document_id))continue;
+          const heading=lexicalText(row.name),body=lexicalText(row.body||'');
+          const score=words.reduce((sum,word)=>sum+(heading.includes(word)?3:0)+(body.includes(word)?1:0),0);
+          candidates.push({id:row.id||`${row.document_id}:0`,document_id:row.document_id,body:row.body||'',locator:row.locator||'正文',
+            name:row.name,course_id:row.course_id,folder_path:row.folder_path,origin:row.origin,origin_key:row.origin_key,
+            score:score+1,match_reason:'提及已命中资料'});
+        }
+      }catch{/* A title with unsupported FTS syntax simply skips this optional hop. */}
+    }
+  }
+  return [...new Map(candidates.sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name)).map(item=>[item.document_id,item])).values()]
+    .slice(0,Math.max(1,Math.min(limit,12)));
+}
 type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   if(!course){const code=query.toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await kernel.listCourses()).filter(c=>c.enabled);course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
 
-  const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(30,options.limit||8));
-  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0)`;
-  const scopeArgs=[owner,...(course?[course]:[])];
+  const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(options.documentId?80:30,options.limit||8));
+  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} ${options.documentId?'AND d.id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0)`;
+  const scopeArgs=[owner,...(course?[course]:[]),...(options.documentId?[options.documentId]:[])];
   const fields='c.id,d.id document_id,c.body,c.locator,d.name,d.course_id,d.folder_path,d.origin,d.origin_key';
   const words=strict?librarySearchTokens(query):[...new Set([...activitySearchAliases(query),...librarySearchTokens(query)])];
   const candidateStarted=performance.now();
@@ -201,6 +253,13 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
     const metadata=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id AND c.position=0 WHERE ${scopeSql} AND (${condition}) ORDER BY d.created_at DESC LIMIT 60`).bind(...scopeArgs,...metadataWords.flatMap(word=>[`%${word}%`,`%${word}%`])).all<CandidateRow>()).results;
     raw=[...raw,...metadata];
   }
+  if(options.documentId){
+    // A named PDF or paper is a small, known scope. Include every one of its
+    // chunks so semantic ranking can find passages with no shared query words.
+    const within=(await db.prepare(`SELECT ${fields} FROM library_chunks c JOIN library_documents d ON d.id=c.document_id
+      WHERE ${scopeSql} ORDER BY c.position LIMIT 256`).bind(...scopeArgs).all<CandidateRow>()).results;
+    raw=[...raw,...within];
+  }
   if(!raw.length&&semantic){
     // Bounded fallback for concepts with no lexical overlap. Course and owner
     // filters still apply before any vector JSON is read.
@@ -226,7 +285,13 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const ranked=rows.map(r=>{
     const title=lexicalText(r.name),body=lexicalText(r.body),stored=mailMap.get(r.document_id)||map.get(r.id);
     const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;
-    const score=titleMatches*3+bodyMatches+(vector&&stored?cosine(vector,JSON.parse(stored)):0);
+    // A full document name supplied by the user or a course-specific query is
+    // stronger evidence than shared words such as "syllabus" or "assignment".
+    const name=r.name.toLocaleLowerCase();
+    const namedInQuery=name.length>=5&&query.toLocaleLowerCase().includes(name) ||
+      name.length>=2&&name.length<5&&/\d/.test(name)&&
+      new RegExp(`(^|[^a-z0-9])${name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}($|[^a-z0-9])`,'i').test(query);
+    const score=titleMatches*3+bodyMatches+(namedInQuery?12:0)+(vector&&stored?(options.documentId?5:2)*cosine(vector,JSON.parse(stored)):0);
     if(mappedSet.has(r.document_id)&&bodyMatches===0)return {...r,id:`${r.document_id}:mail`,body:'',locator:'邮件全文（段落未定位）',score,match_reason:titleMatches?'标题匹配；段落未定位':'邮件整体语义相关；段落未定位'};
     return {...r,score,match_reason:titleMatches?'文件名匹配':'正文相关'};
   }).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score);

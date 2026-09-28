@@ -1,0 +1,25 @@
+.page { min-height: 100vh; max-width: 900px; margin: auto; padding: 24px; background: #fff; color: #111; font: 16px/1.5 Arial, sans-serif; }
+.page header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; border-bottom: 1px solid #ddd; margin-bottom: 20px; }
+.page h1 { font: bold 26px Arial, sans-serif; margin: 0 0 12px; }
+.page a { color: #0645ad; text-decoration: underline; }
+.course { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.course select, .form textarea { background: #fff; color: #111; border: 1px solid #888; padding: 8px; }
+.course select { max-width: 100%; }
+.turns { min-height: 45vh; }
+.hint { color: #555; }
+.turn { border-top: 1px solid #ddd; padding: 14px 0; }
+.turn p { margin: 6px 0; white-space: pre-wrap; }
+.turn details { margin: 12px 0 4px; }
+.turn summary { cursor: pointer; }
+.turn ul { padding-left: 22px; }
+.turn li { margin: 8px 0; }
+.turn small, .turn li small { display: block; color: #555; white-space: pre-wrap; }
+.feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.feedback button, .feedback input { border: 1px solid #888; background: #fff; color: #111; padding: 4px 8px; }
+.feedback input { min-width: 230px; flex: 1; }
+.form { border-top: 1px solid #ddd; padding-top: 16px; display: grid; gap: 8px; }
+.form textarea { width: 100%; resize: vertical; }
+.form button { justify-self: start; border: 1px solid #666; background: #eee; color: #111; padding: 7px 18px; cursor: pointer; }
+.form button:disabled { opacity: .5; cursor: default; }
+.form p { color: #a00; }
+@media (max-width: 600px) { .page { padding: 16px; } .course { align-items: stretch; flex-direction: column; } }
