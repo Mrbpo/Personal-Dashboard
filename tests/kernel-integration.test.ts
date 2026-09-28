@@ -98,7 +98,7 @@ test('reviewed Canvas reconciliation retains source history and local status, an
   assert.ok(report.verified.some(pair=>pair.plannerTaskId===plannerId&&pair.directTaskId===assignmentId));
   const before=report.activeCount;
   const plannerEntity=(await kernel.taskRows(courseId,true)).find(task=>task.id===plannerId)?.entity_id;
-  const merged=await kernel.mergeCanvasTasks(plannerId,assignmentId,'verified assignment:42');
+  const merged=await kernel.mergeCanvasTasks(plannerId,assignmentId,'verified assignment:42','test-admin');
   assert.equal(merged.activeCount,before-1);
   const tasks=await kernel.taskRows(courseId,true);
   assert.equal(tasks.length,1);
@@ -111,11 +111,21 @@ test('reviewed Canvas reconciliation retains source history and local status, an
      AND attribute='due')`,[plannerEntity])).rows[0].count)>0);
   await kernel.rebuildProjections();
   assert.equal((await kernel.taskRows(courseId,true)).length,1);
-  const restored=await kernel.unmergeCanvasTasks(plannerId);
+  const restored=await kernel.unmergeCanvasTasks(plannerId,'reviewed rollback','test-admin');
   assert.equal(restored.activeCount,before);
   assert.equal((await kernel.taskRows(courseId,true)).length,2);
   assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===plannerId)?.local_status,'completed');
   assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===assignmentId)?.local_status,'active');
+  const audit=(await kernelPool().query<{actor:string;rolled_back_by:string;rollback_reason:string;
+    before_value:{activeCount:number};after_value:{activeCount:number};
+    rollback_before_value:{activeCount:number};rollback_after_value:{activeCount:number}}>(
+    'SELECT * FROM task_entity_merges WHERE source_task_id=$1 ORDER BY applied_at DESC LIMIT 1',
+    [plannerId])).rows[0];
+  assert.equal(audit.actor,'test-admin');
+  assert.equal(audit.rolled_back_by,'test-admin');
+  assert.equal(audit.rollback_reason,'reviewed rollback');
+  assert.equal(audit.after_value.activeCount,audit.before_value.activeCount-1);
+  assert.equal(audit.rollback_after_value.activeCount,audit.rollback_before_value.activeCount+1);
   assert.ok(!(await kernel.canonicalEvidence([], [assignmentId], []))
     .some(row=>row.attribute==='due'&&row.source==='legacy_import'&&
       row.source_item_id===`${courseId}:planner:42`));
@@ -142,12 +152,13 @@ test('rollback removes a fact created only by reconciliation',async()=>{
   await kernel.ingestCanvasSource({id:`${courseId}:planner:42`,courseId,sourceType:'planner',
     sourceId:'42',plannableType:'assignment',plannableId:'42',title:'Quiz review',body:'',
     sourceUrl:null,updatedAt:null,dueAt:null,unlockAt:null,lockAt:null},null,'typed-reference');
-  await kernel.mergeCanvasTasks(plannerId,directId,'verified assignment reference');
-  assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===directId)?.due_at,'2026-10-01');
-  await kernel.unmergeCanvasTasks(plannerId);
+  await kernel.mergeCanvasTasks(plannerId,directId,'verified assignment reference','test-admin');
+  assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===directId)?.due_date,'2026-10-01');
+  assert.equal((await kernelPool().query('SELECT due_at FROM tasks WHERE id=$1',[directId])).rows[0].due_at,null);
+  await kernel.unmergeCanvasTasks(plannerId,'undo derived due date','test-admin');
   const tasks=await kernel.taskRows(courseId,true);
-  assert.equal(tasks.find(task=>task.id===directId)?.due_at,null);
-  assert.equal(tasks.find(task=>task.id===plannerId)?.due_at,'2026-10-01');
+  assert.equal(tasks.find(task=>task.id===directId)?.due_date,null);
+  assert.equal(tasks.find(task=>task.id===plannerId)?.due_date,'2026-10-01');
 });
 
 test('AI extraction remains reviewable and cannot replace a Canvas assignment',async()=>{

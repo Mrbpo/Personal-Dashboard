@@ -338,9 +338,11 @@ export class KernelService {
     return {activeCount,verified,unresolved,projectedCount:activeCount-verified.length,planHash};
   }
 
-  async mergeCanvasTasks(plannerTaskId:string,directTaskId:string,reason:string,manual=false) {
-    if(!reason.trim())throw new Error('Merge reason is required');
+  async mergeCanvasTasks(plannerTaskId:string,directTaskId:string,reason:string,actor:string,manual=false) {
+    if(!reason.trim()||!actor.trim())throw new Error('Merge actor and reason are required');
     return kernelTransaction(async client=>{
+      const beforeCount=Number((await client.query(
+        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count);
       const pair=(await client.query<{
         id:string;entity_id:string;course_id:string;source_type:string;source_id:string;
         source_item_id:string;source_url:string|null;local_status:string;merged_into:string|null;
@@ -442,24 +444,32 @@ export class KernelService {
            ON CONFLICT DO NOTHING RETURNING fact_id,evidence_id`,[statusFact.id,item.evidence_id,copiedId]);
         for(const row of added.rows)addedEvidence.push({factId:row.fact_id,evidenceId:row.evidence_id});
       }
+      await projectTask(client,direct.entity_id,direct.source_item_id);
       await client.query('UPDATE entities SET merged_into=$2 WHERE id=$1',[planner.entity_id,direct.entity_id]);
       await client.query('DELETE FROM canvas_task_separations WHERE planner_source_item_id=$1 AND action_index=$2',
         [planner.source_item_id,actionIndex]);
       await client.query('UPDATE canvas_task_identity SET entity_id=$2 WHERE entity_id=$1',
         [planner.entity_id,direct.entity_id]);
       await client.query('DELETE FROM tasks WHERE id=$1',[plannerTaskId]);
+      const activeCount=Number((await client.query(
+        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count);
+      const targetStatus=planner.local_status!=='active'&&direct.local_status==='active'
+        ?planner.local_status:direct.local_status;
       await client.query(`INSERT INTO task_entity_merges(source_entity_id,target_entity_id,source_task_id,
         target_task_id,action_index,source_status,target_status_before,added_fact_evidence,copied_candidate_ids,
-        created_fact_ids,reason)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,[planner.entity_id,direct.entity_id,plannerTaskId,
+        created_fact_ids,actor,reason,before_value,after_value)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,[planner.entity_id,direct.entity_id,plannerTaskId,
         directTaskId,actionIndex,planner.local_status,direct.local_status,JSON.stringify(addedEvidence),
-        JSON.stringify(copiedCandidates),JSON.stringify(createdFactIds),reason.trim()]);
-      return {plannerTaskId,directTaskId,activeCount:Number((await client.query(
-        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count)};
+        JSON.stringify(copiedCandidates),JSON.stringify(createdFactIds),actor.trim(),reason.trim(),
+        JSON.stringify({plannerTaskId,directTaskId,plannerStatus:planner.local_status,
+          directStatus:direct.local_status,activeCount:beforeCount}),
+        JSON.stringify({taskId:directTaskId,localStatus:targetStatus,activeCount})]);
+      return {plannerTaskId,directTaskId,activeCount};
     });
   }
 
-  async unmergeCanvasTasks(plannerTaskId:string) {
+  async unmergeCanvasTasks(plannerTaskId:string,reason:string,actor:string) {
+    if(!reason.trim()||!actor.trim())throw new Error('Rollback actor and reason are required');
     return kernelTransaction(async client=>{
       const merge=(await client.query<{source_entity_id:string;target_entity_id:string;source_task_id:string;
         target_task_id:string;action_index:number;source_status:string;target_status_before:string;copied_candidate_ids:string[];
@@ -467,6 +477,10 @@ export class KernelService {
         `SELECT * FROM task_entity_merges WHERE source_task_id=$1 AND rolled_back_at IS NULL
          FOR UPDATE`,[plannerTaskId])).rows[0];
       if(!merge)throw new Error('Active task merge not found');
+      const beforeCount=Number((await client.query(
+        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count);
+      const targetBefore=(await client.query<{local_status:string}>(
+        'SELECT local_status FROM tasks WHERE id=$1',[merge.target_task_id])).rows[0]?.local_status;
       for(const factId of merge.created_fact_ids){
         const fact=(await client.query<{version:number;chosen_candidate_id:string}>(
           'SELECT version,chosen_candidate_id FROM facts WHERE id=$1 FOR UPDATE',[factId])).rows[0];
@@ -510,10 +524,11 @@ export class KernelService {
         [merge.source_entity_id])).rows[0];
       if(!source)throw new Error('Merged task has no source payload');
       await client.query(`INSERT INTO canvas_task_separations(planner_source_item_id,action_index,planner_entity_id,
-        direct_entity_id,reason) VALUES ($1,$2,$3,$4,'merge rolled back') ON CONFLICT(planner_source_item_id,action_index)
+        direct_entity_id,actor,reason) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(planner_source_item_id,action_index)
         DO UPDATE SET planner_entity_id=excluded.planner_entity_id,direct_entity_id=excluded.direct_entity_id,
-        reason=excluded.reason,created_at=now()`,
-        [source.source_item_id,merge.action_index,merge.source_entity_id,merge.target_entity_id]);
+        actor=excluded.actor,reason=excluded.reason,created_at=now()`,
+        [source.source_item_id,merge.action_index,merge.source_entity_id,merge.target_entity_id,
+          actor.trim(),reason.trim()]);
       await projectTask(client,merge.source_entity_id,source.source_item_id);
       await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',
         [plannerTaskId,merge.source_status]);
@@ -536,10 +551,18 @@ export class KernelService {
         await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',
           [merge.target_task_id,merge.target_status_before]);
       }
-      await client.query('UPDATE task_entity_merges SET rolled_back_at=now() WHERE source_entity_id=$1 AND rolled_back_at IS NULL',
-        [merge.source_entity_id]);
-      return {plannerTaskId,activeCount:Number((await client.query(
-        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count)};
+      const activeCount=Number((await client.query(
+        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count);
+      const targetAfter=(await client.query<{local_status:string}>(
+        'SELECT local_status FROM tasks WHERE id=$1',[merge.target_task_id])).rows[0]?.local_status;
+      await client.query(`UPDATE task_entity_merges SET rolled_back_at=now(),rolled_back_by=$2,
+        rollback_reason=$3,rollback_before_value=$4,rollback_after_value=$5
+        WHERE source_entity_id=$1 AND rolled_back_at IS NULL`,
+        [merge.source_entity_id,actor.trim(),reason.trim(),
+          JSON.stringify({taskId:merge.target_task_id,localStatus:targetBefore,activeCount:beforeCount}),
+          JSON.stringify({plannerTaskId,plannerStatus:merge.source_status,targetTaskId:merge.target_task_id,
+            targetStatus:targetAfter,activeCount})]);
+      return {plannerTaskId,activeCount};
     });
   }
   async ingestRawSource(input:{id:string;source:string;scope:string;externalId:string;

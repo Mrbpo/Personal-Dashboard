@@ -14,6 +14,7 @@ CREATE TABLE canvas_task_separations (
   action_index integer NOT NULL,
   planner_entity_id text NOT NULL REFERENCES entities(id),
   direct_entity_id text NOT NULL REFERENCES entities(id),
+  actor text NOT NULL,
   reason text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(planner_source_item_id,action_index)
@@ -32,9 +33,16 @@ CREATE TABLE task_entity_merges (
   added_fact_evidence jsonb NOT NULL DEFAULT '[]',
   copied_candidate_ids jsonb NOT NULL DEFAULT '[]',
   created_fact_ids jsonb NOT NULL DEFAULT '[]',
+  actor text NOT NULL,
   reason text NOT NULL,
+  before_value jsonb NOT NULL,
+  after_value jsonb NOT NULL,
   applied_at timestamptz NOT NULL DEFAULT now(),
   rolled_back_at timestamptz,
+  rolled_back_by text,
+  rollback_reason text,
+  rollback_before_value jsonb,
+  rollback_after_value jsonb,
   PRIMARY KEY(source_entity_id, applied_at)
 );
 
