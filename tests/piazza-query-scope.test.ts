@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { asksForCourseIdentity, asksForEventTiming, asksOnlyForPiazza, requestedKnownCourseCodes } from '../lib/search-vocabulary.ts';
+import { asksForCourseIdentity, asksForEventTiming, asksOnlyForPiazza, requestedCourseCodes } from '../lib/search-vocabulary.ts';
 
 test('cross-source questions retain Canvas and PDF evidence', () => {
   assert.equal(asksOnlyForPiazza('Explain the assignment, lecture PDF and Piazza clarification'), false);
@@ -13,8 +13,9 @@ test('an explicit Piazza-only request stays scoped to forum posts', () => {
 });
 
 test('a page number does not become a course code', () => {
-  assert.deepEqual(requestedKnownCourseCodes('See page 413 in the textbook', ['MAT137', 'CSC110']), []);
-  assert.deepEqual(requestedKnownCourseCodes('Check MAT137 on page 413', ['MAT137', 'CSC110']), ['MAT137']);
+  assert.deepEqual(requestedCourseCodes('See page 413 in the textbook', ['MAT137', 'CSC110']), []);
+  assert.deepEqual(requestedCourseCodes('Check MAT137 on page 413', ['MAT137', 'CSC110']), ['MAT137']);
+  assert.deepEqual(requestedCourseCodes('总结ZZZZ99 piazza', ['MAT137', 'CSC110']), ['ZZZZ99']);
 });
 
 test('midterm dates are not mistaken for course identity questions', () => {

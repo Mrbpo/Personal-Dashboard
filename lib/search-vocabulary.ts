@@ -23,11 +23,16 @@ export function asksOnlyForPiazza(question: string): boolean {
   return /(?:只|仅|only).{0,12}piazza|piazza.{0,12}(?:帖子|讨论|问答)|^(?:总结|汇总|概览|查看|查找|搜索|检索).{0,20}piazza\s*$/i.test(question);
 }
 
-export function requestedKnownCourseCodes(question: string, codes: string[]): string[] {
+export function requestedCourseCodes(question: string, codes: string[]): string[] {
   const known = new Set(codes.map(code => code.toUpperCase().replace(/\s/g, '').replace(/H\d$/, '')));
-  return (question.toUpperCase().match(/[A-Z]{2,}\s*\d{2,}(?:H\d)?/g) || [])
-    .map(code => code.replace(/\s/g, '').replace(/H\d$/, ''))
-    .filter(code => known.has(code));
+  return (question.match(/[A-Za-z]{2,}\s*\d{2,}(?:[Hh]\d)?/g) || [])
+    .filter(raw => {
+      const code = raw.toUpperCase().replace(/\s/g, '').replace(/H\d$/, '');
+      // Unknown but explicitly capitalized codes still constrain a search to
+      // zero matches. Ordinary text such as "page 413" must not do so.
+      return known.has(code) || /^[A-Z]{2,}\d{2,}(?:H\d)?$/.test(raw);
+    })
+    .map(raw => raw.toUpperCase().replace(/\s/g, '').replace(/H\d$/, ''));
 }
 
 export function asksForCourseIdentity(question: string): boolean {
