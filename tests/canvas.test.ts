@@ -19,6 +19,26 @@ test('an optional Canvas endpoint failure marks the course scan incomplete',asyn
   }finally{globalThis.fetch=original;}
 });
 
+test('planner normalization retains the outer typed reference even without a URL',async()=>{
+  const original=globalThis.fetch;
+  globalThis.fetch=(async input=>{
+    const url=String(input);
+    if(url.includes('/planner/items?'))return Response.json([{id:900,plannable_type:'assignment',
+      plannable_id:42,plannable:{id:42,title:'Problem set',html_url:null,due_at:'2026-10-01'}}]);
+    if(url.includes('/assignments?'))return Response.json([{id:42,name:'Problem set',
+      html_url:'https://canvas.example.test/courses/7/assignments/42'}]);
+    return Response.json(url.includes('/courses/7?')?{}:[]);
+  }) as typeof fetch;
+  try{
+    const result=await getCourseSources('7');
+    const planner=result.sources.find(source=>source.sourceType==='planner');
+    assert.equal(planner?.sourceId,'42');
+    assert.equal(planner?.plannableType,'assignment');
+    assert.equal(planner?.plannableId,'42');
+    assert.equal(planner?.sourceUrl,null);
+  }finally{globalThis.fetch=original;}
+});
+
 test("Canvas pagination follows the next link and keeps bearer auth", async () => {
   const original = globalThis.fetch;
   const calls: Array<{ url: string; auth: string | null }> = [];

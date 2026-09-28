@@ -13,6 +13,9 @@ export async function hashSource(source: CanvasSource): Promise<string> {
   const payload = JSON.stringify({
     title: source.title,
     body: source.body,
+    sourceUrl: source.sourceUrl,
+    plannableType: source.plannableType ?? null,
+    plannableId: source.plannableId ?? null,
     dueAt: source.dueAt,
     unlockAt: source.unlockAt,
     lockAt: source.lockAt,

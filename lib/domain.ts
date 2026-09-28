@@ -48,6 +48,9 @@ export type CanvasSource = {
   courseId: string;
   sourceType: string;
   sourceId: string;
+  /** Canvas planner's typed reference, kept separate from the planner item ID. */
+  plannableType?: string | null;
+  plannableId?: string | null;
   title: string;
   body: string;
   sourceUrl: string | null;

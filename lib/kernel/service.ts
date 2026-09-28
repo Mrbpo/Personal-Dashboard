@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
+import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 
 type Json = Record<string, unknown>;
 type CandidateInput = {
@@ -152,6 +153,19 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
   const status = (await client.query<{status:string}>('SELECT status FROM candidate_facts WHERE id=$1',[candidateId])).rows[0].status;
   if (status !== 'pending') return candidateId;
   if (existing && JSON.stringify(existing.canonical_value) === JSON.stringify(input.value)) {
+    if(input.authority==='canvas' && ['task_payload','due'].includes(input.attribute)){
+      const types=(await client.query<{chosen_type:string;incoming_type:string}>(
+        `SELECT split_part(chosen.external_id,':',1) chosen_type,
+         split_part(incoming.external_id,':',1) incoming_type
+         FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+         JOIN source_items chosen ON chosen.id=e.source_item_id
+         JOIN source_items incoming ON incoming.id=$2 WHERE c.id=$1`,
+        [existing.chosen_candidate_id,input.sourceItemId])).rows[0];
+      if(types?.chosen_type==='planner'&&types.incoming_type!=='planner'){
+        await acceptCandidate(client,candidateId,'direct Canvas item has priority over planner summary');
+        return candidateId;
+      }
+    }
     await client.query('UPDATE candidate_facts SET status=\'accepted\',reason=\'corroborating evidence\',decided_at=now() WHERE id=$1',[candidateId]);
     await client.query('INSERT INTO fact_evidence(fact_id,evidence_id,candidate_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
       [existing.id,evidenceId,candidateId]);
@@ -165,8 +179,16 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
     const prior = (await client.query<{source:string;source_item_id:string;remote_updated_at:Date|null;acquired_at:Date}>(
       `SELECT e.source,e.source_item_id,v.remote_updated_at,e.acquired_at FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
        JOIN source_item_versions v ON v.id=e.source_version_id WHERE c.id=$1`,[existing.chosen_candidate_id])).rows[0];
+    const priorType=(await client.query<{external_id:string}>(
+      'SELECT external_id FROM source_items WHERE id=$1',[prior?.source_item_id])).rows[0]?.external_id.split(':')[0];
+    const incomingType=(await client.query<{external_id:string}>(
+      'SELECT external_id FROM source_items WHERE id=$1',[input.sourceItemId])).rows[0]?.external_id.split(':')[0];
     if (prior?.source === 'legacy_import' && input.authority === 'canvas') {
       await acceptCandidate(client,candidateId,'current Canvas evidence supersedes legacy import');
+    } else if (input.authority === 'canvas' && prior?.source === 'canvas' &&
+      priorType === 'planner' && incomingType !== 'planner' &&
+      ['task_payload','due'].includes(input.attribute)) {
+      await acceptCandidate(client,candidateId,'direct Canvas item supersedes planner summary');
     } else if (input.authority === 'calendar_import' && prior?.source === 'calendar_import') {
       await acceptCandidate(client,candidateId,'new explicitly imported calendar version');
     } else if (prior?.source === input.source && prior.source_item_id===input.sourceItemId &&
@@ -186,7 +208,42 @@ async function entity(client: PoolClient, id: string, kind: string, identityKey:
      VALUES ($1,'local-owner',$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING`,[id,kind,identityKey,courseId,termId]);
 }
 
+async function canvasTaskEntity(client: PoolClient, source: CanvasSource, index: number): Promise<string> {
+  const identityKey=canvasTaskIdentity(source,index);
+  const ref=canvasTaskReference(source);
+  if (!ref) {
+    const id=stableId('task',identityKey);
+    await entity(client,id,'task',identityKey,source.courseId,null);
+    return id;
+  }
+  // Serialize this typed reference so planner-first and assignment-first scans choose one entity.
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[identityKey]);
+  const mapped=(await client.query<{entity_id:string}>(
+    `SELECT entity_id FROM canvas_task_identity WHERE course_id=$1 AND reference_type=$2
+     AND reference_id=$3 AND action_index=$4`,[source.courseId,ref.type,ref.id,index])).rows[0];
+  if (mapped) return mapped.entity_id;
+  const existing=(await client.query<{entity_id:string}>(
+    `SELECT t.entity_id FROM tasks t JOIN entities e ON e.id=t.entity_id
+     WHERE t.course_id=$1 AND e.merged_into IS NULL AND
+       ((t.source_type=$2 AND t.source_id=$3) OR
+        (t.source_type='planner' AND t.source_item_id=$4))
+     ORDER BY CASE WHEN t.source_type=$2 THEN 0 ELSE 1 END,t.id LIMIT 1`,
+    [source.courseId,ref.type,ref.id,source.id])).rows[0];
+  const byKey=(await client.query<{id:string}>(
+    `SELECT id FROM entities WHERE owner_id='local-owner' AND kind='task' AND identity_key=$1
+     AND merged_into IS NULL`,[identityKey])).rows[0];
+  const id=existing?.entity_id||byKey?.id||stableId('task',identityKey);
+  if (!existing && !byKey) await entity(client,id,'task',identityKey,source.courseId,null);
+  await client.query(
+    `INSERT INTO canvas_task_identity(course_id,reference_type,reference_id,action_index,entity_id)
+     VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,[source.courseId,ref.type,ref.id,index,id]);
+  return id;
+}
+
 async function projectTask(client: PoolClient, entityId: string, sourceItemId: string): Promise<void> {
+  const merged=(await client.query<{merged_into:string|null}>(
+    'SELECT merged_into FROM entities WHERE id=$1',[entityId])).rows[0]?.merged_into;
+  if (merged) return;
   const result = await client.query<{attribute:string;canonical_value:unknown;updated_at:Date}>(
     'SELECT attribute,canonical_value,updated_at FROM facts WHERE entity_id=$1',[entityId]);
   const facts = Object.fromEntries(result.rows.map(row=>[row.attribute,row.canonical_value]));
@@ -194,7 +251,10 @@ async function projectTask(client: PoolClient, entityId: string, sourceItemId: s
   if (!payload) return;
   const existingTask=(await client.query<{id:string;source_item_id:string}>(
     'SELECT id,source_item_id FROM tasks WHERE entity_id=$1',[entityId])).rows[0];
-  const primarySourceItemId=existingTask?.source_item_id||sourceItemId;
+  const chosenSource=(await client.query<{source_item_id:string}>(
+    `SELECT e.source_item_id FROM facts f JOIN candidate_facts c ON c.id=f.chosen_candidate_id
+     JOIN evidence e ON e.id=c.evidence_id WHERE f.entity_id=$1 AND f.attribute='task_payload'`,[entityId])).rows[0];
+  const primarySourceItemId=chosenSource?.source_item_id||existingTask?.source_item_id||sourceItemId;
   const sourceState=(await client.query<{state:string}>(
     'SELECT state FROM source_items WHERE id=$1',[primarySourceItemId])).rows[0]?.state;
   const due = (facts.due as Deadline | undefined) ?? parseDeadline(null);
@@ -208,7 +268,8 @@ async function projectTask(client: PoolClient, entityId: string, sourceItemId: s
       urgency,confidence,evidence_excerpt,estimated_minutes,points_possible,prerequisite_blocked,cancelled_at,source_missing,local_status)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
        $27,$28,$29)
-     ON CONFLICT(id) DO UPDATE SET title=excluded.title,action=excluded.action,requirements=excluded.requirements,
+     ON CONFLICT(id) DO UPDATE SET source_item_id=excluded.source_item_id,source_type=excluded.source_type,
+       source_id=excluded.source_id,source_url=excluded.source_url,title=excluded.title,action=excluded.action,requirements=excluded.requirements,
        start_at=excluded.start_at,due_date=excluded.due_date,due_at=excluded.due_at,due_local_time=excluded.due_local_time,
        due_timezone=excluded.due_timezone,due_precision=excluded.due_precision,due_original=excluded.due_original,
        unlock_at=excluded.unlock_at,lock_at=excluded.lock_at,canvas_status=excluded.canvas_status,
@@ -226,6 +287,195 @@ async function projectTask(client: PoolClient, entityId: string, sourceItemId: s
 }
 
 export class KernelService {
+  async canvasDuplicateReport() {
+    const rows=(await kernelPool().query<{
+      id:string;entity_id:string;course_id:string;source_id:string;source_item_id:string;
+      source_url:string|null;local_status:string;raw_value:CanvasSource|null;
+    }>(`SELECT t.id,t.entity_id,t.course_id,t.source_id,t.source_item_id,t.source_url,t.local_status,
+       v.raw_value FROM tasks t JOIN entities en ON en.id=t.entity_id
+       LEFT JOIN LATERAL (SELECT raw_value FROM source_item_versions
+         WHERE source_item_id=t.source_item_id ORDER BY acquired_at DESC,id DESC LIMIT 1) v ON true
+       WHERE t.source_type='planner' AND en.merged_into IS NULL ORDER BY t.course_id,t.id`)).rows;
+    const direct=(await kernelPool().query<{id:string;entity_id:string;course_id:string;source_type:string;source_id:string;local_status:string}>(
+      `SELECT t.id,t.entity_id,t.course_id,t.source_type,t.source_id,t.local_status FROM tasks t
+       JOIN entities en ON en.id=t.entity_id WHERE t.source_type IN ('assignment','quiz','discussion','page')
+       AND en.merged_into IS NULL`)).rows;
+    const verified:Array<{plannerTaskId:string;directTaskId:string;courseId:string;reference:string}> = [];
+    const unresolved:Array<{plannerTaskId:string;courseId:string;reason:string;possibleTaskIds:string[]}> = [];
+    for(const planner of rows){
+      const raw=planner.raw_value;
+      const ref=raw && typeof raw==='object' && raw.sourceType==='planner'
+        ?canvasTaskReference(raw):canvasTaskReference({courseId:planner.course_id,sourceType:'planner',sourceId:planner.source_id,
+          sourceUrl:planner.source_url} as CanvasSource);
+      const candidates=direct.filter(item=>item.course_id===planner.course_id &&
+        item.source_id===(ref?.id||planner.source_id) && (!ref||item.source_type===ref.type) &&
+        item.entity_id!==planner.entity_id);
+      if(ref && candidates.length===1)verified.push({plannerTaskId:planner.id,directTaskId:candidates[0].id,
+        courseId:planner.course_id,reference:`${ref.type}:${ref.id}`});
+      else if(candidates.length || !ref)unresolved.push({plannerTaskId:planner.id,courseId:planner.course_id,
+        reason:ref?'multiple direct objects share the reference':'missing reliable typed reference',
+        possibleTaskIds:candidates.map(item=>item.id)});
+    }
+    const activeCount=Number((await kernelPool().query(
+      'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count);
+    const planHash=stableId(JSON.stringify({activeCount,verified,unresolved}));
+    return {activeCount,verified,unresolved,projectedCount:activeCount-verified.length,planHash};
+  }
+
+  async mergeCanvasTasks(plannerTaskId:string,directTaskId:string,reason:string,manual=false) {
+    if(!reason.trim())throw new Error('Merge reason is required');
+    return kernelTransaction(async client=>{
+      const pair=(await client.query<{
+        id:string;entity_id:string;course_id:string;source_type:string;source_id:string;
+        source_item_id:string;source_url:string|null;local_status:string;merged_into:string|null;
+      }>(`SELECT t.id,t.entity_id,t.course_id,t.source_type,t.source_id,t.source_item_id,t.source_url,
+         t.local_status,e.merged_into FROM tasks t JOIN entities e ON e.id=t.entity_id
+         WHERE t.id=ANY($1::text[]) ORDER BY t.id FOR UPDATE OF t,e`,[[plannerTaskId,directTaskId]])).rows;
+      const planner=pair.find(row=>row.id===plannerTaskId),direct=pair.find(row=>row.id===directTaskId);
+      if(!planner||!direct||planner.source_type!=='planner'||
+        !['assignment','quiz','discussion','page'].includes(direct.source_type)||
+        planner.course_id!==direct.course_id||planner.entity_id===direct.entity_id||
+        planner.merged_into||direct.merged_into)throw new Error('Invalid active Canvas task pair');
+      const raw=(await client.query<{raw_value:CanvasSource}>(
+        `SELECT raw_value FROM source_item_versions WHERE source_item_id=$1
+         ORDER BY acquired_at DESC,id DESC LIMIT 1`,[planner.source_item_id])).rows[0]?.raw_value;
+      const reference=raw?.sourceType==='planner'?canvasTaskReference(raw):null;
+      if(reference && (reference.type!==direct.source_type||reference.id!==direct.source_id))
+        throw new Error('Planner reference contradicts direct Canvas object');
+      if(!reference && !manual)throw new Error('Typed Canvas reference is missing; explicit adjudication required');
+      if(planner.local_status!=='active'&&direct.local_status!=='active'&&planner.local_status!==direct.local_status)
+        throw new Error('Conflicting local statuses require separate adjudication');
+      const addedEvidence:Array<{factId:string;evidenceId:string}>=[];
+      const copiedCandidates:string[]=[];
+      const sourceCandidates=(await client.query<{
+        attribute:string;value:unknown;evidence_id:string;authority:string;
+      }>(`SELECT attribute,value,evidence_id,authority FROM candidate_facts WHERE entity_id=$1
+         ORDER BY created_at,id`,[planner.entity_id])).rows;
+      for(const candidate of sourceCandidates){
+        const copiedId=stableId(direct.entity_id,candidate.attribute,candidate.evidence_id);
+        const inserted=await client.query(
+          `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority,reason)
+           VALUES ($1,$2,$3,$4,$5,'pending',$6,$7) ON CONFLICT DO NOTHING RETURNING id`,
+          [copiedId,direct.entity_id,candidate.attribute,JSON.stringify(candidate.value),candidate.evidence_id,
+            candidate.authority,`copied from merged task ${plannerTaskId}`]);
+        if(inserted.rowCount)copiedCandidates.push(copiedId);
+      }
+      const sourceFacts=(await client.query<{attribute:string;canonical_value:unknown;chosen_candidate_id:string}>(
+        'SELECT attribute,canonical_value,chosen_candidate_id FROM facts WHERE entity_id=$1',[planner.entity_id])).rows;
+      for(const sourceFact of sourceFacts){
+        if(sourceFact.attribute==='local_status')continue;
+        let targetFact=(await client.query<{id:string;canonical_value:unknown}>(
+          'SELECT id,canonical_value FROM facts WHERE entity_id=$1 AND attribute=$2 FOR UPDATE',
+          [direct.entity_id,sourceFact.attribute])).rows[0];
+        if(!targetFact){
+          const old=(await client.query<{evidence_id:string}>(
+            'SELECT evidence_id FROM candidate_facts WHERE id=$1',[sourceFact.chosen_candidate_id])).rows[0];
+          if(old){
+            const copiedId=stableId(direct.entity_id,sourceFact.attribute,old.evidence_id);
+            await acceptCandidate(client,copiedId,`merged from ${plannerTaskId}: ${reason.trim()}`);
+            targetFact=(await client.query<{id:string;canonical_value:unknown}>(
+              'SELECT id,canonical_value FROM facts WHERE entity_id=$1 AND attribute=$2',
+              [direct.entity_id,sourceFact.attribute])).rows[0];
+          }
+        }
+        if(targetFact){
+          const matching=sourceCandidates.filter(item=>item.attribute===sourceFact.attribute &&
+            JSON.stringify(item.value)===JSON.stringify(targetFact.canonical_value));
+          for(const item of matching){
+            const copiedId=stableId(direct.entity_id,item.attribute,item.evidence_id);
+            await client.query(`UPDATE candidate_facts SET status='accepted',reason='corroborating merged evidence',
+              decided_at=now() WHERE id=$1 AND status='pending'`,[copiedId]);
+            const added=await client.query<{fact_id:string;evidence_id:string}>(
+              `INSERT INTO fact_evidence(fact_id,evidence_id,candidate_id) VALUES ($1,$2,$3)
+               ON CONFLICT DO NOTHING RETURNING fact_id,evidence_id`,[targetFact.id,item.evidence_id,copiedId]);
+            for(const row of added.rows)addedEvidence.push({factId:row.fact_id,evidenceId:row.evidence_id});
+          }
+        }
+      }
+      if(planner.local_status!=='active'&&direct.local_status==='active'){
+        const at=new Date().toISOString();
+        const mergeSource=`manual:task_merge:${plannerTaskId}`;
+        const version=await sourceVersion(client,{id:mergeSource,source:'manual',scope:'local-owner',
+          externalId:plannerTaskId,contentHash:stableId(plannerTaskId,directTaskId,reason,at),
+          raw:{plannerTaskId,directTaskId,status:planner.local_status,reason},acquiredAt:at});
+        const candidateId=await recordCandidate(client,{entityId:direct.entity_id,attribute:'local_status',
+          value:planner.local_status,sourceVersionId:version,source:'manual',sourceItemId:mergeSource,
+          originalExcerpt:reason,confidence:1,authority:'manual',locator:'local_status',acquiredAt:at});
+        const status=(await client.query<{status:string}>(
+          'SELECT status FROM candidate_facts WHERE id=$1',[candidateId])).rows[0]?.status;
+        if(status==='pending')await acceptCandidate(client,candidateId,`status retained from ${plannerTaskId}`);
+        await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',[directTaskId,planner.local_status]);
+      }
+      const statusFact=(await client.query<{id:string;canonical_value:unknown}>(
+        `SELECT id,canonical_value FROM facts WHERE entity_id=$1 AND attribute='local_status'`,
+        [direct.entity_id])).rows[0];
+      if(statusFact)for(const item of sourceCandidates.filter(candidate=>candidate.attribute==='local_status' &&
+        JSON.stringify(candidate.value)===JSON.stringify(statusFact.canonical_value))){
+        const copiedId=stableId(direct.entity_id,'local_status',item.evidence_id);
+        await client.query(`UPDATE candidate_facts SET status='accepted',reason='corroborating merged status',
+          decided_at=now() WHERE id=$1 AND status='pending'`,[copiedId]);
+        const added=await client.query<{fact_id:string;evidence_id:string}>(
+          `INSERT INTO fact_evidence(fact_id,evidence_id,candidate_id) VALUES ($1,$2,$3)
+           ON CONFLICT DO NOTHING RETURNING fact_id,evidence_id`,[statusFact.id,item.evidence_id,copiedId]);
+        for(const row of added.rows)addedEvidence.push({factId:row.fact_id,evidenceId:row.evidence_id});
+      }
+      await client.query('UPDATE entities SET merged_into=$2 WHERE id=$1',[planner.entity_id,direct.entity_id]);
+      await client.query('UPDATE canvas_task_identity SET entity_id=$2 WHERE entity_id=$1',
+        [planner.entity_id,direct.entity_id]);
+      await client.query('DELETE FROM tasks WHERE id=$1',[plannerTaskId]);
+      await client.query(`INSERT INTO task_entity_merges(source_entity_id,target_entity_id,source_task_id,
+        target_task_id,source_status,target_status_before,added_fact_evidence,copied_candidate_ids,reason)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[planner.entity_id,direct.entity_id,plannerTaskId,
+        directTaskId,planner.local_status,direct.local_status,JSON.stringify(addedEvidence),
+        JSON.stringify(copiedCandidates),reason.trim()]);
+      return {plannerTaskId,directTaskId,activeCount:Number((await client.query(
+        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count)};
+    });
+  }
+
+  async unmergeCanvasTasks(plannerTaskId:string) {
+    return kernelTransaction(async client=>{
+      const merge=(await client.query<{source_entity_id:string;target_entity_id:string;source_task_id:string;
+        target_task_id:string;source_status:string;target_status_before:string;copied_candidate_ids:string[]}>(
+        `SELECT * FROM task_entity_merges WHERE source_task_id=$1 AND rolled_back_at IS NULL
+         FOR UPDATE`,[plannerTaskId])).rows[0];
+      if(!merge)throw new Error('Active task merge not found');
+      await client.query('UPDATE entities SET merged_into=NULL WHERE id=$1',[merge.source_entity_id]);
+      await client.query(`UPDATE candidate_facts SET status='superseded',reason='task merge rolled back',decided_at=now()
+        WHERE id=ANY($1::text[]) AND status='pending'`,[merge.copied_candidate_ids]);
+      const source=(await client.query<{source_item_id:string}>(
+        `SELECT e.source_item_id FROM facts f JOIN candidate_facts c ON c.id=f.chosen_candidate_id
+         JOIN evidence e ON e.id=c.evidence_id WHERE f.entity_id=$1 AND f.attribute='task_payload'`,
+        [merge.source_entity_id])).rows[0];
+      if(!source)throw new Error('Merged task has no source payload');
+      await projectTask(client,merge.source_entity_id,source.source_item_id);
+      await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',
+        [plannerTaskId,merge.source_status]);
+      const chosenStatus=(await client.query<{source_item_id:string}>(
+        `SELECT e.source_item_id FROM facts f JOIN candidate_facts c ON c.id=f.chosen_candidate_id
+         JOIN evidence e ON e.id=c.evidence_id WHERE f.entity_id=$1 AND f.attribute='local_status'`,
+        [merge.target_entity_id])).rows[0]?.source_item_id;
+      if(chosenStatus===`manual:task_merge:${plannerTaskId}`){
+        const at=new Date().toISOString(),undoSource=`manual:task_unmerge:${plannerTaskId}`;
+        const version=await sourceVersion(client,{id:undoSource,source:'manual',scope:'local-owner',
+          externalId:plannerTaskId,contentHash:stableId(plannerTaskId,at),
+          raw:{plannerTaskId,targetTaskId:merge.target_task_id,status:merge.target_status_before},acquiredAt:at});
+        const candidateId=await recordCandidate(client,{entityId:merge.target_entity_id,
+          attribute:'local_status',value:merge.target_status_before,sourceVersionId:version,
+          source:'manual',sourceItemId:undoSource,originalExcerpt:'Canvas task merge rolled back',
+          confidence:1,authority:'manual',locator:'local_status',acquiredAt:at});
+        const status=(await client.query<{status:string}>(
+          'SELECT status FROM candidate_facts WHERE id=$1',[candidateId])).rows[0]?.status;
+        if(status==='pending')await acceptCandidate(client,candidateId,'task merge rolled back');
+        await client.query('UPDATE tasks SET local_status=$2 WHERE id=$1',
+          [merge.target_task_id,merge.target_status_before]);
+      }
+      await client.query('UPDATE task_entity_merges SET rolled_back_at=now() WHERE source_entity_id=$1 AND rolled_back_at IS NULL',
+        [merge.source_entity_id]);
+      return {plannerTaskId,activeCount:Number((await client.query(
+        'SELECT count(*) FROM tasks t JOIN entities e ON e.id=t.entity_id WHERE e.merged_into IS NULL')).rows[0].count)};
+    });
+  }
   async ingestRawSource(input:{id:string;source:string;scope:string;externalId:string;
     courseId?:string|null;sourceUrl?:string|null;contentHash:string;metadata:Json;
     rawUri:string;excerpt:string;publishedAt?:string|null;remoteUpdatedAt?:string|null}):Promise<void>{
@@ -294,10 +544,7 @@ export class KernelService {
         evidence:source.body.slice(0,220),estimatedMinutes:null,possiblyCancelled:false};
       const actions=deterministic?[baseAction]:aiActions;
       for (const [index,action] of actions.entries()) {
-        const identityKey=source.sourceUrl && ['assignment','quiz','planner'].includes(source.sourceType)
-          ? `${source.courseId}|${source.sourceUrl.replace(/\?.*$/,'')}` : `${source.courseId}|${source.sourceType}|${source.sourceId}|${index}`;
-        const entityId=stableId('task',identityKey);
-        await entity(client,entityId,'task',identityKey,source.courseId,null);
+        const entityId=await canvasTaskEntity(client,source,index);
         const payloadFor=(candidate:typeof action)=>({id:`${source.id}:${index}`,courseId:source.courseId,sourceType:source.sourceType,
           sourceId:source.sourceId,sourceUrl:source.sourceUrl,title:candidate.title || source.title,action:candidate.action,
           requirements:candidate.requirements,startAt:candidate.recommendedStartAt,unlockAt:source.unlockAt,lockAt:source.lockAt,
@@ -530,8 +777,9 @@ export class KernelService {
   async taskRows(courseId?: string, includeIgnored=false) {
     const result=await kernelPool().query(
       `SELECT t.*,c.code course_code,c.name course_name,'complete' analysis_status
-       FROM tasks t JOIN courses c ON c.id=t.course_id
-       WHERE c.enabled=true AND ($2::boolean OR t.local_status!='ignored') AND ($1::text IS NULL OR t.course_id=$1)
+       FROM tasks t JOIN courses c ON c.id=t.course_id JOIN entities en ON en.id=t.entity_id
+       WHERE c.enabled=true AND en.merged_into IS NULL AND ($2::boolean OR t.local_status!='ignored')
+       AND ($1::text IS NULL OR t.course_id=$1)
        ORDER BY t.due_at NULLS LAST,t.due_date NULLS LAST`,[courseId ?? null,includeIgnored]);
     return result.rows.map(row=>({ ...row,requirements_json:JSON.stringify(row.requirements),
       evidence:row.evidence_excerpt,local_status:row.local_status,points_possible:row.points_possible==null?null:Number(row.points_possible),
@@ -542,13 +790,17 @@ export class KernelService {
 
   async taskTarget(taskId: string) {
     return (await kernelPool().query<{source_type:string;source_id:string}>(
-      'SELECT source_type,source_id FROM tasks WHERE id=$1',[taskId])).rows[0] ?? null;
+      `SELECT source_type,source_id FROM tasks WHERE id=COALESCE(
+        (SELECT target_task_id FROM task_entity_merges WHERE source_task_id=$1 AND rolled_back_at IS NULL),$1)`,
+      [taskId])).rows[0] ?? null;
   }
 
   async setTaskStatus(taskId: string, status: 'active'|'completed'|'ignored', syncCanvas=false) {
     await kernelTransaction(async client => {
       const task=(await client.query<{entity_id:string;source_item_id:string}>(
-        'SELECT entity_id,source_item_id FROM tasks WHERE id=$1 FOR UPDATE',[taskId])).rows[0];
+        `SELECT entity_id,source_item_id FROM tasks WHERE id=COALESCE(
+          (SELECT target_task_id FROM task_entity_merges WHERE source_task_id=$1 AND rolled_back_at IS NULL),$1)
+          FOR UPDATE`,[taskId])).rows[0];
       if (!task) throw new Error('Task not found');
       const raw={taskId,status};const acquiredAt=new Date().toISOString();
       const sourceId=`manual:status:${taskId}`;
@@ -562,11 +814,13 @@ export class KernelService {
         `SELECT id,status FROM candidate_facts WHERE entity_id=$1 AND attribute='local_status' AND evidence_id=
          (SELECT id FROM evidence WHERE source_version_id=$2 AND locator='local_status')`,[task.entity_id,version])).rows[0];
       if (candidate?.status==='pending') await acceptCandidate(client,candidate.id,'user action');
-      await client.query('UPDATE tasks SET local_status=$2,updated_at=now() WHERE id=$1',[taskId,status]);
+      const activeTaskId=(await client.query<{id:string}>(
+        'SELECT id FROM tasks WHERE entity_id=$1',[task.entity_id])).rows[0].id;
+      await client.query('UPDATE tasks SET local_status=$2,updated_at=now() WHERE id=$1',[activeTaskId,status]);
       if(syncCanvas && status!=='ignored')await client.query(
         `INSERT INTO kernel_outbox(id,kind,payload,idempotency_key) VALUES ($1,'canvas_task_status',$2,$3)
          ON CONFLICT(idempotency_key) DO NOTHING`,
-        [randomUUID(),JSON.stringify({taskId,status}),`canvas_task_status:${taskId}:${status}:${acquiredAt}`]);
+        [randomUUID(),JSON.stringify({taskId:activeTaskId,status}),`canvas_task_status:${activeTaskId}:${status}:${acquiredAt}`]);
     });
   }
 
@@ -630,7 +884,8 @@ export class KernelService {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [row.source_item_id,row.entity_id,row.source_item_id,row.source,row.external_id,row.payload.title,
           row.payload.description,row.payload.startAt,row.payload.endAt,row.payload.allDay]);
-      return {courses:courseFacts.length,tasks:taskFacts.length,events:eventFacts.length};
+      return {courses:courseFacts.length,tasks:Number((await client.query('SELECT count(*) FROM tasks')).rows[0].count),
+        events:eventFacts.length};
     });
   }
 
@@ -641,16 +896,17 @@ export class KernelService {
        JOIN evidence e ON e.id=c.evidence_id JOIN entities en ON en.id=c.entity_id
        LEFT JOIN tasks t ON t.entity_id=c.entity_id LEFT JOIN courses co ON co.id=en.course_id
        LEFT JOIN facts f ON f.entity_id=c.entity_id AND f.attribute=c.attribute
-       WHERE c.status='pending' ORDER BY c.created_at LIMIT 100`)).rows;
+       WHERE c.status='pending' AND en.merged_into IS NULL ORDER BY c.created_at LIMIT 100`)).rows;
   }
 
   async canonicalEvidence(courseIds: string[], taskIds: string[], eventIds: string[]) {
     const result=await kernelPool().query<{
       entity_kind:string;entity_key:string;task_id:string|null;attribute:string;source:string;
+      source_item_id:string;
       source_url:string|null;original_excerpt:string;locator:string|null;authority:string;
       acquired_at:Date;published_at:Date|null;confidence:string;
     }>(
-      `SELECT en.kind entity_kind,en.identity_key entity_key,t.id task_id,f.attribute,e.source,
+      `SELECT en.kind entity_kind,en.identity_key entity_key,t.id task_id,f.attribute,e.source,e.source_item_id,
        si.source_url,e.original_excerpt,e.locator,c.authority,e.acquired_at,e.published_at,e.confidence
        FROM facts f JOIN entities en ON en.id=f.entity_id
        JOIN fact_evidence fe ON fe.fact_id=f.id
@@ -684,6 +940,9 @@ export class KernelService {
         `SELECT c.entity_id,c.attribute,c.value,c.status,e.kind FROM candidate_facts c
          JOIN entities e ON e.id=c.entity_id WHERE c.id=$1 FOR UPDATE OF c`,[id])).rows[0];
       if (!candidate || candidate.status!=='pending') throw new Error('Candidate is not pending');
+      if((await client.query<{merged_into:string|null}>(
+        'SELECT merged_into FROM entities WHERE id=$1',[candidate.entity_id])).rows[0]?.merged_into)
+        throw new Error('Candidate belongs to a merged task');
       if(decision==='accept' && ['due','cancelled'].includes(candidate.attribute) && candidate.kind!=='task'){
         throw new Error('Link this claim to a task before accepting it');
       }
