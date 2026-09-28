@@ -396,7 +396,7 @@ export class KernelService {
         const at=new Date().toISOString();
         const mergeSource=`manual:task_merge:${plannerTaskId}`;
         const version=await sourceVersion(client,{id:mergeSource,source:'manual',scope:'local-owner',
-          externalId:plannerTaskId,contentHash:stableId(plannerTaskId,directTaskId,reason,at),
+          externalId:mergeSource,contentHash:stableId(plannerTaskId,directTaskId,reason,at),
           raw:{plannerTaskId,directTaskId,status:planner.local_status,reason},acquiredAt:at});
         const candidateId=await recordCandidate(client,{entityId:direct.entity_id,attribute:'local_status',
           value:planner.local_status,sourceVersionId:version,source:'manual',sourceItemId:mergeSource,
@@ -458,7 +458,7 @@ export class KernelService {
       if(chosenStatus===`manual:task_merge:${plannerTaskId}`){
         const at=new Date().toISOString(),undoSource=`manual:task_unmerge:${plannerTaskId}`;
         const version=await sourceVersion(client,{id:undoSource,source:'manual',scope:'local-owner',
-          externalId:plannerTaskId,contentHash:stableId(plannerTaskId,at),
+          externalId:undoSource,contentHash:stableId(plannerTaskId,at),
           raw:{plannerTaskId,targetTaskId:merge.target_task_id,status:merge.target_status_before},acquiredAt:at});
         const candidateId=await recordCandidate(client,{entityId:merge.target_entity_id,
           attribute:'local_status',value:merge.target_status_before,sourceVersionId:version,

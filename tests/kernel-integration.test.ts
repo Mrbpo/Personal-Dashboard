@@ -45,7 +45,16 @@ test('typed Canvas planner and assignment resolve to one task in either arrival 
     assert.equal(versions.length,2);
     const dueEvidence=(await kernel.canonicalEvidence([], [tasks[0].id], []))
       .filter(row=>row.attribute==='due');
-    assert.deepEqual(new Set(dueEvidence.map(row=>row.source_item_id)),new Set([planner.id,assignment.id]));
+    const dueSources=new Set(dueEvidence.map(row=>row.source_item_id));
+    if(dueSources.size!==2){
+      const debug=(await kernelPool().query(
+        `SELECT c.entity_id,c.status,e.source_item_id,e.parsed_value,f.canonical_value,fe.fact_id
+         FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+         LEFT JOIN fact_evidence fe ON fe.candidate_id=c.id
+         LEFT JOIN facts f ON f.entity_id=c.entity_id AND f.attribute='due'
+         WHERE c.attribute='due' AND e.source_item_id=ANY($1::text[])`,[[planner.id,assignment.id]])).rows;
+      assert.deepEqual(dueSources,new Set([planner.id,assignment.id]),JSON.stringify(debug));
+    }
     await kernel.ingestCanvasSource({...assignment,id:`${courseId}:quiz:42`,sourceType:'quiz',
       sourceUrl:null},null,'quiz-hash');
     assert.equal((await kernel.taskRows(courseId)).length,2);
