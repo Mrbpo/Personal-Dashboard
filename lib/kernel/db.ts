@@ -33,7 +33,7 @@ export async function kernelTransaction<T>(work: (client: PoolClient) => Promise
 
 export async function migrateKernel(): Promise<void> {
   const directory=resolve(process.cwd(),'lib/kernel/migrations');
-  const files=readdirSync(directory).filter(name=>/^\d{3}_[a-z0-9_-]+\.sql$/.test(name)).sort();
+  const files=kernelMigrationFiles();
   await kernelTransaction(async client => {
     await client.query('SELECT pg_advisory_xact_lock(927441)');
     await client.query('CREATE TABLE IF NOT EXISTS kernel_migrations(version integer PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())');
@@ -45,4 +45,15 @@ export async function migrateKernel(): Promise<void> {
       await client.query('INSERT INTO kernel_migrations(version) VALUES ($1)',[version]);
     }
   });
+}
+
+function kernelMigrationFiles(): string[] {
+  return readdirSync(resolve(process.cwd(),'lib/kernel/migrations'))
+    .filter(name=>/^\d{3}_[a-z0-9_-]+\.sql$/.test(name)).sort();
+}
+
+export function expectedKernelMigrationVersion(): number {
+  const latest=kernelMigrationFiles().at(-1);
+  if(!latest)throw new Error('No kernel migrations found in the current image');
+  return Number(latest.slice(0,3));
 }

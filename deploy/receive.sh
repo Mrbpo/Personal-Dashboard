@@ -69,7 +69,7 @@ cutover_started=1
 "${compose[@]}" up -d web worker proxy
 healthy=0
 for n in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:3000/api/health/live >/dev/null && "${compose[@]}" exec -T worker node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts';import {kernelPool} from './lib/kernel/db.ts';const r=await database.prepare(\"SELECT heartbeat FROM worker_state WHERE id='primary'\").first();const s=await database.prepare('SELECT MAX(version) AS v FROM schema_releases').first();const k=await kernelPool().query('SELECT MAX(version) AS v FROM kernel_migrations');process.exit(r && r.heartbeat>$started && Date.now()-r.heartbeat<15000 && s.v===1 && k.rows[0].v===1?0:1);" && "${compose[@]}" exec -T worker node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then healthy=1; break; fi
+  if curl -fsS http://127.0.0.1:3000/api/health/live >/dev/null && "${compose[@]}" exec -T worker node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts';import {kernelPool,expectedKernelMigrationVersion} from './lib/kernel/db.ts';const r=await database.prepare(\"SELECT heartbeat FROM worker_state WHERE id='primary'\").first();const s=await database.prepare('SELECT MAX(version) AS v FROM schema_releases').first();const k=await kernelPool().query('SELECT MAX(version) AS v FROM kernel_migrations');process.exit(r && r.heartbeat>$started && Date.now()-r.heartbeat<15000 && s.v===1 && k.rows[0].v===expectedKernelMigrationVersion()?0:1);" && "${compose[@]}" exec -T worker node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then healthy=1; break; fi
   sleep 2
 done
 test "$healthy" = 1
