@@ -7,6 +7,7 @@ test -s /srv/study/kernel-postgres-password
 test -d /srv/study/data
 test -d /srv/study/assets
 source /srv/study/backup-s3.env
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 : "${S3_BUCKET:?S3_BUCKET required}"
 : "${S3_ENDPOINT:?S3_ENDPOINT required}"
 [[ "$S3_ENDPOINT" == https://* ]]
