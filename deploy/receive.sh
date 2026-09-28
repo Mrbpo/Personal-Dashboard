@@ -52,8 +52,11 @@ trap 'rollback' ERR
 "${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 if test -n "$previous"; then APP_VERSION="$previous" "${compose[@]}" stop worker web; fi
-bash /srv/study/backup.sh
-bash /srv/study/verify-backup.sh
+backup_key=$(bash /srv/study/backup.sh)
+backup_name=${backup_key##*/}
+[[ "$backup_name" =~ ^study-v1-[0-9]{8}T[0-9]{6}Z\.tar\.age$ ]]
+bash /srv/study/verify-backup.sh "$backup_name"
+bash /srv/study/verify-offsite-backup.sh "/srv/study/backups/$backup_name" "$backup_key"
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
 # All old executors are stopped. Clear only the executor lease so the new

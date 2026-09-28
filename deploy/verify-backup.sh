@@ -2,7 +2,8 @@
 set -euo pipefail
 umask 077
 test -s /srv/study/backup.identity
-latest=$(find /srv/study/backups -maxdepth 1 -name 'study-v1-*.tar.age' -type f -printf '%f\n' | sort | tail -1)
+if test "$#" -gt 1; then exit 64; fi
+latest=${1:-$(find /srv/study/backups -maxdepth 1 -name 'study-v1-*.tar.age' -type f -printf '%f\n' | sort | tail -1)}
 [[ "$latest" =~ ^study-v1-[0-9]{8}T[0-9]{6}Z\.tar\.age$ ]]
 temporary=$(mktemp -d /srv/study/restore-check.XXXXXX)
 restore_db="kernel_restore_$(date -u +%s)_$$"

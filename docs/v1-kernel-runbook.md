@@ -8,8 +8,8 @@ Canvas announcement and planner feeds are requested for a moving date window. Th
 
 ## Required host state
 
-- Install Docker Engine/Compose, `age`, AWS CLI, and enough disk for a complete PostgreSQL restore plus an encrypted copy of SQLite, blobs and assets.
-- Install the reviewed v1 `deploy/compose.yml`, `backup.sh`, `verify-backup.sh`, `daily-backup.sh` and `receive.sh` as root-owned files under `/srv/study`. Keep their permissions restricted from the app user.
+- Install Docker Engine/Compose, `age`, AWS CLI, and enough disk for a complete PostgreSQL restore, the local encrypted archive, and a temporary downloaded copy for offsite readback.
+- Install the reviewed v1 `deploy/compose.yml`, `backup.sh`, `verify-backup.sh`, `verify-offsite-backup.sh`, `daily-backup.sh` and `receive.sh` as root-owned files under `/srv/study`. Keep their permissions restricted from the app user.
 - Create `/srv/study/kernel-postgres-password` (0600) and set `KERNEL_DATABASE_URL=postgresql://study_kernel:<URL-encoded password>@postgres:5432/study_kernel` in `/srv/study/runtime.env` (0600). The password must match the file; neither belongs in Git or an image.
 - Set `S3_BUCKET`, `S3_ENDPOINT` (HTTPS) and optionally `S3_PREFIX` plus AWS credentials in `/srv/study/backup-s3.env` (0600). Give this account write/read only to the backup prefix. Configure retention at the object store separately.
 - Keep `/srv/study/backup.recipient` as the public age recipient. Keep `/srv/study/backup.identity` root-only for restore verification and an independent offline copy of that private key. The private key is not inside its own encrypted archive.
@@ -21,9 +21,9 @@ Canvas announcement and planner feeds are requested for a moving date window. Th
 
 1. Merge an approved PR into `main`, run CI with a real PostgreSQL service, and publish the normal release only when its tag points to the reviewed commit. A merge alone does not deploy.
 2. The release receiver loads the image, starts PostgreSQL and Docling, applies versioned kernel migrations, and records `services_deployed` only after a real PostgreSQL health check. The v0 web and worker are still running at this point.
-3. The receiver stops v0 writers, creates and uploads an encrypted backup of PostgreSQL, SQLite, original blobs, assets and recovery configuration, then verifies a local decryption and disposable-database restore before importing the final v0 core snapshot. Import records a completion marker so later releases do not replay old task status.
+3. The receiver stops v0 writers, creates and uploads an encrypted backup of PostgreSQL, SQLite, original blobs, assets and recovery configuration, then verifies a local decryption and disposable-database restore. It downloads that same encrypted archive and SHA sidecar from offsite storage and compares their SHA and bytes with the locally verified archive before importing the final v0 core snapshot. A failed readback takes the existing before-cutover rollback path; the downloaded archive is not unpacked a second time. Import records a completion marker so later releases do not replay old task status.
 4. The receiver starts v1 web and worker and checks the website, both databases, the worker heartbeat and Docling. Only successful checks record `production_switched`. A failure after v1 starts is reported as `blocked_after_cutover`; the script never silently starts a v0 writer against divergent data.
-5. Run `verify-backup.sh` against the encrypted local copy. It checks file hashes and SQLite integrity, verifies referenced original blobs, and restores the PostgreSQL dump into a disposable database. Separately verify off-server object retrieval and a full restore on an isolated host before declaring disaster recovery tested.
+5. `verify-backup.sh` checks file hashes and SQLite integrity, verifies referenced original blobs, and restores the PostgreSQL dump into a disposable database. The receiver's readback confirms offsite object retrieval and byte identity; separately perform a full restore on an isolated host before declaring disaster recovery tested.
 
 Before cutover, compare date-only deadlines in the API (`dueDate` and `duePrecision: date`) with the existing calendar in the configured timezone. The kernel does not invent a clock time for these deadlines. A wrong day or hour in the unchanged UI blocks production acceptance and needs a separately scoped rendering fix.
 

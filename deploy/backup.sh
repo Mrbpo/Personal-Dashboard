@@ -42,3 +42,4 @@ aws --endpoint-url "$S3_ENDPOINT" s3 cp --only-show-errors "$target.sha256" "s3:
 aws --endpoint-url "$S3_ENDPOINT" s3api head-object --bucket "$S3_BUCKET" --key "$key" >/dev/null
 printf '{"status":"uploaded","object":"%s","at":"%s"}\n' "$key" "$(date -u +%FT%TZ)" > /srv/study/status/backup.json
 find /srv/study/backups -maxdepth 1 -type f -name 'study-v1-*.tar.age*' -mtime +7 -delete
+printf '%s\n' "$key"
