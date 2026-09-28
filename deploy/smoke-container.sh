@@ -42,3 +42,5 @@ test -s "$dump_file"
 docker exec "$database_container" createdb -U study_kernel study_kernel_restore
 docker exec -i "$database_container" pg_restore -U study_kernel -d study_kernel_restore --no-owner --exit-on-error < "$dump_file"
 test "$(docker exec "$database_container" psql -U study_kernel -d study_kernel_restore -Atc "SELECT count(*) FROM courses WHERE id='backup-smoke'")" = 1
+
+bash deploy/smoke-sqlite-backup.sh "$image"
