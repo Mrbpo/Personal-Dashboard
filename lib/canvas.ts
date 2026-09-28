@@ -182,7 +182,12 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       source.file = { url: item.url ?? "", name: item.display_name ?? item.filename ?? "file", size: Number(item.size ?? 0), contentType: item["content-type"] ?? item.content_type ?? "application/octet-stream" };
       return source;
     }),
-    ...planner.map((item) => sourceFromObject(courseId, "planner", item.plannable ?? item)),
+    ...planner.map((item) => {
+      const source = sourceFromObject(courseId, "planner", item.plannable ?? item);
+      source.plannableType = item.plannable_type == null ? null : String(item.plannable_type);
+      source.plannableId = item.plannable_id == null ? null : String(item.plannable_id);
+      return source;
+    }),
   ];
   const syllabusBody = textFromHtml(courseDetail.syllabus_body);
   if (syllabusBody) sources.push(sourceFromObject(courseId, "syllabus", { id: courseId, title: "课程大纲 Syllabus", body: syllabusBody, html_url: baseUrl + "/courses/" + courseId + "/assignments/syllabus", updated_at: courseDetail.updated_at, folder_path: "课程大纲" }));

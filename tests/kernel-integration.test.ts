@@ -21,6 +21,146 @@ test('deadline precision never fabricates a time',()=>{
   assert.equal(parseDeadline('2026-09-25T23:59:00-05:00','America/Toronto').precision,null);
 });
 
+test('typed Canvas planner and assignment resolve to one task in either arrival order',async()=>{
+  await migrateKernel();
+  for(const plannerFirst of [true,false]){
+    const courseId=`canvas-pair:${randomUUID()}`;
+    await kernel.upsertCourse({id:courseId,name:'Canvas pair',course_code:'PAIR'});
+    const assignment={id:`${courseId}:assignment:42`,courseId,sourceType:'assignment',sourceId:'42',
+      title:'Problem set',body:'Submit answers',sourceUrl:`https://canvas.example/courses/${courseId}/assignments/42`,
+      updatedAt:'2026-09-21T12:00:00Z',dueAt:'2026-10-01',unlockAt:null,lockAt:null};
+    const planner={...assignment,id:`${courseId}:planner:900`,sourceType:'planner',sourceId:'900',
+      sourceUrl:null,plannableType:'assignment',plannableId:'42',body:'Planner summary'};
+    const ordered=plannerFirst?[planner,assignment]:[assignment,planner];
+    for(const item of ordered)await kernel.ingestCanvasSource(item,null,`${item.sourceType}-hash`);
+    for(const item of ordered)await kernel.ingestCanvasSource(item,null,`${item.sourceType}-hash`);
+    const tasks=await kernel.taskRows(courseId);
+    assert.equal(tasks.length,1);
+    assert.equal(tasks[0].source_type,'assignment');
+    assert.equal(tasks[0].source_item_id,assignment.id);
+    const versions=(await kernelPool().query<{source_item_id:string}>(
+      'SELECT source_item_id FROM source_item_versions WHERE source_item_id=ANY($1::text[])',
+      [[planner.id,assignment.id]])).rows;
+    assert.deepEqual(new Set(versions.map(row=>row.source_item_id)),new Set([planner.id,assignment.id]));
+    assert.equal(versions.length,2);
+    const dueEvidence=(await kernel.canonicalEvidence([], [tasks[0].id], []))
+      .filter(row=>row.attribute==='due');
+    assert.deepEqual(new Set(dueEvidence.map(row=>row.source_item_id)),new Set([planner.id,assignment.id]));
+    await kernel.ingestCanvasSource({...assignment,id:`${courseId}:quiz:42`,sourceType:'quiz',
+      sourceUrl:null},null,'quiz-hash');
+    assert.equal((await kernel.taskRows(courseId)).length,2);
+  }
+});
+
+test('extra AI actions from one planner item cannot map onto assignment action zero',async()=>{
+  await migrateKernel();
+  const courseId=`canvas-actions:${randomUUID()}`;
+  await kernel.upsertCourse({id:courseId,name:'Canvas actions',course_code:'ACT'});
+  const assignment={id:`${courseId}:assignment:42`,courseId,sourceType:'assignment',sourceId:'42',
+    title:'Lab',body:'Submit lab',sourceUrl:null,updatedAt:null,dueAt:null,unlockAt:null,lockAt:null};
+  await kernel.ingestCanvasSource(assignment,null,'assignment');
+  const planner={...assignment,id:`${courseId}:planner:900`,sourceType:'planner',sourceId:'900',
+    plannableType:'assignment',plannableId:'42'};
+  const action=(title:string)=>({title,action:`Do ${title}`,requirements:[],recommendedStartAt:null,
+    inferredDueAt:null,confidence:'inferred' as const,evidence:title,estimatedMinutes:null,possiblyCancelled:false});
+  await kernel.ingestCanvasSource(planner,{summary:'',actions:[action('Part A'),action('Part B')],notes:[]},'planner');
+  const task=(await kernel.taskRows(courseId))[0];
+  const rows=(await kernelPool().query<{entity_id:string;locator:string}>(
+    `SELECT c.entity_id,e.locator FROM candidate_facts c JOIN evidence e ON e.id=c.evidence_id
+     WHERE e.source_item_id=$1 AND c.attribute='task_payload' ORDER BY e.locator`,[planner.id])).rows;
+  assert.equal(rows.length,2);
+  assert.equal(rows[0].entity_id,task.entity_id);
+  assert.notEqual(rows[1].entity_id,task.entity_id);
+  assert.equal((await kernel.taskRows(courseId)).length,1);
+});
+
+test('reviewed Canvas reconciliation retains source history and local status, and can be undone',async()=>{
+  await migrateKernel();
+  const courseId=`canvas-merge:${randomUUID()}`;
+  await kernel.upsertCourse({id:courseId,name:'Canvas merge',course_code:'MERGE'});
+  const base={course_id:courseId,title:'Same title',action:'Complete task',requirements_json:'[]',
+    start_at:null,due_at:'2026-10-01',unlock_at:null,lock_at:null,canvas_status:'upcoming',
+    urgency:'upcoming',confidence:'certain',evidence:'legacy evidence',estimated_minutes:null,
+    points_possible:null,prerequisite_blocked:0,updated_at:'2026-09-20T12:00:00Z'};
+  const plannerId=`${courseId}:planner:42:0`,assignmentId=`${courseId}:assignment:42:0`;
+  await kernel.importLegacyTask({...base,id:plannerId,source_item_id:`${courseId}:planner:42`,
+    source_type:'planner',source_id:'42',source_url:null},'completed');
+  await kernel.importLegacyTask({...base,id:assignmentId,source_item_id:`${courseId}:assignment:42`,
+    source_type:'assignment',source_id:'42',
+    source_url:`https://canvas.example/courses/${courseId}/assignments/42`});
+  const assignment={id:`${courseId}:assignment:42`,courseId,sourceType:'assignment',sourceId:'42',
+    title:'Same title',body:'Current assignment',sourceUrl:`https://canvas.example/courses/${courseId}/assignments/42`,
+    updatedAt:'2026-09-21T12:00:00Z',dueAt:'2026-10-01',unlockAt:null,lockAt:null};
+  await kernel.ingestCanvasSource(assignment,null,'current-assignment');
+  await kernel.ingestCanvasSource({...assignment,id:`${courseId}:planner:42`,sourceType:'planner',
+    sourceUrl:null,plannableType:'assignment',plannableId:'42'},null,'current-planner');
+  const report=await kernel.canvasDuplicateReport();
+  assert.ok(report.verified.some(pair=>pair.plannerTaskId===plannerId&&pair.directTaskId===assignmentId));
+  const before=report.activeCount;
+  const plannerEntity=(await kernel.taskRows(courseId,true)).find(task=>task.id===plannerId)?.entity_id;
+  const merged=await kernel.mergeCanvasTasks(plannerId,assignmentId,'verified assignment:42','test-admin');
+  assert.equal(merged.activeCount,before-1);
+  const tasks=await kernel.taskRows(courseId,true);
+  assert.equal(tasks.length,1);
+  assert.equal(tasks[0].local_status,'completed');
+  assert.equal((await kernel.taskTarget(plannerId))?.source_type,'assignment');
+  assert.ok((await kernel.canonicalEvidence([], [assignmentId], []))
+    .some(row=>row.attribute==='due'&&row.source_item_id===`${courseId}:planner:42`));
+  assert.ok(Number((await kernelPool().query(
+    `SELECT count(*) FROM fact_versions WHERE fact_id=(SELECT id FROM facts WHERE entity_id=$1
+     AND attribute='due')`,[plannerEntity])).rows[0].count)>0);
+  await kernel.rebuildProjections();
+  assert.equal((await kernel.taskRows(courseId,true)).length,1);
+  const restored=await kernel.unmergeCanvasTasks(plannerId,'reviewed rollback','test-admin');
+  assert.equal(restored.activeCount,before);
+  assert.equal((await kernel.taskRows(courseId,true)).length,2);
+  assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===plannerId)?.local_status,'completed');
+  assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===assignmentId)?.local_status,'active');
+  const audit=(await kernelPool().query<{actor:string;rolled_back_by:string;rollback_reason:string;
+    before_value:{activeCount:number};after_value:{activeCount:number};
+    rollback_before_value:{activeCount:number};rollback_after_value:{activeCount:number}}>(
+    'SELECT * FROM task_entity_merges WHERE source_task_id=$1 ORDER BY applied_at DESC LIMIT 1',
+    [plannerId])).rows[0];
+  assert.equal(audit.actor,'test-admin');
+  assert.equal(audit.rolled_back_by,'test-admin');
+  assert.equal(audit.rollback_reason,'reviewed rollback');
+  assert.equal(audit.after_value.activeCount,audit.before_value.activeCount-1);
+  assert.equal(audit.rollback_after_value.activeCount,audit.rollback_before_value.activeCount+1);
+  assert.ok(!(await kernel.canonicalEvidence([], [assignmentId], []))
+    .some(row=>row.attribute==='due'&&row.source==='legacy_import'&&
+      row.source_item_id===`${courseId}:planner:42`));
+  await kernel.ingestCanvasSource({...assignment,id:`${courseId}:planner:42`,sourceType:'planner',
+    sourceUrl:null,plannableType:'assignment',plannableId:'42',body:'Planner resynced'},null,'after-rollback');
+  await kernel.ingestCanvasSource(assignment,null,'current-assignment');
+  assert.equal((await kernel.taskRows(courseId,true)).length,2);
+  assert.ok(!(await kernel.canvasDuplicateReport()).verified.some(pair=>pair.plannerTaskId===plannerId));
+});
+
+test('rollback removes a fact created only by reconciliation',async()=>{
+  await migrateKernel();
+  const courseId=`canvas-undo:${randomUUID()}`;
+  await kernel.upsertCourse({id:courseId,name:'Canvas undo',course_code:'UNDO'});
+  const base={course_id:courseId,title:'Quiz review',action:'Review quiz',requirements_json:'[]',
+    start_at:null,unlock_at:null,lock_at:null,canvas_status:'upcoming',urgency:'upcoming',
+    confidence:'certain',evidence:'legacy',estimated_minutes:null,points_possible:null,
+    prerequisite_blocked:0,updated_at:'2026-09-20T12:00:00Z'};
+  const plannerId=`${courseId}:planner:42:0`,directId=`${courseId}:assignment:42:0`;
+  await kernel.importLegacyTask({...base,id:plannerId,source_item_id:`${courseId}:planner:42`,
+    source_type:'planner',source_id:'42',source_url:null,due_at:'2026-10-01'});
+  await kernel.importLegacyTask({...base,id:directId,source_item_id:`${courseId}:assignment:42`,
+    source_type:'assignment',source_id:'42',source_url:null,due_at:null});
+  await kernel.ingestCanvasSource({id:`${courseId}:planner:42`,courseId,sourceType:'planner',
+    sourceId:'42',plannableType:'assignment',plannableId:'42',title:'Quiz review',body:'',
+    sourceUrl:null,updatedAt:null,dueAt:null,unlockAt:null,lockAt:null},null,'typed-reference');
+  await kernel.mergeCanvasTasks(plannerId,directId,'verified assignment reference','test-admin');
+  assert.equal((await kernel.taskRows(courseId,true)).find(task=>task.id===directId)?.due_date,'2026-10-01');
+  assert.equal((await kernelPool().query('SELECT due_at FROM tasks WHERE id=$1',[directId])).rows[0].due_at,null);
+  await kernel.unmergeCanvasTasks(plannerId,'undo derived due date','test-admin');
+  const tasks=await kernel.taskRows(courseId,true);
+  assert.equal(tasks.find(task=>task.id===directId)?.due_date,null);
+  assert.equal(tasks.find(task=>task.id===plannerId)?.due_date,'2026-10-01');
+});
+
 test('AI extraction remains reviewable and cannot replace a Canvas assignment',async()=>{
   await migrateKernel();
   const courseId=`ai-review:${randomUUID()}`;
