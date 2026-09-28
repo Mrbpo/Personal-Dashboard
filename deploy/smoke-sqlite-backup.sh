@@ -33,6 +33,10 @@ if ! test -s "$temporary/data/course-radar-v2.db-journal"; then
   exit 1
 fi
 test "$(od -An -tx1 -N8 "$temporary/data/course-radar-v2.db-journal" | tr -d '[:space:]')" = d9d505f920a163d7
+# The CI runner owns mktemp; container UID 0 has all capabilities dropped.
+# Make only this synthetic mounted copy writable to model root-owned extracts.
+chmod 0777 "$temporary/data"
+chmod 0666 "$temporary/data/course-radar-v2.db" "$temporary/data/course-radar-v2.db-journal"
 echo 'SQLite hot rollback journal fixture created'
 
 # The old read-only SQLite open cannot recover the hot journal even on :rw.
