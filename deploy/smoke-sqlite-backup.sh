@@ -9,30 +9,30 @@ trap 'status=$?; echo "SQLite backup smoke failed in $phase (exit $status)" >&2'
 mkdir -p "$temporary/data/library"
 printf 'backup fixture' > "$temporary/data/library/fixture-blob"
 
-# Kill an uncommitted writer to leave the same hot rollback journal shape seen
-# in the v1 archive. Only this disposable directory is mounted in the tests.
-fixture_status=0
-docker run --rm --network none --user 0 --read-only --cap-drop ALL \
-  -v "$temporary/data:/restore:rw" "$image" node --input-type=module -e '
-    import {DatabaseSync} from "node:sqlite";
-    const db=new DatabaseSync("/restore/course-radar-v2.db");
-    db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=1; CREATE TABLE library_documents(hash TEXT, deleted INTEGER, payload TEXT)");
-    db.prepare("INSERT INTO library_documents VALUES (?,?,?)").run("fixture-blob",0,"");
-    db.exec("BEGIN IMMEDIATE");
-    db.prepare("UPDATE library_documents SET deleted=1,payload=?").run("x".repeat(1000000));
-    process.kill(process.pid,"SIGKILL");
-  ' > "$temporary/fixture.log" 2>&1 || fixture_status=$?
-if test "$fixture_status" -ne 137; then
-  cat "$temporary/fixture.log" >&2
-  echo "Fixture writer exited $fixture_status instead of 137" >&2
-  exit 1
-fi
+# Exit a host SQLite writer without closing its uncommitted transaction. A
+# small cache forces journal sync, producing a genuinely hot rollback journal.
+python3 - "$temporary/data/course-radar-v2.db" <<'PY'
+import os
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA journal_mode=DELETE')
+db.execute('PRAGMA synchronous=FULL')
+db.execute('PRAGMA cache_size=1')
+db.execute('CREATE TABLE library_documents(hash TEXT, deleted INTEGER, payload TEXT)')
+db.execute('INSERT INTO library_documents VALUES (?,?,?)', ('fixture-blob', 0, ''))
+db.commit()
+db.execute('BEGIN IMMEDIATE')
+db.execute('UPDATE library_documents SET deleted=1,payload=?', ('x' * 1_000_000,))
+os._exit(0)
+PY
 phase=hot-journal
 if ! test -s "$temporary/data/course-radar-v2.db-journal"; then
-  cat "$temporary/fixture.log" >&2
   echo 'Fixture did not leave a rollback journal' >&2
   exit 1
 fi
+test "$(od -An -tx1 -N8 "$temporary/data/course-radar-v2.db-journal" | tr -d '[:space:]')" = d9d505f920a163d7
 echo 'SQLite hot rollback journal fixture created'
 
 # The old read-only SQLite open cannot recover the hot journal even on :rw.
