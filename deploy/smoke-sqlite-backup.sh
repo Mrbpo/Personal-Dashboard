@@ -11,7 +11,8 @@ printf 'backup fixture' > "$temporary/data/library/fixture-blob"
 
 # Kill an uncommitted writer to leave the same hot rollback journal shape seen
 # in the v1 archive. Only this disposable directory is mounted in the tests.
-if docker run --rm --network none --user 0 --read-only --cap-drop ALL \
+fixture_status=0
+docker run --rm --network none --user 0 --read-only --cap-drop ALL \
   -v "$temporary/data:/restore:rw" "$image" node --input-type=module -e '
     import {DatabaseSync} from "node:sqlite";
     const db=new DatabaseSync("/restore/course-radar-v2.db");
@@ -20,12 +21,15 @@ if docker run --rm --network none --user 0 --read-only --cap-drop ALL \
     db.exec("BEGIN IMMEDIATE");
     db.prepare("UPDATE library_documents SET deleted=1,payload=?").run("x".repeat(1000000));
     process.kill(process.pid,"SIGKILL");
-  ' >/dev/null 2>&1; then
-  echo 'Expected the fixture writer to terminate with an open transaction' >&2
+  ' > "$temporary/fixture.log" 2>&1 || fixture_status=$?
+if test "$fixture_status" -ne 137; then
+  cat "$temporary/fixture.log" >&2
+  echo "Fixture writer exited $fixture_status instead of 137" >&2
   exit 1
 fi
 phase=hot-journal
 if ! test -s "$temporary/data/course-radar-v2.db-journal"; then
+  cat "$temporary/fixture.log" >&2
   echo 'Fixture did not leave a rollback journal' >&2
   exit 1
 fi
