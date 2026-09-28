@@ -20,6 +20,7 @@ $deployFiles = @(
     "backup.sh",
     "daily-backup.sh",
     "verify-backup.sh",
+    "verify-offsite-backup.sh",
     "study-backup.service",
     "study-backup.timer"
 )
