@@ -51,6 +51,10 @@ export type CanvasSource = {
   /** Canvas planner's typed reference, kept separate from the planner item ID. */
   plannableType?: string | null;
   plannableId?: string | null;
+  /** Outer planner item metadata, distinct from the nested plannable object. */
+  plannerItemId?: string | null;
+  plannerContextCode?: string | null;
+  plannerCourseId?: string | null;
   title: string;
   body: string;
   sourceUrl: string | null;

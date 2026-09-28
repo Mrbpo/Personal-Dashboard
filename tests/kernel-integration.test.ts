@@ -7,6 +7,127 @@ import {join} from 'node:path';
 import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
 import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
+import { applyCanvasPlannerBackfill, planCanvasPlannerBackfill } from '../lib/kernel/canvas-planner-backfill.ts';
+
+function numericCourseId(){return BigInt(`0x${randomUUID().replaceAll('-','')}`).toString().slice(0,15);}
+async function oldPlannerPair(day:string){
+  const courseId=numericCourseId();
+  await kernel.upsertCourse({id:courseId,name:'Historical Canvas',course_code:`H${courseId}`});
+  const base={course_id:courseId,title:'Old assignment',action:'Submit',requirements_json:'[]',
+    start_at:null,due_at:day,unlock_at:null,lock_at:null,canvas_status:'upcoming',
+    urgency:'upcoming',confidence:'certain',evidence:'legacy',estimated_minutes:null,
+    points_possible:null,prerequisite_blocked:0,updated_at:'2026-05-01T00:00:00Z'};
+  await kernel.importLegacyTask({...base,id:`${courseId}:planner:42:0`,
+    source_item_id:`${courseId}:planner:42`,source_type:'planner',source_id:'42',source_url:null});
+  await kernel.importLegacyTask({...base,id:`${courseId}:assignment:42:0`,
+    source_item_id:`${courseId}:assignment:42`,source_type:'assignment',source_id:'42',source_url:null});
+  return {courseId,sourceItemId:`${courseId}:planner:42`};
+}
+function plannerResponse(courseId:string, day:string, typed=true){
+  return {id:900,course_id:Number(courseId),plannable_type:typed?'assignment':null,
+    plannable_id:typed?42:null,plannable:{id:42,title:'Old assignment',due_at:day}};
+}
+const oldPlanOptions=(day:string)=>({asOf:'2026-09-28',from:day,through:day});
+
+test('historical planner plan and apply preserve legacy source history and duplicate reruns',async()=>{
+  await migrateKernel();
+  const day='2026-05-26', {courseId,sourceItemId}=await oldPlannerPair(day);
+  process.env.CANVAS_BASE_URL='https://canvas.example.test';process.env.CANVAS_TOKEN='test-token';
+  const plan=await planCanvasPlannerBackfill(oldPlanOptions(day));
+  assert.equal(plan.candidateCount,1);
+  assert.equal(plan.windows.length,1);
+  assert.ok(plan.candidates.some(item=>item.sourceItemId===sourceItemId));
+  const prior=(await kernelPool().query<{id:string;raw_value:unknown}>(
+    'SELECT id,raw_value FROM source_item_versions WHERE source_item_id=$1',[sourceItemId])).rows;
+  const plannerEntity=(await kernelPool().query<{entity_id:string}>(
+    'SELECT entity_id FROM tasks WHERE id=$1',[`${sourceItemId}:0`])).rows[0].entity_id;
+  const priorFacts=(await kernelPool().query<{fact_id:string;version:number;value:unknown}>(
+    `SELECT fv.fact_id,fv.version,fv.value FROM fact_versions fv JOIN facts f ON f.id=fv.fact_id
+     WHERE f.entity_id=$1 ORDER BY fv.fact_id,fv.version`,[plannerEntity])).rows;
+  const original=globalThis.fetch;
+  globalThis.fetch=(async()=>Response.json([plannerResponse(courseId,day)])) as typeof fetch;
+  try{
+    await assert.rejects(applyCanvasPlannerBackfill({expectedCount:2,expectedPlan:plan.planHash,
+      actor:'test-admin',...oldPlanOptions(day)}),/plan changed/);
+    const first=await applyCanvasPlannerBackfill({expectedCount:1,expectedPlan:plan.planHash,
+      actor:'test-admin',...oldPlanOptions(day)});
+    assert.equal(first.completed.length,1);
+    assert.equal(first.review.length,0);
+    assert.ok(first.reconciliation.verified.some(item=>item.plannerTaskId===`${sourceItemId}:0`));
+    const versions=(await kernelPool().query<{id:string;raw_value:Record<string,unknown>}>(
+      'SELECT id,raw_value FROM source_item_versions WHERE source_item_id=$1',[sourceItemId])).rows;
+    assert.equal(versions.length,prior.length+1);
+    assert.deepEqual(versions.find(item=>item.id===prior[0].id)?.raw_value,prior[0].raw_value);
+    assert.deepEqual((await kernelPool().query<{fact_id:string;version:number;value:unknown}>(
+      `SELECT fv.fact_id,fv.version,fv.value FROM fact_versions fv JOIN facts f ON f.id=fv.fact_id
+       WHERE f.entity_id=$1 ORDER BY fv.fact_id,fv.version`,[plannerEntity])).rows,priorFacts);
+    assert.equal(versions.find(item=>item.id!==prior[0].id)?.raw_value.plannableType,'assignment');
+    assert.equal(versions.find(item=>item.id!==prior[0].id)?.raw_value.plannerCourseId,courseId);
+    await assert.rejects(kernel.ingestCanvasSource({id:sourceItemId,courseId,sourceType:'planner',
+      sourceId:'42',plannableType:'quiz',plannableId:'42',title:'Old assignment',body:'',
+      sourceUrl:null,updatedAt:null,dueAt:day,unlockAt:null,lockAt:null},null,'contradicting-hash','canvas',true),
+    /CANVAS_PLANNER_TYPED_REFERENCE_MISMATCH/);
+    const second=await applyCanvasPlannerBackfill({expectedCount:1,expectedPlan:plan.planHash,
+      actor:'test-admin',...oldPlanOptions(day)});
+    assert.equal(second.completed.length,1);
+    assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_item_versions WHERE source_item_id=$1',
+      [sourceItemId])).rows[0].count),versions.length);
+    assert.equal((await kernelPool().query('SELECT attempts FROM canvas_planner_backfill_windows WHERE plan_hash=$1',
+      [plan.planHash])).rows[0].attempts,1);
+  }finally{globalThis.fetch=original;}
+});
+
+test('historical planner review skips missing or ambiguous references and can retry',async()=>{
+  await migrateKernel();
+  const day='2026-05-27',{courseId,sourceItemId}=await oldPlannerPair(day);
+  process.env.CANVAS_BASE_URL='https://canvas.example.test';process.env.CANVAS_TOKEN='test-token';
+  const plan=await planCanvasPlannerBackfill(oldPlanOptions(day));
+  assert.equal(plan.candidateCount,1);
+  const original=globalThis.fetch;
+  let payload=[plannerResponse(courseId,day,false)];
+  globalThis.fetch=(async()=>Response.json(payload)) as typeof fetch;
+  try{
+    const apply=()=>applyCanvasPlannerBackfill({expectedCount:1,expectedPlan:plan.planHash,
+      actor:'test-admin',...oldPlanOptions(day)});
+    assert.equal((await apply()).review[0].result.skipped[0].reason,'missing reliable typed reference');
+    payload=[plannerResponse(courseId,day),plannerResponse(courseId,day)];
+    assert.equal((await apply()).review[0].result.skipped[0].reason,'ambiguous planner item');
+    assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_item_versions WHERE source_item_id=$1',
+      [sourceItemId])).rows[0].count),1);
+    payload=[plannerResponse(courseId,day)];
+    assert.equal((await apply()).completed.length,1);
+    assert.equal((await kernelPool().query('SELECT state,attempts FROM canvas_planner_backfill_windows WHERE plan_hash=$1',
+      [plan.planHash])).rows[0].attempts,3);
+  }finally{globalThis.fetch=original;}
+});
+
+test('partial historical page failure records an error without ingesting and resumes',async()=>{
+  await migrateKernel();
+  const day='2026-05-28',{courseId,sourceItemId}=await oldPlannerPair(day);
+  process.env.CANVAS_BASE_URL='https://canvas.example.test';process.env.CANVAS_TOKEN='test-token';
+  const plan=await planCanvasPlannerBackfill(oldPlanOptions(day));
+  assert.equal(plan.candidateCount,1);
+  const original=globalThis.fetch;
+  let fail=true;
+  globalThis.fetch=(async input=>String(input).includes('page=2')
+    ?fail?new Response('',{status:403}):Response.json([plannerResponse(courseId,day)])
+    :new Response('[]',{headers:{Link:'<https://canvas.example.test/api/v1/planner/items?page=2>; rel="next"'}})) as typeof fetch;
+  try{
+    const apply=()=>applyCanvasPlannerBackfill({expectedCount:1,expectedPlan:plan.planHash,
+      actor:'test-admin',...oldPlanOptions(day)});
+    await assert.rejects(apply(),/CANVAS_REQUEST_FAILED_403/);
+    assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_item_versions WHERE source_item_id=$1',
+      [sourceItemId])).rows[0].count),1);
+    assert.equal((await kernelPool().query('SELECT state FROM canvas_planner_backfill_windows WHERE plan_hash=$1',
+      [plan.planHash])).rows[0].state,'error');
+    assert.equal((await kernelPool().query('SELECT count(*) FROM source_status WHERE source=$1 AND scope=$2',
+      ['canvas',courseId])).rows[0].count,'0');
+    fail=false;
+    assert.equal((await apply()).completed.length,1);
+    assert.equal((await kernelPool().query('SELECT state,attempts FROM canvas_planner_backfill_windows WHERE plan_hash=$1',
+      [plan.planHash])).rows[0].attempts,2);
+  }finally{globalThis.fetch=original;}
+});
 
 test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});

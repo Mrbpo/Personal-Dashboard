@@ -3,31 +3,12 @@ import { classifyCanvasStatus, priorityScore, statusLabels, urgencyForStatus, ur
 import { database, searchIndexAvailable } from "./database.ts";
 import { activitySearchAliases, ftsMatchTerms } from "./search-vocabulary.ts";
 import { kernel } from './kernel/service.ts';
+export { hashSource } from './canvas-source-hash.ts';
 
 type D1Row = Record<string, any>;
 const EXTRACTION_VERSION = 5;
 
 export function getDatabase() { return database; }
-
-export async function hashSource(source: CanvasSource): Promise<string> {
-  const payload = JSON.stringify({
-    title: source.title,
-    body: source.body,
-    sourceUrl: source.sourceUrl,
-    plannableType: source.plannableType ?? null,
-    plannableId: source.plannableId ?? null,
-    dueAt: source.dueAt,
-    unlockAt: source.unlockAt,
-    lockAt: source.lockAt,
-    submissionState: source.submissionState,
-    pointsPossible: source.pointsPossible,
-    prerequisiteBlocked: source.prerequisiteBlocked,
-    file: source.file ? { name: source.file.name, size: source.file.size } : null,
-    folderPath: source.folderPath ?? null,
-  });
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 
 export async function getStoredSource(id: string) {
   return getDatabase().prepare("SELECT content_hash, analysis_json, analysis_status, extraction_version, is_active FROM source_items WHERE id=?").bind(id).first<{ content_hash: string; analysis_json: string | null; analysis_status: string; extraction_version: number; is_active: number }>();

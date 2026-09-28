@@ -10,7 +10,7 @@ function config() {
   return { baseUrl, token };
 }
 
-async function canvasRequest<T>(pathOrUrl: string): Promise<{ data: T; headers: Headers }> {
+async function canvasRequest<T>(pathOrUrl: string): Promise<{ data: T; headers: Headers; status: number }> {
   const { baseUrl, token } = config();
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : baseUrl + pathOrUrl;
   if (!url.startsWith(baseUrl + "/")) throw new Error("UNTRUSTED_CANVAS_URL");
@@ -28,7 +28,7 @@ async function canvasRequest<T>(pathOrUrl: string): Promise<{ data: T; headers: 
       if (response.status === 401) throw new Error("CANVAS_AUTH_FAILED");
       throw new Error("CANVAS_REQUEST_FAILED_" + response.status);
     }
-    return { data: await response.json() as T, headers: response.headers };
+    return { data: await response.json() as T, headers: response.headers, status: response.status };
   }
   throw new Error("CANVAS_RATE_LIMITED");
 }
@@ -127,6 +127,54 @@ function sourceFromObject(courseId: string, type: string, item: JsonObject): Can
   };
 }
 
+export function plannerSourceFromItem(courseId: string, item: JsonObject): CanvasSource {
+  const source = sourceFromObject(courseId, "planner", item.plannable ?? item);
+  source.plannableType = item.plannable_type == null ? null : String(item.plannable_type);
+  source.plannableId = item.plannable_id == null ? null : String(item.plannable_id);
+  source.plannerItemId = item.id == null ? null : String(item.id);
+  source.plannerContextCode = item.context_code == null ? null : String(item.context_code);
+  source.plannerCourseId = item.course_id == null ? null : String(item.course_id);
+  source.sourceUrl ??= item.html_url ?? null;
+  source.updatedAt ??= item.updated_at ?? null;
+  source.dueAt ??= item.plannable_date ?? null;
+  return source;
+}
+
+/** A historical window must be complete before callers ingest any of its items. */
+export async function getHistoricalPlannerSources(courseId: string, start: string, end: string,
+  targetSourceIds?: ReadonlySet<string>): Promise<CanvasSource[]> {
+  if (!/^[1-9]\d*$/.test(courseId) || !/^\d{4}-\d{2}-\d{2}$/.test(start) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end ||
+    (Date.parse(end) - Date.parse(start)) / 86400000 > 14)
+    throw new Error('INVALID_PLANNER_WINDOW');
+  let next: string | null = `/api/v1/planner/items?context_codes[]=${encodeURIComponent(`course_${courseId}`)}` +
+    `&start_date=${start}&end_date=${end}&per_page=100`;
+  const visited = new Set<string>();
+  const items: JsonObject[] = [];
+  while (next) {
+    if (visited.has(next) || visited.size >= 20) throw new Error('CANVAS_PLANNER_PAGE_LIMIT');
+    visited.add(next);
+    const page = await canvasRequest<JsonObject[]>(next);
+    if (page.status !== 200 || !Array.isArray(page.data)) throw new Error('CANVAS_PARTIAL_PLANNER_WINDOW');
+    items.push(...page.data);
+    if (items.length > 2000) throw new Error('CANVAS_PLANNER_ITEM_LIMIT');
+    next = nextLink(page.headers.get('link'));
+  }
+  return items.map(item => {
+    const source = plannerSourceFromItem(courseId, item);
+    if (targetSourceIds && !targetSourceIds.has(source.id)) return null;
+    // Canvas's scoped query is insufficient if an item carries contradictory course metadata.
+    const context = item.context_code == null ? null : String(item.context_code);
+    const nestedCourse = item.plannable?.course_id ?? item.course_id;
+    const course = nestedCourse == null ? null : String(nestedCourse);
+    if ((context && context !== `course_${courseId}`) || (course && course !== courseId))
+      throw new Error('CANVAS_PLANNER_COURSE_MISMATCH');
+    if (!context && !course) throw new Error('CANVAS_PLANNER_COURSE_UNVERIFIED');
+    if (!/^[1-9]\d*$/.test(source.sourceId)) throw new Error('CANVAS_PLANNER_ID_UNVERIFIED');
+    return source;
+  }).filter((source): source is CanvasSource => source !== null);
+}
+
 function canvasFolderPath(folder: JsonObject | undefined) {
   const full = String(folder?.full_name || folder?.name || "").replaceAll("\\", "/");
   const parts = full.split("/").map((part) => part.trim()).filter(Boolean);
@@ -182,12 +230,7 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       source.file = { url: item.url ?? "", name: item.display_name ?? item.filename ?? "file", size: Number(item.size ?? 0), contentType: item["content-type"] ?? item.content_type ?? "application/octet-stream" };
       return source;
     }),
-    ...planner.map((item) => {
-      const source = sourceFromObject(courseId, "planner", item.plannable ?? item);
-      source.plannableType = item.plannable_type == null ? null : String(item.plannable_type);
-      source.plannableId = item.plannable_id == null ? null : String(item.plannable_id);
-      return source;
-    }),
+    ...planner.map((item) => plannerSourceFromItem(courseId, item)),
   ];
   const syllabusBody = textFromHtml(courseDetail.syllabus_body);
   if (syllabusBody) sources.push(sourceFromObject(courseId, "syllabus", { id: courseId, title: "课程大纲 Syllabus", body: syllabusBody, html_url: baseUrl + "/courses/" + courseId + "/assignments/syllabus", updated_at: courseDetail.updated_at, folder_path: "课程大纲" }));
