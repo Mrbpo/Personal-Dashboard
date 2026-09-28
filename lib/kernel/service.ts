@@ -147,12 +147,13 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
     `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority)
      VALUES ($1,$2,$3,$4,$5,'pending',$6) ON CONFLICT(id) DO NOTHING`,
     [candidateId,input.entityId,input.attribute,JSON.stringify(input.value),evidenceId,input.authority]);
-  const existing = (await client.query<{id:string;canonical_value:unknown;chosen_candidate_id:string}>(
-    'SELECT id,canonical_value,chosen_candidate_id FROM facts WHERE entity_id=$1 AND attribute=$2 FOR UPDATE',
-    [input.entityId,input.attribute])).rows[0];
+  const existing = (await client.query<{id:string;canonical_value:unknown;chosen_candidate_id:string;same_value:boolean}>(
+    `SELECT id,canonical_value,chosen_candidate_id,canonical_value=$3::jsonb AS same_value
+     FROM facts WHERE entity_id=$1 AND attribute=$2 FOR UPDATE`,
+    [input.entityId,input.attribute,JSON.stringify(input.value)])).rows[0];
   const status = (await client.query<{status:string}>('SELECT status FROM candidate_facts WHERE id=$1',[candidateId])).rows[0].status;
   if (status !== 'pending') return candidateId;
-  if (existing && JSON.stringify(existing.canonical_value) === JSON.stringify(input.value)) {
+  if (existing?.same_value) {
     if(input.authority==='canvas' && ['task_payload','due'].includes(input.attribute)){
       const types=(await client.query<{chosen_type:string;incoming_type:string}>(
         `SELECT split_part(chosen.external_id,':',1) chosen_type,
