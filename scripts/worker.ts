@@ -15,6 +15,7 @@ import {recoverSketchArchiveClaims} from '../lib/sketchbooks.ts';
 import {enqueueCodexMaintenance} from '../lib/codex-maintenance.ts';
 import {claimIngestionJob,finishIngestionJob,renewIngestionJob} from '../lib/kernel/jobs.ts';
 import {convertDocumentWithDocling} from '../lib/kernel/docling.ts';
+import {recordDoclingParseFailure} from '../lib/pdf-formula-reparse.ts';
 import {claimOutboxJob,finishOutboxJob} from '../lib/kernel/jobs.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {setCanvasPlannerComplete} from '../lib/canvas.ts';
@@ -33,11 +34,16 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  }
  const kernelJob=await claimIngestionJob();
  if(kernelJob){
-  const renewKernel=setInterval(()=>{void renewIngestionJob(kernelJob.id,kernelJob.lease_token,'parsing');},30000);
+  const renewKernel=setInterval(()=>{void Promise.all([
+   renewIngestionJob(kernelJob.id,kernelJob.lease_token,'parsing'),
+   db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now()).run(),
+  ]).catch(error=>console.error('Worker renewal failed',error instanceof Error?error.message:'unknown'));},30000);
   try{
-   const payload=kernelJob.payload as {owner:string;id?:string;course?:string};
+   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string};
    switch(kernelJob.kind){
-    case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id));break;
+    case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id),{
+     id:kernelJob.id,leaseToken:kernelJob.lease_token,taskId:payload.doclingTaskId,
+     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend});break;
     case 'canvas': await archiveCanvas(payload.owner);break;
     case 'canvas-course': await archiveCanvasCourse(payload.owner,String(payload.course));break;
     case 'gmail':{
@@ -62,7 +68,7 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
    await finishIngestionJob(kernelJob.id,kernelJob.lease_token,message);
    if(kernelJob.kind==='docling_document'&&kernelJob.attempts>=5){
     const payload=kernelJob.payload as {id:string};
-    await db.prepare("UPDATE library_documents SET status='error',error=? WHERE id=?").bind('文档解析失败，请检查 Docling 服务',payload.id).run();
+    await recordDoclingParseFailure(payload.id);
    }
    if(kernelJob.kind==='gmail'&&kernelJob.attempts>=5)
     await db.prepare("UPDATE mail_sync SET import_status='error' WHERE import_status='running'").run();

@@ -69,6 +69,13 @@ export async function renewIngestionJob(id: string, token: string, stage: string
   return result.rowCount === 1;
 }
 
+export async function rememberDoclingTask(id:string,token:string,taskId:string|null):Promise<void>{
+  const saved=await kernelPool().query(`UPDATE ingestion_jobs SET payload=CASE WHEN $3::text IS NULL
+    THEN payload-'doclingTaskId' ELSE jsonb_set(payload,'{doclingTaskId}',to_jsonb($3::text)) END,
+    stage='remote_parse',updated_at=now() WHERE id=$1 AND lease_token=$2 AND state='running'`,[id,token,taskId]);
+  if(saved.rowCount!==1)throw new Error('PDF ingestion lease lost');
+}
+
 export async function finishIngestionJob(id: string, token: string, error?: string): Promise<void> {
   await kernelTransaction(async client=>{
     const result=await client.query<{source:string;scope:string;kind:string}>(

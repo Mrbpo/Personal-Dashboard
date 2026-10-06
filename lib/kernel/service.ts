@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
+import { documentSearchText, splitDocumentText, searchDocumentText } from './document-search.ts';
 
 type Json = Record<string, unknown>;
 type CandidateInput = {
@@ -735,22 +736,99 @@ export class KernelService {
     });
   }
 
-  async ingestParsedDocument(document: {id:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string}, pages: Array<{locator:string;text:string}>) {
+  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string},
+    inputPages: Array<{locator:string;text:string;pageNumber?:number}>,
+    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string}={}) {
+    const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
+    const expected=options.expectedPages??pages.length;
+    if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
+      pages.some((page,index)=>page.pageNumber!==index+1||typeof page.text!=='string'||!page.locator)||
+      !pages.some(page=>page.text.trim()))throw new Error('Document transcription is incomplete');
+    const parser=options.parserVersion||'docling-v1',owner=document.ownerId||'local-owner';
+    const textHash=stableId(JSON.stringify(pages));
+    const parsedVersion=stableId(document.id,parser,textHash);
     const sourceItemId=`document:${document.id}`,acquiredAt=new Date().toISOString();
     await kernelTransaction(async client=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`document:${document.id}`]);
       const version=await sourceVersion(client,{id:sourceItemId,source:`document:${document.origin}`,scope:document.courseId||'unscoped',
-        externalId:document.originKey||document.id,courseId:document.courseId||null,
-        contentHash:stableId(document.hash,'docling-v1'),raw:{id:document.id,name:document.name,mime:document.mime,
-          pages:pages.map(page=>({locator:page.locator,length:page.text.length}))},
+        externalId:document.id,courseId:document.courseId||null,
+        contentHash:stableId(document.hash,parser,textHash),raw:{id:document.id,name:document.name,mime:document.mime,
+          originKey:document.originKey,parser,extractionMethod:options.extractionMethod||parser,warnings:options.warnings||[],
+          pages:pages.map(page=>({locator:page.locator,pageNumber:page.pageNumber,length:page.text.length}))},
         rawUri:`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
+      await client.query(`INSERT INTO document_texts(id,owner_id,course_id,source_item_id,origin,origin_key,name,source_hash,created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name`,
+        [document.id,owner,document.courseId||null,sourceItemId,document.origin,document.originKey,document.name,document.hash,document.createdAt||acquiredAt]);
+      const existing=(await client.query<{owner_id:string;source_hash:string}>(
+        'SELECT owner_id,source_hash FROM document_texts WHERE id=$1',[document.id])).rows[0];
+      if(existing.owner_id!==owner||existing.source_hash!==document.hash)throw new Error('Document identity mismatch');
+      await client.query(`INSERT INTO document_text_versions(id,document_id,source_version_id,parser_version,text_hash,page_count,warnings)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
+        [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(options.warnings||[])]);
+      let position=0;
       for(const [index,page] of pages.entries()){
         const evidenceId=stableId(version,`page:${index}`);
         await client.query(
           `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,original_excerpt,
             parsed_value,confidence,locator) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`,
           [evidenceId,version,`document:${document.origin}`,sourceItemId,acquiredAt,page.text.slice(0,4000),
-            JSON.stringify({textLength:page.text.length,parser:'docling-v1'}),0.9,page.locator]);
+            JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.extractionMethod||parser,documentVersion:parsedVersion,pageNumber:page.pageNumber}),0.9,page.locator]);
+        await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text)
+          VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(version_id,page_number) DO NOTHING`,
+          [parsedVersion,page.pageNumber,evidenceId,page.locator,page.text,documentSearchText(page.text)]);
+        for(const body of splitDocumentText(page.text)){
+          await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
+            VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,
+            [stableId(parsedVersion,String(position)),parsedVersion,page.pageNumber,position,body,documentSearchText(body)]);
+          position++;
+        }
       }
+      await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
+    });
+  }
+
+  searchDocumentText(owner:string,query:string,options:{courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean}={}) {
+    return searchDocumentText(kernelPool(),owner,query,options);
+  }
+
+  async documentTextHeads(owner:string){
+    return (await kernelPool().query<{id:string;source_hash:string}>(
+      'SELECT id,source_hash FROM document_texts WHERE owner_id=$1 AND hidden=false AND current_version_id IS NOT NULL',[owner])).rows;
+  }
+
+  async parsedDocument(owner:string,id:string) {
+    const rows=(await kernelPool().query<{page_number:number;locator:string;body:string;parser_version:string;warnings:string[];extraction_method:string}>(`
+      SELECT p.page_number,p.locator,p.body,v.parser_version,v.warnings,s.raw_value->>'extractionMethod' extraction_method FROM document_texts d
+      JOIN document_text_versions v ON v.id=d.current_version_id
+      JOIN source_item_versions s ON s.id=v.source_version_id
+      JOIN document_text_pages p ON p.version_id=v.id
+      WHERE d.owner_id=$1 AND d.id=$2 AND d.hidden=false ORDER BY p.page_number`,[owner,id])).rows;
+    return rows;
+  }
+
+  async hideParsedDocument(owner:string,id:string) {
+    await kernelPool().query('UPDATE document_texts SET hidden=true WHERE owner_id=$1 AND id=$2',[owner,id]);
+  }
+
+  async rebuildDocumentSearch(owner:string,id:string) {
+    return kernelTransaction(async client=>{
+      const version=(await client.query<{current_version_id:string}>(
+        'SELECT current_version_id FROM document_texts WHERE owner_id=$1 AND id=$2 FOR UPDATE',[owner,id])).rows[0]?.current_version_id;
+      if(!version)throw new Error('Document transcription not found');
+      const pages=(await client.query<{page_number:number;body:string}>(
+        'SELECT page_number,body FROM document_text_pages WHERE version_id=$1 ORDER BY page_number',[version])).rows;
+      await client.query('DELETE FROM document_text_chunks WHERE version_id=$1',[version]);
+      let position=0;
+      for(const page of pages){
+       await client.query('UPDATE document_text_pages SET search_text=$3 WHERE version_id=$1 AND page_number=$2',
+        [version,page.page_number,documentSearchText(page.body)]);
+       for(const body of splitDocumentText(page.body)){
+        await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
+          VALUES ($1,$2,$3,$4,$5,$6)`,[stableId(version,String(position)),version,page.page_number,position,body,documentSearchText(body)]);
+        position++;
+       }
+      }
+      return {documentId:id,chunks:position};
     });
   }
 
