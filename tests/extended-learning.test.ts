@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test,{before} from 'node:test';
 import assert from 'node:assert/strict';
 import {PDFDocument} from 'pdf-lib';
 process.env.DATABASE_URL=':memory:';process.env.LOCAL_OCR='false';
@@ -6,6 +6,13 @@ const {database:db}=await import('../lib/database.ts');
 const {saveDocument,indexDocument,searchLibrary,previewDocument,canonicalDocumentMime,recordSourceFailure,listSourceFailures,clearSourceFailure}=await import('../lib/library.ts');
 const {rollingMemory,relevantMemory}=await import('../lib/tutor-memory.ts');
 const {tutorWeb,validatedPublicQuery}=await import('../lib/tutor-web.ts');
+
+before(async()=>{
+ if(process.env.KERNEL_DATABASE_URL){
+  const {kernel}=await import('../lib/kernel/service.ts');
+  await kernel.upsertCourse({id:'chem',name:'Chemistry test fixture',course_code:'CHEM-TEST'});
+ }
+});
 test('PDF page checkpoints resume after failure without reparsing completed pages',async()=>{
  const doc=await PDFDocument.create();doc.addPage();doc.addPage();const id=await saveDocument('alice','chem','upload','long.pdf','long.pdf','application/pdf',await doc.save());
  const original=globalThis.fetch;let calls=0;
