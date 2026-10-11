@@ -62,6 +62,23 @@ const {kernel}=await import('../lib/kernel/service.ts');
 const {kernelPool,migrateKernel}=await import('../lib/kernel/db.ts');
 const library=await import('../lib/library.ts');
 const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
+const {queueIngestionJob,claimIngestionJob,renewIngestionJob,finishIngestionJob}=await import('../lib/kernel/jobs.ts');
+async function convertDurably(document,owner){
+ const payload={owner,id:document.id,sourceHash:document.hash,formulaEnriched:false,formulaBackend:'ai',scanBackend:'docling'};
+ const key=`heldout:${owner}:${document.id}:text:derived-v1:batch${process.env.DOCLING_BATCH_PAGES||1}`;
+ const jobId=await queueIngestionJob('docling_document','public_pdf_heldout',document.course_id,payload,key,true);
+ const job=await claimIngestionJob(jobId);
+ if(!job||job.id!==jobId)throw new Error('Heldout parse job unavailable; preserve existing progress');
+ let leaseLost=false;
+ const renew=setInterval(()=>{void renewIngestionJob(job.id,job.lease_token).then(ok=>{if(!ok)leaseLost=true;}).catch(()=>{leaseLost=true;});},30000);
+ try{
+  await convertDocumentWithDocling(owner,document.id,{id:job.id,leaseToken:job.lease_token,sourceHash:document.hash,
+   formulaEnriched:false,formulaBackend:'ai',scanBackend:'docling'});
+  if(leaseLost)throw new Error('Heldout parse lease renewal failed');
+  await finishIngestionJob(job.id,job.lease_token);
+ }catch(error){await finishIngestionJob(job.id,job.lease_token,error.message);throw error;}
+ finally{clearInterval(renew);}
+}
 if(process.argv.includes('--native-preflight')){
  const {nativePdfTextIsComplete}=await import('../lib/kernel/docling.ts');
  const {localPdfTextPages}=await import('../lib/local-ocr.ts');
@@ -78,13 +95,23 @@ if(process.argv.includes('--native-preflight')){
 }
 const owner='public-pdf-heldout-20261011';
 const identities=new Map(),corpus=[];
+const ingestOnly=process.argv.find(value=>value.startsWith('--only='))?.slice(7);
+if(ingestOnly&&(!process.argv.includes('--ingest')||!materials.some(item=>`${item.group}/${basename(item.path)}`===ingestOnly)))
+ throw new Error('--only requires --ingest and an exact group/original filename');
+let nativeEligibility;
+if(process.argv.includes('--native-only')){
+ if(!process.argv.includes('--ingest'))throw new Error('--native-only requires --ingest');
+ const preflight=JSON.parse(await readFile(join(root,'reports','native-preflight.json'),'utf8'));
+ if(preflight.expectationSha256!==expectationSha256)throw new Error('Native preflight does not match frozen corpus');
+ nativeEligibility=new Map(preflight.records.map(row=>[`${row.group}/${row.path}`,row.nativeCompleteWithoutBlankAllowance]));
+}
 try{
  await migrateKernel();
  const documents=await library.listDocuments(owner);
  for(const item of materials){
   const course=`heldout-${item.group}`,key=JSON.stringify([course,item.source_url]);
   let document=documents.find(row=>row.origin_key===key&&row.hash===item.sha256);
-  let error=null;
+  let error=null,deferredReason=null;
   if(process.argv.includes('--ingest')){
    await kernel.upsertCourse({id:course,name:`Independent public ${item.group}`,course_code:`HOLDOUT-${item.group.toUpperCase()}`});
    if(!document){
@@ -92,7 +119,11 @@ try{
     document=await library.getDocument(owner,id);
    }
    try{
-    if(!(await kernel.parsedDocument(owner,document.id)).length)await convertDocumentWithDocling(owner,document.id);
+    if(!(await kernel.parsedDocument(owner,document.id)).length){
+     if(ingestOnly&&`${item.group}/${basename(item.path)}`!==ingestOnly)deferredReason='Outside selected ingestion file; retained in complete-corpus gate';
+     else if(nativeEligibility&&nativeEligibility.get(`${item.group}/${item.path}`)!==true)deferredReason='Complex parser deferred; resource failure under investigation';
+     else await convertDurably(document,owner);
+    }
    }catch(failure){error=failure.message;}
   }
   const pages=document?await kernel.parsedDocument(owner,document.id):[];
@@ -101,7 +132,7 @@ try{
   const record={group:item.group,path:item.path,sourceUrl:item.source_url,sha256:item.sha256,expectedPages:item.page_count,
    parsedPages:pages.length,status,characters:pages.reduce((sum,page)=>sum+page.body.length,0),
    extractionMethod:pages[0]?.extraction_method||null,parserVersion:pages[0]?.parser_version||null,
-   complete:status==='ready'&&pages.length===item.page_count&&pages.every((page,index)=>page.page_number===index+1),error};
+   complete:status==='ready'&&pages.length===item.page_count&&pages.every((page,index)=>page.page_number===index+1),error,deferredReason};
   corpus.push(record);
   if(process.argv.includes('--ingest'))console.log(JSON.stringify({action:'heldout-ingest',group:item.group,file:basename(item.path),
    parsedPages:record.parsedPages,complete:record.complete,method:record.extractionMethod,error}));
@@ -149,7 +180,7 @@ try{
   }
   const coverageComplete=corpus.every(row=>row.complete);
   const passed=coverageComplete&&summaries.every(row=>row.count===50&&row.top5Page>=.95&&row.errors===0&&row.fallbacks===0&&row.componentDegraded===0&&row.provenanceErrors===0);
-  const report={startedAt,completedAt:new Date().toISOString(),expectationSha256,algorithmBaseline:'f01644c',
+  const report={startedAt,completedAt:new Date().toISOString(),expectationSha256,algorithmBaseline:'f01644c',parserTransport:'docling-derived-v1',
    mode:aiRerank?'ai-rerank':'keyword',scope:'All three complete heldout corpora as distractors; no course/document filter',
    limitations:['PDF locator recall is not AI answer correctness, Truth Layer accuracy or formula transcription fidelity.',
     'English native-PDF learning corpora; public FAQ HTML is provenance only, not part of this PDF query score.'],
