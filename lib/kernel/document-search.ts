@@ -43,7 +43,37 @@ export function splitDocumentText(text:string):string[] {
 export type DocumentTextHit={id:string;document_id:string;course_id:string;name:string;origin:string;
   origin_key:string;source_hash:string;body:string;locator:string;page_number:number;
   evidence_id:string;source_version_id:string;parser_version:string;score:number;
+  // IDF-weighted stored search-text coverage, not factual confidence. Existing
+  // transcription warnings and repeated headers can also contain matching terms.
+  lexical_support?:number;
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+
+// Use majority available query information as the support target, admitting the
+// half-weight boundary. This is lexical coverage, not calibrated relevance.
+// BM25 rank alone does not establish support; absent query terms carry no weight.
+export const DOCUMENT_LEXICAL_SUPPORT_THRESHOLD=.5;
+const evidenceIdentity=(hit:DocumentTextHit)=>JSON.stringify([
+  hit.document_id,hit.page_number,hit.source_version_id,hit.evidence_id]);
+
+/** Protect one supported lexical source without overriding the AI's first four.
+ * Only pages already validated by the AI reranker can move. Fuse the complete
+ * permutation before slicing so different result limits share the same prefix.
+ */
+export function fuseLexicallySupportedAIRanks(lexical:DocumentTextHit[],ranked:DocumentTextHit[],limit=ranked.length):DocumentTextHit[]{
+  const positions=new Map(ranked.map((hit,index)=>[evidenceIdentity(hit),index]));
+  const protectedHit=lexical.find(hit=>Number.isFinite(hit.lexical_support)&&
+    hit.lexical_support!>=DOCUMENT_LEXICAL_SUPPORT_THRESHOLD&&hit.lexical_support!<=1&&
+    positions.has(evidenceIdentity(hit)));
+  const out=[...ranked];
+  if(protectedHit){
+    const position=positions.get(evidenceIdentity(protectedHit))!;
+    if(position>=5){
+      const [validated]=out.splice(position,1);
+      out.splice(4,0,validated);
+    }
+  }
+  return out.slice(0,Math.max(0,limit)).map((hit,index)=>({...hit,score:1/(index+1)}));
+}
 
 function rankingFailure(error:unknown):string{
   const message=error instanceof Error?error.message:String(error);
@@ -84,16 +114,20 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     terms AS (SELECT term,plainto_tsquery('english',term)||plainto_tsquery('simple',term) query FROM unnest($5::text[]) term),
     collection AS MATERIALIZED (SELECT count(*) n,greatest(1,avg(length(search_vector))) avg_length FROM scoped),
     frequencies AS MATERIALIZED (SELECT t.*, (SELECT count(*) FROM scoped s WHERE s.search_vector @@ t.query) df FROM terms t),
+    term_weights AS MATERIALIZED (SELECT f.*,ln(1+(collection.n-f.df+.5)/(f.df+.5)) idf
+      FROM frequencies f CROSS JOIN collection WHERE f.df>0),
     scored AS (SELECT c.*,coalesce((SELECT sum(
-        ln(1+(collection.n-f.df+.5)/(f.df+.5))*
+        f.idf*
         (tf.value*2.2)/(tf.value+1.2*(.25+.75*length(c.search_vector)/collection.avg_length)))
-      FROM frequencies f CROSS JOIN LATERAL (SELECT ts_rank_cd(c.search_vector,f.query,0)*10 value) tf
-      WHERE c.search_vector @@ f.query AND tf.value>0),0) score
+      FROM term_weights f CROSS JOIN LATERAL (SELECT ts_rank_cd(c.search_vector,f.query,0)*10 value) tf
+      WHERE c.search_vector @@ f.query AND tf.value>0),0) score,
+      coalesce((SELECT sum(f.idf) FROM term_weights f WHERE c.search_vector @@ f.query)/
+        nullif((SELECT sum(idf) FROM term_weights),0),0) lexical_support
       FROM scoped c,q,collection WHERE ${match}),
     diverse AS (SELECT *,row_number() OVER (PARTITION BY document_id,page_number ORDER BY score DESC,position) page_rank FROM scored)
     SELECT 'pg:'||coalesce(snippet.id,c.id) AS id,d.id AS document_id,coalesce(d.course_id,'') AS course_id,
       d.name,d.origin,d.origin_key,d.source_hash,coalesce(snippet.body,c.body) body,p.locator,p.page_number,
-      p.evidence_id,v.source_version_id,v.parser_version,c.score
+      p.evidence_id,v.source_version_id,v.parser_version,c.score,c.lexical_support
     FROM diverse c JOIN document_texts d ON d.id=c.document_id CROSS JOIN q
       JOIN document_text_versions v ON v.id=c.version_id
       JOIN document_text_pages p ON p.version_id=c.version_id AND p.page_number=c.page_number
@@ -102,7 +136,8 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
         ORDER BY ts_rank_cd(chunk.search_vector,q.broad,0) DESC,chunk.position LIMIT 1) snippet ON true
     WHERE c.page_rank=1
     ORDER BY score DESC,d.id,c.position LIMIT $4`,args);
-  const hits=rows.rows.map(row=>({...row,score:Number(row.score),retrieval_mode:'keyword' as const}));
+  const hits=rows.rows.map(row=>({...row,score:Number(row.score),
+    lexical_support:row.lexical_support===undefined?undefined:Number(row.lexical_support),retrieval_mode:'keyword' as const}));
   if(semantic&&hits.length){
     let reordered:DocumentTextHit[]=hits,semanticFailure:string|undefined;
     try{
@@ -116,7 +151,8 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
             if(hit&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT)candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
           }
         }
-        return (await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],Math.min(limit,20)))
+        const ranked=await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size);
+        return fuseLexicallySupportedAIRanks(hits,ranked,limit)
           .map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'ai-rerank' as const,degraded_reason:semanticFailure}));
       }catch(error){
         return hits.slice(0,limit).map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,

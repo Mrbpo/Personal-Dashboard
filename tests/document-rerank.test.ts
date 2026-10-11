@@ -85,19 +85,63 @@ test('successful order is cached by owner/query/current texts and retains origin
  }finally{globalThis.fetch=original;}
 });
 
-test('invalid or provider-incomplete output never reaches cache publication',async()=>{
+test('invalid output is retried only once and never reaches cache publication',async()=>{
  const original=globalThis.fetch;
  try{
   for(const response of [
    {output_text:JSON.stringify({orderedIds:['p0','foreign-page']})},
    {output_text:JSON.stringify({orderedIds:['p0','p0']})},
+   {output_text:JSON.stringify({orderedIds:['p0']})},
    {status:'incomplete',output_text:JSON.stringify({orderedIds:['p1','p0']})},
    {output_text:'not-json'},
   ]){
-   const fixture=new Fixture(),hits=fixture.hits();
-   globalThis.fetch=async()=>Response.json(response);
+   const fixture=new Fixture(),hits=fixture.hits();let calls=0;
+   globalThis.fetch=async()=>{calls++;return Response.json(response);};
    await assert.rejects(rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,2));
+   assert.equal(calls,response.status==='incomplete'?1:2);
    assert.equal(fixture.cache.size,0);
+  }
+ }finally{globalThis.fetch=original;}
+});
+
+test('a valid second permutation recovers within the original deadline and caches only success',async()=>{
+ const fixture=new Fixture(),hits=fixture.hits(),originalFetch=globalThis.fetch,originalNow=Date.now,
+  originalTimeout=AbortSignal.timeout;
+ let calls=0,elapsed=0;
+ const start=originalNow(),windows:number[]=[];
+ Date.now=()=>start+elapsed;
+ AbortSignal.timeout=milliseconds=>{windows.push(milliseconds);return originalTimeout(milliseconds);};
+ globalThis.fetch=async()=>{
+  calls++;
+  assert.equal(fixture.cache.size,0,'invalid first response must not be published');
+  if(calls===1){elapsed=5000;return Response.json({output_text:JSON.stringify({orderedIds:['p0','p0']})});}
+  return Response.json({output_text:JSON.stringify({orderedIds:['p1','p0']})});
+ };
+ try{
+  const result=await rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,2);
+  assert.equal(result[0].id,hits[1].id);
+  assert.equal(result[0].evidence_id,hits[1].evidence_id);
+  assert.equal(calls,2);assert.equal(fixture.cache.size,1);
+  assert.deepEqual(windows,[30000,25000],'repair must use only the remaining request window');
+  await rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,2);
+  assert.equal(calls,2,'successful repair is reusable without another request');
+ }finally{globalThis.fetch=originalFetch;Date.now=originalNow;AbortSignal.timeout=originalTimeout;}
+});
+
+test('HTTP, timeout and stale-page failures do not cause a repair request',async()=>{
+ const original=globalThis.fetch;
+ try{
+  for(const failure of ['http','timeout','stale']){
+   const fixture=new Fixture(),hits=fixture.hits();let calls=0;
+   globalThis.fetch=async()=>{
+    calls++;
+    if(failure==='http')return Response.json({error:'provider unavailable'},{status:503});
+    if(failure==='timeout')throw new DOMException('Mock request timeout','TimeoutError');
+    fixture.pages[0].version_id='changed-before-repair';
+    return Response.json({output_text:JSON.stringify({orderedIds:['p0','p0']})});
+   };
+   await assert.rejects(rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,2));
+   assert.equal(calls,1);assert.equal(fixture.cache.size,0);
   }
  }finally{globalThis.fetch=original;}
 });

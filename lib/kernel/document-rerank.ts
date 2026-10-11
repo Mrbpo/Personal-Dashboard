@@ -12,14 +12,15 @@ type Page={document_id:string;version_id:string;source_version_id:string;page_nu
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
 const key=(document:string,page:number)=>JSON.stringify([document,page]);
 const flights=new WeakMap<Pool,Map<string,Promise<string[]>>>();
+class InvalidPageOrderOutput extends Error {}
 
 export function validateDocumentPageOrder(value:unknown,identities:readonly string[]):string[]{
  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length!==1)
-  throw new Error('PDF reranker output format is invalid');
+  throw new InvalidPageOrderOutput('PDF reranker output format is invalid');
  const order=(value as {orderedIds?:unknown}).orderedIds;
  if(!Array.isArray(order)||order.length!==identities.length||new Set(order).size!==identities.length||
   order.some(identity=>typeof identity!=='string'||!identities.includes(identity)))
-  throw new Error('PDF reranker returned duplicate, missing or foreign page identities');
+  throw new InvalidPageOrderOutput('PDF reranker returned duplicate, missing or foreign page identities');
  return order;
 }
 
@@ -46,8 +47,10 @@ function samePages(original:Page[],current:Page[]){
   throw new Error('PDF version changed during AI page reranking');
 }
 
-async function requestOrder(query:string,pages:{id:string;text:string}[],identities:string[]):Promise<string[]>{
+async function requestOrderOnce(query:string,pages:{id:string;text:string}[],identities:string[],deadline:number):Promise<string[]>{
  if(!serviceValue('OPENAI_API_KEY'))throw new Error('AI PDF reranking requires an OpenAI API key');
+ const remaining=deadline-Date.now();
+ if(remaining<=0)throw new Error('PDF AI reranker time limit reached');
  const response=await paidOpenAI('responses',{
   model:DOCUMENT_RERANK_MODEL,store:false,max_output_tokens:4000,reasoning:{effort:'low'},
   input:[{role:'developer',content:'Rank these candidate document pages as evidence for the user query. '+
@@ -59,15 +62,34 @@ async function requestOrder(query:string,pages:{id:string;text:string}[],identit
    {role:'user',content:JSON.stringify({query,pages})}],
   text:{format:{type:'json_schema',name:'document_page_order',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{orderedIds:{type:'array',items:{type:'string',enum:identities}}},required:['orderedIds']}}},
- },AbortSignal.timeout(30000),{kind:'pdf-search-rerank',dailyLimit:200});
+ },AbortSignal.timeout(remaining),{kind:'pdf-search-rerank',dailyLimit:200});
  if(!response.ok)throw new Error(`PDF AI reranker request failed (${response.status})`);
- const payload=await response.json();
+ if(Date.now()>=deadline)throw new Error('PDF AI reranker time limit reached');
+ let payload;
+ try{payload=await response.json();}catch(error){
+  if(error instanceof SyntaxError)throw new InvalidPageOrderOutput('PDF AI reranker did not return valid JSON');
+  throw error;
+ }
+ if(!payload||typeof payload!=='object')throw new InvalidPageOrderOutput('PDF reranker output format is invalid');
  if(payload.status==='incomplete'||payload.error)throw new Error('PDF AI reranker response is incomplete');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content||[])
   .map((item:{text?:string})=>item.text||'').join('');
  let parsed:unknown;
- try{parsed=JSON.parse(raw||'{}');}catch{throw new Error('PDF AI reranker did not return valid JSON');}
+ try{parsed=JSON.parse(raw||'{}');}catch{throw new InvalidPageOrderOutput('PDF AI reranker did not return valid JSON');}
  return validateDocumentPageOrder(parsed,identities);
+}
+
+async function requestOrder(query:string,pages:{id:string;text:string}[],identities:string[],verifyCurrent:()=>Promise<void>):Promise<string[]>{
+ const deadline=Date.now()+30000;
+ for(let attempt=0;;attempt++){
+  try{return await requestOrderOnce(query,pages,identities,deadline);}
+  catch(error){
+   // One repair attempt for untrusted output only; each request uses the same
+   // budget policy and shares the original deadline. Invalid output is not cached.
+   if(attempt>=1||!(error instanceof InvalidPageOrderOutput))throw error;
+   await verifyCurrent();
+  }
+ }
 }
 
 async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],pages:Page[],cacheKey:string):Promise<string[]>{
@@ -79,7 +101,7 @@ async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentText
  const byPage=new Map(pages.map(page=>[key(page.document_id,page.page_number),page]));
  const inputPages=hits.map((hit,index)=>({id:identities[index],
   text:Array.from(byPage.get(key(hit.document_id,hit.page_number))!.body).slice(0,6000).join('')}));
- const order=await requestOrder(query,inputPages,identities);
+ const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits)));
  const client=await pool.connect();
  try{
   await client.query('BEGIN');
