@@ -5,7 +5,7 @@ import {digest,readBlob} from '../library.ts';
 import {decodeDoclingResult} from './docling-result.ts';
 
 export type DoclingIdentity={owner:string;documentId:string;sourceHash:string;optionsHash:string;totalPages:number};
-export type DoclingBatch={start:number;end:number;taskId?:string;resultHash?:string};
+export type DoclingBatch={start:number;end:number;taskId?:string;resultHash?:string;inputHash?:string;copyIndices?:number[]};
 export type DoclingProgress={schema:1;identity:DoclingIdentity;batchSize:number;batches:DoclingBatch[]};
 export type DecodedDocling=ReturnType<typeof decodeDoclingResult>;
 
@@ -22,9 +22,28 @@ export function validateDoclingProgress(value:unknown,identity:DoclingIdentity):
     !Array.isArray(p.batches)||p.batches.length!==expected.batches.length||
     p.batches.some((batch,index)=>!batch||batch.start!==expected.batches[index].start||batch.end!==expected.batches[index].end||
       (batch.taskId!==undefined&&(typeof batch.taskId!=='string'||!batch.taskId||batch.taskId.length>1000))||
-      (batch.resultHash!==undefined&&!/^[a-f0-9]{64}$/.test(batch.resultHash))))
+      (batch.resultHash!==undefined&&!/^[a-f0-9]{64}$/.test(batch.resultHash))||
+      (batch.inputHash!==undefined&&!/^[a-f0-9]{64}$/.test(batch.inputHash))||
+      (batch.copyIndices!==undefined&&(!Array.isArray(batch.copyIndices)||batch.copyIndices.length!==batch.end-batch.start+1||
+        batch.copyIndices.some((page,i)=>page!==batch.start+i-1)))||
+      ((batch.taskId!==undefined||batch.resultHash!==undefined)&&(!batch.inputHash||!batch.copyIndices))))
     throw new Error('Docling staged identity or range plan mismatch');
   return structuredClone(p);
+}
+
+export function decodeDerivedDoclingResult(result:unknown,mapping:{start:number;end:number;totalPages:number;copyIndices:number[]},
+  options:{verifiedBlankPages:number[];formulaEnriched:boolean}):DecodedDocling{
+  const count=mapping.end-mapping.start+1;
+  if(!Number.isInteger(mapping.start)||!Number.isInteger(mapping.end)||mapping.start<1||mapping.end>mapping.totalPages||count<1||
+    mapping.copyIndices.length!==count||mapping.copyIndices.some((index,i)=>index!==mapping.start+i-1))
+    throw new Error('Docling derived page mapping is invalid');
+  const decoded=decodeDoclingResult(result,count,{pageRange:[1,count],formulaEnriched:options.formulaEnriched,
+    verifiedBlankPages:mapping.copyIndices.flatMap((index,i)=>options.verifiedBlankPages.includes(index+1)?[i+1]:[])});
+  const original=(local:number)=>mapping.copyIndices[local-1]+1;
+  return {...decoded,totalPages:mapping.totalPages,
+    pages:decoded.pages.map(page=>({...page,pageNumber:original(page.pageNumber),locator:`第 ${original(page.pageNumber)} 页`})),
+    formulaPageNumbers:decoded.formulaPageNumbers.map(original),
+    warnings:decoded.warnings.map(warning=>warning.replace(/第 (\d+) 页/g,(_,local)=>`第 ${original(Number(local))} 页`))};
 }
 
 // Atomic rename avoids publishing a pointer to a partially written staging blob.
@@ -75,16 +94,23 @@ export async function requestDoclingResult(endpoint:string,headers:HeadersInit,f
 }
 
 export async function convertDoclingBatches(input:{identity:DoclingIdentity;progress?:unknown;verifiedBlankPages:number[];
-  formulaEnriched:boolean;endpoint:string;headers:HeadersInit;form:(start:number,end:number)=>FormData;
+  formulaEnriched:boolean;endpoint:string;headers:HeadersInit;
+  prepare:(start:number,end:number)=>Promise<{form:FormData;inputHash:string;copyIndices:number[]}>;
   persist:(progress:DoclingProgress)=>Promise<void>}):Promise<DecodedDocling>{
   const progress=input.progress?validateDoclingProgress(input.progress,input.identity):createDoclingProgress(input.identity);
   await input.persist(progress);
   const pages:DecodedDocling['pages']=[],warnings=new Set<string>(),formulaPages=new Set<number>();
   for(const batch of progress.batches){
-    const range=[batch.start,batch.end] as const;
-    const identity={...input.identity,start:batch.start,end:batch.end};
-    const decode=(result:unknown)=>decodeDoclingResult(result,input.identity.totalPages,
-      {pageRange:range,verifiedBlankPages:input.verifiedBlankPages,formulaEnriched:input.formulaEnriched});
+    const prepared=await input.prepare(batch.start,batch.end);
+    if(!/^[a-f0-9]{64}$/.test(prepared.inputHash)||prepared.copyIndices.length!==batch.end-batch.start+1||
+      prepared.copyIndices.some((page,i)=>page!==batch.start+i-1)||
+      (batch.inputHash!==undefined&&batch.inputHash!==prepared.inputHash)||
+      (batch.copyIndices!==undefined&&JSON.stringify(batch.copyIndices)!==JSON.stringify(prepared.copyIndices)))
+      throw new Error('Docling derived input identity mismatch');
+    batch.inputHash=prepared.inputHash;batch.copyIndices=[...prepared.copyIndices];
+    const identity={...input.identity,start:batch.start,end:batch.end,inputHash:prepared.inputHash,copyIndices:prepared.copyIndices};
+    const decode=(result:unknown)=>decodeDerivedDoclingResult(result,{...identity},
+      {verifiedBlankPages:input.verifiedBlankPages,formulaEnriched:input.formulaEnriched});
     let decoded:DecodedDocling|undefined;
     if(batch.resultHash){
       try{
@@ -105,8 +131,11 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
         decoded={pages:Array.from({length:batch.end-batch.start+1},(_,i)=>({pageNumber:batch.start+i,
           locator:`第 ${batch.start+i} 页`,text:''})),totalPages:input.identity.totalPages,
           warnings:[`第 ${batch.start}–${batch.end} 页已核验原始 PDF 无页面内容，保留为空白页`],formulaPageNumbers:[]};
+        await input.persist(progress);
       }else{
-        const result=await requestDoclingResult(input.endpoint,input.headers,input.form(batch.start,batch.end),batch.taskId,
+        // Pin input bytes and explicit source indices before submitting or resuming.
+        await input.persist(progress);
+        const result=await requestDoclingResult(input.endpoint,input.headers,prepared.form,batch.taskId,
           async taskId=>{if(taskId)batch.taskId=taskId;else delete batch.taskId;await input.persist(progress);});
         try{decoded=decode(result);}
         catch(error){delete batch.taskId;await input.persist(progress);throw error;}

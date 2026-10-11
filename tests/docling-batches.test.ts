@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,writeFileSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {randomUUID} from 'node:crypto';
-import {PDFDocument} from 'pdf-lib';
+import {randomUUID,createHash} from 'node:crypto';
+import {PDFDocument,PDFArray,PDFStream} from 'pdf-lib';
 
 const directory=mkdtempSync(join(tmpdir(),'docling-batch-tests-'));
 process.env.DATABASE_URL=':memory:';
@@ -16,6 +16,12 @@ process.env.PDF_SCAN_TRANSCRIPTION_BACKEND='docling';
 delete process.env.DOCLING_BATCH_PAGES;
 after(()=>rmSync(directory,{recursive:true,force:true}));
 
+async function fakePrepare(start:number,end:number){
+ const form=new FormData();form.append('test_original_start',String(start));
+ form.append('page_range','1');form.append('page_range',String(end-start+1));
+ return {form,inputHash:start.toString(16).repeat(64),copyIndices:Array.from({length:end-start+1},(_,i)=>start+i-1)};
+}
+
 function result(start:number,end=start){
  return {status:'success',document:{json_content:{
   pages:Object.fromEntries(Array.from({length:end-start+1},(_,i)=>[start+i,{page_no:start+i}])),
@@ -23,10 +29,16 @@ function result(start:number,end=start){
   texts:Array.from({length:end-start+1},(_,i)=>({text:`Verified original page ${start+i}`,prov:[{page_no:start+i}]})),
  }}};
 }
+function pageContents(pdf:PDFDocument,index:number){
+ const value=pdf.getPage(index).node.Contents();
+ const streams=value instanceof PDFArray?value.asArray().map(ref=>pdf.context.lookup(ref)):[value];
+ return Buffer.concat(streams.map(stream=>{assert.ok(stream instanceof PDFStream);return Buffer.from(stream.getContents());}));
+}
 const identity={owner:'owner',documentId:'original',sourceHash:'a'.repeat(64),optionsHash:'b'.repeat(64),totalPages:3};
 
 test('default is a single page; original range IDs are exact and full-document validation stays strict',async()=>{
  const {createDoclingProgress,validateDoclingProgress}=await import('../lib/kernel/docling-batches.ts');
+ const {decodeDerivedDoclingResult}=await import('../lib/kernel/docling-batches.ts');
  const {decodeDoclingResult}=await import('../lib/kernel/docling-result.ts');
  assert.deepEqual(createDoclingProgress(identity).batches,[{start:1,end:1},{start:2,end:2},{start:3,end:3}]);
  assert.throws(()=>createDoclingProgress(identity,5),/integer from 1 to 4/);
@@ -37,6 +49,10 @@ test('default is a single page; original range IDs are exact and full-document v
  assert.throws(()=>decodeDoclingResult(result(5,8),10),/manifest/);
  const bad=result(5);bad.document.json_content.texts[0].prov=[{page_no:6}];
  assert.throws(()=>decodeDoclingResult(bad,10,{pageRange:[5,5]}),/provenance/);
+ const mapping={start:5,end:5,totalPages:10,copyIndices:[4]},options={formulaEnriched:false,verifiedBlankPages:[]};
+ assert.equal(decodeDerivedDoclingResult(result(1),mapping,options).pages[0].pageNumber,5);
+ assert.throws(()=>decodeDerivedDoclingResult(result(5),mapping,options),/manifest/);
+ assert.throws(()=>decodeDerivedDoclingResult(result(1),{...mapping,copyIndices:[0]},options),/mapping/);
  for(const changed of [{owner:'other'}, {sourceHash:'c'.repeat(64)}, {optionsHash:'d'.repeat(64)}])
   assert.throws(()=>validateDoclingProgress(createDoclingProgress(identity),{...identity,...changed}),/identity/);
 });
@@ -48,16 +64,14 @@ test('validated batch blobs survive a later failure; retries reuse them and corr
   const url=String(input);
   if(url.endsWith('/async')){
    const range=(init?.body as FormData).getAll('page_range').map(Number);
-   assert.equal(range[0],range[1]);submitted.push(range[0]);
-   if(range[0]===2&&fail)return new Response(null,{status:503});
-   return Response.json({task_id:`page-${range[0]}`,task_status:'success'});
+   assert.deepEqual(range,[1,1]);const original=Number((init?.body as FormData).get('test_original_start'));submitted.push(original);
+   if(original===2&&fail)return new Response(null,{status:503});
+   return Response.json({task_id:`page-${original}`,task_status:'success'});
   }
-  return Response.json(result(Number(url.split('-').at(-1))));
+  return Response.json(result(1));
  };
  const run=()=>convertDoclingBatches({identity,progress,verifiedBlankPages:[],formulaEnriched:false,
-  endpoint:'http://docling.mock',headers:{},form:(start,end)=>{
-   const f=new FormData();f.append('page_range',String(start));f.append('page_range',String(end));return f;
-  },persist:async value=>{progress=structuredClone(value);}});
+  endpoint:'http://docling.mock',headers:{},prepare:fakePrepare,persist:async value=>{progress=structuredClone(value);}});
  try{
   await assert.rejects(run(),/submit failed/);
   const saved=progress as {batches:{resultHash?:string}[]};
@@ -70,6 +84,8 @@ test('validated batch blobs survive a later failure; retries reuse them and corr
   writeFileSync(join(directory,current.batches[1].resultHash!),'corrupt');
   await run();assert.deepEqual(submitted,[1,2,2,3,2]);
   assert.notEqual(readFileSync(join(directory,(progress as typeof saved).batches[1].resultHash!)).toString(),'corrupt');
+  (progress as {batches:{inputHash:string}[]}).batches[2].inputHash='e'.repeat(64);
+  await assert.rejects(run(),/input identity mismatch/);assert.equal(submitted.length,5);
  }finally{globalThis.fetch=original;}
 });
 
@@ -77,7 +93,7 @@ test('incomplete batch results never cache and only original-verified blanks byp
  const {convertDoclingBatches}=await import('../lib/kernel/docling-batches.ts');
  const original=globalThis.fetch;let progress:unknown,calls=0;
  const run=(verifiedBlankPages:number[]=[])=>convertDoclingBatches({identity,progress,verifiedBlankPages,formulaEnriched:false,
-  endpoint:'http://docling.mock',headers:{},form:()=>new FormData(),persist:async value=>{progress=structuredClone(value);}});
+  endpoint:'http://docling.mock',headers:{},prepare:fakePrepare,persist:async value=>{progress=structuredClone(value);}});
  globalThis.fetch=async input=>{
   calls++;
   return String(input).endsWith('/async')?Response.json({task_id:'invalid',task_status:'success'}):
@@ -98,32 +114,41 @@ test('converter publishes only once after every original page passes, preserving
  const {database:db}=await import('../lib/database.ts');
  const {kernel}=await import('../lib/kernel/service.ts');
  const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
- const pdf=await PDFDocument.create();for(let i=0;i<3;i++)pdf.addPage().drawText(`Original visible page ${i+1}`);
- const id=await saveDocument('converter-owner','','upload','batch','batch.pdf','application/pdf',await pdf.save());
+ const pdf=await PDFDocument.create();for(let i=0;i<5;i++)pdf.addPage().drawText(`Original visible page ${i+1}`);
+ const sourceBytes=await pdf.save(),source=await PDFDocument.load(sourceBytes,{updateMetadata:false});
+ const id=await saveDocument('converter-owner','','upload','batch','batch.pdf','application/pdf',sourceBytes);
  await db.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(id+':old',id,0,'第 1 页','Prior complete text','old').run();
  await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
  const publish=t.mock.method(kernel,'ingestParsedDocument',async(...args:Parameters<typeof kernel.ingestParsedDocument>)=>{void args;});
- const previous=globalThis.fetch;let fail=true;
+ const previous=globalThis.fetch;let fail=true,requestNumber=0;
+ const copiedHashes=new Map<number,string>();
  globalThis.fetch=async(input,init)=>{
   const url=String(input);
   if(url.endsWith('/async')){
    const range=(init?.body as FormData).getAll('page_range').map(Number);
-   assert.equal(range[0],range[1]);
+   assert.deepEqual(range,[1,1]);
    const original=(init?.body as FormData).get('files') as Blob;
-   assert.equal((await PDFDocument.load(await original.arrayBuffer())).getPageCount(),3,'request carries original PDF, not a new resource');
-   if(fail&&range[0]===2)return new Response(null,{status:503});
-   return Response.json({task_id:`page-${range[0]}`,task_status:'success'});
+   const inputBytes=await original.arrayBuffer(),derived=await PDFDocument.load(inputBytes);
+   assert.equal(derived.getPageCount(),1,'request contains only the explicitly copied page');
+   assert.equal(derived.getCreationDate()?.getTime(),0,'retry bytes have stable metadata');
+   const position=++requestNumber;
+   const hash=createHash('sha256').update(Buffer.from(inputBytes)).digest('hex');
+   if(copiedHashes.has(position))assert.equal(hash,copiedHashes.get(position),'reconstructing the same original page yields the same input SHA');
+   copiedHashes.set(position,hash);
+   assert.deepEqual(pageContents(derived,0),pageContents(source,position-1),'copy uses the intended original page, including page 5');
+   if(fail&&position===2)return new Response(null,{status:503});
+   return Response.json({task_id:`page-${position}`,task_status:'success'});
   }
-  return Response.json(result(Number(url.split('-').at(-1))));
+  return Response.json(result(1));
  };
  try{
   await assert.rejects(convertDocumentWithDocling('converter-owner',id),/submit failed/);
   assert.equal(publish.mock.callCount(),0);
   assert.equal((await getDocument('converter-owner',id)).status,'ready');
   assert.equal((await db.prepare('SELECT body FROM library_chunks WHERE document_id=?').bind(id).first<{body:string}>())?.body,'Prior complete text');
-  fail=false;await convertDocumentWithDocling('converter-owner',id);
+  fail=false;requestNumber=0;await convertDocumentWithDocling('converter-owner',id);
   assert.equal(publish.mock.callCount(),1);
-  assert.deepEqual(publish.mock.calls[0].arguments[1].map(p=>p.pageNumber),[1,2,3]);
+  assert.deepEqual(publish.mock.calls[0].arguments[1].map(p=>p.pageNumber),[1,2,3,4,5]);
  }finally{globalThis.fetch=previous;publish.mock.restore();}
 });
 
@@ -143,13 +168,14 @@ test('PG job stages, exact claims, remote resume, lease-guarded publication, rev
  globalThis.fetch=async(input,init)=>{
   const url=String(input);
   if(url.endsWith('/async')){
-   const page=Number((init?.body as FormData).get('page_range'));submits.push(page);
+   assert.deepEqual((init?.body as FormData).getAll('page_range'),['1','1']);
+   const page=submits.length+1;submits.push(page);
    return Response.json({task_id:`page-${page}`,task_status:'success'});
   }
   if(url.includes('/status/'))return Response.json({task_status:'success'});
   const page=Number(url.split('-').at(-1));
   if(fail&&page===2)return new Response(null,{status:503});
-  return Response.json(result(page));
+  return Response.json(result(1));
  };
  try{
   const context=(job:NonNullable<typeof first>)=>({id:job.id,leaseToken:job.lease_token,formulaEnriched:false});
