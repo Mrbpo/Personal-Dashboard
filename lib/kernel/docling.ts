@@ -67,15 +67,24 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   if(typeof scanBackend!=='string')throw new Error('Unknown PDF scan backend');
   if(!['ai','docling'].includes(scanBackend))throw new Error('Unknown PDF scan backend');
   const visual=!savedResult&&!legacyTaskId&&!progress&&!nativeComplete&&scanBackend==='ai';
-  const form=(start:number,end:number)=>{
+  const prepare=async(start:number,end:number)=>{
+    const copyIndices=Array.from({length:end-start+1},(_,i)=>start+i-1);
+    const derived=await PDFDocument.create();
+    // Stable metadata makes reconstruction and its checksum reproducible on retry.
+    derived.setCreationDate(new Date(0));derived.setModificationDate(new Date(0));
+    derived.setProducer('Study Kernel Docling derived-v1');derived.setCreator('Study Kernel');
+    for(const page of await derived.copyPages(originalPdf,copyIndices))derived.addPage(page);
+    const inputBytes=await derived.save();
+    if((await PDFDocument.load(inputBytes,{updateMetadata:false})).getPageCount()!==copyIndices.length)
+      throw new Error('Docling derived PDF page count mismatch');
     const value=new FormData();
-    value.append('files',new Blob([new Uint8Array(bytes)],{type:'application/pdf'}),document.name);
+    value.append('files',new Blob([new Uint8Array(inputBytes)],{type:'application/pdf'}),'pages.pdf');
     value.append('from_formats','pdf');value.append('to_formats','md');value.append('to_formats','json');
     value.append('do_ocr','true');value.append('do_table_structure','true');
     value.append('do_formula_enrichment',String(localFormula));value.append('code_formula_preset',formulaPreset);
     value.append('abort_on_error','true');
-    value.append('page_range',String(start));value.append('page_range',String(end));
-    return value;
+    value.append('page_range','1');value.append('page_range',String(copyIndices.length));
+    return {form:value,inputHash:digest(inputBytes),copyIndices};
   };
   let currentProgress:DoclingProgress|undefined;
   let result=savedResult;
@@ -89,9 +98,9 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     nativeComplete?{pages:native!.map((text,index)=>({text,pageNumber:index+1,locator:`第 ${index+1} 页`})),
       totalPages:originalPages,warnings:formulaEnriched?[]:['公式增强未启用；正文可检索，公式须核对原 PDF'],formulaPageNumbers:[]}:
     await convertDoclingBatches({identity:{owner,documentId:id,sourceHash:document.hash,totalPages:originalPages,
-      optionsHash:digest(JSON.stringify({transport:'docling-original-range-v1',endpoint,parser:formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION,
+      optionsHash:digest(JSON.stringify({transport:'docling-derived-v1',endpoint,parser:formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION,
         doOcr:true,doTableStructure:true,localFormula,formulaBackend,formulaPreset,scanBackend}))},
-      progress,verifiedBlankPages,formulaEnriched:localFormula,endpoint,headers,form,
+      progress,verifiedBlankPages,formulaEnriched:localFormula,endpoint,headers,prepare,
       persist:async value=>{
         if(job)await rememberDoclingProgress(job.id,job.leaseToken,value);
         currentProgress=structuredClone(value);
