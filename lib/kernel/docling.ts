@@ -3,7 +3,8 @@ import { PDFArray, PDFDocument, PDFName, PDFStream } from 'pdf-lib';
 import { digest, getDocument, readBlob, splitText } from '../library.ts';
 import { kernel } from './service.ts';
 import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION } from './docling-result.ts';
-import {rememberDoclingTask} from './jobs.ts';
+import {rememberDoclingTask,doclingJobPayload,rememberDoclingProgress} from './jobs.ts';
+import {convertDoclingBatches,requestDoclingResult,type DoclingProgress} from './docling-batches.ts';
 import {enrichParsedPdfFormulae,transcribePdfVisualPages} from '../document-parser.ts';
 import {localPdfTextPages} from '../local-ocr.ts';
 
@@ -24,12 +25,19 @@ export function nativePdfTextIsComplete(pages:string[]|null,expectedPages:number
     meaningful.filter(page=>page.length>=300).length>expectedPages*.5;
 }
 
-export async function convertDocumentWithDocling(owner: string, id: string, job?:{id:string;leaseToken:string;taskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string},savedResult?:Record<string,unknown>,savedTaskId?:string): Promise<void> {
+export async function convertDocumentWithDocling(owner: string, id: string, job?:{id:string;leaseToken:string;taskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;progress?:unknown;sourceHash?:string},savedResult?:Record<string,unknown>,savedTaskId?:string): Promise<void> {
   const base=process.env.DOCLING_URL;
   if(!base)throw new Error('DOCLING_URL is required for v1 PDF parsing');
   const document=await getDocument(owner,id);
   if(document.mime!=='application/pdf')return;
   const bytes=await readBlob(document.hash);
+  if(digest(bytes)!==document.hash)throw new Error('Original PDF checksum mismatch');
+  const payload=job?await doclingJobPayload(job.id,job.leaseToken):undefined;
+  if(payload&&(payload.owner!==owner||payload.id!==id||
+    (payload.sourceHash!==undefined&&payload.sourceHash!==document.hash)))throw new Error('PDF ingestion source identity mismatch');
+  if(job?.sourceHash&&job.sourceHash!==document.hash)throw new Error('PDF ingestion source identity mismatch');
+  const progress=payload?.doclingProgress??job?.progress;
+  const legacyTaskId=job?.taskId??(payload?.doclingTaskId as string|undefined)??savedTaskId;
   const originalPdf=await PDFDocument.load(bytes,{updateMetadata:false});
   const originalPages=originalPdf.getPageCount();
   if(originalPages>500)throw new Error('PDF 超过 500 页，请分册导入');
@@ -43,70 +51,51 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
       (stream.getContentsSize()===0 || (!stream.dict.has(PDFName.of('Filter')) && !stream.getContentsString().trim()))));
     return blank?[index+1]:[];
   });
-  const form=new FormData();
-  form.append('files',new Blob([new Uint8Array(bytes)],{type:'application/pdf'}),document.name);
-  form.append('from_formats','pdf');
-  form.append('to_formats','md');
-  form.append('to_formats','json');
-  form.append('do_ocr','true');
-  form.append('do_table_structure','true');
-  const formulaEnriched=job?.formulaEnriched??(process.env.DOCLING_FORMULA_ENRICHMENT!=='false');
-  const formulaBackend=job?.formulaBackend||process.env.DOCLING_FORMULA_BACKEND||'ai';
+  const formulaEnriched=payload?.formulaEnriched??job?.formulaEnriched??(process.env.DOCLING_FORMULA_ENRICHMENT!=='false');
+  if(typeof formulaEnriched!=='boolean')throw new Error('Invalid PDF formula enrichment setting');
+  const formulaBackend=payload?.formulaBackend??job?.formulaBackend??process.env.DOCLING_FORMULA_BACKEND??'ai';
+  if(typeof formulaBackend!=='string')throw new Error('Unknown PDF formula backend');
   if(!['ai','docling'].includes(formulaBackend))throw new Error('Unknown PDF formula backend');
   const localFormula=formulaEnriched&&formulaBackend==='docling';
-  form.append('do_formula_enrichment',String(localFormula));
-  form.append('code_formula_preset',process.env.DOCLING_FORMULA_PRESET||'codeformulav2');
-  form.append('abort_on_error','true');
+  const formulaPreset=process.env.DOCLING_FORMULA_PRESET||'codeformulav2';
   const headers:HeadersInit=process.env.DOCLING_API_KEY?{'X-Api-Key':process.env.DOCLING_API_KEY}:{};
   const endpoint=base.replace(/\/$/,'');
-  const native=localFormula||process.env.DOCLING_NATIVE_TEXT_FASTPATH==='false'||savedResult||job?.taskId||savedTaskId?null:await localPdfTextPages(bytes);
-  // Do not OCR a healthy embedded text layer. Sparse scans and image-only pages
-  // still require Docling; short native headers alone do not qualify.
+  const native=localFormula||process.env.DOCLING_NATIVE_TEXT_FASTPATH==='false'||savedResult||legacyTaskId||progress?null:await localPdfTextPages(bytes);
+  // Keep the strict native gate: sparse/image-only bodies still need parsing.
   const nativeComplete=nativePdfTextIsComplete(native,originalPages,verifiedBlankPages);
-  const scanBackend=job?.scanBackend||process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling';
+  const scanBackend=payload?.scanBackend??job?.scanBackend??process.env.PDF_SCAN_TRANSCRIPTION_BACKEND??'docling';
+  if(typeof scanBackend!=='string')throw new Error('Unknown PDF scan backend');
   if(!['ai','docling'].includes(scanBackend))throw new Error('Unknown PDF scan backend');
-  const visual=!nativeComplete&&scanBackend==='ai';
+  const visual=!savedResult&&!legacyTaskId&&!progress&&!nativeComplete&&scanBackend==='ai';
+  const form=(start:number,end:number)=>{
+    const value=new FormData();
+    value.append('files',new Blob([new Uint8Array(bytes)],{type:'application/pdf'}),document.name);
+    value.append('from_formats','pdf');value.append('to_formats','md');value.append('to_formats','json');
+    value.append('do_ocr','true');value.append('do_table_structure','true');
+    value.append('do_formula_enrichment',String(localFormula));value.append('code_formula_preset',formulaPreset);
+    value.append('abort_on_error','true');
+    value.append('page_range',String(start));value.append('page_range',String(end));
+    return value;
+  };
+  let currentProgress:DoclingProgress|undefined;
   let result=savedResult;
-  if(!result&&!nativeComplete&&!visual){
-  let task:{task_id?:string;task_status?:string}={task_id:job?.taskId||savedTaskId};
-  if(!task.task_id){
-    const submitted=await fetch(`${endpoint}/v1/convert/file/async`,{method:'POST',headers,body:form,signal:AbortSignal.timeout(120000)});
-    if(!submitted.ok)throw new Error(`Docling submit failed (${submitted.status})`);
-    task=await submitted.json() as typeof task;
-    if(!task.task_id)throw new Error('Docling did not return a task id');
-    if(job)await rememberDoclingTask(job.id,job.leaseToken,task.task_id);
-  }
-  let state=task.task_status;
-  const until=Date.now()+15*60000;let transientErrors=0;
-  while(Date.now()<until && state!=='success' && state!=='failure'){
-    await new Promise(resolve=>setTimeout(resolve,5000));
-    let polled:Response;
-    try{polled=await fetch(`${endpoint}/v1/status/poll/${encodeURIComponent(task.task_id)}`,{headers,signal:AbortSignal.timeout(30000)});}
-    catch(error){if(++transientErrors>8)throw error;continue;}
-    if(polled.status>=500&&++transientErrors<=8)continue;
-    transientErrors=0;
-    if(!polled.ok){
-      if(job&&polled.status===404)await rememberDoclingTask(job.id,job.leaseToken,null);
-      throw new Error(`Docling poll failed (${polled.status})`);
-    }
-    state=(await polled.json() as {task_status?:string}).task_status;
-  }
-  if(state!=='success'){
-    if(job&&state==='failure')await rememberDoclingTask(job.id,job.leaseToken,null);
-    throw new Error(`Docling conversion ${state||'timed out'}`);
-  }
-  const response=await fetch(`${endpoint}/v1/result/${encodeURIComponent(task.task_id)}`,{headers,signal:AbortSignal.timeout(30000)});
-  if(!response.ok){
-    if(job&&response.status===404)await rememberDoclingTask(job.id,job.leaseToken,null);
-    throw new Error(`Docling result failed (${response.status})`);
-  }
-  result=await response.json() as Record<string,unknown>;
-  }
-  const decoded=visual?{pages:await transcribePdfVisualPages(id,bytes),totalPages:originalPages,
-    warnings:['AI 视觉转写；数学、手写及图表请核对原 PDF'],formulaPageNumbers:[]}:
+  // An old task ID has no range metadata: only resume that full response; never
+  // submit a new whole-document request or reinterpret its pages as a batch.
+  if(!result&&legacyTaskId)result=await requestDoclingResult(endpoint,headers,undefined,legacyTaskId,
+    async taskId=>{if(job)await rememberDoclingTask(job.id,job.leaseToken,taskId);});
+  const decoded=result?decodeDoclingResult(result,originalPages,{verifiedBlankPages,formulaEnriched:localFormula}):
+    visual?{pages:await transcribePdfVisualPages(id,bytes),totalPages:originalPages,
+      warnings:['AI 视觉转写；数学、手写及图表请核对原 PDF'],formulaPageNumbers:[]}:
     nativeComplete?{pages:native!.map((text,index)=>({text,pageNumber:index+1,locator:`第 ${index+1} 页`})),
-    totalPages:originalPages,warnings:formulaEnriched?[]:['公式增强未启用；正文可检索，公式须核对原 PDF'],formulaPageNumbers:[]}:
-    decodeDoclingResult(result,originalPages,{verifiedBlankPages,formulaEnriched:localFormula});
+      totalPages:originalPages,warnings:formulaEnriched?[]:['公式增强未启用；正文可检索，公式须核对原 PDF'],formulaPageNumbers:[]}:
+    await convertDoclingBatches({identity:{owner,documentId:id,sourceHash:document.hash,totalPages:originalPages,
+      optionsHash:digest(JSON.stringify({transport:'docling-original-range-v1',endpoint,parser:formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION,
+        doOcr:true,doTableStructure:true,localFormula,formulaBackend,formulaPreset,scanBackend}))},
+      progress,verifiedBlankPages,formulaEnriched:localFormula,endpoint,headers,form,
+      persist:async value=>{
+        if(job)await rememberDoclingProgress(job.id,job.leaseToken,value);
+        currentProgress=structuredClone(value);
+      }});
   let pages=decoded.pages,warnings=decoded.warnings;
   const totalPages=decoded.totalPages;
   if(visual)warnings=[...warnings,...pages.filter(page=>page.text.includes('[无法可靠辨认')).map(page=>`第 ${page.pageNumber} 页含无法可靠辨认的片段，须核对原 PDF`)];
@@ -116,10 +105,15 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     warnings=[...warnings.filter(warning=>!warning.startsWith('公式增强未启用')), ...enhanced.warnings];
   }
   const parserVersion=formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION;
-  await getDocument(owner,id); // Do not publish a conversion for a deleted original.
+  const current=await getDocument(owner,id);
+  if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');
+  if(digest(await readBlob(current.hash))!==document.hash)throw new Error('Original PDF checksum changed during conversion');
   await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,
     hash:document.hash,mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
-    {parserVersion,expectedPages:totalPages,warnings,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
+    {parserVersion,expectedPages:totalPages,warnings,
+      ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,
+      batchProvenance:currentProgress?{schema:currentProgress.schema,identity:currentProgress.identity,
+        batchSize:currentProgress.batchSize,batches:currentProgress.batches}:undefined,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
       (formulaEnriched?'native-text-plus-ai-formula':'native-text'):formulaEnriched?`docling-plus-${formulaBackend}-formula`:'docling-text'});
   const chunks=pages.flatMap(page=>splitText(page.text).map(body=>({locator:page.locator,body})));
   // Search chunks are a rebuildable cache. The original blob and provenance remain available.

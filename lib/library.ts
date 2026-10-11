@@ -7,7 +7,7 @@ import { serviceValue } from './service-vault.ts';
 import { acquireLease,enqueue,releaseLease } from './jobs.ts';
 import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
 import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
-import {queueIngestionJob} from './kernel/jobs.ts';
+import {queueIngestionJob,doclingStageBlobHashes} from './kernel/jobs.ts';
 import {kernel} from './kernel/service.ts';
 import {documentSearchText,splitDocumentText} from './kernel/document-search.ts';
 import {DOCLING_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
@@ -86,7 +86,7 @@ export async function indexDocument(owner:string,id:string,forcePdfFormulaRepars
   const d=await getDocument(owner,id);
   if(d.mime==='application/pdf' && process.env.DOCLING_URL){
     const parser=configuredDoclingParser();
-    await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id,formulaEnriched:parser===DOCLING_PARSER_VERSION,
+    await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id,sourceHash:d.hash,formulaEnriched:parser===DOCLING_PARSER_VERSION,
       formulaBackend:process.env.DOCLING_FORMULA_BACKEND||'ai',scanBackend:process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling'},`docling:${id}:${d.hash}:${parser}`,forcePdfFormulaReparse);
     return;
   }
@@ -147,6 +147,7 @@ export async function collectUnusedBlobs(now=Date.now()){
  const documents=(await db.prepare('SELECT hash FROM library_documents WHERE deleted=0').all<{hash:string}>()).results;
  const messages=(await db.prepare('SELECT attachments_json FROM tutor_messages').all<{attachments_json:string}>()).results;
  const used=new Set(documents.map(d=>d.hash));for(const m of messages)for(const a of JSON.parse(m.attachments_json))if(a.hash)used.add(a.hash);
+ if(process.env.KERNEL_DATABASE_URL)for(const hash of await doclingStageBlobHashes())used.add(hash);
  let removed=0;await mkdir(root(),{recursive:true,mode:0o700});
  for(const name of await readdir(/* turbopackIgnore: true */ root())){
   if(!/^[a-f0-9]{64}$/.test(name)||used.has(name))continue;

@@ -738,7 +738,8 @@ export class KernelService {
 
   async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number}>,
-    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string}={}) {
+    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
+      ingestionLease?:{id:string;token:string};batchProvenance?:unknown}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -749,11 +750,19 @@ export class KernelService {
     const parsedVersion=stableId(document.id,parser,textHash);
     const sourceItemId=`document:${document.id}`,acquiredAt=new Date().toISOString();
     await kernelTransaction(async client=>{
+      if(options.ingestionLease){
+        const job=(await client.query<{payload:Record<string,unknown>}>(`SELECT payload FROM ingestion_jobs
+          WHERE id=$1 AND lease_token=$2 AND kind='docling_document' AND state='running' AND lease_until>now() FOR UPDATE`,
+          [options.ingestionLease.id,options.ingestionLease.token])).rows[0];
+        if(!job||job.payload.owner!==owner||job.payload.id!==document.id||
+          (job.payload.sourceHash!==undefined&&job.payload.sourceHash!==document.hash))throw new Error('PDF ingestion lease or source identity lost');
+      }
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`document:${document.id}`]);
       const version=await sourceVersion(client,{id:sourceItemId,source:`document:${document.origin}`,scope:document.courseId||'unscoped',
         externalId:document.id,courseId:document.courseId||null,
         contentHash:stableId(document.hash,parser,textHash),raw:{id:document.id,name:document.name,mime:document.mime,
           originKey:document.originKey,parser,extractionMethod:options.extractionMethod||parser,warnings:options.warnings||[],
+          ...(options.batchProvenance?{batchProvenance:options.batchProvenance}:{}),
           pages:pages.map(page=>({locator:page.locator,pageNumber:page.pageNumber,length:page.text.length}))},
         rawUri:`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
       await client.query(`INSERT INTO document_texts(id,owner_id,course_id,source_item_id,origin,origin_key,name,source_hash,created_at)

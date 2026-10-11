@@ -42,7 +42,7 @@ test('a resumed conversion uses its durable Docling task and rejects a stale lea
  const pdf=await PDFDocument.create();pdf.addPage();
  const owner=`resume-${randomUUID()}`,id=await saveDocument(owner,'','upload','resume','resume.pdf','application/pdf',await pdf.save());
  const job=await queueIngestionJob('docling_document','upload','test',{owner,id},randomUUID()),token=randomUUID();
- await kernelPool().query("UPDATE ingestion_jobs SET state='running',lease_token=$2 WHERE id=$1",[job,token]);
+ await kernelPool().query("UPDATE ingestion_jobs SET state='running',lease_token=$2,lease_until=now()+interval '3 minutes' WHERE id=$1",[job,token]);
  try{
   await assert.rejects(rememberDoclingTask(job,'stale-token','remote-task'),/lease lost/);
   await rememberDoclingTask(job,token,'remote-task');

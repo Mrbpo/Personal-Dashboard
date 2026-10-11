@@ -35,15 +35,16 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  const kernelJob=await claimIngestionJob();
  if(kernelJob){
   const renewKernel=setInterval(()=>{void Promise.all([
-   renewIngestionJob(kernelJob.id,kernelJob.lease_token,'parsing'),
+   renewIngestionJob(kernelJob.id,kernelJob.lease_token),
    db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now()).run(),
   ]).catch(error=>console.error('Worker renewal failed',error instanceof Error?error.message:'unknown'));},30000);
   try{
-   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string};
+   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string};
    switch(kernelJob.kind){
     case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id),{
      id:kernelJob.id,leaseToken:kernelJob.lease_token,taskId:payload.doclingTaskId,
-     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend});break;
+     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,
+     progress:payload.doclingProgress,sourceHash:payload.sourceHash});break;
     case 'canvas': await archiveCanvas(payload.owner);break;
     case 'canvas-course': await archiveCanvasCourse(payload.owner,String(payload.course));break;
     case 'gmail':{
