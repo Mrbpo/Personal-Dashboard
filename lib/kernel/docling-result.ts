@@ -13,7 +13,7 @@ function object(value: unknown): Json | undefined {
 function list(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
 
-export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[]} {
+export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[]} {
   const response = object(result);
   if (response?.status !== 'success') throw new Error(`Docling conversion is incomplete (${response?.status || 'missing status'})`);
   if (list(response.errors).length) throw new Error('Docling reported conversion errors');
@@ -27,7 +27,12 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     return number;
   }).sort((a, b) => a - b);
   const totalPages = expectedPages ?? pageNumbers.length;
-  if (!Number.isInteger(totalPages) || totalPages < 1 || pageNumbers.length !== totalPages || pageNumbers.some((number, index) => number !== index + 1)) {
+  const [first,last]=options.pageRange??[1,totalPages];
+  // Ranged responses must retain original PDF page numbers. Never infer an offset
+  // from a locally renumbered response or accept pages outside the requested range.
+  if (!Number.isInteger(totalPages) || totalPages < 1 || !Number.isInteger(first)||!Number.isInteger(last)||
+    first<1||last<first||last>totalPages||pageNumbers.length!==last-first+1||
+    pageNumbers.some((number, index) => number !== index + first)) {
     throw new Error('Docling page manifest is incomplete');
   }
   const body = object(document.body);
@@ -170,6 +175,6 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (!content) warnings.push(`第 ${pageNumber} 页已核验原始 PDF 无页面内容，保留为空白页`);
     return {pageNumber, locator: `第 ${pageNumber} 页`, text: content};
   });
-  if (!pages.some(page => page.text)) throw new Error('Docling returned no readable text');
+  if (!pages.some(page => page.text)&&!options.pageRange) throw new Error('Docling returned no readable text');
   return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers]};
 }

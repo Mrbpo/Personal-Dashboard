@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { kernelPool, kernelTransaction } from './db.ts';
+import type {DoclingProgress} from './docling-batches.ts';
 
 export type IngestionJob = { id: string; kind: string; source: string; scope: string; payload: unknown; attempts: number; lease_token: string };
 
@@ -9,7 +10,12 @@ export async function queueIngestionJob(kind: string, source: string, scope: str
     `INSERT INTO ingestion_jobs(id,kind,source,scope,payload,idempotency_key)
      VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(idempotency_key) DO UPDATE SET
      updated_at=now(),payload=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
-       THEN excluded.payload ELSE ingestion_jobs.payload END,
+       THEN excluded.payload || CASE WHEN ingestion_jobs.kind='docling_document'
+         AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['owner','id','sourceHash','formulaEnriched','formulaBackend','scanBackend']) AS settings(key)
+           WHERE (ingestion_jobs.payload->key) IS DISTINCT FROM (excluded.payload->key))
+         THEN jsonb_strip_nulls(jsonb_build_object('doclingProgress',ingestion_jobs.payload->'doclingProgress',
+           'doclingTaskId',ingestion_jobs.payload->'doclingTaskId')) ELSE '{}'::jsonb END
+       ELSE ingestion_jobs.payload END,
      state=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
        THEN 'queued' ELSE ingestion_jobs.state END,
      attempts=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
@@ -42,12 +48,13 @@ export async function hasRunningIngestionJob(kind:string):Promise<boolean>{
     `SELECT 1 FROM ingestion_jobs WHERE kind=$1 AND state='running' AND lease_until>now() LIMIT 1`,[kind])).rowCount===1;
 }
 
-export async function claimIngestionJob(): Promise<IngestionJob | null> {
+export async function claimIngestionJob(jobId?:string): Promise<IngestionJob | null> {
   return kernelTransaction(async client => {
     const result = await client.query<IngestionJob>(
       `SELECT id,kind,source,scope,payload,attempts FROM ingestion_jobs
-       WHERE (state='queued' AND available_at<=now()) OR (state='running' AND lease_until<now())
-       ORDER BY available_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`);
+       WHERE ((state='queued' AND available_at<=now()) OR (state='running' AND lease_until<now()))
+         AND ($1::text IS NULL OR id=$1)
+       ORDER BY available_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[jobId??null]);
     const job = result.rows[0];
     if (!job) return null;
     const token = randomUUID();
@@ -62,18 +69,40 @@ export async function claimIngestionJob(): Promise<IngestionJob | null> {
   });
 }
 
-export async function renewIngestionJob(id: string, token: string, stage: string): Promise<boolean> {
+export async function renewIngestionJob(id: string, token: string, stage?: string): Promise<boolean> {
   const result = await kernelPool().query(
-    `UPDATE ingestion_jobs SET stage=$3,lease_until=now()+interval '3 minutes',updated_at=now()
-     WHERE id=$1 AND lease_token=$2 AND state='running'`, [id, token, stage]);
+    `UPDATE ingestion_jobs SET stage=COALESCE($3,stage),lease_until=now()+interval '3 minutes',updated_at=now()
+     WHERE id=$1 AND lease_token=$2 AND state='running'`, [id, token, stage??null]);
   return result.rowCount === 1;
 }
 
 export async function rememberDoclingTask(id:string,token:string,taskId:string|null):Promise<void>{
   const saved=await kernelPool().query(`UPDATE ingestion_jobs SET payload=CASE WHEN $3::text IS NULL
     THEN payload-'doclingTaskId' ELSE jsonb_set(payload,'{doclingTaskId}',to_jsonb($3::text)) END,
-    stage='remote_parse',updated_at=now() WHERE id=$1 AND lease_token=$2 AND state='running'`,[id,token,taskId]);
+    stage='remote_parse',updated_at=now() WHERE id=$1 AND lease_token=$2 AND kind='docling_document' AND state='running' AND lease_until>now()`,[id,token,taskId]);
   if(saved.rowCount!==1)throw new Error('PDF ingestion lease lost');
+}
+
+export async function doclingJobPayload(id:string,token:string):Promise<Record<string,unknown>>{
+  const row=(await kernelPool().query<{payload:Record<string,unknown>}>(`SELECT payload FROM ingestion_jobs
+    WHERE id=$1 AND lease_token=$2 AND kind='docling_document' AND state='running' AND lease_until>now()`,[id,token])).rows[0];
+  if(!row)throw new Error('PDF ingestion lease lost');
+  return row.payload;
+}
+export async function rememberDoclingProgress(id:string,token:string,progress:DoclingProgress):Promise<void>{
+  const result=await kernelPool().query(`UPDATE ingestion_jobs SET payload=jsonb_set(payload,'{doclingProgress}',$3::jsonb),
+    stage=$4,updated_at=now() WHERE id=$1 AND lease_token=$2 AND kind='docling_document' AND state='running' AND lease_until>now()
+      AND payload->>'owner'=$5 AND payload->>'id'=$6
+      AND (payload->>'sourceHash' IS NULL OR payload->>'sourceHash'=$7)`,
+    [id,token,JSON.stringify(progress),`remote_parse:${progress.batches.filter(batch=>batch.resultHash).length}/${progress.batches.length}`,
+      progress.identity.owner,progress.identity.documentId,progress.identity.sourceHash]);
+  if(result.rowCount!==1)throw new Error('PDF ingestion lease or source identity lost');
+}
+export async function doclingStageBlobHashes():Promise<string[]>{
+  const rows=(await kernelPool().query<{hash:string}>(`SELECT batch->>'resultHash' hash FROM ingestion_jobs,
+    LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'doclingProgress'->'batches')='array'
+      THEN payload->'doclingProgress'->'batches' ELSE '[]'::jsonb END) batch WHERE kind='docling_document'`)).rows;
+  return rows.map(row=>row.hash).filter(hash=>typeof hash==='string'&&/^[a-f0-9]{64}$/.test(hash));
 }
 
 export async function finishIngestionJob(id: string, token: string, error?: string): Promise<void> {
