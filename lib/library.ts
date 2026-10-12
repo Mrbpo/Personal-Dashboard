@@ -173,14 +173,20 @@ type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:strin
 export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;parser_version?:string;retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;parser_version?:string;retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
+  let contentIdentifiers:string[]=[];
   if(!course){
     const codes=[...query.replace(/\\[a-z]+/giu,' ').toUpperCase().matchAll(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/g)]
       .map(match=>match[0].replace(/\s/g,''));
     if(codes.length){
       // Infer only actual enabled courses. Technical identifiers such as IEEE754
       // are searchable content, not evidence that the user chose a course.
-      const matches=(await kernel.listCourses()).filter(c=>c.enabled&&
+      const courses=(await kernel.listCourses()).filter(c=>c.enabled);
+      const matches=courses.filter(c=>
         codes.some(code=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code)));
+      // Unknown identifiers must occur in the retrieved content. They must not
+      // become invented course filters or be discarded as optional query words.
+      contentIdentifiers=codes.filter(code=>!courses.some(c=>
+        c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code)));
       if(matches.length===1)course=matches[0].id;
     }
   }
@@ -205,7 +211,8 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
     raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;
     raw=[...persistedRows,...raw];
     const rows=raw.map(row=>({...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
-    const scoped=path?rows.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):rows;
+    const identified=rows.filter(row=>contentIdentifiers.every(code=>containsEvery(`${row.name} ${row.body}`,librarySearchTokens(code))));
+    const scoped=path?identified.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):identified;
     const metadataMatches=scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name}`,words));
     const candidates=(options.metadataFirst!==false&&metadataMatches.length?metadataMatches:scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name} ${row.body}`,words)));
     const best=new Map<string,(typeof candidates)[number]&{score:number;match_reason:string}>();
@@ -259,7 +266,8 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
       evidence_id:row.evidence_id??previous?.evidence_id,page_number:row.page_number??previous?.page_number,
       parser_version:row.parser_version??previous?.parser_version});
   }
-  const rows=[...combined.values()];
+  const rows=[...combined.values()].filter(row=>contentIdentifiers.every(code=>
+    containsEvery(`${row.name} ${row.body}`,librarySearchTokens(code))));
   const candidateMs=performance.now()-candidateStarted;
   let vector:number[]|null=null;
   const embeddingStarted=performance.now();
