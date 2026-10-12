@@ -1,6 +1,6 @@
 import { searchLibrary } from './library.ts';
 import { listCourseSettings, searchCourseContent, type CourseSearchResult } from './repository.ts';
-import { asksForSyllabus, asksOnlyForPiazza } from './search-vocabulary.ts';
+import { asksForSyllabus } from './search-vocabulary.ts';
 
 type LibraryHit = Awaited<ReturnType<typeof searchLibrary>>[number];
 type CourseOption = { id: string; code: string; name: string; enabled: boolean };
@@ -16,9 +16,7 @@ function subjectCourse(course: CourseOption, subject: 'math' | 'stats' | 'chemis
 
 export function subjectArchiveCourses(question: string, courses: CourseOption[]): CourseOption[] | null {
   const subjects: Array<'math' | 'stats' | 'chemistry'> = [];
-  // A mention of mathematical notation inside another selected course is not
-  // a request to switch to a mathematics course.
-  if (/数学|微积分|\bmath(?:ematics)?\b(?!\s+(?:notation|symbol|formula|expression|operator))|\bcalculus\b/i.test(question)) subjects.push('math');
+  if (/数学|微积分|\bmath(?:ematics)?\b|\bcalculus\b/i.test(question)) subjects.push('math');
   if (/统计|\bstat(?:s|istics?)?\b/i.test(question)) subjects.push('stats');
   if (/化学|\bchem(?:istry)?\b/i.test(question)) subjects.push('chemistry');
   // A comparison mentioning two subjects must not silently select either one.
@@ -143,7 +141,7 @@ export async function searchArchiveForAnswer(owner: string, question: string, re
     timings.totalMs = performance.now() - started;
     return { sources: [] as CourseSearchResult[], inferredCourseId: null, courseSelection, timings };
   }
-  const piazzaOnly = asksOnlyForPiazza(question);
+  const piazzaOnly = /piazza/i.test(question);
   const [structuredResults, libraryResults] = await Promise.all([
     (async () => { const at = performance.now(); const result = await searchCourseContent(question, scope || undefined, scope ? limit : Math.max(limit * 3, 24)); timings.structuredMs += performance.now() - at; return result; })(),
     (async () => { const at = performance.now(); const result = piazzaOnly ? [] : await searchLibrary(owner, question, scope, false, { limit: 30, onTiming: recordLibrary }); timings.libraryMs += performance.now() - at; return result; })(),
