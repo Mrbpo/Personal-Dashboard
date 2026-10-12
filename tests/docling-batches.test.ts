@@ -89,6 +89,72 @@ test('validated batch blobs survive a later failure; retries reuse them and corr
  }finally{globalThis.fetch=original;}
 });
 
+for(const lostAt of ['poll','result'] as const){
+ test(`remote restart missing ${lostAt} task resumes one verified derived batch without replaying completed pages`,async()=>{
+  const {createDoclingProgress,convertDoclingBatches,requestDoclingResult}=await import('../lib/kernel/docling-batches.ts');
+  const scope={...identity,documentId:`restart-${lostAt}-${randomUUID()}`};
+  const saved=createDoclingProgress(scope);
+  for(const batch of saved.batches){
+   const prepared=await fakePrepare(batch.start,batch.end);
+   batch.inputHash=prepared.inputHash;batch.copyIndices=prepared.copyIndices;
+   if(batch.start===3){batch.taskId='lost-before-restart';continue;}
+   const bytes=Buffer.from(JSON.stringify({identity:{...scope,start:batch.start,end:batch.end,
+    inputHash:prepared.inputHash,copyIndices:prepared.copyIndices},result:result(1)}));
+   batch.resultHash=createHash('sha256').update(bytes).digest('hex');
+   writeFileSync(join(directory,batch.resultHash),bytes);
+  }
+  const completed=saved.batches.slice(0,2).map(batch=>({hash:batch.resultHash!,
+   bytes:readFileSync(join(directory,batch.resultHash!))}));
+  let progress=structuredClone(saved),preparedForm:FormData|undefined,replacementMissing=false;
+  const snapshots:typeof saved[]=[],submissions:number[]=[];
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(input,init)=>{
+   const url=String(input);
+   if(url.endsWith('/async')){
+    assert.equal(init?.body,preparedForm,'reuse the same form that passed derived input verification');
+    const form=init?.body as FormData;
+    assert.deepEqual(form.getAll('page_range'),['1','1']);
+    submissions.push(Number(form.get('test_original_start')));
+    return Response.json({task_id:'new-after-restart',task_status:'success'});
+   }
+   if(url.endsWith('/status/poll/lost-before-restart'))
+    return lostAt==='poll'?new Response(null,{status:404}):Response.json({task_status:'success'});
+   if(url.endsWith('/result/lost-before-restart'))return new Response(null,{status:404});
+   assert.equal(url,'http://docling.mock/v1/result/new-after-restart','only the resumed range may reach Docling');
+   return replacementMissing?new Response(null,{status:404}):Response.json(result(1));
+  };
+  const run=()=>convertDoclingBatches({identity:scope,progress,verifiedBlankPages:[],formulaEnriched:false,
+   endpoint:'http://docling.mock',headers:{},prepare:async(start,end)=>{
+    const prepared=await fakePrepare(start,end);if(start===3)preparedForm=prepared.form;return prepared;
+   },persist:async value=>{progress=structuredClone(value);snapshots.push(structuredClone(value));}});
+  try{
+   const parsed=await run();
+   assert.deepEqual(parsed.pages.map(page=>page.pageNumber),[1,2,3]);
+   assert.deepEqual(submissions,[3],'completed verified batches must never be submitted again');
+   assert.ok(snapshots.some(value=>!value.batches[2].taskId&&!value.batches[2].resultHash),'clear the lost ID before submitting');
+   assert.ok(snapshots.some(value=>value.batches[2].taskId==='new-after-restart'));
+   assert.ok(progress.batches[2].resultHash);
+   for(const [index,batch] of completed.entries()){
+    assert.equal(progress.batches[index].resultHash,batch.hash);
+    assert.deepEqual(readFileSync(join(directory,batch.hash)),batch.bytes);
+   }
+   // The replacement can also disappear (for example after OOM). Stop after
+   // that one submission; never recursively resubmit a newly created task.
+   progress=structuredClone(saved);replacementMissing=true;
+   await assert.rejects(run(),/Docling result failed \(404\)/);
+   assert.deepEqual(submissions,[3,3]);
+   assert.equal(progress.batches[2].taskId,undefined);
+   assert.equal(progress.batches[2].resultHash,undefined);
+   assert.deepEqual(progress.batches.slice(0,2).map(batch=>batch.resultHash),completed.map(batch=>batch.hash));
+   const cleared:(string|null)[]=[];
+   await assert.rejects(requestDoclingResult('http://docling.mock',{},undefined,'lost-before-restart',
+    async task=>{cleared.push(task);}),new RegExp(`Docling ${lostAt} failed \\(404\\)`));
+   assert.deepEqual(cleared,[null],'legacy task IDs without derived form only clear and fail');
+   assert.deepEqual(submissions,[3,3],'legacy recovery must not submit an entire document');
+  }finally{globalThis.fetch=originalFetch;}
+ });
+}
+
 test('incomplete batch results never cache and only original-verified blanks bypass requests',async()=>{
  const {convertDoclingBatches}=await import('../lib/kernel/docling-batches.ts');
  const original=globalThis.fetch;let progress:unknown,calls=0;

@@ -81,7 +81,15 @@ export async function requestDoclingResult(endpoint:string,headers:HeadersInit,f
     catch(error){if(++transient>8)throw error;continue;}
     if(response.status>=500&&++transient<=8)continue;
     transient=0;
-    if(!response.ok){if(response.status===404)await remember(null);throw new Error(`Docling poll failed (${response.status})`);}
+    if(!response.ok){
+      if(response.status===404){
+        await remember(null);
+        // Only an old resumed task can be replaced, using its already verified
+        // derived form. The fresh call has no taskId, so a second 404 must fail.
+        if(taskId&&form)return requestDoclingResult(endpoint,headers,form,undefined,remember);
+      }
+      throw new Error(`Docling poll failed (${response.status})`);
+    }
     state=(await response.json() as {task_status?:string}).task_status;
   }
   if(state!=='success'){
@@ -89,7 +97,13 @@ export async function requestDoclingResult(endpoint:string,headers:HeadersInit,f
     throw new Error(`Docling conversion ${state||'timed out'}`);
   }
   const response=await fetch(`${endpoint}/v1/result/${encodeURIComponent(task.task_id!)}`,{headers,signal:AbortSignal.timeout(30000)});
-  if(!response.ok){if(response.status===404)await remember(null);throw new Error(`Docling result failed (${response.status})`);}
+  if(!response.ok){
+    if(response.status===404){
+      await remember(null);
+      if(taskId&&form)return requestDoclingResult(endpoint,headers,form,undefined,remember);
+    }
+    throw new Error(`Docling result failed (${response.status})`);
+  }
   return await response.json() as Record<string,unknown>;
 }
 

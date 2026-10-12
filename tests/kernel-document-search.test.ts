@@ -81,3 +81,31 @@ test('a database interruption cannot publish half a PDF or its source evidence',
     await kernelPool().query('DROP FUNCTION fail_pdf_test_chunk()');
   }
 });
+
+test('equal capture times choose the same PDF identity in PostgreSQL and the library cache',async()=>{
+  await migrateKernel();
+  const lib=await import('../lib/library.ts');
+  const {database}=await import('../lib/database.ts');
+  const owner=`equal-time-${randomUUID()}`,originKey=`revision-${randomUUID()}`;
+  const ids=await Promise.all(['first','second'].map(label=>lib.saveDocument(owner,'','upload',originKey,
+    'Revision.pdf','application/pdf',Buffer.from(`%PDF-1.4 original ${label}`))));
+  const selected=[...ids].sort().at(-1)!;
+  const other=ids.find(id=>id!==selected)!;
+  const capturedAt='2026-01-01T12:00:00.000Z';
+  // Deliberately make SQLite insertion order disagree with the stable ID tie rule.
+  await database.prepare('UPDATE library_documents SET rowid=1000000 WHERE id=?').bind(other).run();
+  for(const id of ids){
+    await database.prepare("UPDATE library_documents SET created_at=?,status='ready' WHERE id=?").bind(capturedAt,id).run();
+    const row=await lib.getDocument(owner,id);
+    await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:row.name,hash:row.hash,mime:row.mime,
+      origin:row.origin,originKey:row.origin_key,createdAt:capturedAt},
+      [{pageNumber:1,locator:'第 1 页',text:'Quartz phase diagram searchable evidence.'}],{parserVersion:'equal-time-test',expectedPages:1});
+  }
+  const query='quartz phase diagram';
+  const core=await kernel.searchDocumentText(owner,query,{limit:5});
+  const compatible=await lib.searchLibrary(owner,query,'',false,{limit:5});
+  assert.deepEqual(core.map(hit=>hit.document_id),[selected]);
+  assert.deepEqual(compatible.map(hit=>hit.document_id),[selected]);
+  assert.equal(compatible[0].evidence_id,core[0].evidence_id);
+  assert.equal(compatible[0].page_number,1);
+});

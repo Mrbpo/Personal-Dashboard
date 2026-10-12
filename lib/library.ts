@@ -176,7 +176,7 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   if(!course){const code=query.replace(/\\[a-z]+/giu,' ').toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await kernel.listCourses()).filter(c=>c.enabled);course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
 
   const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(options.documentId?80:30,options.limit||8));
-  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} ${options.documentId?'AND d.id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0)`;
+  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} ${options.documentId?'AND d.id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)) AND newer.deleted=0)`;
   const scopeArgs=[owner,...(course?[course]:[]),...(options.documentId?[options.documentId]:[])];
   const fields='c.id,d.id document_id,c.body,c.locator,d.name,d.course_id,d.folder_path,d.origin,d.origin_key';
   const words=strict?librarySearchTokens(query):[...new Set([...activitySearchAliases(query),...librarySearchTokens(query)])];
