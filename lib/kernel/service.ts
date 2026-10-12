@@ -653,6 +653,9 @@ export class KernelService {
       const version=await sourceVersion(client,{id:source.id,source:'canvas',scope:source.courseId,
         externalId:`${source.sourceType}:${source.sourceId}`,courseId:source.courseId,sourceUrl:source.sourceUrl,
         contentHash:provenance==='legacy_import'?`legacy:${hash}`:hash,raw,acquiredAt,remoteUpdatedAt:source.updatedAt});
+      // Historical reference backfill records provenance for a later reviewed merge.
+      // It must not run normal identity resolution or replace either legacy task's facts.
+      if (expectedExistingPlanner) return;
       const deterministic=['assignment','quiz'].includes(source.sourceType) || Boolean(source.dueAt);
       const aiActions=analysis?.actions||[];
       const baseAction={title:source.title,action:`完成并提交 ${source.title}`,requirements:[],

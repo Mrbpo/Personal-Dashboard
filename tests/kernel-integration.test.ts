@@ -44,6 +44,11 @@ test('historical planner plan and apply preserve legacy source history and dupli
   const priorFacts=(await kernelPool().query<{fact_id:string;version:number;value:unknown}>(
     `SELECT fv.fact_id,fv.version,fv.value FROM fact_versions fv JOIN facts f ON f.id=fv.fact_id
      WHERE f.entity_id=$1 ORDER BY fv.fact_id,fv.version`,[plannerEntity])).rows;
+  const priorTasks=await kernel.taskRows(courseId,true);
+  const directEntity=priorTasks.find(task=>task.source_type==='assignment')!.entity_id;
+  const priorDirectFacts=(await kernelPool().query<{fact_id:string;version:number;value:unknown}>(
+    `SELECT fv.fact_id,fv.version,fv.value FROM fact_versions fv JOIN facts f ON f.id=fv.fact_id
+     WHERE f.entity_id=$1 ORDER BY fv.fact_id,fv.version`,[directEntity])).rows;
   const original=globalThis.fetch;
   globalThis.fetch=(async()=>Response.json([plannerResponse(courseId,day)])) as typeof fetch;
   try{
@@ -54,6 +59,10 @@ test('historical planner plan and apply preserve legacy source history and dupli
     assert.equal(first.completed.length,1);
     assert.equal(first.review.length,0);
     assert.ok(first.reconciliation.verified.some(item=>item.plannerTaskId===`${sourceItemId}:0`));
+    assert.deepEqual(await kernel.taskRows(courseId,true),priorTasks);
+    assert.deepEqual((await kernelPool().query<{fact_id:string;version:number;value:unknown}>(
+      `SELECT fv.fact_id,fv.version,fv.value FROM fact_versions fv JOIN facts f ON f.id=fv.fact_id
+       WHERE f.entity_id=$1 ORDER BY fv.fact_id,fv.version`,[directEntity])).rows,priorDirectFacts);
     const versions=(await kernelPool().query<{id:string;raw_value:Record<string,unknown>}>(
       'SELECT id,raw_value FROM source_item_versions WHERE source_item_id=$1',[sourceItemId])).rows;
     assert.equal(versions.length,prior.length+1);
