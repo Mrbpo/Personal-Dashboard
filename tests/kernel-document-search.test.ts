@@ -109,3 +109,23 @@ test('equal capture times choose the same PDF identity in PostgreSQL and the lib
   assert.equal(compatible[0].evidence_id,core[0].evidence_id);
   assert.equal(compatible[0].page_number,1);
 });
+
+test('technical identifiers remain searchable without an invented course filter',async()=>{
+  await migrateKernel();
+  const lib=await import('../lib/library.ts');
+  const {database}=await import('../lib/database.ts');
+  const tag=randomUUID(),owner=`identifier-${tag}`,courseId=`identifier-course-${tag}`;
+  await kernel.upsertCourse({id:courseId,name:'Computer systems',course_code:'SCI123'});
+  const id=await lib.saveDocument(owner,courseId,'upload','numbers.pdf','Numbers.pdf',
+    'application/pdf',Buffer.from('%PDF-1.4 test scientific identifiers'));
+  const row=await lib.getDocument(owner,id);
+  await kernel.ingestParsedDocument({id,ownerId:owner,courseId,name:row.name,hash:row.hash,mime:row.mime,
+    origin:row.origin,originKey:row.origin_key},
+    [{pageNumber:1,locator:'第 1 页',text:'IEEE754 explains floating point rounding and representation.'}],
+    {parserVersion:'identifier-test',expectedPages:1});
+  await database.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+  assert.equal((await lib.searchLibrary(owner,'IEEE754 rounding','',false))[0].document_id,id);
+  assert.equal((await lib.searchLibrary(owner,'SCI123 IEEE754 rounding','',false))[0].document_id,id);
+  assert.deepEqual(await lib.searchLibrary(owner,'IEEE754 rounding','unknown-course',false),[]);
+  assert.deepEqual(await lib.searchLibrary('other-'+owner,'IEEE754 rounding','',false),[]);
+});
