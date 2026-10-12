@@ -1,7 +1,7 @@
 import type { CanvasSource, ExtractedAnalysis, LearningTask } from "./domain.ts";
 import { classifyCanvasStatus, priorityScore, statusLabels, urgencyForStatus, urgencyForTask } from "./task-rules.ts";
 import { database, searchIndexAvailable } from "./database.ts";
-import { activitySearchAliases, asksOnlyForPiazza, ftsMatchTerms, requestedCourseCodes } from "./search-vocabulary.ts";
+import { activitySearchAliases, ftsMatchTerms } from "./search-vocabulary.ts";
 import { kernel } from './kernel/service.ts';
 
 type D1Row = Record<string, any>;
@@ -386,15 +386,13 @@ function searchTerms(question: string) {
 }
 
 export async function searchCourseContent(question: string, courseId?: string, limit = 8): Promise<CourseSearchResult[]> {
-  const piazzaOnly = asksOnlyForPiazza(question);
+  const requestedCodes = question.toUpperCase().match(/[A-Z]{2,}\s*\d{2,}(?:H\d)?/g)?.map((code) => code.replace(/\s/g, "").replace(/H\d$/, "")) || [];
+  const piazzaOnly = /piazza/i.test(question);
   const summary = /总结|汇总|概览|概括|summari[sz]|summary|overview/i.test(question);
   const terms = searchTerms(question);
   if (!terms.length) return [];
   const db = getDatabase();
   const courses = (await kernel.listCourses()).filter(row=>row.enabled);
-  // Ordinary "page 413" is not a course code; a deliberately typed unknown
-  // uppercase code should still produce no matches rather than cross courses.
-  const requestedCodes = requestedCourseCodes(question, courses.map(row => row.code));
   const courseMap = new Map(courses.map(row=>[row.id,row]));
   const scopedCourseId = courseId ? courses.find(row=>row.id===courseId||row.code===courseId)?.id ?? '__unknown__' : '';
   const indexed = await searchIndexAvailable();
@@ -455,7 +453,6 @@ export async function searchCourseContent(question: string, courseId?: string, l
     const bodyText = (body + " " + analysis).toLocaleLowerCase();
     const answerText = answer.toLocaleLowerCase();
     let score = 0;
-    if (titleText.trim() === question.toLocaleLowerCase().trim()) score += 1000;
     for (const term of terms) {
       if (titleText.includes(term)) score += 9;
       if (bodyText.includes(term)) score += 2;

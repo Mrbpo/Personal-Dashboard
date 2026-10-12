@@ -56,7 +56,6 @@ export default async function KernelPage() {
     <header className={styles.header}>
       <h1>Kernel</h1>
       <p>已确认资料与待核实候选分开显示</p>
-      <Link href="/kernel/ask">打开内核问答</Link>
     </header>
 
     <section aria-labelledby="courses-heading">
