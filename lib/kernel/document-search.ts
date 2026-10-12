@@ -139,6 +139,11 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
   const hits=rows.rows.map(row=>({...row,score:Number(row.score),
     lexical_support:row.lexical_support===undefined?undefined:Number(row.lexical_support),retrieval_mode:'keyword' as const}));
   if(semantic&&hits.length){
+    // A model request can outlive the parsed version used for its candidates.
+    // Re-read current evidence once, retaining the scope and making no AI calls.
+    const keywordFallback=async(reason:string):Promise<DocumentTextHit[]>=>
+      (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false}))
+        .map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,degraded_reason:reason}));
     let reordered:DocumentTextHit[]=hits,semanticFailure:string|undefined;
     try{
       reordered=await rerankDocumentPages(pool,owner,query,hits,aiRerank?80:Math.min(limit,80));
@@ -155,13 +160,11 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
         return fuseLexicallySupportedAIRanks(hits,ranked,limit)
           .map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'ai-rerank' as const,degraded_reason:semanticFailure}));
       }catch(error){
-        return hits.slice(0,limit).map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,
-          degraded_reason:[semanticFailure,`ai:${rankingFailure(error)}`].filter(Boolean).join(';')}));
+        return keywordFallback([semanticFailure,`ai:${rankingFailure(error)}`].filter(Boolean).join(';'));
       }
     }
     if(semanticFailure){
-      return hits.slice(0,limit).map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,
-        degraded_reason:semanticFailure}));
+      return keywordFallback(semanticFailure);
     }
     return reordered.map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
   }
