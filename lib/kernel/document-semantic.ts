@@ -63,7 +63,7 @@ export function fuseDocumentPageRanks(hits:DocumentTextHit[],similarities:number
   .map(({hit,score})=>({...hit,score}));
 }
 
-async function embed(inputs:string[],deadline:number):Promise<number[][]>{
+export async function embedDocumentInputs(inputs:string[],deadline:number):Promise<number[][]>{
  if(!serviceValue('OPENAI_API_KEY'))throw new Error('PDF semantic search requires an OpenAI API key');
  const remaining=deadline-Date.now();
  if(remaining<=0)throw new Error('PDF semantic search time limit reached');
@@ -74,7 +74,7 @@ async function embed(inputs:string[],deadline:number):Promise<number[][]>{
  return decodeDocumentEmbeddingBatch(await response.json(),inputs.length);
 }
 
-async function queryVector(pool:Pool,owner:string,input:string,deadline:number):Promise<number[]>{
+export async function documentQueryVector(pool:Pool,owner:string,input:string,deadline:number):Promise<number[]>{
  let flights=queryFlights.get(pool);
  if(!flights){flights=new Map();queryFlights.set(pool,flights);}
  const queryHash=hash(input),key=JSON.stringify([owner,DOCUMENT_EMBEDDING_MODEL,queryHash]);
@@ -84,7 +84,7 @@ async function queryVector(pool:Pool,owner:string,input:string,deadline:number):
    SELECT embedding FROM document_query_embeddings WHERE owner_id=$1 AND query_hash=$2 AND model=$3`,
    [owner,queryHash,DOCUMENT_EMBEDDING_MODEL])).rows[0];
   if(cached)return vector(cached.embedding);
-  const [embedding]=await embed([input],deadline);
+  const [embedding]=await embedDocumentInputs([input],deadline);
   await pool.query(`/* semantic:query-save */ INSERT INTO document_query_embeddings(owner_id,query_hash,model,embedding)
    VALUES ($1,$2,$3,$4::double precision[]) ON CONFLICT(owner_id,query_hash,model) DO NOTHING`,
    [owner,queryHash,DOCUMENT_EMBEDDING_MODEL,embedding]);
@@ -165,9 +165,9 @@ export async function rerankDocumentPages(pool:Pool,owner:string,query:string,hi
    JSON.stringify(pages.map(({version_id,page_number,input_hash})=>({version_id,page_number,input_hash})))])).rows;
  const byVersionPage=new Map(cached.map(page=>[pageKey(page.version_id,page.page_number),vector(page.embedding)]));
  const missing=pages.filter(page=>!byVersionPage.has(pageKey(page.version_id,page.page_number)));
- const queryEmbedding=await queryVector(pool,owner,input,deadline);
+ const queryEmbedding=await documentQueryVector(pool,owner,input,deadline);
  for(let start=0;start<missing.length;start+=DOCUMENT_EMBEDDING_BATCH_SIZE){
-  const batch=missing.slice(start,start+DOCUMENT_EMBEDDING_BATCH_SIZE),embeddings=await embed(batch.map(page=>page.input),deadline);
+  const batch=missing.slice(start,start+DOCUMENT_EMBEDDING_BATCH_SIZE),embeddings=await embedDocumentInputs(batch.map(page=>page.input),deadline);
   await savePageBatch(pool,owner,batch,embeddings);
   batch.forEach((page,index)=>byVersionPage.set(pageKey(page.version_id,page.page_number),embeddings[index]));
  }

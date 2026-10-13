@@ -5,7 +5,8 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import type {Pool} from 'pg';
 import type {DocumentTextHit} from '../lib/kernel/document-search.ts';
-import {rerankDocumentPagesWithAI,validateDocumentPageOrder} from '../lib/kernel/document-rerank.ts';
+import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,validateDocumentPageOrder,validateDocumentPageSelection,
+ DOCUMENT_RERANK_CANDIDATE_LIMIT,DOCUMENT_RERANK_SELECTION_PROMPT_VERSION} from '../lib/kernel/document-rerank.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'document-rerank-tests-'));
 process.env.DATABASE_URL=':memory:';process.env.SERVICE_VAULT_DIR=directory;
@@ -158,7 +159,7 @@ test('a parsed-version switch during the API request rolls back instead of retur
  }finally{globalThis.fetch=original;}
 });
 
-test('missing credentials, zero budget and more than 20 candidates cannot make an API call',async()=>{
+test('missing credentials, zero budget and excess candidates cannot make an API call',async()=>{
  const fixture=new Fixture(),hits=fixture.hits(),original=globalThis.fetch;
  const priorKey=process.env.OPENAI_API_KEY,priorBudget=process.env.AI_MONTHLY_BUDGET;
  let calls=0;globalThis.fetch=async()=>{calls++;throw new Error('No network permitted');};
@@ -168,11 +169,96 @@ test('missing credentials, zero budget and more than 20 candidates cannot make a
   process.env.OPENAI_API_KEY='dummy-never-sent';process.env.AI_MONTHLY_BUDGET='0';
   await assert.rejects(rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,2),/预算或每日请求上限/);
   const reads=fixture.reads;
-  await assert.rejects(rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',Array(21).fill(hits[0]),2),/scope or limit/);
+  await assert.rejects(rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',Array(DOCUMENT_RERANK_CANDIDATE_LIMIT+1).fill(hits[0]),2),/scope or limit/);
   assert.equal(reads,fixture.reads);assert.equal(calls,0);assert.equal(fixture.cache.size,0);
  }finally{
   globalThis.fetch=original;
   if(priorKey===undefined)delete process.env.OPENAI_API_KEY;else process.env.OPENAI_API_KEY=priorKey;
   if(priorBudget===undefined)delete process.env.AI_MONTHLY_BUDGET;else process.env.AI_MONTHLY_BUDGET=priorBudget;
  }
+});
+
+test('the configured full candidate limit accepts a complete validated order',async()=>{
+ const fixture=new Fixture(),seed=fixture.hits()[0],original=globalThis.fetch;
+ fixture.pages=[];
+ const hits=Array.from({length:DOCUMENT_RERANK_CANDIDATE_LIMIT},(_,index)=>{
+  const document_id='expanded-'+index,source_version_id='source-'+index;
+  fixture.pages.push({owner:'alice',document_id,source_version_id,version_id:'version-'+index,
+    page_number:1,body:'Current evidence about motion '+index});
+  return {...seed,id:document_id,document_id,source_version_id,evidence_id:'evidence-'+index};
+ });
+ globalThis.fetch=async(_input,init)=>{
+  const request=JSON.parse(String(init?.body)),pages=JSON.parse(request.input[1].content).pages;
+  assert.equal(pages.length,DOCUMENT_RERANK_CANDIDATE_LIMIT);
+  return Response.json({output_text:JSON.stringify({orderedIds:pages.map((page:{id:string})=>page.id).reverse()}),
+    usage:{input_tokens:100,output_tokens:50}});
+ };
+ try{
+  const result=await rerankDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,DOCUMENT_RERANK_CANDIDATE_LIMIT);
+  assert.equal(result.length,DOCUMENT_RERANK_CANDIDATE_LIMIT);
+  assert.equal(result[0].evidence_id,hits.at(-1)!.evidence_id);
+ }finally{globalThis.fetch=original;}
+});
+
+test('top-k selection validates five unique identities from all forty candidates and versions its cache',async()=>{
+ const fixture=new Fixture(),seed=fixture.hits()[0],original=globalThis.fetch;
+ fixture.pages=[];let calls=0;
+ const hits=Array.from({length:40},(_,index)=>{
+  const document_id='selection-'+index,source_version_id='source-'+index;
+  fixture.pages.push({owner:'alice',document_id,source_version_id,version_id:'version-'+index,
+   page_number:1,body:'Current learning material '+index});
+  return {...seed,id:document_id,document_id,source_version_id,evidence_id:'evidence-'+index};
+ });
+ globalThis.fetch=async(_input,init)=>{
+  calls++;
+  const request=JSON.parse(String(init?.body)),pages=JSON.parse(request.input[1].content).pages,
+   schema=request.text.format.schema.properties.orderedIds;
+  assert.equal(pages.length,40,'selection must not shrink the candidate input pool');
+  assert.equal(request.max_output_tokens,4000,'reasoning allowance and budget policy stay bounded');
+  assert.equal(schema.minItems,schema.maxItems);
+  assert.ok([1,5].includes(schema.minItems));
+  const order=['p39','p31','p27','p9','p0'].slice(0,schema.minItems);
+  return Response.json({output_text:JSON.stringify({orderedIds:order})});
+ };
+ try{
+  const selected=await selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,5);
+  assert.deepEqual(selected.map(hit=>hit.document_id),[39,31,27,9,0].map(index=>'selection-'+index));
+  assert.equal(selected[0].body,hits[39].body);assert.equal(selected[0].evidence_id,hits[39].evidence_id);
+  assert.equal(selected.length,5);assert.equal(fixture.cache.size,1);assert.equal(calls,1);
+  assert.ok([...fixture.cache.keys()][0].includes(DOCUMENT_RERANK_SELECTION_PROMPT_VERSION));
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,5);
+  assert.equal(calls,1,'the same selected top-k is reused without paid requests');
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,1);
+  assert.equal(calls,2,'requested selection size participates in the cache identity');
+  await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'bob','motion',hits,5),/owner scope/);
+  assert.equal(calls,2);
+  fixture.pages[0].version_id='replacement-selection-version';
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,5);
+  assert.equal(calls,3,'reparsed candidate content invalidates selection artifacts');
+ }finally{globalThis.fetch=original;}
+});
+
+test('top-k selection rejects duplicates, omissions, extras and foreign identities without inventing an unvalidated tail',async()=>{
+ const identities=Array.from({length:40},(_,index)=>'p'+index);
+ assert.deepEqual(validateDocumentPageSelection({orderedIds:['p39','p2','p11','p3','p8']},identities,5),['p39','p2','p11','p3','p8']);
+ for(const order of [['p0','p0','p1','p2','p3'],['p0','p1','p2','p3'],['p0','p1','p2','p3','p4','p5'],
+  ['p0','p1','p2','p3','foreign']])assert.throws(()=>validateDocumentPageSelection({orderedIds:order},identities,5));
+ const fixture=new Fixture(),hits=fixture.hits(),original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({orderedIds:['p0','p0']})});};
+ try{
+  await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,2));
+  assert.equal(calls,2,'invalid selections permit one bounded repair only');assert.equal(fixture.cache.size,0);
+ }finally{globalThis.fetch=original;}
+});
+
+test('top-k selection does not publish when the parsed version changes during its request',async()=>{
+ const fixture=new Fixture(),hits=fixture.hits(),original=globalThis.fetch;
+ globalThis.fetch=async()=>{
+  fixture.pages[0].version_id='replacement-during-selection';
+  return Response.json({output_text:JSON.stringify({orderedIds:['p1']})});
+ };
+ try{
+  await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,1),/version changed/i);
+  assert.equal(fixture.cache.size,0);assert.equal(fixture.rollbacks,1);
+ }finally{globalThis.fetch=original;}
 });

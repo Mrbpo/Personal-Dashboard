@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
-import {rerankDocumentPages,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
-import {rerankDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
+import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
+import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
+import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks} from './document-vector.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -87,7 +88,7 @@ function rankingFailure(error:unknown):string{
 }
 
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:{
-  courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;
+  courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;
 }={}):Promise<DocumentTextHit[]> {
   const normalized=documentSearchText(query).slice(0,4000);
   const formulaQuery=/[\\^_=∫∑√]/u.test(query);
@@ -95,8 +96,20 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     (formulaQuery||!queryStopWords.has(word))))].slice(0,40);
   if(!words.length)return [];
   const limit=Math.max(1,Math.min(240,options.limit||30));
-  const aiRerank=Boolean(options.aiRerank&&!options.strict);
-  const semantic=Boolean((options.semantic||aiRerank)&&!options.strict);
+  const aiRerank=Boolean((options.aiRerank??(process.env.KERNEL_DOCUMENT_RERANK==='true'))&&!options.strict);
+  const hybrid=Boolean((options.hybrid??(process.env.KERNEL_DOCUMENT_HYBRID==='true'))&&!options.strict);
+  const semantic=Boolean((options.semantic||aiRerank||hybrid)&&!options.strict);
+  // Dense recall and keyword scoring are independent. Start the bounded query
+  // embedding concurrently; document embeddings are prepared by the worker.
+  const dense=hybrid?(async()=>{
+    const scope={courseId:options.courseId,documentId:options.documentId};
+    const coverage=await documentVectorCoverage(pool,owner,scope);
+    if(!coverage.complete||coverage.totalPages===0)return {hits:[],coverage};
+    const input=Array.from(query.normalize('NFKC').replace(/\s+/gu,' ').trim()).slice(0,4000).join('');
+    const embedding=await documentQueryVector(pool,owner,input,Date.now()+30000);
+    return searchDocumentVectorText(pool,owner,embedding,{courseId:options.courseId,
+      documentId:options.documentId,limit:DOCUMENT_SEMANTIC_CANDIDATE_LIMIT});
+  })().then(value=>({value,error:undefined}),error=>({value:undefined,error})):null;
   const args:unknown[]=[owner,options.strict?normalized:words.join(' '),words.map(word=>`"${word}"`).join(' OR '),semantic?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:limit,words];
   const course=options.courseId?`AND d.course_id=$${args.push(options.courseId)}`:'';
   const document=options.documentId?`AND d.id=$${args.push(options.documentId)}`:'';
@@ -138,25 +151,34 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     ORDER BY score DESC,d.id,c.position LIMIT $4`,args);
   const hits=rows.rows.map(row=>({...row,score:Number(row.score),
     lexical_support:row.lexical_support===undefined?undefined:Number(row.lexical_support),retrieval_mode:'keyword' as const}));
-  if(semantic&&hits.length){
+  if(semantic&&(hits.length||hybrid)){
     // A model request can outlive the parsed version used for its candidates.
     // Re-read current evidence once, retaining the scope and making no AI calls.
     const keywordFallback=async(reason:string):Promise<DocumentTextHit[]>=>
-      (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false}))
+      (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false,hybrid:false}))
         .map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,degraded_reason:reason}));
     let reordered:DocumentTextHit[]=hits,semanticFailure:string|undefined;
-    try{
-      reordered=await rerankDocumentPages(pool,owner,query,hits,aiRerank?80:Math.min(limit,80));
-    }catch(error){semanticFailure=`semantic:${rankingFailure(error)}`;}
+    if(dense){
+      const result=await dense;
+      if(result.error)semanticFailure=`semantic:${rankingFailure(result.error)}`;
+      else if(!result.value?.coverage.complete)semanticFailure='semantic:index-incomplete';
+      else try{reordered=fuseIndependentDocumentRanks(hits,result.value.hits,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
+      catch(error){semanticFailure=`semantic:${rankingFailure(error)}`;}
+    }else{
+      try{
+        reordered=await rerankDocumentPages(pool,owner,query,hits,aiRerank?80:Math.min(limit,80));
+      }catch(error){semanticFailure=`semantic:${rankingFailure(error)}`;}
+    }
     if(aiRerank){
       try{
         const candidates=new Map<string,DocumentTextHit>();
-        for(let index=0;index<hits.length&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT;index++){
-          for(const hit of [hits[index],reordered[index]]){
+        for(let index=0;index<Math.max(hits.length,reordered.length)&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT;index++){
+          for(const hit of hybrid?[reordered[index]]:[hits[index],reordered[index]]){
             if(hit&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT)candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
           }
         }
-        const ranked=await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size);
+        const ranked=hybrid?await selectDocumentPagesWithAI(pool,owner,query,[...candidates.values()],Math.min(5,limit,candidates.size)):
+          await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size);
         return fuseLexicallySupportedAIRanks(hits,ranked,limit)
           .map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'ai-rerank' as const,degraded_reason:semanticFailure}));
       }catch(error){
@@ -166,7 +188,21 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     if(semanticFailure){
       return keywordFallback(semanticFailure);
     }
-    return reordered.map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
+    if(hybrid&&reordered.length){
+      const current=await pool.query(`WITH requested AS (SELECT * FROM jsonb_to_recordset($2::jsonb)
+        AS r(document_id text,page_number integer,source_version_id text,evidence_id text))
+        SELECT count(*) n FROM requested r JOIN document_texts d ON d.id=r.document_id
+          AND d.owner_id=$1 AND d.hidden=false
+        JOIN document_text_versions v ON v.id=d.current_version_id AND v.source_version_id=r.source_version_id
+        JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=r.page_number AND p.evidence_id=r.evidence_id
+        WHERE NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
+          AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
+          AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))`,
+        [owner,JSON.stringify(reordered.map(hit=>({document_id:hit.document_id,page_number:hit.page_number,
+          source_version_id:hit.source_version_id,evidence_id:hit.evidence_id})))]);
+      if(Number(current.rows[0].n)!==reordered.length)return keywordFallback('semantic:stale-version');
+    }
+    return reordered.slice(0,limit).map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
   }
   return hits.slice(0,limit);
 }
