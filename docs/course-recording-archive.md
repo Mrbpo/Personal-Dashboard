@@ -4,7 +4,7 @@
 
 这是独立的本地命令行工具，不改 UI，不在服务器安装新服务。首轮必须先用真实课程验证登录、课程频道分页及双流关系；代码和测试不等于已归档所有课程。依赖 PDF PR #52 的原文、证据及全文检索基础，并在其最新迁移 007 后增加 008。
 
-默认只输出不含凭据的清单，**不下载视频、不启动语音模型**。浏览器是独立可见 Edge 临时会话，由用户输入学校登录信息并完成 Duo。脚本只接收正常授权后 Quercus/Kaltura 请求里的临时 KS；不接收密码、不跳过 MFA、不读用户原浏览器资料、不输出 KS/签名播放地址。
+默认只输出不含凭据的清单，**不下载视频、不读取字幕、不启动语音模型**。浏览器是独立可见 Edge 临时会话，由用户输入学校登录信息并完成 Duo。脚本只接收正常授权后 Quercus/Kaltura 请求里的临时 KS；不接收密码、不跳过 MFA、不读用户原浏览器资料、不输出 KS/签名播放地址。
 
 示例课程入口：`https://q.utoronto.ca/courses/440904/external_tools/8084`。已观察到学校媒体域 `kaltura-quercus-prod.utoronto.ca`，必须显式加入允许范围。
 
@@ -48,6 +48,8 @@ python scripts/course-video/archive.py --course-url COURSE_URL `
 ```
 
 每份媒体目录包含原文件和字幕（SRT/VTT/TTML），manifest 保存 SHA-256、大小及字幕语言。yt-dlp 使用 `.part` 继续下载，成功后才写 `archived`；重跑对现有文件核验 SHA，损坏文件不能当成已完成。更新版本放在单独目录，旧字幕即使被平台原位修改也保留原字节及历史清单。
+
+用户当前验收顺序是 **440904 全部录像与两路视角 → 其他科目读取 → 字幕**。因此普通 `--download` 只下载视频；只有日后显式指定 `--with-captions` 或 `--subtitles-only` 才读取/下载平台字幕。为了先核对清单再下载又避免两个进程各登录一次，首次可使用 `--download --pause-after-inventory`：完成清单后同一可见浏览器保持登录，管理员读 manifest 核对后在控制台按 Enter 开始视频归档。等待过久仍可能由学校强制过期，需要正常重新授权。
 
 缺字幕时可以额外安装 `requirements-asr.txt` 并调用 `transcribe.py VIDEO --model-path EXISTING_LOCAL_MODEL --output caption.vtt --threads 4`。使用本地 faster-whisper CPU int8、单 worker，不自动下载模型、不调付费 API、不自动翻译。原语音字幕的质量必须实际验收，不能等同于官方字幕。此次不开展全课程 ASR。模型恢复为整份重做，下载断点与 ASR 断点是不同能力。
 

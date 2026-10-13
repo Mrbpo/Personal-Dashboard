@@ -177,7 +177,7 @@ def kaltura_api(context, session: dict, service: str, action: str, **parameters)
     return result
 
 
-def inventory_entry(context, session: dict) -> tuple[dict, dict]:
+def inventory_entry(context, session: dict, include_captions: bool = False) -> tuple[dict, dict]:
     info = kaltura_api(context, session, "baseentry", "get", entryId=session["entryId"])
     if not isinstance(info, dict) or info.get("id") != session["entryId"]:
         raise RuntimeError("media_identity_mismatch")
@@ -188,7 +188,7 @@ def inventory_entry(context, session: dict) -> tuple[dict, dict]:
         raise RuntimeError("flavor_identity_mismatch")
     captions = []
     page = 1
-    while True:
+    while include_captions:
         batch = kaltura_api(context, session, "caption_captionasset", "list", **{
             "filter:entryIdEqual": session["entryId"], "pager:pageSize": "100", "pager:pageIndex": str(page)})
         objects = batch.get("objects", [])
@@ -285,14 +285,14 @@ def verified_files(root: Path, record: dict) -> bool:
     return bool(files)
 
 
-def archive_entry(context, session: dict, metadata: dict, private: dict, root: Path, subtitles_only: bool) -> list[dict]:
+def archive_entry(context, session: dict, metadata: dict, private: dict, root: Path, subtitles_only: bool, include_captions: bool = False) -> list[dict]:
     revision = str(metadata.get("updatedAt") or metadata.get("publishedAt") or "unknown")
     if not re.fullmatch(r"[0-9]+|unknown", revision):
         raise RuntimeError("invalid_media_revision")
     directory = root / session["courseId"] / session["entryId"] / ("version-" + revision)
     directory.mkdir(parents=True, exist_ok=True)
     files = []
-    for caption in private["captions"]:
+    for caption in private["captions"] if include_captions else []:
         if caption.get("status") != 2:
             continue
         extension = {1: "srt", 2: "ttml", 3: "vtt"}.get(caption.get("format"), "ttml")
@@ -423,6 +423,8 @@ def main():
     parser.add_argument("--media-host", action="append", default=[], help="Explicit university Kaltura custom hostname, if applicable")
     parser.add_argument("--download", action="store_true", help="Explicitly archive discovered media; default is metadata only")
     parser.add_argument("--subtitles-only", action="store_true")
+    parser.add_argument("--with-captions", action="store_true", help="Opt in to platform subtitle discovery/download after video acceptance")
+    parser.add_argument("--pause-after-inventory", action="store_true", help="With --download, keep this login alive for an operator to review the manifest before continuing")
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--settle-ms", type=int, default=2500)
     parser.add_argument("--limit", type=int, default=0, help="Bound first download trial; zero means all discovered entries")
@@ -435,6 +437,8 @@ def main():
         parser.error("Provide HTTPS Canvas course URLs from one instance")
     if args.max_pages < 1 or args.settle_ms < 0 or args.limit < 0 or args.login_timeout < 1:
         parser.error("Invalid limits")
+    if args.pause_after_inventory and not args.download:
+        parser.error("--pause-after-inventory requires --download")
     root = args.output.resolve()
     profile = args.profile.resolve() if args.profile else None
     if profile and (profile == root or root in profile.parents or profile in root.parents):
@@ -532,27 +536,33 @@ def main():
                     complete = False
                     manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {"state": "unavailable"}
             processed = 0
+            download_plans = []
             for key, observed in list(sessions.entries.items()):
                 session = sessions.usable(observed)
                 sessions.current_course = session["courseId"]
                 sessions.current_page = session["sourceUrl"]
                 previous = manifest["entries"].get(key, {})
                 try:
-                    public, private = inventory_entry(context, session)
+                    include_captions = args.with_captions or args.subtitles_only
+                    public, private = inventory_entry(context, session, include_captions)
+                    if not include_captions:
+                        public["captions"] = previous.get("captions", [])
                     public["history"] = previous.get("history", [])
                     if previous.get("files") and (public["updatedAt"] != previous.get("updatedAt") or public["captions"] != previous.get("captions")):
                         public["history"].append({key: previous.get(key) for key in ("updatedAt", "captions", "files", "archivedAt")})
                     public["files"] = previous.get("files", [])
                     unchanged = public["updatedAt"] == previous.get("updatedAt") and public["captions"] == previous.get("captions")
                     has_video = any(item.get("kind") == "video" for item in public["files"])
-                    if args.download and (not args.limit or processed < args.limit):
+                    if args.pause_after_inventory:
+                        download_plans.append((key, session, public, private))
+                    if args.download and not args.pause_after_inventory and (not args.limit or processed < args.limit):
                         if unchanged and previous.get("state") in ("archived", "subtitles_archived") and verified_files(root, previous) and (args.subtitles_only or has_video):
                             public["state"] = "archived"
                         else:
                             public["state"] = "downloading"
                             manifest["entries"][key] = public
                             atomic_json(path, manifest)
-                            public["files"] = archive_entry(context, session, public, private, root, args.subtitles_only)
+                            public["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, include_captions)
                             public["state"] = "archived" if not args.subtitles_only else "subtitles_archived"
                             public["archivedAt"] = int(time.time())
                         processed += 1
@@ -581,6 +591,26 @@ def main():
             # missing until a platform-specific total-count check is verified.
             atomic_json(path, manifest)
             estimated = sum(max([fmt.get("filesize_approx", 0) for fmt in record.get("formats", [])] or [0]) for record in manifest["entries"].values())
+            if args.pause_after_inventory:
+                print(json.dumps({"state": "inventory_ready", "entries": len(download_plans), "estimatedMaximumBytes": estimated,
+                                  "freeLocalBytes": shutil.disk_usage(root).free, "manifest": str(path)}, ensure_ascii=False), flush=True)
+                input("Review the saved inventory; press Enter to continue downloads in this same login, or Ctrl+C to stop. ")
+                for index, (key, session, public, private) in enumerate(download_plans):
+                    if args.limit and index >= args.limit:
+                        break
+                    record = manifest["entries"][key]
+                    if record.get("state") == "archived" and verified_files(root, record):
+                        continue
+                    record["state"] = "downloading"
+                    atomic_json(path, manifest)
+                    try:
+                        record["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, args.with_captions or args.subtitles_only)
+                        record["state"] = "subtitles_archived" if args.subtitles_only else "archived"
+                        record["archivedAt"] = int(time.time())
+                    except Exception as error:
+                        record["state"] = "needs_reauth" if isinstance(error, ReauthRequired) or re.search(r"\b(?:401|403)\b", str(error)) else "retryable_failure"
+                        complete = False
+                    atomic_json(path, manifest)
             print(json.dumps({"entries": len(sessions.entries), "scanComplete": complete,
                               "estimatedMaximumBytes": estimated, "freeLocalBytes": shutil.disk_usage(root).free,
                               "manifest": str(path)}, ensure_ascii=False))
