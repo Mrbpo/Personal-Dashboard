@@ -136,7 +136,9 @@ export async function embedMissing(owner:string) {
 async function embedBatch(owner:string) {
   const mails=(await db.prepare(`SELECT DISTINCT m.id,m.account,m.subject,m.body,m.hash FROM library_documents d JOIN library_mail_sources s ON s.document_id=d.id JOIN mail_messages m ON m.id=s.email_id AND m.account=s.account AND m.hash=s.source_hash LEFT JOIN mail_embeddings e ON e.email_id=m.id AND e.model=? WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND (e.email_id IS NULL OR e.input_hash!=?||m.hash) LIMIT 32`).bind(EMBED_MODEL,owner,MAIL_EMBED_VERSION).all<MailEmbeddingInput>()).results;
   if(mails.length)return storeMailEmbeddings(mails);
-  const pending=(await db.prepare(`SELECT c.* FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND NOT EXISTS (SELECT 1 FROM library_mail_sources s WHERE s.document_id=d.id) AND NOT EXISTS (SELECT 1 FROM library_vectors v WHERE v.chunk_id=c.id AND v.model=?) LIMIT 32`).bind(owner,EMBED_MODEL).all<{id:string;body:string}>()).results;
+  const indexed=process.env.KERNEL_DOCUMENT_HYBRID==='true'?(await kernel.documentTextHeads(owner)).map(row=>row.id):[];
+  const coreFilter=indexed.length?`AND d.id NOT IN (${indexed.map(()=>'?').join(',')})`:'';
+  const pending=(await db.prepare(`SELECT c.* FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND NOT EXISTS (SELECT 1 FROM library_mail_sources s WHERE s.document_id=d.id) AND NOT EXISTS (SELECT 1 FROM library_vectors v WHERE v.chunk_id=c.id AND v.model=?) ${coreFilter} LIMIT 32`).bind(owner,EMBED_MODEL,...indexed).all<{id:string;body:string}>()).results;
   if(!pending.length)return 0;
   const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:pending.map(c=>c.body),dimensions:768});if(!r.ok)throw new Error('向量索引暂时失败');const p=await r.json();
   if(p.data?.length!==pending.length)throw new Error('向量结果不完整');
@@ -169,7 +171,7 @@ function lexicalText(value:string){return librarySearchTokens(value).join(' ');}
 function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return Array.isArray(parts)&&typeof parts[1]==='string'&&parts[1].endsWith('/body');}catch{return false;}}
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
-type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;onTiming?:(detail:SearchTiming)=>void};
+type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;hybrid?:boolean;onTiming?:(detail:SearchTiming)=>void};
 export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;parser_version?:string;retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;parser_version?:string;retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
@@ -198,7 +200,7 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const words=strict?librarySearchTokens(query):[...new Set([...activitySearchAliases(query),...librarySearchTokens(query)])];
   const candidateStarted=performance.now();
   const documentSemantic=Boolean(options.aiRerank||(semantic&&(options.kernelSemantic??process.env.KERNEL_DOCUMENT_SEMANTIC==='true')));
-  const persisted=await kernel.searchDocumentText(owner,query,{courseId:course,documentId:options.documentId,strict,semantic:documentSemantic,aiRerank:options.aiRerank,limit:240});
+  const persisted=await kernel.searchDocumentText(owner,query,{courseId:course,documentId:options.documentId,strict,semantic:documentSemantic,aiRerank:options.aiRerank,hybrid:options.hybrid,limit:240});
   const documentIds=[...new Set(persisted.map(row=>row.document_id))];
   const eligible=documentIds.length?(await db.prepare(`SELECT d.id,d.hash,d.folder_path FROM library_documents d WHERE ${scopeSql}
     AND d.id IN (${documentIds.map(()=>'?').join(',')})`).bind(...scopeArgs,...documentIds).all<{id:string;hash:string;folder_path:string}>()).results:[];

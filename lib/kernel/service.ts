@@ -5,6 +5,8 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText } from './document-search.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
+import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
+import type {IngestionJob} from './jobs.ts';
 
 type Json = Record<string, unknown>;
 type CandidateInput = {
@@ -807,11 +809,25 @@ export class KernelService {
         }
       }
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
+      if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
+        await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
   }
 
-  searchDocumentText(owner:string,query:string,options:{courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean}={}) {
+  searchDocumentText(owner:string,query:string,options:{courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean}={}) {
     return searchDocumentText(kernelPool(),owner,query,options);
+  }
+
+  queueDocumentVectorJobs(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+    return queueDocumentVectorJobs(kernelPool(),owner,scope);
+  }
+
+  documentVectorCoverage(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+    return documentVectorCoverage(kernelPool(),owner,scope);
+  }
+
+  runDocumentVectorJob(job:IngestionJob) {
+    return runDocumentVectorJob(kernelPool(),job);
   }
 
   async documentTextHeads(owner:string){
