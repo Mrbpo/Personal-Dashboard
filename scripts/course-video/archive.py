@@ -526,9 +526,11 @@ def main():
                     raise RuntimeError("explicit_channel_requires_single_course")
                 sessions.channels = {courses[0]: {args.channel_id}}
             verified_scope = set()
+            current_channel_keys = set()
             for course, categories in list(sessions.channels.items()):
                 candidate = next((sessions.usable(item) for item in sessions.entries.values() if item["courseId"] == course), None)
                 for category in categories:
+                    current_channel_keys.add(f"{course}:{category}")
                     try:
                         if not candidate:
                             raise ReauthRequired()
@@ -548,7 +550,8 @@ def main():
                         manifest.setdefault("channels", {})[f"{course}:{category}"] = {"state": "unavailable"}
             # Related streams may never appear as separate gallery cards.
             # Enumerate them before archiving and retain an explicit relation.
-            for key in list(verified_scope):
+            parent_scope = set(verified_scope)
+            for key in list(parent_scope):
                 observed = sessions.entries[key]
                 session = sessions.usable(observed)
                 sessions.current_course = session["courseId"]
@@ -565,6 +568,10 @@ def main():
                 except Exception:
                     complete = False
                     manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {"state": "unavailable"}
+            discovery_complete = complete
+            complete = bool(verified_scope and current_channel_keys and parent_scope and
+                all(manifest.get("channels", {}).get(key, {}).get("state") == "verified" for key in current_channel_keys) and
+                all(manifest.get("streams", {}).get(key, {}).get("state") == "verified" for key in parent_scope))
             processed = 0
             download_plans = []
             if not verified_scope:
@@ -618,9 +625,9 @@ def main():
                                 "complete": complete, "state": "complete" if complete else "incomplete",
                                 "discoveredEntries": len(sessions.entries), "verifiedScopeEntries": len(verified_scope), "courses": courses,
                                 "scope": "supplied_pages" if args.target_only else "visible_course_pages",
-                                "coverageVerified": False}
-            scoped_channels = [value for key, value in manifest.get("channels", {}).items() if key.split(":", 1)[0] in courses]
-            scoped_streams = [value for key, value in manifest.get("streams", {}).items() if key.split(":", 1)[0] in courses]
+                                "coverageVerified": False, "discoveryComplete": discovery_complete}
+            scoped_channels = [manifest["channels"][key] for key in current_channel_keys]
+            scoped_streams = [manifest["streams"][key] for key in parent_scope]
             manifest["scan"]["scopeComplete"] = bool(complete and scoped_channels and scoped_streams and
                 all(value.get("state") == "verified" for value in scoped_channels + scoped_streams))
             # Generic UI pagination is not proof that a KAF gallery is exhaustive.
@@ -649,9 +656,17 @@ def main():
                         record["archivedAt"] = int(time.time())
                     except Exception as error:
                         record["state"] = "needs_reauth" if isinstance(error, ReauthRequired) or re.search(r"\b(?:401|403)\b", str(error)) else "retryable_failure"
+                        record["failureReason"] = "insufficient_local_storage" if str(error) == "insufficient_local_storage" else record["state"]
                         complete = False
                     atomic_json(path, manifest)
-            print(json.dumps({"entries": len(sessions.entries), "scanComplete": complete,
+            if args.download:
+                counts = {state: sum(manifest["entries"].get(key, {}).get("state") == state for key in verified_scope)
+                          for state in ("archived", "subtitles_archived", "needs_reauth", "retryable_failure", "downloading", "discovered")}
+                manifest["archive"] = {"completedAt": int(time.time()), "scopeEntries": len(verified_scope),
+                                       "counts": counts, "state": "complete" if counts["archived"] + counts["subtitles_archived"] == len(verified_scope) and verified_scope else "incomplete"}
+                atomic_json(path, manifest)
+            print(json.dumps({"entries": len(sessions.entries), "scanComplete": manifest["scan"]["complete"],
+                              "scopeComplete": manifest["scan"]["scopeComplete"], "archive": manifest.get("archive"),
                               "estimatedMaximumBytes": estimated, "freeLocalBytes": shutil.disk_usage(root).free,
                               "manifest": str(path)}, ensure_ascii=False))
             return 0 if complete else 2
