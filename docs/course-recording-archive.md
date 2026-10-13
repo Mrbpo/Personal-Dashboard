@@ -37,15 +37,15 @@ server collector 不重做 Canvas 网页 SSO 判断，因为 sessionless LTI 可
 实际派生镜像已构建。首次只读容器启动浏览器因默认 HOME 的 Crashpad 写入失败退出；增加 `HOME=/tmp` 后成功启动。此必要配置已写入 Dockerfile；复用已构建镜像时加 `-e HOME=/tmp` 并提供可写 `/tmp`，不必为修配置重新下载 runtime。正常 headed KAF 和 gallery 现已显示；完整频道清单、子流关系及实际文件仍需分别验收。
 
 ```sh
-docker build -f interactive.Dockerfile -t study-course-video:interactive .
+docker build -f interactive.Dockerfile -t study-course-video:interactive1.63.0 .
 # 在 /srv/study-course-video-tool 构建；root 将合法 grant producer 接到此管道。
 GRANT_PRODUCER | docker run --rm -i --name study-course-video-interactive \
-  --memory=1500m --cpus=2 --shm-size=256m \
+  --init --memory=1g --cpus=2 --shm-size=256m \
   -e HOME=/tmp \
   -p 127.0.0.1:6080:6080 \
   -v /srv/study-course-recordings:/archive \
   -v /srv/study-course-video-state:/state \
-  study-course-video:interactive \
+  study-course-video:interactive1.63.0 \
   --course-url https://q.utoronto.ca/courses/440904/external_tools/8084 \
   --media-host kaltura-quercus-prod.utoronto.ca --output /archive \
   --profile /state/browser --target-only --channel-id 814427 \
@@ -92,9 +92,22 @@ python scripts/course-video/archive.py `
 --entry-id 0_l0mx1vr8 --download --limit 1
 ```
 
-仅元数据验收则去掉 `--download --limit 1`。公开资产地址必须已观察，不猜版本或替代路径。单条服务器实测现已成功：`440904:0_l0mx1vr8` 返回身份一致的时长 3055 秒，归档 MP4 为 207,558,864 字节，文件 `ftyp` 头与 SHA 校验通过。存放 `/srv/study-course-recordings/440904/0_l0mx1vr8/version-1791926345/original.mp4`。播放时长及画面验收由调度继续检查；这只证明单条文件，不证明全部双流。字幕仍关闭，原网站未切换。
+仅元数据验收则去掉 `--download --limit 1`。公开资产地址必须已观察，不猜版本或替代路径。单条服务器实测现已成功：`440904:0_l0mx1vr8` 返回身份一致的时长 3055 秒，归档 MP4 为 207,558,864 字节，文件 `ftyp` 头与 SHA 校验通过。存放 `/srv/study-course-recordings/440904/0_l0mx1vr8/version-1791926345/original.mp4`。真实 ffprobe 为 3054.538594 秒、H.264 1920×1080 和 AAC；ffmpeg 解码第 10 秒一帧退出 0。这只证明单条文件，不证明全部双流。字幕仍关闭，原网站未切换。
 
 全课拓扑清单去掉 `--entry-id`、`--download`、`--limit`，保留同一个 gallery 和公开资产参数。正式父子列表无权限时，只对播放器已经观察的候选逐条读取元数据，并严格核对 `parentEntryId` 属于上述四个父录像。通过的关系保存原字段、获取时间、API host、版本作为证据，才允许进入归档范围；相同标题或时长不用于合并。此替代路径仍将全量子流覆盖标为未证实，不会把可见候选等同于穷尽。范围核对后增加 `--download` 归档已验证视角；第一条版本和 SHA 一致时直接跳过，不重复下载。
+
+实际整课元数据已经退出 0：`scanComplete=true`、`scopeComplete=true`、8 个身份校验通过的 entry。此次正式 `baseentry.list(parentEntryIdEqual)` 成功，4 个父录像各有一个已核对的子流，非猜测关联：
+
+| 父录像 | 子流 |
+| --- | --- |
+| `0_iptvn6i4` | `0_0ggqv361` |
+| `0_73lcxb7r` | `0_jpfly7x5` |
+| `0_l0mx1vr8` | `0_udo2h43p` |
+| `0_n1wtlnwk` | `0_ugt8kqvu` |
+
+每路返回两个格式，第一讲父录像时长 3054 秒，其余 3055 秒；屏幕/摄像头标签仍为 `unknown`，不得仅凭 parent/child 位置猜画面内容。最大格式估计总容量 5,358,257,152 字节，服务器空余约 105 GB。整课实际文件归档和各视角画面仍须单独确认；元数据完整不等于所有文件已落盘。元数据运行的最终摘要显示 `archiveStatus=not_requested`，不会把上一次单文件归档摘要当成此次完成结果。
+
+随后整课视频归档实际退出 0：`scanComplete=true`、`scopeComplete=true`、8/8 `archived`，没有 needs_reauth 或 retryable_failure；总文件大小 5,358,260,822 字节。第一份复用已经通过的校验，新七份均经 ffprobe 和单帧解码，都是 H.264 1920×1080 + AAC，真实时长约 3054.49–3054.98 秒。第 4 讲主录像的第 120 秒是 DNA EDITING 幻灯片/电脑画面，子流 `0_udo2h43p` 同时点是课堂摄像头画面，两个视角已有真实图像证据。私人课堂截图不进 Git。该完成范围是此次明确观察到的 440904 频道四场录播，不代表其他课程或未来新增录像也已归档。
 
 移除 `--target-only`，增加 `--all-courses`，会读取用户可见的学生课程，分页扫描课程模块、页面、公告和 Kaltura 外部工具。不使用服务器保存的 Canvas/Gmail 凭据。
 
@@ -108,6 +121,25 @@ python scripts/course-video/archive.py `
 - 来源暂时不可见不会删除任何归档，也不取消课程任务。该版本不凭 UI 扫描自动标记缺失。
 
 ## 原始文件与字幕
+
+### 管理员手动差量入口
+
+仓库的 `course-video-grant.mjs`、`server-run.sh`、collector 和 entrypoint 已放到 `/srv/study-course-video-tool`，使用现已构建的临时 interactive 镜像。新 producer 接收数值 course/tool ID，在既有 worker 中读取 vault，校验 Canvas origin；授权 URL 只通过内部 stdin 管道进入 collector，不写文件、不输出终端。服务器实际 `bash -n` 和帮助输出通过，非法 course ID 在启动前被拒绝；新 producer 实际取得同 Canvas origin 的 grant，验收只输出成功布尔值。没有为入口包装重复整课下载。整课归档的运行已经证明第一条版本和 SHA 一致时跳过，不再次下载；其他课读取将在同一手动入口继续验收。
+
+```sh
+# 默认整课拓扑清单；不下载。
+bash /srv/study-course-video-tool/server-run.sh
+# 人工发起，自动补缺/补更新；版本和 SHA 一致的文件跳过。
+bash /srv/study-course-video-tool/server-run.sh --download
+# 单条试验仍明确为 partial。
+bash /srv/study-course-video-tool/server-run.sh --download --entry-id 0_l0mx1vr8 --limit 1
+# 其他课程只读发现真实频道链接；不知道 channel 时不用猜。
+bash /srv/study-course-video-tool/server-run.sh --discover-channels --course-id COURSE_ID --tool-id OBSERVED_TOOL_ID
+```
+
+默认 scope 是实测课程 440904 / tool 8084 / channel 814427；其他课程须提供真实数值 `--course-id`、`--tool-id`、`--channel-id` 和已观察的公共 `--observed-asset-url`，不得猜频道或 CDN 版本。默认镜像是服务器已验证的 `study-course-video:interactive1.63.0`，可由管理员通过 `COURSE_VIDEO_IMAGE` 指定已构建版本；使用已验证的 1 GB 内存、2 CPU、256 MiB tmp 和 init 配置。工具使用 dedicated profile 的非阻塞文件锁，拒绝并发使用该浏览器。每次获取 fresh grant，不设置计划任务；结束关闭容器，之后可再次手动运行。需要本人验证时才通过前述 SSH 隧道打开临时网页。完整双流覆盖未通过时 exit 2 和 scopeIncomplete 仍保留，即使一些已验证文件已经成功归档。
+
+`--discover-channels` 不访问猜测的 gallery、元数据列表 API 或视频；在正常 LTI 启动后只读取实际 frame/anchor 中出现的频道路径，保存独立 `channel-discovery-COURSE_ID.json`，不覆盖已经验收的归档清单。明确 `/channel/channelid/N` 与媒体 href 的 category 候选会分别标方法；候选不等于课程会员验证。没有可读链接时退出 2 并明确未发现，不能静默宣称所有课成功。此只读发现新增路径仍待其他课程实测。
 
 先核对清单估计容量和本地空余，再加 `--download --limit 1` 做一份真实试下载。移除 `--limit` 才下载全部已发现 entry。双流各自保存，默认优先来源原始格式；若原格式没有授权下载，就不能保证拿到源文件，保留可下载格式和错误状态供核查。不会重编码，不处理 DRM。
 

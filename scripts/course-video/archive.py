@@ -124,6 +124,7 @@ class Sessions:
         self.current_course = ""
         self.current_page = ""
         self.channels: dict[str, set[str]] = {}
+        self.channel_evidence: list[dict] = []
         self.api_origins: set[str] = set()
         self.gallery_members: dict[str, set[str]] = {}
         self.gallery_totals: dict[str, int] = {}
@@ -133,11 +134,18 @@ class Sessions:
         parsed = urlparse(url)
         if not media_host(parsed.hostname or "", self.extra_hosts):
             return
-        category = re.search(r"/(?:categoryid|categoryId)/(\d+)(?:/|$)", parsed.path)
+        category = re.search(r"/channel/channelid/(\d+)(?:/|$)", parsed.path)
+        direct_gallery = bool(category)
+        if not category:
+            category = re.search(r"/(?:categoryid|categoryId)/(\d+)(?:/|$)", parsed.path)
         if not category:
             category = re.search(r"/media/(?:[^/]+/)*[01]_[A-Za-z0-9]+/(\d+)(?:/|$)", parsed.path)
         if category:
             self.channels.setdefault(self.current_course, set()).add(category.group(1))
+            item = {"courseId": self.current_course, "channelId": category.group(1), "observedUrl": public_url(url),
+                    "method": "observed_channel_url" if direct_gallery else "observed_media_category_url"}
+            if item not in self.channel_evidence and len(self.channel_evidence) < 2000:
+                self.channel_evidence.append(item)
 
     def observe_request(self, request):
         parsed = urlparse(request.url)
@@ -434,8 +442,9 @@ def course_targets(context, base: str, course: str, max_pages: int) -> list[str]
     for item in canvas_pages(context, base, f"/api/v1/courses/{course}/discussion_topics?only_announcements=true&per_page=100", max_pages):
         if item.get("html_url"):
             targets.append(item["html_url"])
-    for tool in canvas_pages(context, base, f"/api/v1/courses/{course}/external_tools?per_page=100", max_pages):
-        if re.search(r"kaltura|media gallery|course media|recording", str(tool.get("name", "")), re.I):
+    for tool in canvas_pages(context, base, f"/api/v1/courses/{course}/external_tools?include_parents=true&placement=course_navigation&per_page=100", max_pages):
+        name = str(tool.get("name", ""))
+        if not re.search(r"\bmy\s*media\b", name, re.I) and re.search(r"kaltura|media gallery|course media|recording", name, re.I):
             targets.append(f"{base}/courses/{course}/external_tools/{tool['id']}")
     return list(dict.fromkeys(targets))
 
@@ -535,6 +544,7 @@ def main():
     parser.add_argument("--known-gallery-url", help="One already-observed KAF channel URL to navigate in the authorized context; no URL guessing")
     parser.add_argument("--verify-observed-asset-url", help="One explicitly observed public Kaltura script URL for normal manual CDN verification before returning to the known gallery")
     parser.add_argument("--probe", action="store_true", help="Read-only scoped API origin/permission diagnosis; never downloads")
+    parser.add_argument("--discover-channels", action="store_true", help="Only read actually visible frame/link channel URLs; no guessed gallery, metadata API, or downloads")
     parser.add_argument("--hold-browser", type=int, default=0, help="After a read-only probe, hold the same browser for visual diagnosis for up to 900 seconds")
     parser.add_argument("--headless", action="store_true", help="Official Chromium headless shell on the server")
     parser.add_argument("--interactive-server", action="store_true", help="Normal headed Chromium in a temporary server display, with manual verification")
@@ -563,6 +573,8 @@ def main():
             parser.error("Asset verification requires interactive server, a known gallery and one observed public HTTPS script URL without credentials")
     if args.probe and args.download:
         parser.error("--probe cannot download")
+    if args.discover_channels and (args.download or args.probe or args.entry_id or args.all_courses or args.known_gallery_url or args.verify_observed_asset_url or len(urls) != 1):
+        parser.error("--discover-channels needs one launch only, without download, probe, entry or guessed/known gallery navigation")
     if args.hold_browser < 0 or args.hold_browser > 900 or args.hold_browser and not args.probe:
         parser.error("--hold-browser requires --probe and must be between 0 and 900")
     if args.headless and args.interactive_server:
@@ -733,6 +745,29 @@ def main():
             context.close()
             raise ReauthRequired()
         courses = list(dict.fromkeys(re.match(r"^/courses/(\d+)", value.path).group(1) for value in urls))
+        if args.discover_channels:
+            runtime_stage = "read_observed_channel_links"
+            page.wait_for_timeout(args.settle_ms)
+            for frame in page.frames:
+                if not media_host(urlparse(frame.url).hostname or "", sessions.extra_hosts):
+                    continue
+                sessions.remember_channel(frame.url)
+                try:
+                    links = frame.locator('a[href]').evaluate_all("nodes => nodes.map(n => n.href)")
+                    for link in links:
+                        sessions.remember_channel(link)
+                except Exception:
+                    pass
+            result = {"state": "channel_links_discovered" if sessions.channel_evidence else "channel_links_not_found",
+                      "courseId": courses[0], "observedChannels": sessions.channel_evidence,
+                      "frames": [safe_request_location(frame.url) for frame in page.frames],
+                      "complete": False, "downloadRequested": False}
+            atomic_json(root / ("channel-discovery-" + courses[0] + ".json"), result)
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+            context.close()
+            if browser:
+                browser.close()
+            return 0 if sessions.channel_evidence else 2
         if args.verify_observed_asset_url:
             runtime_stage = "wait_observed_asset_browser_verification"
             asset_documents = []
@@ -1082,7 +1117,9 @@ def main():
                                        "counts": counts, "state": "complete" if counts["archived"] + counts["subtitles_archived"] == len(verified_scope) and verified_scope else "incomplete"}
                 atomic_json(path, manifest)
             print(json.dumps({"entries": len(sessions.entries), "scanComplete": manifest["scan"]["complete"],
-                              "scopeComplete": manifest["scan"]["scopeComplete"], "archive": manifest.get("archive"),
+                              "scopeComplete": manifest["scan"]["scopeComplete"],
+                              "archive": manifest.get("archive") if args.download else None,
+                              "archiveStatus": "requested" if args.download else "not_requested",
                               "estimatedMaximumBytes": estimated, "freeLocalBytes": shutil.disk_usage(root).free,
                               "manifest": str(path)}, ensure_ascii=False))
             partial_success = bool(args.entry_id and manifest["entries"].get(f"{courses[0]}:{args.entry_id}", {}).get("state") in
