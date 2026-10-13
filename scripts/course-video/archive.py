@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -319,13 +320,23 @@ def archive_entry(context, session: dict, metadata: dict, private: dict, root: P
     if not subtitles_only:
         if not private["formats"]:
             raise RuntimeError("no_authorized_download_format")
+        maximum = max(item.get("filesize_approx", 0) for item in private["formats"])
+        if shutil.disk_usage(root).free < maximum + 512 * 1024 * 1024:
+            raise RuntimeError("insufficient_local_storage")
         import yt_dlp
+        last_storage_check = 0
+        def guard_storage(progress):
+            nonlocal last_storage_check
+            if progress.get("status") == "downloading" and time.monotonic() - last_storage_check > 2:
+                last_storage_check = time.monotonic()
+                if shutil.disk_usage(root).free < 512 * 1024 * 1024:
+                    raise RuntimeError("insufficient_local_storage")
         # yt-dlp's public Kaltura extractor starts a widget KS itself. Supplying
         # already-authorized formats avoids replacing the browser's scoped KS.
         with yt_dlp.YoutubeDL({"logger": QuietLogger(), "quiet": True, "no_warnings": True,
                               "outtmpl": str(directory / "original.%(ext)s"), "continuedl": True,
                               "retries": 3, "fragment_retries": 3, "concurrent_fragment_downloads": 1,
-                              "writeinfojson": False, "noprogress": True}) as downloader:
+                              "writeinfojson": False, "noprogress": True, "progress_hooks": [guard_storage]}) as downloader:
             result = downloader.process_ie_result({"id": session["entryId"], "title": metadata["title"],
                                                     "formats": private["formats"]}, download=True)
             filename = Path(result.get("filepath") or downloader.prepare_filename(result))
@@ -444,6 +455,12 @@ def main():
     if profile and (profile == root or root in profile.parents or profile in root.parents):
         parser.error("Browser profile and archive must be separate directories")
     root.mkdir(parents=True, exist_ok=True)
+    if args.download and not args.subtitles_only and importlib.util.find_spec("yt_dlp") is None:
+        print("yt-dlp is required for video downloads; install requirements.txt in this Python environment before login.", file=sys.stderr)
+        return 2
+    if args.download and shutil.disk_usage(root).free < 512 * 1024 * 1024:
+        print("Insufficient free space for archive; keep at least 512 MiB reserve.", file=sys.stderr)
+        return 2
     path = root / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"version": 1, "entries": {}}
     sessions = Sessions({value.lower() for value in args.media_host})
@@ -451,7 +468,7 @@ def main():
     with sync_playwright() as playwright:
         browser = None
         if profile:
-            context = playwright.chromium.launch_persistent_context(str(profile), headless=False)
+            context = playwright.chromium.launch_persistent_context(str(profile), headless=False, channel="msedge")
         else:
             browser = playwright.chromium.launch(headless=False, channel="msedge")
             context = browser.new_context()
@@ -586,6 +603,10 @@ def main():
                                 "discoveredEntries": len(sessions.entries), "courses": courses,
                                 "scope": "supplied_pages" if args.target_only else "visible_course_pages",
                                 "coverageVerified": False}
+            scoped_channels = [value for key, value in manifest.get("channels", {}).items() if key.split(":", 1)[0] in courses]
+            scoped_streams = [value for key, value in manifest.get("streams", {}).items() if key.split(":", 1)[0] in courses]
+            manifest["scan"]["scopeComplete"] = bool(complete and scoped_channels and scoped_streams and
+                all(value.get("state") == "verified" for value in scoped_channels + scoped_streams))
             # Generic UI pagination is not proof that a KAF gallery is exhaustive.
             # Therefore absent entries are never deleted or automatically marked
             # missing until a platform-specific total-count check is verified.
@@ -594,6 +615,9 @@ def main():
             if args.pause_after_inventory:
                 print(json.dumps({"state": "inventory_ready", "entries": len(download_plans), "estimatedMaximumBytes": estimated,
                                   "freeLocalBytes": shutil.disk_usage(root).free, "manifest": str(path)}, ensure_ascii=False), flush=True)
+                if not manifest["scan"]["scopeComplete"] or not download_plans:
+                    print("Inventory scope is not fully verified; no video download started.", file=sys.stderr)
+                    return 2
                 input("Review the saved inventory; press Enter to continue downloads in this same login, or Ctrl+C to stop. ")
                 for index, (key, session, public, private) in enumerate(download_plans):
                     if args.limit and index >= args.limit:

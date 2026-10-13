@@ -12,6 +12,8 @@
 
 Python 安装 `scripts/course-video/requirements.txt` 的依赖。若系统已有 Playwright 和 Edge，可直接用现有 Python，不需要安装第二份浏览器。只有下载视频才需要 yt-dlp；字幕下载不需要 yt-dlp。
 
+临时与可选持久登录都明确使用本机 Edge (`channel=msedge`)，不依赖额外安装的 Chromium。下载模式在登录前检查 yt-dlp 是否已装；按每路最大已知大小和 512 MiB 余量预检磁盘，下载时再检查余量，空间不足停止并保留 `.part`。平台大小缺失时预估不等于保证足够，下载时的余量保护仍有效。
+
 ```powershell
 python scripts/course-video/archive.py `
   --course-url https://q.utoronto.ca/courses/440904/external_tools/8084 `
@@ -34,6 +36,7 @@ python scripts/course-video/archive.py `
 - 对每个录播使用正式 `baseentry.list(parentEntryIdEqual)` 分页，独立枚举 parent/child 流，每路各自查询格式和字幕；记录关系证据。
 - `track` 是 `screen / camera / unknown`，只有发布者提供明确 stream 名称时才分类；parent 不一定是摄像头，child 不一定是屏幕。没有第二路或无权限时必须查看 `streams.state`，不能宣称双流齐全。
 - 通用 DOM 分页只能发现可见入口，不能证明所有课程的任意嵌入内容穷尽。因此清单保留 `coverageVerified: false`，直到真实学校 gallery 行为逐项验证。`scan.complete` 只表示本次已发现范围的操作成功。
+- `scan.scopeComplete` 单独表示本次课程中观察到的频道总数、parent/child 关系和 entry 身份都已成功核对，必须实际发现频道且其分页计数一致；它不代表所有科目全局穷尽。
 - 来源暂时不可见不会删除任何归档，也不取消课程任务。该版本不凭 UI 扫描自动标记缺失。
 
 ## 原始文件与字幕
