@@ -440,6 +440,7 @@ def main():
     parser.add_argument("--settle-ms", type=int, default=2500)
     parser.add_argument("--limit", type=int, default=0, help="Bound first download trial; zero means all discovered entries")
     parser.add_argument("--target-only", action="store_true", help="Visit only supplied pages for a first authorized sample")
+    parser.add_argument("--channel-id", help="Explicit observed Kaltura channel for a single-course acceptance scope")
     parser.add_argument("--login-timeout", type=int, default=900, help="Seconds allowed for interactive school login and Duo")
     args = parser.parse_args()
     urls = [urlparse(value) for value in args.course_url]
@@ -450,6 +451,8 @@ def main():
         parser.error("Invalid limits")
     if args.pause_after_inventory and not args.download:
         parser.error("--pause-after-inventory requires --download")
+    if args.channel_id and (not args.channel_id.isdigit() or args.all_courses):
+        parser.error("--channel-id requires one numeric channel and a single-course run")
     root = args.output.resolve()
     profile = args.profile.resolve() if args.profile else None
     if profile and (profile == root or root in profile.parents or profile in root.parents):
@@ -517,6 +520,12 @@ def main():
                     complete = inspect_target(page, target, sessions, args.max_pages, args.settle_ms) and complete
             # Related streams may never appear as separate gallery cards.
             # Enumerate explicit observed course channels with total-count gates.
+            manifest["observedEntryIds"] = list(sessions.entries)
+            if args.channel_id:
+                if len(courses) != 1:
+                    raise RuntimeError("explicit_channel_requires_single_course")
+                sessions.channels = {courses[0]: {args.channel_id}}
+            verified_scope = set()
             for course, categories in list(sessions.channels.items()):
                 candidate = next((sessions.usable(item) for item in sessions.entries.values() if item["courseId"] == course), None)
                 for category in categories:
@@ -528,6 +537,7 @@ def main():
                         entries, total = channel_entries(context, candidate, category, args.max_pages)
                         for entry in entries:
                             key = f"{course}:{entry}"
+                            verified_scope.add(key)
                             sessions.entries[key] = {**candidate, **sessions.entries.get(key, {}), "entryId": entry,
                                                      "channelId": category, "courseId": course}
                         manifest.setdefault("channels", {})[f"{course}:{category}"] = {
@@ -538,14 +548,17 @@ def main():
                         manifest.setdefault("channels", {})[f"{course}:{category}"] = {"state": "unavailable"}
             # Related streams may never appear as separate gallery cards.
             # Enumerate them before archiving and retain an explicit relation.
-            for observed in list(sessions.entries.values()):
+            for key in list(verified_scope):
+                observed = sessions.entries[key]
                 session = sessions.usable(observed)
                 sessions.current_course = session["courseId"]
                 sessions.current_page = session["sourceUrl"]
                 try:
                     children = child_streams(context, session, args.max_pages)
                     for child in children:
-                        sessions.entries[f"{child['courseId']}:{child['entryId']}"] = child
+                        child_key = f"{child['courseId']}:{child['entryId']}"
+                        sessions.entries[child_key] = child
+                        verified_scope.add(child_key)
                     manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {
                         "state": "verified", "childEntryIds": [child["entryId"] for child in children],
                         "method": "baseentry.list.parentEntryIdEqual"}
@@ -554,7 +567,10 @@ def main():
                     manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {"state": "unavailable"}
             processed = 0
             download_plans = []
-            for key, observed in list(sessions.entries.items()):
+            if not verified_scope:
+                complete = False
+            for key in sorted(verified_scope):
+                observed = sessions.entries[key]
                 session = sessions.usable(observed)
                 sessions.current_course = session["courseId"]
                 sessions.current_page = session["sourceUrl"]
@@ -600,7 +616,7 @@ def main():
                     atomic_json(path, manifest)
             manifest["scan"] = {"startedAt": manifest["scan"]["startedAt"], "completedAt": int(time.time()),
                                 "complete": complete, "state": "complete" if complete else "incomplete",
-                                "discoveredEntries": len(sessions.entries), "courses": courses,
+                                "discoveredEntries": len(sessions.entries), "verifiedScopeEntries": len(verified_scope), "courses": courses,
                                 "scope": "supplied_pages" if args.target_only else "visible_course_pages",
                                 "coverageVerified": False}
             scoped_channels = [value for key, value in manifest.get("channels", {}).items() if key.split(":", 1)[0] in courses]
