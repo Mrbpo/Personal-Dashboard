@@ -10,6 +10,30 @@
 
 ## 准备与首次清单
 
+### 当前优先：服务器授权启动
+
+用户已要求流程放服务器。实际生产 worker 用现有 `CANVAS_TOKEN` 调用官方 `GET /api/v1/courses/440904/external_tools/sessionless_launch?id=8084&launch_type=course_navigation` 已得到 HTTP 200 和临时启动 URL；继续 GET 返回正常签名 LTI 1.1 hidden autoPOST form，非学校密码页。另一个 `/login/session_token` 入口实际返回 403，不能当成已可用。
+
+`server-lti-probe.py` 是 stdlib HTTP-only 诊断：stdin 接受 `{ "launchUrl": "短时URL" }`，使用内存 CookieJar 原样 POST 合法 hidden fields，不输出表单值。真实 KAF POST 返回 403，固定安全 marker 为 `cloudflare=true / captcha=true`，没有明确 OAuth 签名错误标记；这表明需要继续验证普通浏览器流程，不能宣称服务器归档已经通。
+
+可选 `server.Dockerfile` 只装固定匹配的 Playwright 1.63.0 和 Chromium headless shell，以及 yt-dlp 2026.8.19。构建 context 是 `scripts/course-video`；只运行一次标准 headless metadata probe，不安装全部浏览器，不采用 stealth、不自动求验证码、不使用特殊代理。来源 URL 由管理员在现 worker 中正常取 grant，经 stdin 管道喂给 collector；不得把 URL 放命令行或日志。
+
+```sh
+# GRANT_JSON 由服务器现授权程序通过 stdin 提供，示例不包含密钥。
+GRANT_PRODUCER | docker run --rm -i --memory=1g --cpus=2 --shm-size=256m \
+  -v /srv/study-course-recordings:/archive COURSE_VIDEO_IMAGE \
+  --course-url https://q.utoronto.ca/courses/440904/external_tools/8084 \
+  --media-host kaltura-quercus-prod.utoronto.ca --output /archive \
+  --target-only --channel-id 814427 --headless --launch-url-stdin \
+  --probe --login-timeout 30
+```
+
+server collector 不重做 Canvas 网页 SSO 判断，因为 sessionless LTI 可启动 KAF 而没有 Canvas 浏览器 Cookie；也不会重新跳回要求网页登录的普通课程 URL。它观察正常 KAF JS/API 请求来判定真实会话和频道权限，阻断自动媒体流加载节省资源。普通 JS 等待一次后仍遇 Cloudflare 验证时记录 `needs_browser_verification` 并停止；无交互认证能力时不能承诺全自动。只有真实 metadata 和单 track 下载通过才能逐步启用 `--download`，字幕仍默认关闭。
+
+目前不传用户完整浏览器 profile，也不把学校密码交给程序。若最终需要专用人工授权的 scoped `storage_state`，必须另行验证仅 Quercus/KAF 会话跨服务器 IP 可用；当前没有声称已实现该后备路径。
+
+### 可选本地授权入口
+
 Python 安装 `scripts/course-video/requirements.txt` 的依赖。若系统已有 Playwright 和 Edge，可直接用现有 Python，不需要安装第二份浏览器。只有下载视频才需要 yt-dlp；字幕下载不需要 yt-dlp。
 
 临时与可选持久登录都明确使用本机 Edge (`channel=msedge`)，不依赖额外安装的 Chromium。下载模式在登录前检查 yt-dlp 是否已装；按每路最大已知大小和 512 MiB 余量预检磁盘，下载时再检查余量，空间不足停止并保留 `.part`。平台大小缺失时预估不等于保证足够，下载时的余量保护仍有效。
