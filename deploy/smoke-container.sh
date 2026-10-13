@@ -2,6 +2,7 @@
 set -euo pipefail
 
 image="${1:?Pass the built image tag}"
+postgres_image="${POSTGRES_SMOKE_IMAGE:-study-postgres:18.6-pgvector0.8.7}"
 network="study-smoke-$$"
 database_container="${network}-postgres"
 dump_file=$(mktemp)
@@ -16,7 +17,7 @@ trap cleanup EXIT
 docker network create --internal "$network" >/dev/null
 docker run -d --rm --name "$database_container" --network "$network" \
   -e POSTGRES_DB=study_kernel -e POSTGRES_USER=study_kernel \
-  -e POSTGRES_PASSWORD=smoke-password postgres:18.6 >/dev/null
+  -e POSTGRES_PASSWORD=smoke-password "$postgres_image" >/dev/null
 ready=0
 for _ in $(seq 1 30); do
   if docker exec "$database_container" pg_isready -h 127.0.0.1 -U study_kernel -d study_kernel >/dev/null 2>&1; then
