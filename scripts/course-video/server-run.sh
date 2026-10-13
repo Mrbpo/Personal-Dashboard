@@ -11,31 +11,46 @@ tool_id=8084
 channel_id=814427
 kaf_host=kaltura-quercus-prod.utoronto.ca
 asset_url=https://assets.cap2.mediaspace.kaltura.com/5.188.26.1331/public/build0/js/kmsCookie.js
+gallery_url=
 download=0
 entry_id=
 limit=0
 tool_supplied=0
 channel_supplied=0
 discover=0
+catalog=
+dry_run=0
 usage() {
-  echo 'Usage: server-run.sh [--discover-channels | --download] [--entry-id ID] [--limit N] [--course-id N --tool-id N --channel-id N] [--kaf-host HOST] [--observed-asset-url URL]'
+  echo 'Usage: server-run.sh [--catalog FILE [--dry-run]] [--discover-channels | --download] [--entry-id ID] [--limit N] [--course-id N --tool-id N --channel-id N] [--kaf-host HOST] [--observed-gallery-url URL] [--observed-asset-url URL]'
   echo 'Default is metadata only. Use --download for missing/updated verified recordings.'
 }
 while (( $# )); do
   case "$1" in
     --download) download=1; shift ;;
     --discover-channels) discover=1; shift ;;
+    --catalog) catalog=${2:?}; shift 2 ;;
+    --dry-run) dry_run=1; shift ;;
     --course-id) course_id=${2:?}; shift 2 ;;
     --tool-id) tool_id=${2:?}; tool_supplied=1; shift 2 ;;
     --channel-id) channel_id=${2:?}; channel_supplied=1; shift 2 ;;
     --kaf-host) kaf_host=${2:?}; shift 2 ;;
     --observed-asset-url) asset_url=${2:?}; shift 2 ;;
+    --observed-gallery-url) gallery_url=${2:?}; shift 2 ;;
     --entry-id) entry_id=${2:?}; shift 2 ;;
     --limit) limit=${2:?}; shift 2 ;;
     --help) usage; exit 0 ;;
     *) echo 'Unknown option.' >&2; usage >&2; exit 2 ;;
   esac
 done
+if [[ -n $catalog ]]; then
+  [[ $discover == 0 && -z $entry_id && $limit == 0 ]] ||
+    { echo 'Catalog runs cannot mix discovery, entry, or limit options.' >&2; exit 2; }
+  catalog_args=(--catalog "$catalog")
+  (( download == 0 )) || catalog_args+=(--download)
+  (( dry_run == 0 )) || catalog_args+=(--dry-run)
+  exec python3 "$tool_root/server-catalog.py" "${catalog_args[@]}"
+fi
+(( dry_run == 0 )) || { echo 'Dry-run requires a catalog.' >&2; exit 2; }
 [[ $course_id =~ ^[1-9][0-9]*$ && $tool_id =~ ^[1-9][0-9]*$ && $channel_id =~ ^[1-9][0-9]*$ && $limit =~ ^[0-9]+$ ]] ||
   { echo 'Identifiers must be positive integers; limit must be nonnegative.' >&2; exit 2; }
 [[ $kaf_host =~ ^[A-Za-z0-9.-]+$ ]] || { echo 'Invalid observed KAF hostname.' >&2; exit 2; }
@@ -45,6 +60,8 @@ done
   { echo 'Another course requires its observed tool and channel IDs.' >&2; exit 2; }
 [[ $discover == 0 || $download == 0 && -z $entry_id ]] ||
   { echo 'Channel discovery cannot download or select an entry.' >&2; exit 2; }
+[[ $course_id == 440904 || $discover == 1 || -n $gallery_url ]] ||
+  { echo 'Another course needs its actually observed gallery URL.' >&2; exit 2; }
 [[ -f "$tool_root/course-video-grant.mjs" && -f "$tool_root/archive.py" && -f "$tool_root/interactive-entrypoint.sh" ]] ||
   { echo 'Server grant producer and collector are required.' >&2; exit 2; }
 mkdir -p "$archive_root" "$state_root"
@@ -57,7 +74,8 @@ args=(--course-url "https://q.utoronto.ca/courses/$course_id/external_tools/$too
 if (( discover )); then
   args+=(--discover-channels)
 else
-  args+=(--channel-id "$channel_id" --known-gallery-url "https://$kaf_host/channel/channelid/$channel_id")
+  [[ -n $gallery_url ]] || gallery_url="https://$kaf_host/channel/channelid/$channel_id"
+  args+=(--channel-id "$channel_id" --known-gallery-url "$gallery_url")
   [[ -z $asset_url ]] || args+=(--verify-observed-asset-url "$asset_url")
 fi
 [[ -z $entry_id ]] || args+=(--entry-id "$entry_id")

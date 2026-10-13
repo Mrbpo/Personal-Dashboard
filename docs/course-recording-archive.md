@@ -135,11 +135,19 @@ bash /srv/study-course-video-tool/server-run.sh --download
 bash /srv/study-course-video-tool/server-run.sh --download --entry-id 0_l0mx1vr8 --limit 1
 # 其他课程只读发现真实频道链接；不知道 channel 时不用猜。
 bash /srv/study-course-video-tool/server-run.sh --discover-channels --course-id COURSE_ID --tool-id OBSERVED_TOOL_ID
+# 配置清单验证：不访问网络、不下载。
+bash /srv/study-course-video-tool/server-run.sh --catalog /srv/study-course-video-tool/core-courses.catalog.json --dry-run
+# 一次人工发起，依配置顺序补缺；失败课记录后继续下一课。
+bash /srv/study-course-video-tool/server-run.sh --catalog /srv/study-course-video-tool/core-courses.catalog.json --download
 ```
 
 默认 scope 是实测课程 440904 / tool 8084 / channel 814427；其他课程须提供真实数值 `--course-id`、`--tool-id`、`--channel-id` 和已观察的公共 `--observed-asset-url`，不得猜频道或 CDN 版本。默认镜像是服务器已验证的 `study-course-video:interactive1.63.0`，可由管理员通过 `COURSE_VIDEO_IMAGE` 指定已构建版本；使用已验证的 1 GB 内存、2 CPU、256 MiB tmp 和 init 配置。工具使用 dedicated profile 的非阻塞文件锁，拒绝并发使用该浏览器。每次获取 fresh grant，不设置计划任务；结束关闭容器，之后可再次手动运行。需要本人验证时才通过前述 SSH 隧道打开临时网页。完整双流覆盖未通过时 exit 2 和 scopeIncomplete 仍保留，即使一些已验证文件已经成功归档。
 
-`--discover-channels` 不访问猜测的 gallery、元数据列表 API 或视频；在正常 LTI 启动后只读取实际 frame/anchor 中出现的频道路径，保存独立 `channel-discovery-COURSE_ID.json`，不覆盖已经验收的归档清单。明确 `/channel/channelid/N` 与媒体 href 的 category 候选会分别标方法；候选不等于课程会员验证。没有可读链接时退出 2 并明确未发现，不能静默宣称所有课成功。此只读发现新增路径仍待其他课程实测。
+`--discover-channels` 不访问猜测的 gallery、元数据列表 API 或视频；在正常 LTI 启动后只读取实际 frame/anchor 中出现的频道路径，保存独立 `channel-discovery-COURSE_ID.json`，不覆盖已经验收的归档清单。明确 `/channel/channelid/N`、匹配当前课程的 `/channel/COURSE_ID/N` 与媒体 href 的 category 候选会分别记录来源；候选不等于课程会员验证。没有可读链接时退出 2 并明确未发现，不能静默宣称所有课成功。
+
+只读实测已读到 CHMA10（443350 / 811203）、MATA29（452689 / 812430）、PHYA11（458777 / 814239）的实际 `/channel/COURSE_ID/CHANNEL_ID` frame 路径及媒体链接。STAB22（463664 / 814363）最初因未识别这种路径误报未发现；仅复验这一课后实际退出 0，读取 `/channel/463664/814363`、原生 **0 Media**、`observedEmpty=true`。没有重复前三课。可视链接数不作为全量录像数；空课来自实际原生标签，不从零链接推断空课或身份失效。元数据完整流程对明确的总数零保存 healthy empty，不删除既有归档。
+
+管理员显式维护的 `core-courses.catalog.json` 包含以上四课和已完成 BIO 的真实 course/tool/channel/gallery 地址，不自动扩展辅助课或旧学期。`server-catalog.py` 先完整校验配置，再以 subprocess argv 顺序调用同一个已安装入口，每课 fresh grant、共享专用 profile；某课失败仍继续下一课，最后汇总并退出非零。真实服务器 bash 静态检查和五条清单 dry-run 已通过，`networkRequested=false`；尚未执行整个 catalog 的首次全量归档。没有网站按钮、计划任务或额外服务。
 
 先核对清单估计容量和本地空余，再加 `--download --limit 1` 做一份真实试下载。移除 `--limit` 才下载全部已发现 entry。双流各自保存，默认优先来源原始格式；若原格式没有授权下载，就不能保证拿到源文件，保留可下载格式和错误状态供核查。不会重编码，不处理 DRM。
 

@@ -136,6 +136,9 @@ class Sessions:
             return
         category = re.search(r"/channel/channelid/(\d+)(?:/|$)", parsed.path)
         direct_gallery = bool(category)
+        if not category and self.current_course.isdigit():
+            category = re.search(r"^/channel/" + re.escape(self.current_course) + r"/(\d+)(?:/|$)", parsed.path)
+            direct_gallery = bool(category)
         if not category:
             category = re.search(r"/(?:categoryid|categoryId)/(\d+)(?:/|$)", parsed.path)
         if not category:
@@ -389,6 +392,15 @@ def archive_entry(context, session: dict, metadata: dict, private: dict, root: P
         maximum = max(item.get("filesize_approx", 0) for item in private["formats"])
         if shutil.disk_usage(root).free < maximum + 512 * 1024 * 1024:
             raise RuntimeError("insufficient_local_storage")
+        # A checksum failure must not be "repaired" by yt-dlp skipping the
+        # existing final file. Retain its bytes under a corruption name, then
+        # allow a fresh final file or an existing .part to be downloaded.
+        for prior in metadata.get("files", []):
+            damaged = (root / prior["path"]).resolve()
+            if prior.get("kind") == "video" and damaged.is_relative_to(directory.resolve()) and damaged.is_file():
+                actual_hash = sha256(damaged)
+                if actual_hash != prior.get("sha256"):
+                    damaged.rename(damaged.with_name("corrupt-" + actual_hash + "-" + damaged.name))
         import yt_dlp
         last_storage_check = 0
         def guard_storage(progress):
@@ -565,7 +577,8 @@ def main():
         parser.error("--entry-id requires one observed entry and a single-course run")
     if args.known_gallery_url:
         gallery = urlparse(args.known_gallery_url)
-        if not args.channel_id or gallery.scheme != "https" or not media_host(gallery.hostname or "", {value.lower() for value in args.media_host}) or gallery.path != "/channel/channelid/" + args.channel_id or gallery.query or gallery.fragment or gallery.username or gallery.password:
+        gallery_paths = {"/channel/channelid/" + str(args.channel_id), "/channel/" + re.match(r"^/courses/(\d+)", urls[0].path).group(1) + "/" + str(args.channel_id)}
+        if not args.channel_id or gallery.scheme != "https" or not media_host(gallery.hostname or "", {value.lower() for value in args.media_host}) or gallery.path not in gallery_paths or gallery.query or gallery.fragment or gallery.username or gallery.password:
             parser.error("Known gallery must be a previously observed HTTPS channel URL for the explicit channel")
     if args.verify_observed_asset_url:
         asset = urlparse(args.verify_observed_asset_url)
@@ -748,6 +761,7 @@ def main():
         if args.discover_channels:
             runtime_stage = "read_observed_channel_links"
             page.wait_for_timeout(args.settle_ms)
+            native_totals = []
             for frame in page.frames:
                 if not media_host(urlparse(frame.url).hostname or "", sessions.extra_hosts):
                     continue
@@ -756,11 +770,15 @@ def main():
                     links = frame.locator('a[href]').evaluate_all("nodes => nodes.map(n => n.href)")
                     for link in links:
                         sessions.remember_channel(link)
+                    totals = frame.evaluate("() => [...document.body.innerText.matchAll(/\\b(\\d+)\\s+Media\\b/gi)].map(m => ({value:Number(m[1]),label:m[0]}))")
+                    native_totals.append({**safe_request_location(frame.url), "totalLabels": totals,
+                                          "observedEmpty": bool(totals and {item["value"] for item in totals} == {0})})
                 except Exception:
                     pass
             result = {"state": "channel_links_discovered" if sessions.channel_evidence else "channel_links_not_found",
                       "courseId": courses[0], "observedChannels": sessions.channel_evidence,
                       "frames": [safe_request_location(frame.url) for frame in page.frames],
+                      "nativeGalleryTotals": native_totals,
                       "complete": False, "downloadRequested": False}
             atomic_json(root / ("channel-discovery-" + courses[0] + ".json"), result)
             print(json.dumps(result, ensure_ascii=False), flush=True)
@@ -878,7 +896,7 @@ def main():
                         key = f"{course}:{category}"
                         native_members = sessions.gallery_members.get(key, set())
                         native_total = sessions.gallery_totals.get(key)
-                        if native_total is not None and native_total == len(native_members) and native_total > 0:
+                        if native_total is not None and native_total == len(native_members):
                             manifest["channels"][key] = {"state": "verified", "totalCount": native_total,
                                                         "uniqueEntries": len(native_members), "method": "kaf_native_visible_gallery_total",
                                                         "nativeLabel": f"{native_total} Media", "restrictedApi": details}
@@ -1009,12 +1027,17 @@ def main():
                         details = error.details if isinstance(error, MediaAPIError) else {"code": "CHILD_IDENTITY_OR_METADATA_FAILED"}
                         print(json.dumps({"state": "observed_child_unverified", "entryId": observed_child["entryId"], **details}), flush=True)
             discovery_complete = complete
-            complete = bool(not args.entry_id and verified_scope and current_channel_keys and parent_scope and
+            healthy_empty = bool(not args.entry_id and current_channel_keys and
+                all(manifest.get("channels", {}).get(key, {}).get("state") == "verified" and
+                    manifest["channels"][key].get("totalCount") == 0 for key in current_channel_keys))
+            if healthy_empty:
+                print(json.dumps({"state": "verified_empty_gallery", "courseIds": courses, "channelCount": len(current_channel_keys)}), flush=True)
+            complete = bool(not args.entry_id and current_channel_keys and (parent_scope or healthy_empty) and
                 all(manifest.get("channels", {}).get(key, {}).get("state") == "verified" for key in current_channel_keys) and
                 all(manifest.get("streams", {}).get(key, {}).get("state") == "verified" for key in parent_scope))
             processed = 0
             download_plans = []
-            if not verified_scope:
+            if not verified_scope and not healthy_empty:
                 complete = False
             for key in sorted(verified_scope):
                 runtime_stage = "query_entry_metadata"
@@ -1079,8 +1102,9 @@ def main():
                                 "coverageVerified": False, "discoveryComplete": discovery_complete}
             scoped_channels = [manifest["channels"][key] for key in current_channel_keys]
             scoped_streams = [manifest["streams"][key] for key in parent_scope]
-            manifest["scan"]["scopeComplete"] = bool(complete and scoped_channels and scoped_streams and
+            manifest["scan"]["scopeComplete"] = bool(complete and scoped_channels and (scoped_streams or healthy_empty) and
                 all(value.get("state") == "verified" for value in scoped_channels + scoped_streams))
+            manifest["scan"]["empty"] = healthy_empty
             # Generic UI pagination is not proof that a KAF gallery is exhaustive.
             # Therefore absent entries are never deleted or automatically marked
             # missing until a platform-specific total-count check is verified.
@@ -1114,7 +1138,8 @@ def main():
                 counts = {state: sum(manifest["entries"].get(key, {}).get("state") == state for key in verified_scope)
                           for state in ("archived", "subtitles_archived", "needs_reauth", "retryable_failure", "downloading", "discovered")}
                 manifest["archive"] = {"completedAt": int(time.time()), "scopeEntries": len(verified_scope),
-                                       "counts": counts, "state": "complete" if counts["archived"] + counts["subtitles_archived"] == len(verified_scope) and verified_scope else "incomplete"}
+                                       "counts": counts, "state": "empty" if healthy_empty else
+                                       ("complete" if counts["archived"] + counts["subtitles_archived"] == len(verified_scope) and verified_scope else "incomplete")}
                 atomic_json(path, manifest)
             print(json.dumps({"entries": len(sessions.entries), "scanComplete": manifest["scan"]["complete"],
                               "scopeComplete": manifest["scan"]["scopeComplete"],
