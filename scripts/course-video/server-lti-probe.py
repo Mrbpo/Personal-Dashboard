@@ -104,7 +104,16 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except HTTPError as error:
-        print(json.dumps({"state": "http_failure", "httpStatus": error.code, "originHost": urlparse(error.url).hostname}))
+        body = error.read(1024 * 1024)
+        text = body.decode("utf-8", errors="replace").lower()
+        markers = {name: bool(re.search(pattern, text)) for name, pattern in {
+            "cloudflare": r"cloudflare|cf-ray", "cloudfront": r"cloudfront",
+            "requestBlocked": r"request.?blocked|request could not be satisfied|request was blocked",
+            "invalidSignature": r"invalid.?signature|signature.?invalid|signature.?mismatch|signature.?verification",
+            "oauth": r"oauth", "captcha": r"captcha|turnstile|challenge-platform",
+            "accessDenied": r"access.?denied|permission.?denied|not.?authorized|unauthorized"}.items()}
+        print(json.dumps({"state": "http_failure", "httpStatus": error.code, "originHost": urlparse(error.url).hostname,
+                          "bodyBytesRead": len(body), "bodyMayBeTruncated": len(body) == 1024 * 1024, "markers": markers}))
         sys.exit(2)
     except Exception:
         print(json.dumps({"state": "probe_failed", "error": "invalid_input_or_network_response"}))

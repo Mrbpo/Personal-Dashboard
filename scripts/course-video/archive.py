@@ -394,9 +394,10 @@ def course_targets(context, base: str, course: str, max_pages: int) -> list[str]
     return list(dict.fromkeys(targets))
 
 
-def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms: int) -> bool:
+def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms: int, navigate: bool = True) -> bool:
     sessions.current_page = url
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    if navigate:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(settle_ms)
     if "/login" in page.url:
         raise ReauthRequired()
@@ -454,6 +455,8 @@ def main():
     parser.add_argument("--target-only", action="store_true", help="Visit only supplied pages for a first authorized sample")
     parser.add_argument("--channel-id", help="Explicit observed Kaltura channel for a single-course acceptance scope")
     parser.add_argument("--probe", action="store_true", help="Read-only scoped API origin/permission diagnosis; never downloads")
+    parser.add_argument("--headless", action="store_true", help="Official Chromium headless shell on the server")
+    parser.add_argument("--launch-url-stdin", action="store_true", help="Read a Canvas-authorized sessionless launch JSON from stdin; never log or persist the URL")
     parser.add_argument("--login-timeout", type=int, default=900, help="Seconds allowed for interactive school login and Duo")
     args = parser.parse_args()
     urls = [urlparse(value) for value in args.course_url]
@@ -468,6 +471,17 @@ def main():
         parser.error("--channel-id requires one numeric channel and a single-course run")
     if args.probe and args.download:
         parser.error("--probe cannot download")
+    if args.launch_url_stdin and (not args.headless or not args.target_only or args.all_courses or len(urls) != 1 or args.pause_after_inventory):
+        parser.error("Server launch requires --headless --target-only, one course and noninteractive execution")
+    if args.headless and not args.launch_url_stdin:
+        parser.error("Headless mode requires an authorized launch from stdin")
+    launch_url = None
+    if args.launch_url_stdin:
+        payload = json.loads(sys.stdin.buffer.read(262144))
+        launch_url = payload.get("launchUrl") or payload.get("url")
+        parsed_launch = urlparse(launch_url) if isinstance(launch_url, str) else None
+        if not parsed_launch or parsed_launch.scheme != "https" or parsed_launch.netloc != host or parsed_launch.username or parsed_launch.password:
+            parser.error("Authorized launch must use the configured Canvas HTTPS host")
     root = args.output.resolve()
     profile = args.profile.resolve() if args.profile else None
     if profile and (profile == root or root in profile.parents or profile in root.parents):
@@ -486,20 +500,52 @@ def main():
     with sync_playwright() as playwright:
         browser = None
         if profile:
-            context = playwright.chromium.launch_persistent_context(str(profile), headless=False, channel="msedge")
+            launch_options = {"headless": args.headless}
+            if not args.headless:
+                launch_options["channel"] = "msedge"
+            context = playwright.chromium.launch_persistent_context(str(profile), **launch_options)
         else:
-            browser = playwright.chromium.launch(headless=False, channel="msedge")
+            launch_options = {"headless": args.headless}
+            if not args.headless:
+                launch_options["channel"] = "msedge"
+            browser = playwright.chromium.launch(**launch_options)
             context = browser.new_context()
+        # Observe manifest/session requests but avoid streaming whole lectures
+        # during metadata collection. Direct yt-dlp download is independent.
+        if args.headless:
+            context.route("**/*", lambda route: route.abort() if route.request.resource_type == "media" else route.continue_())
         context.on("request", sessions.observe_request)
         context.on("response", sessions.observe_response)
+        document_responses = []
+        def record_document_response(response):
+            if response.request.resource_type == "document" and media_host(urlparse(response.url).hostname or "", sessions.extra_hosts):
+                document_responses.append({"httpStatus": response.status, "originHost": urlparse(response.url).hostname})
+        context.on("response", record_document_response)
         page = context.pages[0] if context.pages else context.new_page()
         sessions.current_course = re.match(r"^/courses/(\d+)", urls[0].path).group(1)
         sessions.current_page = args.course_url[0]
-        page.goto(args.course_url[0], wait_until="domcontentloaded")
+        page.goto(launch_url or args.course_url[0], wait_until="domcontentloaded")
         base = "https://" + host
         deadline = time.monotonic() + args.login_timeout
         status = None
         while time.monotonic() < deadline:
+            if args.launch_url_stdin:
+                rejected = next((item for item in document_responses if item["httpStatus"] in (401, 403)), None)
+                if rejected:
+                    print(json.dumps({"state": "server_launch_rejected", **rejected}), flush=True)
+                    atomic_json(path, {**manifest, "scan": {"state": "blocked_authorization", "complete": False, **rejected}})
+                    context.close()
+                    return 2
+                if any(media_host(urlparse(frame.url).hostname or "", sessions.extra_hosts) for frame in page.frames):
+                    print(json.dumps({"state": "tool_launched", "documentResponses": document_responses}), flush=True)
+                    page.wait_for_timeout(args.settle_ms)
+                    break
+                if any("duo" in frame.url.lower() or "login" in urlparse(frame.url).path.lower() for frame in page.frames):
+                    print(json.dumps({"state": "needs_reauth", "interactiveAuthorizationRequired": True}), flush=True)
+                    context.close()
+                    return 2
+                page.wait_for_timeout(1000)
+                continue
             state = "waiting_duo" if any("duo" in frame.url.lower() for frame in page.frames) else "waiting_login"
             try:
                 check = context.request.get(base + "/api/v1/courses/" + sessions.current_course, timeout=10000)
@@ -532,7 +578,7 @@ def main():
                     # inspected after Canvas performs its signed launch.
                     if urlparse(target).netloc != host or not urlparse(target).path.startswith("/courses/" + course + "/") and target != base + "/courses/" + course:
                         continue
-                    complete = inspect_target(page, target, sessions, args.max_pages, args.settle_ms) and complete
+                    complete = inspect_target(page, target, sessions, args.max_pages, args.settle_ms, navigate=not args.launch_url_stdin) and complete
             # Related streams may never appear as separate gallery cards.
             # Enumerate explicit observed course channels with total-count gates.
             manifest["observedEntryIds"] = list(sessions.entries)
