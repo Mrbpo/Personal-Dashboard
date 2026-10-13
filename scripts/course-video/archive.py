@@ -16,6 +16,18 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
+runtime_stage = "arguments"
+
+
+def safe_runtime_failure(error):
+    message = str(error).lower()
+    patterns = {"READ_ONLY_RUNTIME": r"read-only file system", "RUNTIME_PERMISSION": r"permission denied|eacces",
+                "DISPLAY_UNAVAILABLE": r"missing x server|\$display|cannot open display",
+                "BROWSER_NOT_INSTALLED": r"executable doesn't exist", "CRASHPAD_RUNTIME": r"crashpad",
+                "BROWSER_SANDBOX": r"no usable sandbox|without --no-sandbox", "TIMEOUT": r"timeout"}
+    code = next((key for key, pattern in patterns.items() if re.search(pattern, message)), "RUNTIME_FAILURE")
+    return {"state": "runtime_failure", "stage": runtime_stage, "exceptionType": type(error).__name__, "code": code}
+
 
 class ReauthRequired(Exception):
     pass
@@ -439,6 +451,7 @@ def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms
 
 
 def main():
+    global runtime_stage
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--course-url", action="append", required=True)
     parser.add_argument("--all-courses", action="store_true", help="Enumerate all visible student courses on the same Canvas instance")
@@ -482,6 +495,7 @@ def main():
         parser.error("Interactive server mode requires its own server-only --profile directory")
     launch_url = None
     if args.launch_url_stdin:
+        runtime_stage = "read_authorized_launch_input"
         payload = json.loads(sys.stdin.buffer.read(262144))
         launch_url = payload.get("launchUrl") or payload.get("url")
         parsed_launch = urlparse(launch_url) if isinstance(launch_url, str) else None
@@ -501,9 +515,11 @@ def main():
     path = root / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"version": 1, "entries": {}}
     sessions = Sessions({value.lower() for value in args.media_host})
+    runtime_stage = "import_browser_runtime"
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = None
+        runtime_stage = "start_browser_context"
         if profile:
             launch_options = {"headless": args.headless}
             if not (args.headless or args.interactive_server):
@@ -541,10 +557,12 @@ def main():
         page = context.pages[0] if context.pages else context.new_page()
         sessions.current_course = re.match(r"^/courses/(\d+)", urls[0].path).group(1)
         sessions.current_page = args.course_url[0]
+        runtime_stage = "navigate_authorized_launch"
         page.goto(launch_url or args.course_url[0], wait_until="domcontentloaded")
         base = "https://" + host
         deadline = time.monotonic() + args.login_timeout
         status = None
+        runtime_stage = "wait_authorization"
         while time.monotonic() < deadline:
             if args.launch_url_stdin:
                 last_document = document_responses[-1] if document_responses else None
@@ -609,6 +627,7 @@ def main():
             if args.all_courses:
                 courses = [str(course["id"]) for course in canvas_pages(context, base, "/api/v1/courses?enrollment_type=student&per_page=100", args.max_pages)]
             complete = True
+            runtime_stage = "scan_gallery"
             for course in courses:
                 sessions.current_course = course
                 targets = [] if args.target_only else course_targets(context, base, course, args.max_pages)
@@ -627,6 +646,7 @@ def main():
                     raise RuntimeError("explicit_channel_requires_single_course")
                 sessions.channels = {courses[0]: {args.channel_id}}
             verified_scope = set()
+            runtime_stage = "query_channel_membership"
             current_channel_keys = set()
             for course, categories in list(sessions.channels.items()):
                 candidate = next((sessions.usable(item) for item in sessions.entries.values() if item["courseId"] == course), None)
@@ -686,6 +706,7 @@ def main():
             # Related streams may never appear as separate gallery cards.
             # Enumerate them before archiving and retain an explicit relation.
             parent_scope = set(verified_scope)
+            runtime_stage = "query_child_streams"
             for key in list(parent_scope):
                 observed = sessions.entries[key]
                 session = sessions.usable(observed)
@@ -712,6 +733,7 @@ def main():
             if not verified_scope:
                 complete = False
             for key in sorted(verified_scope):
+                runtime_stage = "query_entry_metadata"
                 observed = sessions.entries[key]
                 session = sessions.usable(observed)
                 sessions.current_course = session["courseId"]
@@ -827,6 +849,6 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
-    except Exception:
-        print("Archive interrupted. Check local prerequisites and rerun; existing files are preserved.", file=sys.stderr)
+    except Exception as error:
+        print(json.dumps(safe_runtime_failure(error)), file=sys.stderr, flush=True)
         sys.exit(2)

@@ -34,11 +34,14 @@ server collector 不重做 Canvas 网页 SSO 判断，因为 sessionless LTI 可
 
 用户选择采集、授权验证和下载都放在服务器，并自行约每周发起一次，**没有定时任务**。`interactive.Dockerfile` 复用已安装的 runtime，只补匹配的 full Chromium、Xvfb、x11vnc、noVNC/websockify；`interactive-entrypoint.sh` 启动临时显示器和网页像素入口，同一正常浏览器等待本人验证，collector 退出就结束所有临时进程。该工件需实际部署验证，不能等同于入口已交付。
 
+实际派生镜像已构建。首次只读容器启动浏览器因默认 HOME 的 Crashpad 写入失败退出；同一资源配置仅增加 `HOME=/tmp` 后，正常无授权 headed 浏览器成功启动。此必要配置已写入 Dockerfile；复用已构建镜像时加 `-e HOME=/tmp` 并提供可写 `/tmp`，不必为修配置重新下载 runtime。登录验证、完整频道清单及视频下载仍需分别确认。
+
 ```sh
 docker build -f interactive.Dockerfile -t study-course-video:interactive .
 # 在 /srv/study-course-video-tool 构建；root 将合法 grant producer 接到此管道。
 GRANT_PRODUCER | docker run --rm -i --name study-course-video-interactive \
   --memory=1500m --cpus=2 --shm-size=256m \
+  -e HOME=/tmp \
   -p 127.0.0.1:6080:6080 \
   -v /srv/study-course-recordings:/archive \
   -v /srv/study-course-video-state:/state \

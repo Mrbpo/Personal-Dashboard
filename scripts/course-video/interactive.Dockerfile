@@ -8,6 +8,6 @@ COPY archive.py /tool/archive.py
 COPY interactive-entrypoint.sh /tool/interactive-entrypoint.sh
 RUN sed -i 's/\r$//' /tool/interactive-entrypoint.sh \
  && chmod 755 /tool/interactive-entrypoint.sh
-ENV DISPLAY=:99 PYTHONUNBUFFERED=1
+ENV DISPLAY=:99 HOME=/tmp PYTHONUNBUFFERED=1
 EXPOSE 6080
 ENTRYPOINT ["/tool/interactive-entrypoint.sh"]
