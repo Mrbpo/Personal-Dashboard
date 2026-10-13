@@ -14,7 +14,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 
 runtime_stage = "arguments"
 
@@ -27,6 +27,18 @@ def safe_runtime_failure(error):
                 "BROWSER_SANDBOX": r"no usable sandbox|without --no-sandbox", "TIMEOUT": r"timeout"}
     code = next((key for key, pattern in patterns.items() if re.search(pattern, message)), "RUNTIME_FAILURE")
     return {"state": "runtime_failure", "stage": runtime_stage, "exceptionType": type(error).__name__, "code": code}
+
+
+def script_error_category(message):
+    patterns = {"CSP_REJECTED": r"content.security.policy|refused to.*script", "CORS_REJECTED": r"cors|access.control.allow.origin",
+                "POSTMESSAGE_ORIGIN": r"postmessage|target origin", "FAILED_SCRIPT_LOAD": r"loading chunk|failed to.*module|script.*load|unexpected token.*<",
+                "UNDEFINED_RUNTIME_OBJECT": r"is not defined|referenceerror", "JAVASCRIPT_TYPE_ERROR": r"typeerror|cannot read prop"}
+    return next((key for key, pattern in patterns.items() if re.search(pattern, str(message), re.I)), "JAVASCRIPT_ERROR")
+
+
+def safe_request_location(url):
+    parsed = urlparse(public_url(url))
+    return {"host": parsed.hostname, "path": parsed.path}
 
 
 class ReauthRequired(Exception):
@@ -112,6 +124,10 @@ class Sessions:
         self.current_course = ""
         self.current_page = ""
         self.channels: dict[str, set[str]] = {}
+        self.api_origins: set[str] = set()
+        self.gallery_members: dict[str, set[str]] = {}
+        self.gallery_totals: dict[str, int] = {}
+        self.gallery_diagnostics: list[dict] = []
 
     def remember_channel(self, url: str):
         parsed = urlparse(url)
@@ -129,6 +145,9 @@ class Sessions:
             return
         self.remember_channel(request.url)
         origin = f"https://{parsed.netloc}"
+        is_api = parsed.path.lower().startswith("/api_v3/") and not re.search(r"(?:^|\.)(?:analytics|stats)(?:\.|$)", parsed.hostname or "", re.I)
+        if is_api:
+            self.api_origins.add(origin)
         payload = parse_request(request.url, request.post_data)
         dictionaries = list(fields(payload))
         session = next((str(item[key]) for item in dictionaries for key in item
@@ -141,14 +160,16 @@ class Sessions:
             for key, value in item.items():
                 if key.lower() in ("entryid", "entry_id", "filter:entryidequal") or key.lower().endswith(":entryid"):
                     if isinstance(value, str) and re.fullmatch(r"[01]_[A-Za-z0-9]+", value):
-                        self.remember(value, origin, session)
+                        self.remember(value, origin, session, is_api)
 
-    def remember(self, entry: str, origin: str, session: str | None):
+    def remember(self, entry: str, origin: str, session: str | None, api_observed: bool = False):
         key = f"{self.current_course}:{entry}"
         old = self.entries.get(key, {})
+        if old.get("apiObserved") and not api_observed:
+            return  # Analytics/manifest observations must not replace an API KS.
         self.entries[key] = {**old, "entryId": entry, "courseId": self.current_course,
                              "origin": origin, "ks": session or old.get("ks"),
-                             "sourceUrl": public_url(self.current_page)}
+                             "sourceUrl": public_url(self.current_page), "apiObserved": api_observed}
 
     def observe_response(self, response):
         parsed = urlparse(response.url)
@@ -161,16 +182,23 @@ class Sessions:
         except Exception:
             return
         origin = f"https://{parsed.netloc}"
+        is_api = parsed.path.lower().startswith("/api_v3/") and not re.search(r"(?:^|\.)(?:analytics|stats)(?:\.|$)", parsed.hostname or "", re.I)
+        if is_api:
+            self.api_origins.add(origin)
         for item in fields(data):
             # Response-issued KS covers bootstrap/multirequest session start.
             if isinstance(item.get("ks"), str):
                 self.session_by_origin[f"{self.current_course}:{origin}"] = item["ks"]
                 self.session_sources[f"{self.current_course}:{origin}"] = "observed_response_session"
             if item.get("objectType") in ("KalturaMediaEntry", "KalturaBaseEntry") and re.fullmatch(r"[01]_[A-Za-z0-9]+", str(item.get("id", ""))):
-                self.remember(item["id"], origin, self.session_by_origin.get(f"{self.current_course}:{origin}"))
+                self.remember(item["id"], origin, self.session_by_origin.get(f"{self.current_course}:{origin}"), is_api)
 
     def usable(self, value: dict) -> dict:
-        return {**value, "ks": value.get("ks") or self.session_by_origin.get(f"{value['courseId']}:{value['origin']}")}
+        result = {**value, "ks": value.get("ks") or self.session_by_origin.get(f"{value['courseId']}:{value['origin']}")}
+        if result["origin"] not in self.api_origins and len(self.api_origins) == 1:
+            result["origin"] = next(iter(self.api_origins))
+        result["_allowedMediaHosts"] = sorted(self.extra_hosts)
+        return result
 
 
 class QuietLogger:
@@ -226,14 +254,20 @@ def inventory_entry(context, session: dict, include_captions: bool = False) -> t
         if page > 100:
             raise RuntimeError("caption_pagination_limit")
     formats = []
+    data_url = urlparse(str(info.get("dataUrl", "")))
+    if data_url.scheme != "https" or data_url.username or data_url.password or not media_host(data_url.hostname or "", set(session.get("_allowedMediaHosts", []))):
+        raise MediaAPIError("UNTRUSTED_MEDIA_URL", 200, session["origin"], "baseentry", "get")
+    encoded_session = quote(session["ks"], safe="")
     for flavor in flavors:
         if flavor.get("status") != 2 or flavor.get("fileExt") in ("wvm", "chun"):
             continue
+        if not re.fullmatch(r"[01]_[A-Za-z0-9]+", str(flavor.get("id", ""))):
+            raise RuntimeError("flavor_identity_mismatch")
         formats.append({"format_id": str(flavor["id"]), "ext": flavor.get("fileExt") or "mp4",
                         "height": flavor.get("height"), "width": flavor.get("width"),
                         "tbr": flavor.get("bitrate"), "filesize_approx": int(flavor.get("size") or 0) * 1024,
                         "preference": 10 if flavor.get("isOriginal") else 0,
-                        "url": info["dataUrl"].rstrip("/") + "/flavorId/" + flavor["id"] + "/ks/" + session["ks"]})
+                        "url": urlunparse(data_url._replace(path=data_url.path.rstrip("/") + "/flavorId/" + flavor["id"] + "/ks/" + encoded_session))})
     stable_id = hashlib.sha256(f"{info.get('partnerId')}:{session['entryId']}:{session['courseId']}".encode()).hexdigest()
     track = "unknown"
     # A parent-child relationship establishes stream identity, not the content
@@ -406,7 +440,7 @@ def course_targets(context, base: str, course: str, max_pages: int) -> list[str]
     return list(dict.fromkeys(targets))
 
 
-def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms: int, navigate: bool = True) -> bool:
+def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms: int, navigate: bool = True, gallery_url: str | None = None, channel_id: str | None = None, entry_id: str | None = None) -> bool:
     sessions.current_page = url
     if navigate:
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -422,12 +456,42 @@ def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms
                 if not media_host(frame_url.hostname or "", sessions.extra_hosts):
                     continue
                 sessions.remember_channel(frame.url)
+                if gallery_url and public_url(frame.url) == gallery_url and channel_id:
+                    summary = frame.evaluate("""() => {
+                      const totalLabels = [...document.body.innerText.matchAll(/\\b(\\d+)\\s+Media\\b/gi)].map(m => ({value:Number(m[1]),label:m[0]}));
+                      const anchors = [...document.querySelectorAll('a[href*="/media/"]')].filter(n => n.getBoundingClientRect().width > 0)
+                        .map(n => ({path:new URL(n.href).pathname,text:n.innerText.trim().slice(0,100),
+                          parents:[n.parentElement,n.parentElement?.parentElement].filter(Boolean).map(p => ({tag:p.tagName,id:p.id,className:String(p.className)}))}));
+                      const next = [...document.querySelectorAll('a[rel="next"],button[aria-label="Next"],a[aria-label="Next"],.pagination-next a')].filter(n => n.getBoundingClientRect().width>0)
+                        .map(n => ({text:n.innerText.trim().slice(0,40),disabled:n.disabled||n.getAttribute('aria-disabled')==='true'}));
+                      return {totalLabels,anchors,next};
+                    }""")
+                    members = set()
+                    card_details = []
+                    for anchor in summary["anchors"]:
+                        match = re.search(r"/media/(?:[^/]+/)*([01]_[A-Za-z0-9]+)/(?:categoryid/)?" + re.escape(channel_id) + r"(?:/|$)", anchor["path"])
+                        if match:
+                            members.add(match[1])
+                            card_details.append({"entryId": match[1], "title": anchor["text"], "parents": anchor["parents"]})
+                    key = f"{sessions.current_course}:{channel_id}"
+                    sessions.gallery_members.setdefault(key, set()).update(members)
+                    totals = {label["value"] for label in summary["totalLabels"]}
+                    if len(totals) == 1:
+                        total = next(iter(totals))
+                        if key in sessions.gallery_totals and sessions.gallery_totals[key] != total:
+                            return False
+                        sessions.gallery_totals[key] = total
+                    sessions.gallery_diagnostics.append({"courseId": sessions.current_course, "channelId": channel_id,
+                                                         "totalLabels": summary["totalLabels"], "cardEntries": card_details,
+                                                         "nextControls": summary["next"]})
                 # Load per-entry pages to obtain an applicable session/context.
                 anchors = frame.locator('a[href*="/entryid/"], a[href*="/entry_id/"], a[href*="/media/"]').evaluate_all("nodes => nodes.map(n => n.href)")
                 for href in anchors:
                     sessions.remember_channel(href)
                     target = urlparse(href)
                     if target.scheme != "https" or not media_host(target.hostname or "", sessions.extra_hosts) or href in visited:
+                        continue
+                    if entry_id and not re.search(r"(?:/|=)" + re.escape(entry_id) + r"(?:/|&|$)", href):
                         continue
                     visited.add(href)
                     child = page.context.new_page()
@@ -467,7 +531,11 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Bound first download trial; zero means all discovered entries")
     parser.add_argument("--target-only", action="store_true", help="Visit only supplied pages for a first authorized sample")
     parser.add_argument("--channel-id", help="Explicit observed Kaltura channel for a single-course acceptance scope")
+    parser.add_argument("--entry-id", help="One explicitly observed entry for a partial authorized metadata/download trial; does not assert full channel coverage")
+    parser.add_argument("--known-gallery-url", help="One already-observed KAF channel URL to navigate in the authorized context; no URL guessing")
+    parser.add_argument("--verify-observed-asset-url", help="One explicitly observed public Kaltura script URL for normal manual CDN verification before returning to the known gallery")
     parser.add_argument("--probe", action="store_true", help="Read-only scoped API origin/permission diagnosis; never downloads")
+    parser.add_argument("--hold-browser", type=int, default=0, help="After a read-only probe, hold the same browser for visual diagnosis for up to 900 seconds")
     parser.add_argument("--headless", action="store_true", help="Official Chromium headless shell on the server")
     parser.add_argument("--interactive-server", action="store_true", help="Normal headed Chromium in a temporary server display, with manual verification")
     parser.add_argument("--launch-url-stdin", action="store_true", help="Read a Canvas-authorized sessionless launch JSON from stdin; never log or persist the URL")
@@ -483,8 +551,20 @@ def main():
         parser.error("--pause-after-inventory requires --download")
     if args.channel_id and (not args.channel_id.isdigit() or args.all_courses):
         parser.error("--channel-id requires one numeric channel and a single-course run")
+    if args.entry_id and (not re.fullmatch(r"[01]_[A-Za-z0-9]+", args.entry_id) or args.all_courses or len(urls) != 1):
+        parser.error("--entry-id requires one observed entry and a single-course run")
+    if args.known_gallery_url:
+        gallery = urlparse(args.known_gallery_url)
+        if not args.channel_id or gallery.scheme != "https" or not media_host(gallery.hostname or "", {value.lower() for value in args.media_host}) or gallery.path != "/channel/channelid/" + args.channel_id or gallery.query or gallery.fragment or gallery.username or gallery.password:
+            parser.error("Known gallery must be a previously observed HTTPS channel URL for the explicit channel")
+    if args.verify_observed_asset_url:
+        asset = urlparse(args.verify_observed_asset_url)
+        if not args.interactive_server or not args.known_gallery_url or asset.scheme != "https" or not media_host(asset.hostname or "", {value.lower() for value in args.media_host}) or not asset.path.endswith(".js") or asset.query or asset.fragment or asset.username or asset.password:
+            parser.error("Asset verification requires interactive server, a known gallery and one observed public HTTPS script URL without credentials")
     if args.probe and args.download:
         parser.error("--probe cannot download")
+    if args.hold_browser < 0 or args.hold_browser > 900 or args.hold_browser and not args.probe:
+        parser.error("--hold-browser requires --probe and must be between 0 and 900")
     if args.headless and args.interactive_server:
         parser.error("Choose headless or interactive server mode")
     if args.launch_url_stdin and (not (args.headless or args.interactive_server) or not args.target_only or args.all_courses or len(urls) != 1 or args.pause_after_inventory):
@@ -537,6 +617,38 @@ def main():
             context.route("**/*", lambda route: route.abort() if route.request.resource_type == "media" else route.continue_())
         context.on("request", sessions.observe_request)
         context.on("response", sessions.observe_response)
+        network_failures = []
+        script_errors = []
+        def record_failed_request(request):
+            if request.resource_type == "media":
+                return  # Intentionally blocked during discovery.
+            if len(network_failures) < 100:
+                error_code = re.search(r"ERR_[A-Z_]+", request.failure or "")
+                network_failures.append({**safe_request_location(request.url), "resourceType": request.resource_type,
+                                         "failureCode": error_code.group(0) if error_code else "NETWORK_FAILURE", "phase": runtime_stage})
+        def record_failed_response(response):
+            if response.status >= 400 and len(network_failures) < 100:
+                network_failures.append({**safe_request_location(response.url), "resourceType": response.request.resource_type,
+                                         "httpStatus": response.status, "phase": runtime_stage})
+        def attach_page_diagnostics(diagnostic_page):
+            def page_error(error):
+                if len(script_errors) < 50:
+                    line = re.search(r":(\d+):(\d+)(?:\)?\s*$)", getattr(error, "stack", ""), re.M)
+                    script_errors.append({"category": script_error_category(error), "line": int(line[1]) if line else None,
+                                          "column": int(line[2]) if line else None, "phase": runtime_stage})
+            def console_error(message):
+                if message.type == "error" and len(script_errors) < 50:
+                    location = message.location
+                    script_errors.append({"category": script_error_category(message.text),
+                                          "line": location.get("lineNumber"), "column": location.get("columnNumber"),
+                                          **safe_request_location(location.get("url", "")), "phase": runtime_stage})
+            diagnostic_page.on("pageerror", page_error)
+            diagnostic_page.on("console", console_error)
+        context.on("requestfailed", record_failed_request)
+        context.on("response", record_failed_response)
+        context.on("page", attach_page_diagnostics)
+        for diagnostic_page in context.pages:
+            attach_page_diagnostics(diagnostic_page)
         document_responses = []
         def record_document_response(response):
             if response.request.resource_type == "document" and media_host(urlparse(response.url).hostname or "", sessions.extra_hosts):
@@ -621,6 +733,35 @@ def main():
             context.close()
             raise ReauthRequired()
         courses = list(dict.fromkeys(re.match(r"^/courses/(\d+)", value.path).group(1) for value in urls))
+        if args.verify_observed_asset_url:
+            runtime_stage = "wait_observed_asset_browser_verification"
+            asset_documents = []
+            def record_asset_document(response):
+                if response.request.resource_type == "document" and public_url(response.url) == args.verify_observed_asset_url:
+                    asset_documents.append({"httpStatus": response.status, "contentType": response.headers.get("content-type", "").split(";", 1)[0].lower()})
+            context.on("response", record_asset_document)
+            page.goto(args.verify_observed_asset_url, wait_until="domcontentloaded", timeout=60000)
+            print(json.dumps({"state": "waiting_asset_browser_verification", **safe_request_location(args.verify_observed_asset_url),
+                              "timeoutSeconds": args.login_timeout}), flush=True)
+            asset_deadline = time.monotonic() + args.login_timeout
+            while time.monotonic() < asset_deadline:
+                latest_asset = asset_documents[-1] if asset_documents else None
+                if latest_asset and latest_asset["httpStatus"] == 200 and latest_asset["contentType"] and "html" not in latest_asset["contentType"]:
+                    print(json.dumps({"state": "observed_asset_verified", **latest_asset}), flush=True)
+                    break
+                page.wait_for_timeout(1000)
+            else:
+                print(json.dumps({"state": "needs_asset_browser_verification", "timeoutSeconds": args.login_timeout}), flush=True)
+                atomic_json(path, {**manifest, "scan": {"state": "needs_asset_browser_verification", "complete": False}})
+                context.close()
+                return 2
+        if args.known_gallery_url:
+            print(json.dumps({"state": "launch_page_before_observed_gallery", "frames": [
+                safe_request_location(frame.url) for frame in page.frames],
+                "networkFailures": list(network_failures), "scriptErrors": list(script_errors)}, ensure_ascii=False), flush=True)
+            runtime_stage = "navigate_observed_gallery"
+            page.goto(args.known_gallery_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(args.settle_ms)
         manifest["scan"] = {"startedAt": int(time.time()), "complete": False, "state": "running"}
         atomic_json(path, manifest)
         try:
@@ -637,7 +778,8 @@ def main():
                     # inspected after Canvas performs its signed launch.
                     if urlparse(target).netloc != host or not urlparse(target).path.startswith("/courses/" + course + "/") and target != base + "/courses/" + course:
                         continue
-                    complete = inspect_target(page, target, sessions, args.max_pages, args.settle_ms, navigate=not args.launch_url_stdin) and complete
+                    complete = inspect_target(page, target, sessions, args.max_pages, args.settle_ms, navigate=not args.launch_url_stdin,
+                                              gallery_url=args.known_gallery_url, channel_id=args.channel_id, entry_id=args.entry_id) and complete
             # Related streams may never appear as separate gallery cards.
             # Enumerate explicit observed course channels with total-count gates.
             manifest["observedEntryIds"] = list(sessions.entries)
@@ -660,10 +802,12 @@ def main():
                         candidates = [candidate]
                         if args.probe:
                             candidates = [{**candidate, "origin": origin_key.split(":https://", 1)[-1], "ks": token}
-                                          for origin_key, token in sessions.session_by_origin.items() if origin_key.startswith(course + ":https://")]
+                                          for origin_key, token in sessions.session_by_origin.items()
+                                          if origin_key.startswith(course + ":https://") and "https://" + origin_key.split(":https://", 1)[-1] in sessions.api_origins]
                             for item in candidates:
                                 item["origin"] = "https://" + item["origin"]
                         found = None
+                        last_api_error = None
                         for probe_candidate in candidates:
                             try:
                                 entries, total = channel_entries(context, probe_candidate, category, args.max_pages)
@@ -674,6 +818,7 @@ def main():
                                                       "totalCount": total, "ksSource": sessions.session_sources.get(course + ":" + probe_candidate["origin"], "entry_literal")}), flush=True)
                                 break
                             except Exception as error:
+                                last_api_error = error
                                 if args.probe:
                                     details = error.details if isinstance(error, MediaAPIError) else {"code": "NO_APPLICABLE_SESSION" if isinstance(error, ReauthRequired) else "INVALID_API_RESULT"}
                                     print(json.dumps({"state": "channel_probe", "courseId": course, "categoryId": category,
@@ -682,7 +827,7 @@ def main():
                                 else:
                                     raise
                         if found is None:
-                            raise RuntimeError("no_usable_channel_api_session")
+                            raise last_api_error or RuntimeError("no_usable_channel_api_session")
                         entries, total, candidate = found
                         for entry in entries:
                             key = f"{course}:{entry}"
@@ -693,19 +838,81 @@ def main():
                             "state": "verified", "totalCount": total, "uniqueEntries": len(entries),
                             "method": "categoryentry.list.categoryIdEqual"}
                     except Exception as error:
-                        complete = False
                         details = error.details if isinstance(error, MediaAPIError) else {"code": "NO_APPLICABLE_SESSION" if isinstance(error, ReauthRequired) else "INVALID_API_RESULT"}
                         manifest.setdefault("channels", {})[f"{course}:{category}"] = {"state": "unavailable", **details}
+                        key = f"{course}:{category}"
+                        native_members = sessions.gallery_members.get(key, set())
+                        native_total = sessions.gallery_totals.get(key)
+                        if native_total is not None and native_total == len(native_members) and native_total > 0:
+                            manifest["channels"][key] = {"state": "verified", "totalCount": native_total,
+                                                        "uniqueEntries": len(native_members), "method": "kaf_native_visible_gallery_total",
+                                                        "nativeLabel": f"{native_total} Media", "restrictedApi": details}
+                            observed_members = {entry for entry in native_members if f"{course}:{entry}" in sessions.entries}
+                            verified_scope.update(f"{course}:{entry}" for entry in observed_members)
+                            if observed_members != native_members:
+                                complete = False
+                                manifest["channels"][key]["state"] = "incomplete"
+                                manifest["channels"][key]["unobservedEntryIds"] = sorted(native_members - observed_members)
+                            for entry in native_members:
+                                observed_key = f"{course}:{entry}"
+                                if observed_key in sessions.entries:
+                                    sessions.entries[observed_key]["channelId"] = category
+                        else:
+                            complete = False
             if args.probe:
+                if args.entry_id:
+                    key = f"{courses[0]}:{args.entry_id}"
+                    if key not in sessions.entries:
+                        raise RuntimeError("requested_entry_not_observed")
+                    try:
+                        public, _private = inventory_entry(context, sessions.usable(sessions.entries[key]), False)
+                        manifest["entries"][key] = public
+                        print(json.dumps({"state": "authorized_entry_probe", "entryId": args.entry_id,
+                                          "identityVerified": True, "durationSeconds": public["durationSeconds"],
+                                          "formatCount": len(public["formats"]), "channelCoverageVerified": False}), flush=True)
+                    except Exception as error:
+                        details = error.details if isinstance(error, MediaAPIError) else {"code": "ENTRY_IDENTITY_OR_METADATA_FAILED"}
+                        print(json.dumps({"state": "authorized_entry_probe", "entryId": args.entry_id,
+                                          "identityVerified": False, **details}), flush=True)
                 manifest["scan"].update({"state": "probe_complete", "complete": False, "coverageVerified": False})
                 atomic_json(path, manifest)
                 print(json.dumps({"state": "probe_complete", "observedEntryIds": list(sessions.entries),
                                   "observedSessionHosts": [key.split(":https://", 1)[-1] for key in sessions.session_by_origin],
                                   "verifiedChannelEntries": len(verified_scope)}, ensure_ascii=False), flush=True)
+                frames = []
+                for diagnostic_frame in page.frames:
+                    try:
+                        stats = diagnostic_frame.evaluate("() => ({htmlBytes: new TextEncoder().encode(document.documentElement.outerHTML).length, scriptCount: document.scripts.length, iframeCount: document.querySelectorAll('iframe').length, topLevel: window.top === window.self})")
+                    except Exception:
+                        stats = {"frameInspectionUnavailable": True}
+                    frames.append({**safe_request_location(diagnostic_frame.url), **stats})
+                print(json.dumps({"state": "page_diagnostics", "networkFailureCount": len(network_failures), "networkFailures": network_failures[:12],
+                                  "scriptErrors": script_errors, "frames": frames,
+                                  "nativeGallery": sessions.gallery_diagnostics,
+                                  "failedStaticAssets": sum(item.get("resourceType") in ("script", "stylesheet", "font") for item in network_failures)}, ensure_ascii=False), flush=True)
+                if args.hold_browser:
+                    title = page.title()
+                    if re.search(r"ks=|oauth_signature|session_token|https?://", title, re.I):
+                        title = "[redacted]"
+                    frames = [{"host": urlparse(frame.url).hostname,
+                               "path": urlparse(public_url(frame.url)).path} for frame in page.frames]
+                    print(json.dumps({"state": "browser_held_for_diagnosis", "holdSeconds": args.hold_browser,
+                                      "pageTitle": title[:160], "frames": frames}, ensure_ascii=False), flush=True)
+                    page.wait_for_timeout(args.hold_browser * 1000)
                 return 0 if verified_scope else 2
             # Related streams may never appear as separate gallery cards.
+            if sessions.gallery_diagnostics:
+                print(json.dumps({"state": "native_gallery_inventory", "nativeGallery": sessions.gallery_diagnostics}, ensure_ascii=False), flush=True)
+            if args.entry_id:
+                partial_key = f"{courses[0]}:{args.entry_id}"
+                if partial_key not in sessions.entries:
+                    raise RuntimeError("requested_entry_not_observed")
+                verified_scope = {partial_key}
+                manifest["partialEntryTrial"] = {"entryId": args.entry_id, "observedInCourseContext": True,
+                                               "channelCoverageVerified": False}
             # Enumerate them before archiving and retain an explicit relation.
-            parent_scope = set(verified_scope)
+            parent_scope = set() if args.entry_id else set(verified_scope)
+            metadata_cache = {}
             runtime_stage = "query_child_streams"
             for key in list(parent_scope):
                 observed = sessions.entries[key]
@@ -721,11 +928,53 @@ def main():
                     manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {
                         "state": "verified", "childEntryIds": [child["entryId"] for child in children],
                         "method": "baseentry.list.parentEntryIdEqual"}
-                except Exception:
+                except Exception as error:
                     complete = False
-                    manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {"state": "unavailable"}
+                    details = error.details if isinstance(error, MediaAPIError) else {"code": "CHILD_LIST_UNAVAILABLE"}
+                    manifest.setdefault("streams", {})[f"{session['courseId']}:{session['entryId']}"] = {
+                        "state": "unavailable", "restrictedApi": details, "coverageVerified": False}
+            # Viewer permissions may forbid a broad list while the real player
+            # already supplies its other streams. Only an exact server-provided
+            # parentEntryId can associate those observed candidates; names and
+            # equal durations are not identity evidence.
+            if not args.entry_id:
+                runtime_stage = "verify_observed_child_metadata"
+                for child_key, observed_child in list(sessions.entries.items()):
+                    if child_key in parent_scope or child_key in verified_scope:
+                        continue
+                    if not any(key.startswith(observed_child["courseId"] + ":") for key in parent_scope):
+                        continue
+                    try:
+                        child_session = sessions.usable(observed_child)
+                        public, private = inventory_entry(context, child_session, args.with_captions or args.subtitles_only)
+                        parent_id = public.get("parentEntryId")
+                        parent_key = f"{observed_child['courseId']}:{parent_id}"
+                        if parent_key not in parent_scope:
+                            continue
+                        relation = {"method": "baseentry.get.parentEntryId", "parentEntryId": parent_id,
+                                    "childEntryId": observed_child["entryId"], "originHost": urlparse(child_session["origin"]).hostname,
+                                    "retrievedAt": int(time.time()), "childUpdatedAt": public["updatedAt"]}
+                        sessions.entries[child_key] = {**observed_child, "parentEntryId": parent_id, "trackRelation": relation}
+                        public["trackRelation"] = relation
+                        metadata_cache[child_key] = (public, private)
+                        verified_scope.add(child_key)
+                        stream = manifest.setdefault("streams", {}).setdefault(parent_key, {"state": "unavailable", "coverageVerified": False})
+                        stream.setdefault("observedChildEntryIds", []).append(observed_child["entryId"])
+                        stream.setdefault("relationEvidence", []).append(relation)
+                        if stream.get("state") == "verified" and observed_child["entryId"] not in stream.get("childEntryIds", []):
+                            complete = False
+                            stream["state"] = "conflicting_child_coverage"
+                            stream["coverageVerified"] = False
+                        elif stream.get("state") != "verified":
+                            stream["state"] = "observed_relations_verified"
+                            stream["coverageVerified"] = False
+                        print(json.dumps({"state": "child_relation_verified", "parentEntryId": parent_id,
+                                          "childEntryId": observed_child["entryId"], "completeChildCoverage": stream.get("state") == "verified"}), flush=True)
+                    except Exception as error:
+                        details = error.details if isinstance(error, MediaAPIError) else {"code": "CHILD_IDENTITY_OR_METADATA_FAILED"}
+                        print(json.dumps({"state": "observed_child_unverified", "entryId": observed_child["entryId"], **details}), flush=True)
             discovery_complete = complete
-            complete = bool(verified_scope and current_channel_keys and parent_scope and
+            complete = bool(not args.entry_id and verified_scope and current_channel_keys and parent_scope and
                 all(manifest.get("channels", {}).get(key, {}).get("state") == "verified" for key in current_channel_keys) and
                 all(manifest.get("streams", {}).get(key, {}).get("state") == "verified" for key in parent_scope))
             processed = 0
@@ -741,7 +990,11 @@ def main():
                 previous = manifest["entries"].get(key, {})
                 try:
                     include_captions = args.with_captions or args.subtitles_only
-                    public, private = inventory_entry(context, session, include_captions)
+                    public, private = metadata_cache.get(key) or inventory_entry(context, session, include_captions)
+                    print(json.dumps({"state": "entry_metadata_verified", "entryId": session["entryId"],
+                                      "identityVerified": True, "durationSeconds": public["durationSeconds"],
+                                      "formatCount": len(public["formats"]), "parentEntryId": public["parentEntryId"],
+                                      "track": public["track"]}), flush=True)
                     if not include_captions:
                         public["captions"] = previous.get("captions", [])
                     public["history"] = previous.get("history", [])
@@ -759,6 +1012,9 @@ def main():
                             public["state"] = "downloading"
                             manifest["entries"][key] = public
                             atomic_json(path, manifest)
+                            runtime_stage = "download_entry"
+                            print(json.dumps({"state": "download_started", "entryId": session["entryId"],
+                                              "estimatedMaximumBytes": max([item.get("filesize_approx", 0) for item in private["formats"]] or [0])}), flush=True)
                             public["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, include_captions)
                             public["state"] = "archived" if not args.subtitles_only else "subtitles_archived"
                             public["archivedAt"] = int(time.time())
@@ -776,6 +1032,9 @@ def main():
                     safe_reason = str(error) if str(error) in {"media_identity_mismatch", "flavor_identity_mismatch", "caption_identity_mismatch",
                                                                "media_api_unavailable", "media_api_rejected", "no_authorized_download_format"} else state
                     manifest["entries"][key] = {**previous, "entryId": session["entryId"], "courseId": session["courseId"], "state": state, "failureReason": safe_reason}
+                    details = error.details if isinstance(error, MediaAPIError) else {"code": safe_reason, "exceptionType": type(error).__name__}
+                    manifest["entries"][key]["failureDetails"] = details
+                    print(json.dumps({"state": "entry_failed", "entryId": session["entryId"], "stage": runtime_stage, **details}), file=sys.stderr, flush=True)
                     complete = False
                     atomic_json(path, manifest)
             manifest["scan"] = {"startedAt": manifest["scan"]["startedAt"], "completedAt": int(time.time()),
@@ -826,16 +1085,18 @@ def main():
                               "scopeComplete": manifest["scan"]["scopeComplete"], "archive": manifest.get("archive"),
                               "estimatedMaximumBytes": estimated, "freeLocalBytes": shutil.disk_usage(root).free,
                               "manifest": str(path)}, ensure_ascii=False))
-            return 0 if complete else 2
+            partial_success = bool(args.entry_id and manifest["entries"].get(f"{courses[0]}:{args.entry_id}", {}).get("state") in
+                                   (("archived", "subtitles_archived") if args.download else ("discovered", "archived", "subtitles_archived")))
+            return 0 if complete or partial_success else 2
         except ReauthRequired:
             manifest["scan"]["state"] = "needs_reauth"
             atomic_json(path, manifest)
             print("Login expired; progress saved. Log in again and rerun.", file=sys.stderr)
             return 2
-        except Exception:
+        except Exception as error:
             manifest["scan"]["state"] = "retryable_failure"
             atomic_json(path, manifest)
-            print("Inventory incomplete; progress saved. No archived files removed.", file=sys.stderr)
+            print(json.dumps(safe_runtime_failure(error)), file=sys.stderr, flush=True)
             return 2
         finally:
             context.close()

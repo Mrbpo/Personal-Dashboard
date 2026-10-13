@@ -2,9 +2,9 @@
 
 ## 状态和范围
 
-这是独立的本地命令行工具，不改 UI，不在服务器安装新服务。首轮必须先用真实课程验证登录、课程频道分页及双流关系；代码和测试不等于已归档所有课程。依赖 PDF PR #52 的原文、证据及全文检索基础，并在其最新迁移 007 后增加 008。
+这是独立命令行工具，支持本地入口和临时服务器容器，不改网站 UI、不增加常驻网络服务。首轮必须先用真实课程验证登录、课程频道分页及双流关系；代码和测试不等于已归档所有课程。依赖 PDF PR #52 的原文、证据及全文检索基础，并在其最新迁移 007 后增加 008。
 
-默认只输出不含凭据的清单，**不下载视频、不读取字幕、不启动语音模型**。浏览器是独立可见 Edge 临时会话，由用户输入学校登录信息并完成 Duo。脚本只接收正常授权后 Quercus/Kaltura 请求里的临时 KS；不接收密码、不跳过 MFA、不读用户原浏览器资料、不输出 KS/签名播放地址。
+默认只输出不含凭据的清单，**不下载视频、不读取字幕、不启动语音模型**。本地入口使用独立可见 Edge；当前服务器入口使用官方 Canvas sessionless LTI grant 和专用 Chromium。脚本只接收正常授权后 Quercus/Kaltura 请求里的临时 KS；不接收密码、不跳过 MFA、不读用户原浏览器资料、不输出 KS/签名播放地址。
 
 示例课程入口：`https://q.utoronto.ca/courses/440904/external_tools/8084`。已观察到学校媒体域 `kaltura-quercus-prod.utoronto.ca`，必须显式加入允许范围。
 
@@ -32,9 +32,9 @@ server collector 不重做 Canvas 网页 SSO 判断，因为 sessionless LTI 可
 
 ### 每次人工发起的临时服务器授权窗口
 
-用户选择采集、授权验证和下载都放在服务器，并自行约每周发起一次，**没有定时任务**。`interactive.Dockerfile` 复用已安装的 runtime，只补匹配的 full Chromium、Xvfb、x11vnc、noVNC/websockify；`interactive-entrypoint.sh` 启动临时显示器和网页像素入口，同一正常浏览器等待本人验证，collector 退出就结束所有临时进程。该工件需实际部署验证，不能等同于入口已交付。
+用户选择采集、授权验证和下载都放在服务器，并自行约每周发起一次，**没有定时任务**。`interactive.Dockerfile` 复用已安装的 runtime，只补匹配的 full Chromium、Xvfb、x11vnc、noVNC/websockify；`interactive-entrypoint.sh` 启动临时显示器和网页像素入口，同一正常浏览器等待本人验证，collector 退出就结束所有临时进程。入口已实际启动并查看，完整归档状态见后面的实测说明。
 
-实际派生镜像已构建。首次只读容器启动浏览器因默认 HOME 的 Crashpad 写入失败退出；同一资源配置仅增加 `HOME=/tmp` 后，正常无授权 headed 浏览器成功启动。此必要配置已写入 Dockerfile；复用已构建镜像时加 `-e HOME=/tmp` 并提供可写 `/tmp`，不必为修配置重新下载 runtime。登录验证、完整频道清单及视频下载仍需分别确认。
+实际派生镜像已构建。首次只读容器启动浏览器因默认 HOME 的 Crashpad 写入失败退出；增加 `HOME=/tmp` 后成功启动。此必要配置已写入 Dockerfile；复用已构建镜像时加 `-e HOME=/tmp` 并提供可写 `/tmp`，不必为修配置重新下载 runtime。正常 headed KAF 和 gallery 现已显示；完整频道清单、子流关系及实际文件仍需分别验收。
 
 ```sh
 docker build -f interactive.Dockerfile -t study-course-video:interactive .
@@ -48,15 +48,15 @@ GRANT_PRODUCER | docker run --rm -i --name study-course-video-interactive \
   study-course-video:interactive \
   --course-url https://q.utoronto.ca/courses/440904/external_tools/8084 \
   --media-host kaltura-quercus-prod.utoronto.ca --output /archive \
-  --profile /state/profile --target-only --channel-id 814427 \
+  --profile /state/browser --target-only --channel-id 814427 \
   --interactive-server --launch-url-stdin --probe --login-timeout 900
 ```
 
 本机通过 SSH 将 `127.0.0.1:8765` 转发服务器 `127.0.0.1:6080`，再打开 `http://127.0.0.1:8765/vnc.html?autoconnect=1&resize=scale`。端口必须仅服务器本机开放，不映射公网。只有此专用服务器 profile 保存状态，不导出用户普通浏览器，也不收学校密码。Linux 使用官方 bundled Chromium，不能指定本机 Windows Edge。媒体资源在采集期间被阻断，避免播放器自动下载录像。
 
-本人完成 Cloudflare/必要学校验证后，程序在**同一 context**采集；最长等待 900 秒，未通过就明确标记需验证并停止。实际频道/child/身份核对通过后，下一次人工运行去掉 `--probe`、增加 `--download --limit 1` 验收一个视频；该单例成功后去掉 limit 才下载频道所有未保存或已更新的 track。已有完整文件必须 SHA/版本一致才跳过；保留 `.part` 和历史，不因来源消失删除。字幕仍关闭。
+本人完成 Cloudflare/必要学校验证后，程序在**同一 context**采集；最长等待 900 秒，未通过就明确标记需验证并停止。单条真实验收使用后面的 `--entry-id` 参数；频道及 child 范围核对通过后才去掉该参数和 limit，归档全部未保存或已更新的 track。已有完整文件必须 SHA/版本一致才跳过；保留 `.part` 和历史，不因来源消失删除。字幕仍关闭。
 
-保存浏览器 Cookie 不能延长学校或 Cloudflare 的服务端授权期限，也不能保证以后完全不用验证。UofT 当前官方 FAQ 的常规 remembered MFA 是 24 小时，不能按旧传闻承诺一周。[UofT UTORMFA FAQ](https://security.utoronto.ca/services/utormfa/faqs/)。当前阻塞是 KAF 的 Cloudflare，而非已经通过 API grant 的 Duo；记住 Duo 状态不能单独解决这个阻塞。
+保存浏览器 Cookie 不能延长学校或 Cloudflare 的服务端授权期限，也不能保证以后完全不用验证。UofT 当前官方 FAQ 的常规 remembered MFA 是 24 小时，不能按旧传闻承诺一周。[UofT UTORMFA FAQ](https://security.utoronto.ca/services/utormfa/faqs/)。当前服务器正常浏览器已通过上述验证，剩余验收是实际元数据、文件和双流范围；HTTP-only / headless 的历史 403 不等于现阶段仍被 Duo 阻塞。
 
 ### 可选本地授权入口
 
@@ -78,11 +78,29 @@ python scripts/course-video/archive.py `
 
 ## 多课程、双流和覆盖清单
 
+### 当前服务器实测
+
+临时 noVNC 入口已实际构建、启动并通过 SSH 隧道查看。只读容器需要可写 `/tmp` 和 `HOME=/tmp`；背景 collector 通过独立 FD 3 接收合法 grant，避免 POSIX shell 清空 stdin。正常 headed LTI 启动现已返回 KAF 200。公开 CDN 最初的 Cloudflare 检查导致脚本未加载；同一 context 对已观察的公开 `kmsCookie.js` 做一次正常顶层浏览器验证，得到 200 / JavaScript 后返回已观察的频道，真实窗口已显示 **4 Media、LECTURE 1–4 四张卡片**，没有可见 Next。没有自动解题或改写浏览器保护头。
+
+频道 `categoryentry.list` 对 viewer KS 实测返回 `SERVICE_FORBIDDEN`。工具保留这一证据，以已授权 KAF 原生可视总数和对应频道卡片 ID 去重数量一致作为会员验证的另一入口；总数大于当前卡片数时必须完成原生分页，否则不完整。播放器另外四个 entry 只是子流候选，不能计为另外四节课。父子关系及每个 entry 身份仍须独立核对。
+
+对上述服务器 collector 命令去掉 `--probe`，追加以下已观察地址和单条试验参数。单条只访问这张卡片获取适用会话，不要求 viewer 无权调用的管理员列表接口；严格核验 entry ID、flavor entry ID 和下载域名。`scopeComplete` 始终为 false，不能把一份文件成功报告为全课完成。
+
+```sh
+--known-gallery-url https://kaltura-quercus-prod.utoronto.ca/channel/channelid/814427 \
+--verify-observed-asset-url https://assets.cap2.mediaspace.kaltura.com/5.188.26.1331/public/build0/js/kmsCookie.js \
+--entry-id 0_l0mx1vr8 --download --limit 1
+```
+
+仅元数据验收则去掉 `--download --limit 1`。公开资产地址必须已观察，不猜版本或替代路径。单条服务器实测现已成功：`440904:0_l0mx1vr8` 返回身份一致的时长 3055 秒，归档 MP4 为 207,558,864 字节，文件 `ftyp` 头与 SHA 校验通过。存放 `/srv/study-course-recordings/440904/0_l0mx1vr8/version-1791926345/original.mp4`。播放时长及画面验收由调度继续检查；这只证明单条文件，不证明全部双流。字幕仍关闭，原网站未切换。
+
+全课拓扑清单去掉 `--entry-id`、`--download`、`--limit`，保留同一个 gallery 和公开资产参数。正式父子列表无权限时，只对播放器已经观察的候选逐条读取元数据，并严格核对 `parentEntryId` 属于上述四个父录像。通过的关系保存原字段、获取时间、API host、版本作为证据，才允许进入归档范围；相同标题或时长不用于合并。此替代路径仍将全量子流覆盖标为未证实，不会把可见候选等同于穷尽。范围核对后增加 `--download` 归档已验证视角；第一条版本和 SHA 一致时直接跳过，不重复下载。
+
 移除 `--target-only`，增加 `--all-courses`，会读取用户可见的学生课程，分页扫描课程模块、页面、公告和 Kaltura 外部工具。不使用服务器保存的 Canvas/Gmail 凭据。
 
 清单路径是输出目录的 `manifest.json`，含 course ID、录播名称、发布时间、更新日期、稳定 ID、Kaltura entry ID、时长、原课程入口、是否有当前授权可下载的格式。临时地址仅存在内存中，清单里的入口不能直接代替下载授权。
 
-- 对观察到的频道使用 `categoryentry.list(categoryIdEqual)` 分页，核对 `totalCount` 与唯一 entry 数；缺页、数量变化、权限不足标记未完成。
+- 对观察到的频道优先使用 `categoryentry.list(categoryIdEqual)` 分页核对 `totalCount`；viewer 无权限时使用已授权原生 gallery 的可视总数、频道卡片和分页核对。缺页、数量变化、无法获得该条适用会话时标记未完成。
 - 对每个录播使用正式 `baseentry.list(parentEntryIdEqual)` 分页，独立枚举 parent/child 流，每路各自查询格式和字幕；记录关系证据。
 - `track` 是 `screen / camera / unknown`，只有发布者提供明确 stream 名称时才分类；parent 不一定是摄像头，child 不一定是屏幕。没有第二路或无权限时必须查看 `streams.state`，不能宣称双流齐全。
 - 通用 DOM 分页只能发现可见入口，不能证明所有课程的任意嵌入内容穷尽。因此清单保留 `coverageVerified: false`，直到真实学校 gallery 行为逐项验证。`scan.complete` 只表示本次已发现范围的操作成功。
