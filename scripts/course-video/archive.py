@@ -519,7 +519,19 @@ def main():
         document_responses = []
         def record_document_response(response):
             if response.request.resource_type == "document" and media_host(urlparse(response.url).hostname or "", sessions.extra_hosts):
-                document_responses.append({"httpStatus": response.status, "originHost": urlparse(response.url).hostname})
+                details = {"httpStatus": response.status, "originHost": urlparse(response.url).hostname}
+                if response.status == 403:
+                    try:
+                        body = response.body()[:1024 * 1024]
+                        text = body.decode("utf-8", errors="replace").lower()
+                        details["bodyBytesRead"] = len(body)
+                        details["markers"] = {name: bool(re.search(pattern, text)) for name, pattern in {
+                            "cloudflare": r"cloudflare|cf-ray", "captcha": r"captcha|turnstile|challenge-platform",
+                            "oauth": r"oauth", "invalidSignature": r"invalid.?signature|signature.?mismatch",
+                            "accessDenied": r"access.?denied|permission.?denied"}.items()}
+                    except Exception:
+                        details["markersUnavailable"] = True
+                document_responses.append(details)
         context.on("response", record_document_response)
         page = context.pages[0] if context.pages else context.new_page()
         sessions.current_course = re.match(r"^/courses/(\d+)", urls[0].path).group(1)
@@ -530,10 +542,19 @@ def main():
         status = None
         while time.monotonic() < deadline:
             if args.launch_url_stdin:
-                rejected = next((item for item in document_responses if item["httpStatus"] in (401, 403)), None)
+                last_document = document_responses[-1] if document_responses else None
+                rejected = last_document if last_document and last_document["httpStatus"] in (401, 403) else None
                 if rejected:
-                    print(json.dumps({"state": "server_launch_rejected", **rejected}), flush=True)
-                    atomic_json(path, {**manifest, "scan": {"state": "blocked_authorization", "complete": False, **rejected}})
+                    # Let normal page JavaScript settle once; no stealth,
+                    # challenge solving, proxy changes or repeated grants.
+                    page.wait_for_timeout(3000)
+                    if document_responses[-1]["httpStatus"] not in (401, 403):
+                        continue
+                    rejected = document_responses[-1]
+                    markers = rejected.get("markers", {})
+                    state = "needs_browser_verification" if markers.get("cloudflare") and markers.get("captcha") else "server_launch_rejected"
+                    print(json.dumps({"state": state, **rejected}), flush=True)
+                    atomic_json(path, {**manifest, "scan": {"state": state, "complete": False, **rejected}})
                     context.close()
                     return 2
                 if any(media_host(urlparse(frame.url).hostname or "", sessions.extra_hosts) for frame in page.frames):
