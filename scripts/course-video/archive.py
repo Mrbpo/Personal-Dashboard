@@ -545,9 +545,11 @@ def main():
                 last_document = document_responses[-1] if document_responses else None
                 rejected = last_document if last_document and last_document["httpStatus"] in (401, 403) else None
                 if rejected:
-                    # Let normal page JavaScript settle once; no stealth,
-                    # challenge solving, proxy changes or repeated grants.
-                    page.wait_for_timeout(3000)
+                    # One bounded normal JavaScript wait, with no fresh grant,
+                    # stealth, challenge solving or alternate proxy.
+                    settle_deadline = time.monotonic() + 10
+                    while time.monotonic() < settle_deadline and document_responses[-1]["httpStatus"] in (401, 403):
+                        page.wait_for_timeout(1000)
                     if document_responses[-1]["httpStatus"] not in (401, 403):
                         continue
                     rejected = document_responses[-1]
