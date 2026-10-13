@@ -41,6 +41,7 @@ class ArchiveTests(unittest.TestCase):
             record = {"files": [{"path": video.name, "sha256": sha256(video)}]}
             atomic_json(root / "manifest.json", {"entries": {"example": record}})
             self.assertTrue(verified_files(root, record))
+            self.assertFalse(verified_files(root, {"files": [{"path": "../outside", "sha256": "secret"}]}))
             video.write_bytes(b"damaged")
             self.assertFalse(verified_files(root, record))
             self.assertFalse((root / "manifest.json.tmp").exists())

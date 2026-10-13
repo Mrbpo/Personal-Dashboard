@@ -278,7 +278,11 @@ def channel_entries(context, session: dict, category: str, max_pages: int) -> tu
 
 def verified_files(root: Path, record: dict) -> bool:
     files = record.get("files", [])
-    return bool(files) and all((root / item["path"]).is_file() and sha256(root / item["path"]) == item["sha256"] for item in files)
+    for item in files:
+        path = (root / item["path"]).resolve()
+        if not path.is_relative_to(root.resolve()) or not path.is_file() or sha256(path) != item["sha256"]:
+            return False
+    return bool(files)
 
 
 def archive_entry(context, session: dict, metadata: dict, private: dict, root: Path, subtitles_only: bool) -> list[dict]:
