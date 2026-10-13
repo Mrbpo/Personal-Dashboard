@@ -16,7 +16,7 @@
 
 `server-lti-probe.py` 是 stdlib HTTP-only 诊断：stdin 接受 `{ "launchUrl": "短时URL" }`，使用内存 CookieJar 原样 POST 合法 hidden fields，不输出表单值。真实 KAF POST 返回 403，固定安全 marker 为 `cloudflare=true / captcha=true`，没有明确 OAuth 签名错误标记；这表明需要继续验证普通浏览器流程，不能宣称服务器归档已经通。
 
-可选 `server.Dockerfile` 只装固定匹配的 Playwright 1.63.0 和 Chromium headless shell，以及 yt-dlp 2026.8.19。构建 context 是 `scripts/course-video`；只运行一次标准 headless metadata probe，不安装全部浏览器，不采用 stealth、不自动求验证码、不使用特殊代理。来源 URL 由管理员在现 worker 中正常取 grant，经 stdin 管道喂给 collector；不得把 URL 放命令行或日志。
+可选 `server.Dockerfile` 只装固定匹配的 Playwright 1.63.0 和 Chromium headless shell，以及 yt-dlp 2026.8.19。构建 context 是 `scripts/course-video`。root 已实际构建并进行一次普通无头浏览器诊断，学校 KAF 仍返回 Cloudflare 验证 403，未成功枚举或下载；不继续用 stealth、自动求验证码或特殊代理。来源 URL 由管理员在现 worker 中正常取 grant，经 stdin 管道喂给 collector；不得把 URL 放命令行或日志。
 
 ```sh
 # GRANT_JSON 由服务器现授权程序通过 stdin 提供，示例不包含密钥。
@@ -30,7 +30,30 @@ GRANT_PRODUCER | docker run --rm -i --memory=1g --cpus=2 --shm-size=256m \
 
 server collector 不重做 Canvas 网页 SSO 判断，因为 sessionless LTI 可启动 KAF 而没有 Canvas 浏览器 Cookie；也不会重新跳回要求网页登录的普通课程 URL。它观察正常 KAF JS/API 请求来判定真实会话和频道权限，阻断自动媒体流加载节省资源。普通 JS 等待一次后仍遇 Cloudflare 验证时记录 `needs_browser_verification` 并停止；无交互认证能力时不能承诺全自动。只有真实 metadata 和单 track 下载通过才能逐步启用 `--download`，字幕仍默认关闭。
 
-目前不传用户完整浏览器 profile，也不把学校密码交给程序。若最终需要专用人工授权的 scoped `storage_state`，必须另行验证仅 Quercus/KAF 会话跨服务器 IP 可用；当前没有声称已实现该后备路径。
+### 每次人工发起的临时服务器授权窗口
+
+用户选择采集、授权验证和下载都放在服务器，并自行约每周发起一次，**没有定时任务**。`interactive.Dockerfile` 复用已安装的 runtime，只补匹配的 full Chromium、Xvfb、x11vnc、noVNC/websockify；`interactive-entrypoint.sh` 启动临时显示器和网页像素入口，同一正常浏览器等待本人验证，collector 退出就结束所有临时进程。该工件需实际部署验证，不能等同于入口已交付。
+
+```sh
+docker build -f interactive.Dockerfile -t study-course-video:interactive .
+# 在 /srv/study-course-video-tool 构建；root 将合法 grant producer 接到此管道。
+GRANT_PRODUCER | docker run --rm -i --name study-course-video-interactive \
+  --memory=1500m --cpus=2 --shm-size=256m \
+  -p 127.0.0.1:6080:6080 \
+  -v /srv/study-course-recordings:/archive \
+  -v /srv/study-course-video-state:/state \
+  study-course-video:interactive \
+  --course-url https://q.utoronto.ca/courses/440904/external_tools/8084 \
+  --media-host kaltura-quercus-prod.utoronto.ca --output /archive \
+  --profile /state/profile --target-only --channel-id 814427 \
+  --interactive-server --launch-url-stdin --probe --login-timeout 900
+```
+
+本机通过 SSH 将 `127.0.0.1:8765` 转发服务器 `127.0.0.1:6080`，再打开 `http://127.0.0.1:8765/vnc.html?autoconnect=1&resize=scale`。端口必须仅服务器本机开放，不映射公网。只有此专用服务器 profile 保存状态，不导出用户普通浏览器，也不收学校密码。Linux 使用官方 bundled Chromium，不能指定本机 Windows Edge。媒体资源在采集期间被阻断，避免播放器自动下载录像。
+
+本人完成 Cloudflare/必要学校验证后，程序在**同一 context**采集；最长等待 900 秒，未通过就明确标记需验证并停止。实际频道/child/身份核对通过后，下一次人工运行去掉 `--probe`、增加 `--download --limit 1` 验收一个视频；该单例成功后去掉 limit 才下载频道所有未保存或已更新的 track。已有完整文件必须 SHA/版本一致才跳过；保留 `.part` 和历史，不因来源消失删除。字幕仍关闭。
+
+保存浏览器 Cookie 不能延长学校或 Cloudflare 的服务端授权期限，也不能保证以后完全不用验证。UofT 当前官方 FAQ 的常规 remembered MFA 是 24 小时，不能按旧传闻承诺一周。[UofT UTORMFA FAQ](https://security.utoronto.ca/services/utormfa/faqs/)。当前阻塞是 KAF 的 Cloudflare，而非已经通过 API grant 的 Duo；记住 Duo 状态不能单独解决这个阻塞。
 
 ### 可选本地授权入口
 

@@ -456,6 +456,7 @@ def main():
     parser.add_argument("--channel-id", help="Explicit observed Kaltura channel for a single-course acceptance scope")
     parser.add_argument("--probe", action="store_true", help="Read-only scoped API origin/permission diagnosis; never downloads")
     parser.add_argument("--headless", action="store_true", help="Official Chromium headless shell on the server")
+    parser.add_argument("--interactive-server", action="store_true", help="Normal headed Chromium in a temporary server display, with manual verification")
     parser.add_argument("--launch-url-stdin", action="store_true", help="Read a Canvas-authorized sessionless launch JSON from stdin; never log or persist the URL")
     parser.add_argument("--login-timeout", type=int, default=900, help="Seconds allowed for interactive school login and Duo")
     args = parser.parse_args()
@@ -471,10 +472,14 @@ def main():
         parser.error("--channel-id requires one numeric channel and a single-course run")
     if args.probe and args.download:
         parser.error("--probe cannot download")
-    if args.launch_url_stdin and (not args.headless or not args.target_only or args.all_courses or len(urls) != 1 or args.pause_after_inventory):
-        parser.error("Server launch requires --headless --target-only, one course and noninteractive execution")
-    if args.headless and not args.launch_url_stdin:
-        parser.error("Headless mode requires an authorized launch from stdin")
+    if args.headless and args.interactive_server:
+        parser.error("Choose headless or interactive server mode")
+    if args.launch_url_stdin and (not (args.headless or args.interactive_server) or not args.target_only or args.all_courses or len(urls) != 1 or args.pause_after_inventory):
+        parser.error("Server launch requires a server browser mode, --target-only and one course")
+    if (args.headless or args.interactive_server) and not args.launch_url_stdin:
+        parser.error("Server browser mode requires an authorized launch from stdin")
+    if args.interactive_server and not args.profile:
+        parser.error("Interactive server mode requires its own server-only --profile directory")
     launch_url = None
     if args.launch_url_stdin:
         payload = json.loads(sys.stdin.buffer.read(262144))
@@ -501,18 +506,18 @@ def main():
         browser = None
         if profile:
             launch_options = {"headless": args.headless}
-            if not args.headless:
+            if not (args.headless or args.interactive_server):
                 launch_options["channel"] = "msedge"
             context = playwright.chromium.launch_persistent_context(str(profile), **launch_options)
         else:
             launch_options = {"headless": args.headless}
-            if not args.headless:
+            if not (args.headless or args.interactive_server):
                 launch_options["channel"] = "msedge"
             browser = playwright.chromium.launch(**launch_options)
             context = browser.new_context()
         # Observe manifest/session requests but avoid streaming whole lectures
         # during metadata collection. Direct yt-dlp download is independent.
-        if args.headless:
+        if args.headless or args.interactive_server:
             context.route("**/*", lambda route: route.abort() if route.request.resource_type == "media" else route.continue_())
         context.on("request", sessions.observe_request)
         context.on("response", sessions.observe_response)
@@ -545,6 +550,14 @@ def main():
                 last_document = document_responses[-1] if document_responses else None
                 rejected = last_document if last_document and last_document["httpStatus"] in (401, 403) else None
                 if rejected:
+                    if args.interactive_server:
+                        markers = rejected.get("markers", {})
+                        state = "waiting_browser_verification" if markers.get("cloudflare") else "waiting_server_authorization"
+                        if status != state:
+                            print(json.dumps({"state": state, **rejected}), flush=True)
+                            status = state
+                        page.wait_for_timeout(1000)
+                        continue
                     # One bounded normal JavaScript wait, with no fresh grant,
                     # stealth, challenge solving or alternate proxy.
                     settle_deadline = time.monotonic() + 10
@@ -563,7 +576,7 @@ def main():
                     print(json.dumps({"state": "tool_launched", "documentResponses": document_responses}), flush=True)
                     page.wait_for_timeout(args.settle_ms)
                     break
-                if any("duo" in frame.url.lower() or "login" in urlparse(frame.url).path.lower() for frame in page.frames):
+                if any("duo" in frame.url.lower() or "login" in urlparse(frame.url).path.lower() for frame in page.frames) and not args.interactive_server:
                     print(json.dumps({"state": "needs_reauth", "interactiveAuthorizationRequired": True}), flush=True)
                     context.close()
                     return 2
@@ -583,6 +596,10 @@ def main():
                 break
             page.wait_for_timeout(2000)
         else:
+            if args.launch_url_stdin:
+                state = "needs_browser_verification" if status == "waiting_browser_verification" else "needs_reauth"
+                print(json.dumps({"state": state, "verificationTimeoutSeconds": args.login_timeout}), flush=True)
+                atomic_json(path, {**manifest, "scan": {"state": state, "complete": False}})
             context.close()
             raise ReauthRequired()
         courses = list(dict.fromkeys(re.match(r"^/courses/(\d+)", value.path).group(1) for value in urls))
