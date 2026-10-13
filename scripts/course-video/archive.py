@@ -21,6 +21,14 @@ class ReauthRequired(Exception):
     pass
 
 
+class MediaAPIError(Exception):
+    def __init__(self, code, status, origin, service, action):
+        self.details = {"code": code if re.fullmatch(r"[A-Z0-9_]{1,100}", str(code)) else "API_REJECTED",
+                        "httpStatus": status, "originHost": urlparse(origin).hostname,
+                        "service": service, "action": action}
+        super().__init__(self.details["code"])
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -88,6 +96,7 @@ class Sessions:
         self.extra_hosts = extra_hosts
         self.entries: dict[str, dict] = {}
         self.session_by_origin: dict[str, str] = {}
+        self.session_sources: dict[str, str] = {}
         self.current_course = ""
         self.current_page = ""
         self.channels: dict[str, set[str]] = {}
@@ -115,6 +124,7 @@ class Sessions:
                         and item[key] and not str(item[key]).startswith("{")), None)
         if session:
             self.session_by_origin[f"{self.current_course}:{origin}"] = session
+            self.session_sources[f"{self.current_course}:{origin}"] = "observed_request_literal"
         for item in dictionaries:
             for key, value in item.items():
                 if key.lower() in ("entryid", "entry_id", "filter:entryidequal") or key.lower().endswith(":entryid"):
@@ -143,6 +153,7 @@ class Sessions:
             # Response-issued KS covers bootstrap/multirequest session start.
             if isinstance(item.get("ks"), str):
                 self.session_by_origin[f"{self.current_course}:{origin}"] = item["ks"]
+                self.session_sources[f"{self.current_course}:{origin}"] = "observed_response_session"
             if item.get("objectType") in ("KalturaMediaEntry", "KalturaBaseEntry") and re.fullmatch(r"[01]_[A-Za-z0-9]+", str(item.get("id", ""))):
                 self.remember(item["id"], origin, self.session_by_origin.get(f"{self.current_course}:{origin}"))
 
@@ -167,14 +178,15 @@ def kaltura_api(context, session: dict, service: str, action: str, **parameters)
     response = context.request.post(session["origin"] + "/api_v3/service/" + service + "/action/" + action,
                                     form={"ks": session["ks"], "format": "1", **parameters}, timeout=60000)
     if response.status in (401, 403):
-        raise ReauthRequired()
+        raise MediaAPIError("AUTHORIZATION_DENIED", response.status, session["origin"], service, action)
     if not response.ok:
-        raise RuntimeError("media_api_unavailable")
-    result = response_json(response)
+        raise MediaAPIError("HTTP_FAILURE", response.status, session["origin"], service, action)
+    try:
+        result = response_json(response)
+    except (ValueError, TypeError):
+        raise MediaAPIError("NON_JSON_RESPONSE", response.status, session["origin"], service, action) from None
     if isinstance(result, dict) and result.get("objectType") == "KalturaAPIException":
-        if re.search(r"KS|SESSION|ACCESS|PERMISSION", str(result.get("code", "")), re.I):
-            raise ReauthRequired()
-        raise RuntimeError("media_api_rejected")
+        raise MediaAPIError(result.get("code", "API_REJECTED"), response.status, session["origin"], service, action)
     return result
 
 
@@ -441,6 +453,7 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Bound first download trial; zero means all discovered entries")
     parser.add_argument("--target-only", action="store_true", help="Visit only supplied pages for a first authorized sample")
     parser.add_argument("--channel-id", help="Explicit observed Kaltura channel for a single-course acceptance scope")
+    parser.add_argument("--probe", action="store_true", help="Read-only scoped API origin/permission diagnosis; never downloads")
     parser.add_argument("--login-timeout", type=int, default=900, help="Seconds allowed for interactive school login and Duo")
     args = parser.parse_args()
     urls = [urlparse(value) for value in args.course_url]
@@ -453,6 +466,8 @@ def main():
         parser.error("--pause-after-inventory requires --download")
     if args.channel_id and (not args.channel_id.isdigit() or args.all_courses):
         parser.error("--channel-id requires one numeric channel and a single-course run")
+    if args.probe and args.download:
+        parser.error("--probe cannot download")
     root = args.output.resolve()
     profile = args.profile.resolve() if args.profile else None
     if profile and (profile == root or root in profile.parents or profile in root.parents):
@@ -536,7 +551,33 @@ def main():
                             raise ReauthRequired()
                         sessions.current_course = course
                         sessions.current_page = candidate["sourceUrl"]
-                        entries, total = channel_entries(context, candidate, category, args.max_pages)
+                        candidates = [candidate]
+                        if args.probe:
+                            candidates = [{**candidate, "origin": origin_key.split(":https://", 1)[-1], "ks": token}
+                                          for origin_key, token in sessions.session_by_origin.items() if origin_key.startswith(course + ":https://")]
+                            for item in candidates:
+                                item["origin"] = "https://" + item["origin"]
+                        found = None
+                        for probe_candidate in candidates:
+                            try:
+                                entries, total = channel_entries(context, probe_candidate, category, args.max_pages)
+                                found = (entries, total, probe_candidate)
+                                if args.probe:
+                                    print(json.dumps({"state": "channel_probe", "courseId": course, "categoryId": category,
+                                                      "originHost": urlparse(probe_candidate["origin"]).hostname, "result": "verified",
+                                                      "totalCount": total, "ksSource": sessions.session_sources.get(course + ":" + probe_candidate["origin"], "entry_literal")}), flush=True)
+                                break
+                            except Exception as error:
+                                if args.probe:
+                                    details = error.details if isinstance(error, MediaAPIError) else {"code": "NO_APPLICABLE_SESSION" if isinstance(error, ReauthRequired) else "INVALID_API_RESULT"}
+                                    print(json.dumps({"state": "channel_probe", "courseId": course, "categoryId": category,
+                                                      "originHost": urlparse(probe_candidate["origin"]).hostname, "result": "unavailable",
+                                                      "ksSource": sessions.session_sources.get(course + ":" + probe_candidate["origin"], "entry_literal"), **details}), flush=True)
+                                else:
+                                    raise
+                        if found is None:
+                            raise RuntimeError("no_usable_channel_api_session")
+                        entries, total, candidate = found
                         for entry in entries:
                             key = f"{course}:{entry}"
                             verified_scope.add(key)
@@ -545,9 +586,17 @@ def main():
                         manifest.setdefault("channels", {})[f"{course}:{category}"] = {
                             "state": "verified", "totalCount": total, "uniqueEntries": len(entries),
                             "method": "categoryentry.list.categoryIdEqual"}
-                    except Exception:
+                    except Exception as error:
                         complete = False
-                        manifest.setdefault("channels", {})[f"{course}:{category}"] = {"state": "unavailable"}
+                        details = error.details if isinstance(error, MediaAPIError) else {"code": "NO_APPLICABLE_SESSION" if isinstance(error, ReauthRequired) else "INVALID_API_RESULT"}
+                        manifest.setdefault("channels", {})[f"{course}:{category}"] = {"state": "unavailable", **details}
+            if args.probe:
+                manifest["scan"].update({"state": "probe_complete", "complete": False, "coverageVerified": False})
+                atomic_json(path, manifest)
+                print(json.dumps({"state": "probe_complete", "observedEntryIds": list(sessions.entries),
+                                  "observedSessionHosts": [key.split(":https://", 1)[-1] for key in sessions.session_by_origin],
+                                  "verifiedChannelEntries": len(verified_scope)}, ensure_ascii=False), flush=True)
+                return 0 if verified_scope else 2
             # Related streams may never appear as separate gallery cards.
             # Enumerate them before archiving and retain an explicit relation.
             parent_scope = set(verified_scope)
