@@ -1387,7 +1387,8 @@ def main():
                         # Keep historical identity constraints; the newly issued
                         # player session cannot silently alter the saved scope.
                         session.update({"_expectedParentEntryId": known.get("parentEntryId"), "_expectedPartnerId": known["partnerId"],
-                                        "_resolveFlavorUrl": True, "trackRelation": known.get("trackRelation"), "channelId": args.channel_id})
+                                        "_resolveFlavorUrl": True, "trackRelation": known.get("trackRelation"), "channelId": args.channel_id,
+                                        "sourceUrl": known["sourceUrl"]})
                     include_captions = args.with_captions or args.subtitles_only
                     public, private = metadata_cache.get(key) or inventory_entry(context, session, include_captions)
                     print(json.dumps({"state": "entry_metadata_verified", "entryId": session["entryId"],
