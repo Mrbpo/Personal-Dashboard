@@ -4,7 +4,9 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,type DocumentSourceHint} from './document-source.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint} from './document-source.ts';
+import {readFullDocumentEvidence,DocumentEvidenceChangedError} from './document-evidence.ts';
+import {synthesizeDocumentAnswer,type DocumentAnswerPolicy} from './document-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput} from './document-context.ts';
 import type {DocumentTextHit} from './document-search.ts';
@@ -888,6 +890,31 @@ export class KernelService {
 
   documentImageBlobHashes(){
     return documentImageBlobHashes(kernelPool());
+  }
+
+  /** Non-structured study content only; canonical business facts use their own
+   * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
+  async answerStudyContent(owner:string,question:string,
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
+    const {includeParents=false,includeImages=false,...searchOptions}=options;
+    const limit=searchOptions.limit??14;
+    if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
+      !Number.isInteger(limit)||limit<1||limit>14)throw new Error('Invalid study answer evidence options');
+    const anchors=await this.searchDocumentText(owner,question,{...searchOptions,limit,evidenceBody:'full-page'});
+    if(anchors.some(hit=>hit.retrieval_mode==='keyword-fallback'||hit.degraded_reason))
+      throw new Error('Study answer retrieval was degraded; no answer was generated');
+    return synthesizeDocumentAnswer(question,async()=>{
+      const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
+      if(searchOptions.sourceHint){
+        const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
+          {courseId:searchOptions.courseId}));
+        if(current.some(hit=>hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||
+          hit.source_version_id!==selected.sourceVersionId||hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`))
+          throw new DocumentEvidenceChangedError();
+      }
+      if(includeParents)return this.readDocumentParents(owner,current,{includeImages});
+      return {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
+    },policy);
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {

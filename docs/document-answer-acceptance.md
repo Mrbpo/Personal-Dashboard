@@ -1,0 +1,30 @@
+# 学习内容回答的验收入口
+
+关联 Issue #68。`lib/kernel/document-answer.ts` 提供应用内、只读的内容回答模块，不新增页面、UI、服务或事实写入。
+
+## 输入与输出
+
+统一入口为 `KernelService.answerStudyContent(owner, question, options, policy)`。它最多检索 14 个完整正文节点，保留调用者的语义、混合与重排选择；检索发生降级时不继续生成回答。可显式选择 `includeParents` 和 `includeImages`，默认仅用完整正文。图片模式须同时使用父上下文模式。当前标题选择及所有来源在生成前后重新验证；用户提交的 JSON、文件名、截图说明或旧搜索片段不能替代该读取。父章节最大 8192 个 Unicode codepoints，计数为原节点正文之和；超限内容明确标记不可用。
+
+回答只能返回以下状态：
+- `answered`：每个陈述都要引用本次实际输入的证据。
+- `insufficient-evidence`：没有陈述，说明资料不足。
+- `conflicting-evidence`：保留至少两条分别引用的相互冲突陈述。
+
+文字引用须在原正文中实际出现，仅允许折叠空白。图片引用须对应实际传入且 SHA、长度、PNG 尺寸一致的像素；caption 不算图像。返回引用身份、正文 SHA、来源版本、原定位及解析警告，避免把完整存储文本等同于正确转写。模型返回后再次调用 Kernel 读取回调，来源或输入有变化就拒绝发布回答。
+
+引用形状、引文存在及版本检查只能证明引用归属，不能证明陈述逻辑正确、证据足够或图表理解正确。真实题库仍须独立评分；检索命中率、全部证据覆盖、回答正确率、拒答和冲突分别报告。原 Gold、原题顺序、分母和既有 top-k 不变。
+
+本模块只用于非结构化学习内容。截止时间、考试日期、课程关系和任务状态必须由 canonical Kernel truth 查询提供；不能通过本模块把 PDF 或邮件正文升级成权威业务状态。
+
+## 模型与开发验收
+
+默认使用 `gpt-5-mini`、low reasoning、4000 输出 token 和 30 秒期限，沿用实际月度账本与 200 次每日规则。没有结果缓存或自动付费重试。
+
+隔离开发作用域通过已审核的 `withDocumentRerankRunPolicy` 环境校验复用精确开发数据库、SQLite 账本和管理员进程标记，并要求请求记录回调。本轮可用 `gpt-6-astra`、high reasoning、16384 输出 token、120 秒期限；实际计费通过 `paidOpenAI`，保留账本，不使用 bypass。每题的持久化请求和成功检查点由验收运行器管理，不能把回调存在当成已经持久化。
+
+原始图表在 Astra 中使用 `detail: original`，mini 使用 `high`。[官方图像输入说明](https://developers.openai.com/api/docs/guides/images-vision)。模型身份、reasoning、输出上限、prompt 版本和完整输入指纹共同构成请求身份。返回的 `model` 记录 provider 的实际模型字段，`requestedModel` 记录请求模型；Astra 开发结果必须与实际 provider 模型一致，否则拒绝发布。开发模型通过不证明其他生产模型也通过。
+
+## 当前交付边界
+
+纯验证器和输入打包的测试不能代替真实回答测试。新模块须经 PR、评审及 CI；接入 Kernel 当前上下文接口后才运行冻结的真实问题。代码合并、CI 成功、部署和生产切换分别报告。
