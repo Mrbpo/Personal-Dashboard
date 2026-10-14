@@ -32,7 +32,19 @@ Docling 节点非空 `text` 优先；为空时保留非空 `orig` 原始抽取�
 
 `DOCLING_FORMULA_ENRICHMENT=false` 只关闭独立公式增强，不关闭已明确配置的 AI 整页视觉转写。零付费正文处理须同时使用默认 `PDF_SCAN_TRANSCRIPTION_BACKEND=docling`；不能将正文模式误称为数学验收成功。
 
-本轮真实 CPU 公式试验中，12 页超过约 15 分钟的轮询窗口；2 GB 配置还出现模型内存不足，因此本地 CPU 公式路径不能作为默认方案。扫描资料的正文/OCR 在临时 3 GB 配置下也曾 OOM，不能宣称提高到 3 GB 即可使用。本地 Compose 与服务器资源均恢复为原来的 2 GB。正式启用扫描 Docling 前仍须解决资源阻塞并实际验收。
+### 官方公式模型资产与持久缓存
+
+`codeformulav2` 需要 [官方 CodeFormulaV2 模型](https://huggingface.co/docling-project/CodeFormulaV2)；公开、非受限访问，许可证为 `cdla-permissive-2.0`。本次准备锁定 commit `ecedbe111d15c2dc60bfd4a823cbe80127b58af4`，共 **13 个文件 / 639,800,205 bytes**；`model.safetensors` 为 630,993,616 bytes，官方 SHA-256 为 `4b04e77af34c4e682a7ab1617628340d658f3c3dcd12456dd2a7fff805cf79d2`。其余文件的官方 Git blob 校验值与本地 SHA/大小也核验，清单位于服务器 `/srv/study/docling-models/code-formula-assets.json`。按固定 revision 的官方 `resolve/<revision>/<file>` 下载完整文件，不使用会变化的 `main` 作为验收版本。
+
+现有官方安装的 `docling-tools models download code_formula --output-dir <cache-root>` 可以选择公式资产，[官方离线模型说明](https://docling-project.github.io/docling/usage/advanced_options/)给出缓存准备机制；当前 CLI 不提供 revision 参数。固定版本准备须明确指定官方 revision，并核对完整文件清单和校验值，不能把仅建立目录或添加挂载当作安装成功。无需新增推理组件，也不全局开启公式增强。
+
+服务器 host 持久资产为 `/srv/study/docling-models/docling-project--CodeFormulaV2`，缓存根目录 mode `0700`、owner UID `1001`，与现有 Docling 运行用户一致。Compose 仅将该子目录只读挂到 `/opt/app-root/src/.cache/docling/models/docling-project--CodeFormulaV2`，保留镜像自带 layout/OCR 等兄弟目录；明确 `DOCLING_SERVE_ARTIFACTS_PATH` 为同一父目录。**host 资产已经实际准备；正式 Compose 挂载尚未生效**，当前诊断只复制该模型进既有容器，不重建服务。资产可按固定官方 revision 重新下载，不需要加入冗余数据备份；原件、数据库和恢复配置的现有备份要求不变。
+
+修复前的单页任务在约 5 秒内报告 `CodeFormulaV2 not found in artifacts_path`，未发生 OOM，未输出转写；安装资产不等于公式忠实验收通过。CPU、内存及逐式准确率必须由受控原页探测另行报告，不凭权重存在宣称生产可用。
+
+安装后只提交同一作业解答原第 1 页一次（`pypdfium2` + `do_formula_enrichment=true`）。两次各最多 300 秒的观察窗口结束时，任务累计运行约 **690 秒仍为 `started`**，不是 conversion failure，也没有完整结果可核验。5 秒采样的 `memory.current` 最高约 **2.82 GiB / 4 GiB**，OOM/重启为零；cgroup 历史 `memory.peak` 在观察前后相同，不能归为本任务峰值。CPU 瞬时约 294%–323%，有效核数 4、OMP/default torch 线程为 4；38 个服务 OS 线程不能等同 38 个活跃推理线程。已停止继续观察并保留原 task ID，未重提、未杀服务、未发布知识库新版本、未调用 OpenAI。现有 CPU 路线耗时与 Γ/ψ/上下标忠实度仍未通过；具体记录保存在隔离资料目录的 `hw4-formula-model-ready.receipt.json`。
+
+早期 4 GB 主机 / 2 GB 容器试验记录（历史）：12 页 CPU 公式识别超过约 15 分钟的轮询窗口，2 GB 配置还出现模型内存不足；扫描资料的正文/OCR 在临时 3 GB 配置下也曾 OOM，不能宣称提高到 3 GB 即可使用。当时曾恢复为 2 GB 容器。**当前为升级后的 8 GB 主机 / 4 GiB 容器**，已完成公开隔离正文资料发布；公式模型的本次单页耗时与未完成忠实验收见上，不把早期资源值当作现状，也不默认启用全库 CPU 公式识别。
 
 ## 管理员批量回填
 

@@ -32,19 +32,19 @@ if test -f /srv/study/current-version; then previous=$(cat /srv/study/current-ve
 export APP_VERSION="$sha"
 compose=(docker compose -f /srv/study/compose.yml)
 printf '{"version":"%s","status":"deploying"}\n' "$sha" > /srv/study/status/current.json
-cutover_started=0
+recovery_required=0
 rollback() {
   "${compose[@]}" stop worker web || true
   # The stopped worker can leave its short-lived primary lease behind when npm
   # receives SIGTERM before the Node child. No executor is running here, so the
   # lease is safe to clear before restoring the previous worker.
   "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();" || true
-  if test "$cutover_started" = 0 && [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then
+  if test "$recovery_required" = 0 && [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then
     APP_VERSION="$previous" "${compose[@]}" up -d web worker proxy
     printf '{"version":"%s","previous":"%s","status":"failed_before_cutover"}\n' "$sha" "$previous" > /srv/study/status/current.json
   else
-    # A v1 writer may have committed PostgreSQL changes. Never roll back to v0 automatically.
-    printf '{"version":"%s","previous":"%s","status":"blocked_after_cutover"}\n' "$sha" "$previous" > /srv/study/status/current.json
+    # New schema or application writes may already be committed. Preserve them.
+    printf '{"version":"%s","previous":"%s","status":"blocked_requires_recovery"}\n' "$sha" "$previous" > /srv/study/status/current.json
   fi
 }
 trap 'rollback' ERR
@@ -65,6 +65,10 @@ bash /srv/study/verify-offsite-backup.sh "/srv/study/backups/$backup_name" "$bac
 # new migrations. The same existing volume remains authoritative.
 "${compose[@]}" up -d postgres docling
 "${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
+# New kernel migrations can commit before the application writer starts. The
+# previous application's schema gate may reject that database, so any failure
+# from this point must preserve it for recovery instead of booting old code.
+recovery_required=1
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
 "${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
@@ -74,9 +78,7 @@ printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/sta
 # worker can become primary immediately; job leases and progress are retained.
 "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
 started=$(date +%s%3N)
-# Docker may start a v1 writer before `up` returns. From this point, a failed
-# command must preserve PostgreSQL writes rather than booting the v0 writer.
-cutover_started=1
+# The migration boundary above already prevents automatic old-code rollback.
 "${compose[@]}" up -d web worker proxy
 healthy=0
 for n in $(seq 1 30); do
