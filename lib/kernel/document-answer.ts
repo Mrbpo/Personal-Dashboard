@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
-import type {DocumentTextHit} from './document-search.ts';
+import type {DocumentEvidenceHit} from './document-evidence.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v1';
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
@@ -10,7 +10,7 @@ type Image={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:s
  width:number;height:number;mime:'image/png';bytes:Uint8Array;source:{documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string}};
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
-export type DocumentAnswerContext={anchors:DocumentTextHit[];
+export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
  parents:{parentId:string;status:string;headingMetadata?:{text:string;originalSourceHash:string};sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;

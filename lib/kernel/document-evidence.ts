@@ -1,6 +1,12 @@
 import type {Pool} from 'pg';
 import type {DocumentTextHit} from './document-search.ts';
 
+/** A planner's explicit current-node selection is not a relevance ranking. */
+export type DocumentSelectedNodeHit=Omit<DocumentTextHit,'score'|'retrieval_mode'|'lexical_support'|'degraded_reason'|
+ 'rerank_model'|'rerank_reasoning_effort'|'rerank_max_output_tokens'|'retrieval_scope'|'evidence_body'>&{
+ reader_selection:'evidence-node-ids';retrieval_mode:'reader-selection';evidence_body:'full-page';score?:never};
+export type DocumentEvidenceHit=DocumentTextHit|DocumentSelectedNodeHit;
+
 export class DocumentEvidenceChangedError extends Error {
  readonly code='DOCUMENT_EVIDENCE_CHANGED';
  constructor(){super('Retrieved document evidence is no longer current');this.name='DocumentEvidenceChangedError';}
@@ -10,7 +16,7 @@ export class DocumentEvidenceChangedError extends Error {
  * The same statement checks current owner, visibility, origin and source version.
  * Full-page describes stored text; parser warnings still qualify its fidelity.
  */
-export async function readFullDocumentEvidence(pool:Pool,owner:string,hits:DocumentTextHit[]):Promise<DocumentTextHit[]> {
+export async function readFullDocumentEvidence<Hit extends DocumentEvidenceHit>(pool:Pool,owner:string,hits:Hit[]):Promise<Hit[]> {
  if(!hits.length)return hits;
  const requested=hits.map((hit,ordinal)=>({ordinal,document_id:hit.document_id,page_number:hit.page_number,
   evidence_id:hit.evidence_id,source_version_id:hit.source_version_id,source_hash:hit.source_hash,
