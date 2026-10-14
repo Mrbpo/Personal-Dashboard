@@ -10,6 +10,7 @@ function publicSource(source: CourseSearchResult) {
     sourceType: source.sourceType, title: source.title, excerpt: source.excerpt,
     sourceUrl: source.sourceUrl, updatedAt: source.updatedAt,
     confirmedAnswer: Boolean(source.confirmedAnswer), unconfirmedDiscussion: Boolean(source.unconfirmedDiscussion),
+    parser_warnings: source.parser_warnings || [],
   };
 }
 

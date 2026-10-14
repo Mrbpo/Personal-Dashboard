@@ -52,6 +52,10 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Prepare the pinned PostgreSQL vector runtime
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: bash deploy/prepare-vector-ci.sh "$POSTGRES_CONTAINER"
       - run: npm ci
       - name: Verify release tag matches package version
         env:
@@ -79,4 +83,4 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
-          docker save "study-cabinet:$SHA" | gzip | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "deploy $SHA"
+          docker save "study-cabinet:$SHA" study-postgres:18.6-pgvector0.8.7 | gzip | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST" "deploy $SHA"

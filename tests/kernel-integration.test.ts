@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {PDFDocument} from 'pdf-lib';
 import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
 import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
@@ -338,8 +339,8 @@ test('Docling failure keeps the original and retry commits parsed evidence',asyn
   process.env.DOCLING_URL='http://docling.invalid';
   const library=await import('../lib/library.ts');
   const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
-  const id=await library.saveDocument('owner','','upload','retry.pdf','retry.pdf','application/pdf',
-    Buffer.from('%PDF-1.4 retry evidence'));
+  const pdf=await PDFDocument.create();pdf.addPage().drawText('Recovered formula notes');
+  const id=await library.saveDocument('owner','','upload','retry.pdf','retry.pdf','application/pdf',await pdf.save());
   const original=globalThis.fetch;
   try{
     globalThis.fetch=async()=>new Response('unavailable',{status:503});
@@ -347,7 +348,8 @@ test('Docling failure keeps the original and retry commits parsed evidence',asyn
     assert.equal(Number((await kernelPool().query('SELECT count(*) FROM source_items WHERE id=$1',[`document:${id}`])).rows[0].count),0);
     globalThis.fetch=async url=>String(url).endsWith('/async')
       ?Response.json({task_id:'retry-task',task_status:'success'})
-      :Response.json({status:'success',document:{json_content:{texts:[{text:'Recovered formula notes',prov:[{page_no:1}]}]}}});
+      :Response.json({status:'success',document:{json_content:{pages:{'1':{page_no:1}},body:{children:[{$ref:'#/texts/0'}]},
+        texts:[{text:'Recovered formula notes',prov:[{page_no:1}]}]}}});
     await convertDocumentWithDocling('owner',id);
     assert.equal(Number((await kernelPool().query('SELECT count(*) FROM evidence WHERE source_item_id=$1',[`document:${id}`])).rows[0].count),1);
     assert.equal((await library.getDocument('owner',id)).status,'ready');

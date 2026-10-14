@@ -4,6 +4,28 @@ import {PDFDocument,StandardFonts} from 'pdf-lib';
 import {appendPdfLatex,mayContainPdfMath} from '../lib/pdf-formulas.ts';
 process.env.AI_BUDGET_TEST_BYPASS='true';
 
+test('Docling formula augmentation resumes successful pages without exceeding the per-document cap',async()=>{
+ process.env.DATABASE_URL=':memory:';
+ const {saveDocument}=await import('../lib/library.ts');
+ const {enrichParsedPdfFormulae,PDF_FORMULA_PAGES_PER_DOCUMENT}=await import('../lib/document-parser.ts');
+ const pdf=await PDFDocument.create();
+ for(let page=0;page<PDF_FORMULA_PAGES_PER_DOCUMENT+1;page++)pdf.addPage();
+ const bytes=await pdf.save(),id=await saveDocument('formula-resume','','upload','cache-test','cache-test.pdf','application/pdf',bytes);
+ const pages=Array.from({length:PDF_FORMULA_PAGES_PER_DOCUMENT+1},(_,index)=>({pageNumber:index+1,locator:`第 ${index+1} 页`,text:`Original prose ${index}: E = mc2`}));
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({formulae:['E=mc^{2}'],complete:true})});};
+ try{
+  const first=await enrichParsedPdfFormulae(id,bytes,pages);
+  assert.equal(calls,PDF_FORMULA_PAGES_PER_DOCUMENT);
+  assert.equal(first.warnings.length,1);
+  assert.ok(first.pages[0].text.startsWith(pages[0].text));
+  const resumed=await enrichParsedPdfFormulae(id,bytes,pages);
+  assert.equal(calls,PDF_FORMULA_PAGES_PER_DOCUMENT);
+  assert.equal(resumed.warnings.length,1);
+  assert.match(resumed.pages.at(-1)!.text,/公式识别不完整/);
+ }finally{globalThis.fetch=original;}
+});
+
 test('math cues select pages without sending ordinary prose for vision',()=>{
  assert.equal(mayContainPdfMath('Lecture notes on campus history.'),false);
  assert.equal(mayContainPdfMath('The equation is E = mc².'),true);
@@ -70,6 +92,8 @@ test('an incomplete legacy PDF retries even when historical backfill is disabled
  const {database:db}=await import('../lib/database.ts');
  const {saveDocument,previewDocument,indexDocument}=await import('../lib/library.ts');
  const {PDF_PARSER_VERSION}=await import('../lib/document-parser.ts');
+ const {kernel}=await import('../lib/kernel/service.ts');
+ await kernel.upsertCourse({id:'math',name:'Test mathematics',course_code:'MATH'});
  const pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();const bytes=await pdf.save();
  const id=await saveDocument('legacy-retry','math','upload','partial.pdf','partial.pdf','application/pdf',bytes);
  await db.prepare("INSERT INTO library_parse_pages VALUES (?, 'pdf-page-v2', 0, ?)").bind(id,'Legacy page one').run();
@@ -93,6 +117,8 @@ test('one owner-scoped click queues one resumable PDF formula job and preserves 
  const {saveDocument,previewDocument,indexDocument}=await import('../lib/library.ts');
  const {getPdfFormulaReparseStatus,queuePdfFormulaReparse}=await import('../lib/pdf-formula-reparse.ts');
  const {PDF_PARSER_VERSION}=await import('../lib/document-parser.ts');
+ const {kernel}=await import('../lib/kernel/service.ts');
+ await kernel.upsertCourse({id:'math',name:'Test mathematics',course_code:'MATH'});
  const pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();const bytes=await pdf.save();
  const id=await saveDocument('click-owner','math','upload','formula-old.pdf','formula-old.pdf','application/pdf',bytes);
  await db.prepare("INSERT INTO library_parse_pages VALUES (?, 'pdf-page-v2', 0, ?)").bind(id,'Old page one').run();

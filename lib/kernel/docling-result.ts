@@ -1,0 +1,197 @@
+/** Decode Docling's document tree, whose references carry reading order and PDF provenance. */
+export const DOCLING_PARSER_VERSION = 'docling-v2-search';
+export const DOCLING_TEXT_PARSER_VERSION = 'docling-v2-text-search';
+export function configuredDoclingParser(): string {
+  return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
+}
+export type DoclingPage = { locator: string; text: string; pageNumber: number };
+type Json = Record<string, unknown>;
+
+function object(value: unknown): Json | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
+}
+function list(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
+function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
+// Orig is source extraction, not enriched LaTeX. Keep it verbatim when the
+// normalized text is empty; otherwise valid source content would disappear.
+function nodeContent(node: Json): string {
+  return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
+}
+
+export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[]} {
+  const response = object(result);
+  if (response?.status !== 'success') throw new Error(`Docling conversion is incomplete (${response?.status || 'missing status'})`);
+  if (list(response.errors).length) throw new Error('Docling reported conversion errors');
+  const document = object(object(response.document)?.json_content);
+  if (!document) throw new Error('Docling returned no structured document with page provenance');
+  const manifest = object(document.pages);
+  const pageNumbers = Object.entries(manifest || {}).map(([key, value]) => {
+    const page = object(value);
+    const number = Number(key);
+    if (!Number.isInteger(number) || number < 1 || page?.page_no !== number) throw new Error('Docling has invalid PDF page metadata');
+    return number;
+  }).sort((a, b) => a - b);
+  const totalPages = expectedPages ?? pageNumbers.length;
+  const [first,last]=options.pageRange??[1,totalPages];
+  // Ranged responses must retain original PDF page numbers. Never infer an offset
+  // from a locally renumbered response or accept pages outside the requested range.
+  if (!Number.isInteger(totalPages) || totalPages < 1 || !Number.isInteger(first)||!Number.isInteger(last)||
+    first<1||last<first||last>totalPages||pageNumbers.length!==last-first+1||
+    pageNumbers.some((number, index) => number !== index + first)) {
+    throw new Error('Docling page manifest is incomplete');
+  }
+  const body = object(document.body);
+  if (!body || !Array.isArray(body.children)) throw new Error('Docling returned no document reading order');
+  const parts = new Map(pageNumbers.map(number => [number, [] as string[]]));
+  const occupied = new Set<number>();
+  const visited = new Set<string>();
+  const warnings: string[] = [];
+  const formulaPageNumbers=new Set<number>();
+  if(options.formulaEnriched === false) warnings.push('公式增强未启用；正文可检索，公式须核对原 PDF');
+  const verifiedBlankPages = new Set(options.verifiedBlankPages || []);
+
+  function resolve(reference: unknown): {ref: string; node: Json} {
+    const ref = object(reference)?.$ref;
+    if (typeof ref !== 'string' || !/^#\/(texts|tables|pictures|groups|key_value_items|form_items|field_regions|field_items)\/\d+$/.test(ref)) {
+      throw new Error('Docling contains an invalid document reference');
+    }
+    const [, collection, index] = ref.split('/');
+    const node = object(list(document![collection])[Number(index)]);
+    if (!node) throw new Error(`Docling reference does not exist: ${ref}`);
+    return {ref, node};
+  }
+
+  function provenance(node: Json): Json[] {
+    const values = list(node.prov).map(value => object(value));
+    if (!values.length || values.some(value => !value || !Number.isInteger(value.page_no) || !parts.has(value.page_no as number))) {
+      throw new Error(`Docling item has missing or invalid page provenance (${node.self_ref || node.label || 'unknown'})`);
+    }
+    return values as Json[];
+  }
+
+  function add(node: Json, content: string): void {
+    const locations = provenance(node);
+    for (const location of locations) occupied.add(location.page_no as number);
+    if (!content) return;
+    const numbers = new Set(locations.map(location => location.page_no));
+    if (numbers.size === 1) {
+      parts.get(locations[0].page_no as number)!.push(content);
+      return;
+    }
+    // Spanning text must have valid, complete character ranges; do not guess a page.
+    let consumed = 0;
+    for (const location of locations) {
+      const span = list(location.charspan);
+      const [start, end] = span;
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start !== consumed || (end as number) <= (start as number) || (end as number) > content.length) {
+        throw new Error('Docling spanning item has ambiguous page character ranges');
+      }
+      parts.get(location.page_no as number)!.push(content.slice(start as number, end as number));
+      consumed = end as number;
+    }
+    if (consumed !== content.length) throw new Error('Docling spanning item loses text between pages');
+  }
+
+  function noteFormula(node: Json): void {
+    if(node.label!=='formula')return;
+    const locations=provenance(node);
+    for(const location of locations)formulaPageNumbers.add(location.page_no as number);
+    if(!text(node.text)&&text(node.orig))warnings.push(`第 ${locations[0].page_no} 页公式保留原始抽取文本；未验证 LaTeX、符号和上下标，请核对原 PDF`);
+    // Enrichment describes execution, not source fidelity. A nonempty model
+    // result (including valid-looking LaTeX) has not been checked against print.
+    else if(text(node.text))for(const location of locations)warnings.push(`第 ${location.page_no} 页机器公式未核验符号和上下标，请核对原 PDF`);
+  }
+
+  function cellText(cell: Json, ancestors: Set<string>, tablePages: Set<unknown>): string {
+    if (!cell.ref) return nodeContent(cell);
+    const collect = (reference: unknown, stack: Set<string>): string => {
+      const {ref, node} = resolve(reference);
+      if (stack.has(ref)) throw new Error('Docling document references contain a cycle');
+      visited.add(ref);
+      const next = new Set([...stack, ref]);
+      if (!ref.startsWith('#/groups/')) {
+        if (provenance(node).some(location => !tablePages.has(location.page_no))) throw new Error('Docling rich table cell has ambiguous page provenance');
+        noteFormula(node);
+      }
+      return [nodeContent(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
+    };
+    return collect(cell.ref, ancestors) || nodeContent(cell);
+  }
+
+  function tableText(node: Json, ancestors: Set<string>): string {
+    const data = object(node.data);
+    if (!data) throw new Error('Docling table has no structured data');
+    const cells = list(data.table_cells).map(value => {
+      const cell = object(value);
+      if (!cell || !Number.isInteger(cell.start_row_offset_idx) || !Number.isInteger(cell.start_col_offset_idx) ||
+          (cell.start_row_offset_idx as number) < 0 || (cell.start_col_offset_idx as number) < 0) {
+        throw new Error('Docling table has invalid cell coordinates');
+      }
+      return cell;
+    }).sort((a, b) => (a.start_row_offset_idx as number) - (b.start_row_offset_idx as number) || (a.start_col_offset_idx as number) - (b.start_col_offset_idx as number));
+    const rows = new Map<number, string[]>();
+    const tablePages = new Set(provenance(node).map(location => location.page_no));
+    for (const cell of cells) {
+      const row = cell.start_row_offset_idx as number;
+      const values = rows.get(row) || [];
+      const column = cell.start_col_offset_idx as number;
+      while (values.length <= column) values.push('');
+      const content = cellText(cell, ancestors, tablePages).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+      if (values[column] && content) throw new Error('Docling table has overlapping cell coordinates');
+      values[column] = content;
+      rows.set(row, values);
+    }
+    const columnCount = Math.max(Number.isInteger(data.num_cols) ? data.num_cols as number : 0, ...[...rows.values()].map(row => row.length));
+    const content = [...rows.values()].map(row => {
+      while (row.length < columnCount) row.push('');
+      return `| ${row.join(' | ')} |`;
+    }).join('\n');
+    if (!cells.length || !cells.some(cell => nodeContent(cell) || cell.ref)) throw new Error('Docling table contains no readable cells');
+    return content;
+  }
+
+  function visit(reference: unknown, ancestors = new Set<string>()): void {
+    const {ref, node} = resolve(reference);
+    if (ancestors.has(ref)) throw new Error('Docling document references contain a cycle');
+    if (visited.has(ref)) return;
+    visited.add(ref);
+    const next = new Set([...ancestors, ref]);
+    if (ref.startsWith('#/tables/')) add(node, tableText(node, next));
+    else if (ref.startsWith('#/pictures/')) {
+      // Captions/child text remain searchable; pixels cannot be treated as transcribed text.
+      add(node, '');
+      warnings.push(`第 ${provenance(node)[0].page_no} 页含图片；仅索引已识别文字和图注`);
+    } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
+      const content = nodeContent(node);
+      const originalFallback = !text(node.text) && Boolean(text(node.orig));
+      noteFormula(node);
+      if (node.label === 'formula' && !content.trim()) {
+        if(options.formulaEnriched !== false)throw new Error('Docling formula has no readable LaTeX');
+        warnings.push(`第 ${provenance(node)[0].page_no} 页有公式尚未转写，请核对原 PDF`);
+      }
+      add(node, node.label === 'formula' && content && !originalFallback && options.formulaEnriched !== false ? `$$\n${content}\n$$` : content);
+    }
+    for (const child of [...list(node.children), ...list(node.captions), ...list(node.footnotes), ...list(node.references)]) visit(child, next);
+  }
+
+  for (const reference of list(object(document.furniture)?.children)) visit(reference);
+  for (const reference of body.children) visit(reference);
+  // A malformed tree must not silently discard text residing outside the body hierarchy.
+  for (const collection of ['texts', 'tables', 'pictures']) {
+    list(document[collection]).forEach((value, index) => {
+      const node = object(value);
+      if (!visited.has(`#/${collection}/${index}`) && ((node && nodeContent(node)) || collection !== 'texts')) {
+        throw new Error(`Docling contains unreferenced content: #/${collection}/${index}`);
+      }
+    });
+  }
+  const pages = pageNumbers.map(pageNumber => {
+    const content = parts.get(pageNumber)!.join('\n\n').trim();
+    if (!content && occupied.has(pageNumber)) throw new Error(`Docling page ${pageNumber} has content but no readable transcription`);
+    if (!content && !verifiedBlankPages.has(pageNumber)) throw new Error(`Docling page ${pageNumber} is blank_or_unreadable; original blank page was not verified`);
+    if (!content) warnings.push(`第 ${pageNumber} 页已核验原始 PDF 无页面内容，保留为空白页`);
+    return {pageNumber, locator: `第 ${pageNumber} 页`, text: content};
+  });
+  if (!pages.some(page => page.text)&&!options.pageRange) throw new Error('Docling returned no readable text');
+  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers]};
+}

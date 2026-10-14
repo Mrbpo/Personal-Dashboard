@@ -15,8 +15,9 @@ test("course Q&A retries a truncated structured response", async () => {
   globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body));
     tokenLimits.push(request.max_output_tokens);
-    assert.match(request.input[0].content[0].text, /不是原文摘抄器/);
-    assert.match(request.input[0].content[0].text, /课前完成/);
+    const prompt=request.input.find((item: {role:string})=>item.role==='user').content[0].text;
+    assert.match(prompt, /不是原文摘抄器/);
+    assert.match(prompt, /课前完成/);
     if (tokenLimits.length === 1) return new Response(JSON.stringify({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output_text: "{\"answer\":\"截断" }), { headers: { "Content-Type": "application/json" } });
     return new Response(JSON.stringify({ status: "completed", output_text: JSON.stringify({ answer: "课前写好标题。 [S1]", needsClarification: false, followUps: [], citationRefs: ["S1"] }) }), { headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
@@ -31,15 +32,19 @@ test("answer context includes both a strong document and confirmed Piazza eviden
   const original = globalThis.fetch;
   globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body));
-    const prompt = request.input[0].content[0].text;
+    const prompt = request.input.find((item: {role:string})=>item.role==='user').content[0].text;
     assert.match(prompt, /Lab 1 PDF says prepare the notebook/);
     assert.match(prompt, /教师明确回答：Bring goggles/);
     assert.match(prompt, /分别引用/);
+    assert.match(prompt, /解析警告（此来源）：\["原始公式文本未验证 LaTeX、符号和上下标"\]/);
+    const instruction=request.input.find((item:{role:string})=>item.role==='developer').content[0].text;
+    assert.match(instruction, /不得断言抽取式是精确原式/);
+    assert.match(instruction, /已支持的普通正文仍可正常回答/);
     return Response.json({ status:'completed', output_text:JSON.stringify({ answer:'准备实验记录本，并带护目镜。[S1][S2]', needsClarification:false, followUps:[], citationRefs:['S1','S2'] }) });
   }) as typeof fetch;
   try {
     const sources = [
-      { ref:'S1', sourceId:'pdf', courseId:'chem', courseCode:'CHMA10', sourceType:'document', title:'Lab1.pdf', excerpt:'Lab 1 PDF says prepare the notebook', body:'Lab 1 PDF says prepare the notebook', sourceUrl:'/api/library/pdf', updatedAt:null },
+      { ref:'S1', sourceId:'pdf', courseId:'chem', courseCode:'CHMA10', sourceType:'document', title:'Lab1.pdf', excerpt:'Lab 1 PDF says prepare the notebook', body:'Lab 1 PDF says prepare the notebook', sourceUrl:'/api/library/pdf', updatedAt:null,parser_warnings:['原始公式文本未验证 LaTeX、符号和上下标'] },
       { ref:'S2', sourceId:'post', courseId:'chem', courseCode:'CHMA10', sourceType:'piazza', title:'Lab 1 discussion', excerpt:'教师明确回答：Bring goggles', body:'教师明确回答：Bring goggles', sourceUrl:'https://piazza.com/test', updatedAt:null, confirmedAnswer:true },
     ];
     const result = await answerCourseQuestion('CHMA10 Lab 1 要求是什么？', sources);
@@ -60,7 +65,7 @@ test("unconfirmed Piazza discussion alone cannot establish lab requirements", as
 test('a combined tutorial and syllabus question asks AI to answer both parts', async () => {
   const original=globalThis.fetch;
   globalThis.fetch=(async (_input: string | URL | Request, init?: RequestInit) => {
-    const prompt=JSON.parse(String(init?.body)).input[0].content[0].text as string;
+    const prompt=JSON.parse(String(init?.body)).input.find((item:{role:string})=>item.role==='user').content[0].text as string;
     assert.match(prompt,/分两部分回答/);
     assert.match(prompt,/Tutorial 2 requires problems 1 and 2/);
     assert.match(prompt,/Tutorials count for 10 percent/);

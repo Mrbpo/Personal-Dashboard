@@ -7,8 +7,10 @@ import { serviceValue } from './service-vault.ts';
 import { acquireLease,enqueue,releaseLease } from './jobs.ts';
 import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parser.ts';
 import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
-import {queueIngestionJob} from './kernel/jobs.ts';
+import {queueIngestionJob,doclingStageBlobHashes} from './kernel/jobs.ts';
 import {kernel} from './kernel/service.ts';
+import {documentSearchText,splitDocumentText} from './kernel/document-search.ts';
+import {DOCLING_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
 import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
 export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
@@ -50,7 +52,12 @@ export async function previewDocument(owner:string,id:string) {
   let text='',pages:Array<{page:number;locator:string;text:string}>=[];
   if(document.mime.startsWith('text/')) text=(await readBlob(document.hash)).toString('utf8');
   else if(document.mime==='application/pdf'){
-    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN ('docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser='docling-v1' THEN 0 WHEN parser=? THEN 1 ELSE 2 END LIMIT 1000").bind(id,PDF_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
+    const persisted=await kernel.parsedDocument(owner,id);
+    if(persisted.length){
+      pages=persisted.map(page=>({page:page.page_number,locator:page.locator,text:page.body}));
+      return {document,text,pages};
+    }
+    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, 'docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 WHEN parser='docling-v1' THEN 1 WHEN parser=? THEN 2 ELSE 3 END LIMIT 1000").bind(id,DOCLING_PARSER_VERSION,PDF_PARSER_VERSION,DOCLING_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
     const job=await db.prepare('SELECT status,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;payload:string}>();
     const explicitUnfinished=job&&['queued','running','failed'].includes(job.status)&&JSON.parse(job.payload).forcePdfFormulaReparse===true;
     const preserveOld=document.status!=='ready'||explicitUnfinished;
@@ -66,18 +73,21 @@ export async function previewDocument(owner:string,id:string) {
   }
   return {document,text,pages};
 }
-export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_mail_sources WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_annotation_scenes WHERE document_id=? AND owner_id=?').bind(id,owner)]);}
+export async function removeDocument(owner:string,id:string) {await getDocument(owner,id);await kernel.hideParsedDocument(owner,id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_mail_sources WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM library_annotation_scenes WHERE document_id=? AND owner_id=?').bind(id,owner)]);}
 export async function hideRemoteDocuments(owner:string,course:string,origin:string,remoteKey:string){
  const key=JSON.stringify([course,remoteKey]);
  const documents=(await db.prepare('SELECT id FROM library_documents WHERE owner_id=? AND course_id=? AND origin=? AND origin_key=? AND deleted=0').bind(owner,course,origin,key).all<{id:string}>()).results;
- for(const document of documents)await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(document.id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_mail_sources WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_annotation_scenes WHERE document_id=? AND owner_id=?').bind(document.id,owner)]);
+ for(const document of documents){await kernel.hideParsedDocument(owner,document.id);await db.batch([db.prepare('UPDATE library_documents SET deleted=1 WHERE id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(document.id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_mail_sources WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_parse_pages WHERE document_id=?').bind(document.id),db.prepare('DELETE FROM library_annotations WHERE document_id=? AND owner_id=?').bind(document.id,owner),db.prepare('DELETE FROM library_annotation_scenes WHERE document_id=? AND owner_id=?').bind(document.id,owner)]);
+ }
  return documents.length;
 }
-export function splitText(text:string) {const out:string[]=[];for(let i=0;i<text.length;i+=1400){out.push(text.slice(i,i+1600));if(i+1600>=text.length)break;}return out;}
+export const splitText=splitDocumentText;
 export async function indexDocument(owner:string,id:string,forcePdfFormulaReparse=false) {
   const d=await getDocument(owner,id);
   if(d.mime==='application/pdf' && process.env.DOCLING_URL){
-    await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id},`docling:${id}:${d.hash}:v1`);
+    const parser=configuredDoclingParser();
+    await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id,sourceHash:d.hash,formulaEnriched:parser===DOCLING_PARSER_VERSION,
+      formulaBackend:process.env.DOCLING_FORMULA_BACKEND||'ai',scanBackend:process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling'},`docling:${id}:${d.hash}:${parser}`,forcePdfFormulaReparse);
     return;
   }
   if(d.mime==='application/pdf'&&d.status==='ready'&&!forcePdfFormulaReparse&&process.env.PDF_FORMULA_BACKFILL!=='true'){
@@ -111,6 +121,9 @@ export async function indexDocument(owner:string,id:string,forcePdfFormulaRepars
       }
     }
     const chunks=pages.flatMap(p=>splitText(p.text).map(body=>({locator:p.locator,body})));if(!chunks.length)throw new Error('没有识别到可读正文');
+    if(d.mime==='application/pdf')await kernel.ingestParsedDocument({id:d.id,ownerId:owner,createdAt:d.created_at,courseId:d.course_id,
+      name:d.name,hash:d.hash,mime:d.mime,origin:d.origin,originKey:d.origin_key},pages,
+      {parserVersion:PDF_PARSER_VERSION,expectedPages:pages.length});
     const warning=pages.some(p=>p.text.startsWith('[本页自动识别不完整')||p.text.startsWith('[自动识别不完整'))?'部分内容无法可靠识别；搜索结果会提示核对原文件。':pages.some(p=>p.text.startsWith('[本地 OCR'))?'本地 OCR 已完成；公式、表格与图形可能不完整，请核对 PDF 原页。':pages.some(p=>p.text.includes('[本页公式识别不完整')||p.text.includes('[部分公式无法可靠识别'))?'部分公式无法可靠识别，请核对 PDF 原页。':/word|officedocument/.test(d.mime)?'Word 文本已解析；内嵌图片和图表请另存 PDF 后导入。':null;
     await db.batch([db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),...chunks.map((c,i)=>db.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(`${id}:${i}`,id,i,c.locator,c.body,digest('parser1:split1:'+c.body))),db.prepare("UPDATE library_documents SET status='ready',error=? WHERE id=? AND deleted=0").bind(warning,id)]);
   }catch(e){if(!(forcePdfFormulaReparse&&d.status==='ready'))await db.prepare("UPDATE library_documents SET status='error',error=? WHERE id=?").bind(e instanceof Error&&/^[\u3400-\u9fff]/.test(e.message)?e.message:'解析失败，请稍后重试',id).run();throw e;}
@@ -123,7 +136,9 @@ export async function embedMissing(owner:string) {
 async function embedBatch(owner:string) {
   const mails=(await db.prepare(`SELECT DISTINCT m.id,m.account,m.subject,m.body,m.hash FROM library_documents d JOIN library_mail_sources s ON s.document_id=d.id JOIN mail_messages m ON m.id=s.email_id AND m.account=s.account AND m.hash=s.source_hash LEFT JOIN mail_embeddings e ON e.email_id=m.id AND e.model=? WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND (e.email_id IS NULL OR e.input_hash!=?||m.hash) LIMIT 32`).bind(EMBED_MODEL,owner,MAIL_EMBED_VERSION).all<MailEmbeddingInput>()).results;
   if(mails.length)return storeMailEmbeddings(mails);
-  const pending=(await db.prepare(`SELECT c.* FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND NOT EXISTS (SELECT 1 FROM library_mail_sources s WHERE s.document_id=d.id) AND NOT EXISTS (SELECT 1 FROM library_vectors v WHERE v.chunk_id=c.id AND v.model=?) LIMIT 32`).bind(owner,EMBED_MODEL).all<{id:string;body:string}>()).results;
+  const indexed=process.env.KERNEL_DOCUMENT_HYBRID==='true'?(await kernel.documentTextHeads(owner)).map(row=>row.id):[];
+  const coreFilter=indexed.length?`AND d.id NOT IN (${indexed.map(()=>'?').join(',')})`:'';
+  const pending=(await db.prepare(`SELECT c.* FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE d.owner_id=? AND d.deleted=0 AND d.status='ready' AND NOT EXISTS (SELECT 1 FROM library_mail_sources s WHERE s.document_id=d.id) AND NOT EXISTS (SELECT 1 FROM library_vectors v WHERE v.chunk_id=c.id AND v.model=?) ${coreFilter} LIMIT 32`).bind(owner,EMBED_MODEL,...indexed).all<{id:string;body:string}>()).results;
   if(!pending.length)return 0;
   const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:pending.map(c=>c.body),dimensions:768});if(!r.ok)throw new Error('向量索引暂时失败');const p=await r.json();
   if(p.data?.length!==pending.length)throw new Error('向量结果不完整');
@@ -134,6 +149,7 @@ export async function collectUnusedBlobs(now=Date.now()){
  const documents=(await db.prepare('SELECT hash FROM library_documents WHERE deleted=0').all<{hash:string}>()).results;
  const messages=(await db.prepare('SELECT attachments_json FROM tutor_messages').all<{attachments_json:string}>()).results;
  const used=new Set(documents.map(d=>d.hash));for(const m of messages)for(const a of JSON.parse(m.attachments_json))if(a.hash)used.add(a.hash);
+ if(process.env.KERNEL_DATABASE_URL)for(const hash of await doclingStageBlobHashes())used.add(hash);
  let removed=0;await mkdir(root(),{recursive:true,mode:0o700});
  for(const name of await readdir(/* turbopackIgnore: true */ root())){
   if(!/^[a-f0-9]{64}$/.test(name)||used.has(name))continue;
@@ -147,7 +163,7 @@ export async function collectUnusedBlobs(now=Date.now()){
  return removed;
 }
 export function librarySearchTokens(value:string){
-  const normalized=value.normalize('NFKD').toLocaleLowerCase().replace(/([a-z])([0-9])/g,'$1 $2').replace(/([0-9])([a-z])/g,'$1 $2');
+  const normalized=documentSearchText(value).replace(/([a-z])([0-9])/g,'$1 $2').replace(/([0-9])([a-z])/g,'$1 $2');
   const singular=new Set(['notes','slides','files','weeks','lectures','answers','solutions','blanks','modules','assignments','tutorials','instructions','requirements']);
   return [...new Set((normalized.match(/[a-z0-9]+|[\u3400-\u9fff]{2,}/gu)||[]).map(token=>singular.has(token)?token.slice(0,-1):token).filter(token=>!/^(the|and|for|with)$/.test(token)))];
 }
@@ -155,23 +171,59 @@ function lexicalText(value:string){return librarySearchTokens(value).join(' ');}
 function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return Array.isArray(parts)&&typeof parts[1]==='string'&&parts[1].endsWith('/body');}catch{return false;}}
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
-type SearchOptions={strict?:boolean;path?:string;limit?:number;metadataFirst?:boolean;embeddingTimeoutMs?:number;onTiming?:(detail:SearchTiming)=>void};
-export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string};
-type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string};
+type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;hybrid?:boolean;onTiming?:(detail:SearchTiming)=>void};
+export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
-  if(!course){const code=query.toUpperCase().match(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/)?.[0]?.replace(/\s/g,'');if(code){const courses=(await kernel.listCourses()).filter(c=>c.enabled);course=courses.find(c=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code))?.id||'';if(!course)return [];}}
+  let contentIdentifiers:string[]=[];
+  if(!course){
+    const codes=[...query.replace(/\\[a-z]+/giu,' ').toUpperCase().matchAll(/\b[A-Z]{3,4}\s*[A-Z]?\d{2,3}(?:H\d)?\b/g)]
+      .map(match=>match[0].replace(/\s/g,''));
+    if(codes.length){
+      // Infer only actual enabled courses. Technical identifiers such as IEEE754
+      // are searchable content, not evidence that the user chose a course.
+      const courses=(await kernel.listCourses()).filter(c=>c.enabled);
+      const matches=courses.filter(c=>
+        codes.some(code=>c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code)));
+      // Unknown identifiers must occur in the retrieved content. They must not
+      // become invented course filters or be discarded as optional query words.
+      contentIdentifiers=codes.filter(code=>!courses.some(c=>
+        c.code.toUpperCase().replace(/[^A-Z0-9]/g,'').includes(code)));
+      if(matches.length===1)course=matches[0].id;
+    }
+  }
 
-  const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(30,options.limit||8));
-  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.rowid>d.rowid)) AND newer.deleted=0)`;
-  const scopeArgs=[owner,...(course?[course]:[])];
+  const strict=Boolean(options.strict),path=normalizeFolderPath(options.path||''),limit=Math.max(1,Math.min(options.documentId?80:30,options.limit||8));
+  const scopeSql=`d.owner_id=? AND d.deleted=0 ${strict?'':"AND d.status='ready'"} ${course?'AND d.course_id=?':''} ${options.documentId?'AND d.id=?':''} AND NOT EXISTS (SELECT 1 FROM library_documents newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)) AND newer.deleted=0)`;
+  const scopeArgs=[owner,...(course?[course]:[]),...(options.documentId?[options.documentId]:[])];
   const fields='c.id,d.id document_id,c.body,c.locator,d.name,d.course_id,d.folder_path,d.origin,d.origin_key';
   const words=strict?librarySearchTokens(query):[...new Set([...activitySearchAliases(query),...librarySearchTokens(query)])];
   const candidateStarted=performance.now();
+  const documentSemantic=Boolean(options.aiRerank||(semantic&&(options.kernelSemantic??process.env.KERNEL_DOCUMENT_SEMANTIC==='true')));
+  const persisted=await kernel.searchDocumentText(owner,query,{courseId:course,documentId:options.documentId,strict,semantic:documentSemantic,aiRerank:options.aiRerank,hybrid:options.hybrid,limit:240});
+  const documentIds=[...new Set(persisted.map(row=>row.document_id))];
+  const eligible=documentIds.length?(await db.prepare(`SELECT d.id,d.hash,d.folder_path FROM library_documents d WHERE ${scopeSql}
+    AND d.id IN (${documentIds.map(()=>'?').join(',')})`).bind(...scopeArgs,...documentIds).all<{id:string;hash:string;folder_path:string}>()).results:[];
+  const allowed=new Map(eligible.map(row=>[row.id,row]));
+  const indexedDocuments=new Set((await kernel.documentTextHeads(owner)).map(row=>row.id));
+  const persistedRows:CandidateRow[]=persisted.filter(row=>allowed.get(row.document_id)?.hash===row.source_hash)
+    .map(row=>({...row,parser_warnings:row.parser_warnings||[],folder_path:allowed.get(row.document_id)!.folder_path,contentScore:row.score}));
   let raw:CandidateRow[]=[];
   if(strict){
     raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;
-    const rows=raw.map(row=>({...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
-    const scoped=path?rows.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):rows;
+    // Current PostgreSQL pages own content matches. Keep a filename-only row
+    // for these documents so metadata search cannot resurrect old cache text.
+    const metadata=new Map<string,CandidateRow>();
+    raw=raw.filter(row=>{
+      if(!indexedDocuments.has(row.document_id))return true;
+      if(!metadata.has(row.document_id))metadata.set(row.document_id,{...row,id:null,body:null,locator:null});
+      return false;
+    });
+    raw.push(...metadata.values());
+    raw=[...persistedRows,...raw];
+    const rows=raw.map(row=>({...row,parser_warnings:row.parser_warnings||[],id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
+    const identified=rows.filter(row=>contentIdentifiers.every(code=>containsEvery(`${row.name} ${row.body}`,librarySearchTokens(code))));
+    const scoped=path?identified.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):identified;
     const metadataMatches=scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name}`,words));
     const candidates=(options.metadataFirst!==false&&metadataMatches.length?metadataMatches:scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name} ${row.body}`,words)));
     const best=new Map<string,(typeof candidates)[number]&{score:number;match_reason:string}>();
@@ -201,16 +253,36 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
     const metadata=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id AND c.position=0 WHERE ${scopeSql} AND (${condition}) ORDER BY d.created_at DESC LIMIT 60`).bind(...scopeArgs,...metadataWords.flatMap(word=>[`%${word}%`,`%${word}%`])).all<CandidateRow>()).results;
     raw=[...raw,...metadata];
   }
+  if(options.documentId){
+    // A named PDF or paper is a small, known scope. Include every one of its
+    // chunks so semantic ranking can find passages with no shared query words.
+    const within=(await db.prepare(`SELECT ${fields} FROM library_chunks c JOIN library_documents d ON d.id=c.document_id
+      WHERE ${scopeSql} ORDER BY c.position LIMIT 256`).bind(...scopeArgs).all<CandidateRow>()).results;
+    raw=[...raw,...within];
+  }
+  // PostgreSQL text has already been ranked across the current corpus. A stale
+  // or differently split compatibility cache must not compete with that version.
+  raw=[...persistedRows,...raw.filter(row=>!indexedDocuments.has(row.document_id))];
   if(!raw.length&&semantic){
     // Bounded fallback for concepts with no lexical overlap. Course and owner
     // filters still apply before any vector JSON is read.
     raw=(await db.prepare(`SELECT ${fields} FROM library_chunks c JOIN library_documents d ON d.id=c.document_id WHERE ${scopeSql} ORDER BY d.created_at DESC,c.position LIMIT 256`).bind(...scopeArgs).all<CandidateRow>()).results;
+    raw=raw.filter(row=>!indexedDocuments.has(row.document_id));
   }
-  const rows=[...new Map(raw.map(row=>[row.id||`${row.document_id}:metadata`,{...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}])).values()];
+  const combined=new Map<string,CandidateRow & {id:string;body:string;locator:string}>();
+  for(const row of raw){
+    const key=`${row.document_id}\0${row.locator||''}\0${row.body||''}`,previous=combined.get(key);
+    combined.set(key,{...previous,...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',
+      locator:row.locator||'文件名',folder_path:inferredFolder(row),contentScore:row.contentScore??previous?.contentScore,
+      evidence_id:row.evidence_id??previous?.evidence_id,page_number:row.page_number??previous?.page_number,
+      parser_version:row.parser_version??previous?.parser_version,parser_warnings:row.parser_warnings??previous?.parser_warnings??[]});
+  }
+  const rows=[...combined.values()].filter(row=>contentIdentifiers.every(code=>
+    containsEvery(`${row.name} ${row.body}`,librarySearchTokens(code))));
   const candidateMs=performance.now()-candidateStarted;
   let vector:number[]|null=null;
   const embeddingStarted=performance.now();
-  if(semantic&&rows.length&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768},options.embeddingTimeoutMs?AbortSignal.timeout(options.embeddingTimeoutMs):undefined);if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
+  if(semantic&&rows.some(row=>row.contentScore===undefined)&&serviceValue('OPENAI_API_KEY'))try{const r=await paidOpenAI('embeddings',{model:EMBED_MODEL,input:query.slice(0,4000),dimensions:768},options.embeddingTimeoutMs?AbortSignal.timeout(options.embeddingTimeoutMs):undefined);if(r.ok)vector=(await r.json()).data[0].embedding;}catch{/* Keyword search remains available when budget/API fails. */}
   const embeddingMs=semantic?performance.now()-embeddingStarted:0;
   const bodyIds=[...new Set(rows.filter(r=>r.origin==='gmail'&&isArchivedMailBody(r.origin_key)).map(r=>r.document_id))],bodySet=new Set(bodyIds);
   const mapped=bodyIds.length?(await db.prepare(`SELECT s.document_id FROM library_mail_sources s JOIN library_documents d ON d.id=s.document_id WHERE d.owner_id=? AND d.deleted=0 AND s.document_id IN (${bodyIds.map(()=>'?').join(',')})`).bind(owner,...bodyIds).all<{document_id:string}>()).results:[];
@@ -226,11 +298,17 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const ranked=rows.map(r=>{
     const title=lexicalText(r.name),body=lexicalText(r.body),stored=mailMap.get(r.document_id)||map.get(r.id);
     const titleMatches=words.filter(w=>title.includes(w)).length,bodyMatches=words.filter(w=>body.includes(w)).length;
-    const score=titleMatches*3+bodyMatches+(vector&&stored?cosine(vector,JSON.parse(stored)):0);
+    const lexicalScore=r.contentScore!==undefined?r.contentScore:titleMatches*3+bodyMatches;
+    const score=lexicalScore+(vector&&stored?cosine(vector,JSON.parse(stored)):0);
     if(mappedSet.has(r.document_id)&&bodyMatches===0)return {...r,id:`${r.document_id}:mail`,body:'',locator:'邮件全文（段落未定位）',score,match_reason:titleMatches?'标题匹配；段落未定位':'邮件整体语义相关；段落未定位'};
     return {...r,score,match_reason:titleMatches?'文件名匹配':'正文相关'};
   }).filter(r=>r.score>0.25).sort((a,b)=>b.score-a.score);
-  const seenMail=new Set<string>();return ranked.filter(row=>{if(!bodySet.has(row.document_id))return true;if(seenMail.has(row.document_id))return false;seenMail.add(row.document_id);return true;}).slice(0,limit);
+  const seenMail=new Set<string>(),seenPages=new Set<string>();return ranked.filter(row=>{
+    if(bodySet.has(row.document_id)){if(seenMail.has(row.document_id))return false;seenMail.add(row.document_id);}
+    const page=row.page_number||Number(row.locator.match(/第\s*(\d+)\s*页/u)?.[1]||0);
+    if(page){const key=`${row.document_id}:${page}`;if(seenPages.has(key))return false;seenPages.add(key);}
+    return true;
+  }).slice(0,limit);
 }
 
 type Recommendation={document_id:string;name:string;course_id:string;folder_path:string;reason:string;score:number;week:number|null};

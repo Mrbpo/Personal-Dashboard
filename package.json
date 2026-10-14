@@ -22,7 +22,9 @@
     "test": "node scripts/test-isolated.mjs",
     "git:upload": "node scripts/git-upload.mjs",
     "release:publish": "node --experimental-strip-types scripts/publish-release.mjs",
-    "version:check": "node --experimental-strip-types scripts/version-check.mjs"
+    "version:check": "node --experimental-strip-types scripts/version-check.mjs",
+    "pdf:reindex": "node --experimental-strip-types scripts/reparse-pdfs.ts",
+    "pdf:import-cache": "node --experimental-strip-types scripts/import-legacy-pdf-cache.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

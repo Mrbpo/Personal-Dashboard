@@ -78,7 +78,7 @@ test('subject questions stay in their courses and mixed math requests retain syl
   const syllabusRef=result.sources.find((item)=>item.sourceType==='syllabus')!.ref;
   const originalFetch=globalThis.fetch;
   globalThis.fetch=(async (_input: string | URL | Request, init?: RequestInit) => {
-    const prompt=JSON.parse(String(init?.body)).input[0].content[0].text as string;
+    const prompt=JSON.parse(String(init?.body)).input.find((item:{role:string})=>item.role==='user').content[0].text as string;
     assert.match(prompt,/complete problems 1 and 2/);
     assert.match(prompt,/Tutorials count for 10 percent/);
     assert.doesNotMatch(prompt,/make boxplots|balance equations/);
