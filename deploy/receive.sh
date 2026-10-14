@@ -51,7 +51,7 @@ trap 'rollback' ERR
 if test -z "$previous"; then
   # Initial installation has no running kernel to dump yet. Bootstrap it;
   # upgrades below snapshot the existing database before any new migration.
-  "${compose[@]}" up -d postgres docling
+  "${compose[@]}" up -d --wait --wait-timeout 120 postgres docling
   "${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
   "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
 fi
@@ -63,14 +63,23 @@ bash /srv/study/verify-backup.sh "$backup_name"
 bash /srv/study/verify-offsite-backup.sh "/srv/study/backups/$backup_name" "$backup_key"
 # The one required pre-switch backup precedes PostgreSQL recreation and all
 # new migrations. The same existing volume remains authoritative.
-"${compose[@]}" up -d postgres docling
+"${compose[@]}" up -d --wait --wait-timeout 120 postgres docling
 "${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
 # New kernel migrations can commit before the application writer starts. The
 # previous application's schema gate may reject that database, so any failure
 # from this point must preserve it for recovery instead of booting old code.
 recovery_required=1
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
-"${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+"${compose[@]}" run --rm -T --no-deps web node --input-type=module <<'JS'
+// A running Docling container may still be starting its HTTP server. Wait only
+// for readiness; this sends no conversion request and does not load PDF models.
+for(let attempt=0;attempt<30;attempt++){
+  try{if((await fetch('http://docling:5001/docs',{signal:AbortSignal.timeout(2000)})).ok)process.exit(0);}catch{}
+  await new Promise(resolve=>setTimeout(resolve,2000));
+}
+console.error('Docling HTTP readiness did not succeed within the bounded startup window');
+process.exit(1);
+JS
 printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
