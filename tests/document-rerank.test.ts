@@ -72,6 +72,25 @@ test('development reranker policy stays in its async scope and cannot leak to co
  }finally{spy.mock.restore();for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
 });
 
+test('Astra options fail closed outside development and reject unsupported effort/output/deadline',async()=>{
+ const saved={...process.env};let invoked=0;
+ const work=async()=>{invoked++;};
+ const base={scope:'development' as const,dailyLimit:1000,maxAttempts:1 as const,beforeAttempt:async()=>{},
+  model:'gpt-6-astra' as const,reasoningEffort:'high' as const,maxOutputTokens:16384,deadlineMs:120000};
+ try{
+  assert.throws(()=>withDocumentRerankRunPolicy({...base,scope:undefined,dailyLimit:200},work),/development scope/);
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgres://localhost/study';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';
+  assert.throws(()=>withDocumentRerankRunPolicy(base,work),/isolated administrator/);
+  process.env.KERNEL_DATABASE_URL='postgres://localhost/pdf_acceptance_20261006';
+  for(const override of [{model:'gpt-6-sol'},{reasoningEffort:'none'},{maxOutputTokens:32769},
+   {maxOutputTokens:0},{deadlineMs:180001},{deadlineMs:NaN},{model:'gpt-5-mini',reasoningEffort:'max'}])
+   assert.throws(()=>withDocumentRerankRunPolicy({...base,...override} as typeof base,work),/Invalid/);
+  assert.equal(invoked,0);await withDocumentRerankRunPolicy(base,work);assert.equal(invoked,1);
+ }finally{for(const name of ['KERNEL_ADMIN_DEVELOPMENT_RUN','KERNEL_DATABASE_URL','DATABASE_URL']){
+  if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
+});
+
 class Fixture {
  pages:{owner:string;document_id:string;version_id:string;source_version_id:string;page_number:number;body:string}[]=[];
  cache=new Map<string,string[]>();rollbacks=0;reads=0;
@@ -112,6 +131,75 @@ class Fixture {
   }};
  }
 }
+
+test('Astra request cache diagnostics and billing bind model/effort/output without leaking to ordinary mini',async()=>{
+ const {database}=await import('../lib/database.ts');
+ await database.prepare('SELECT count(*) n FROM ai_ledger').first(); // Initialize the test-only in-memory ledger before guarded env.
+ const ledgerBefore=new Set((await database.prepare('SELECT id FROM ai_ledger').all<{id:string}>()).results.map(row=>row.id));
+ const saved={...process.env},original=globalThis.fetch,originalTimeout=AbortSignal.timeout;
+ const fixture=new Fixture(),hits=fixture.hits('astra'),requests:any[]=[],timeouts:number[]=[],journals:string[]=[];
+ const base={scope:'development' as const,dailyLimit:1000,maxAttempts:1 as const,beforeAttempt:async(identity:string)=>{journals.push(identity);},
+  model:'gpt-6-astra' as const,reasoningEffort:'high' as const,maxOutputTokens:16384,deadlineMs:120000};
+ const timeoutSpy=mock.method(AbortSignal,'timeout',(ms:number)=>{timeouts.push(ms);return originalTimeout(ms);});
+ let wrongModel=false;
+ globalThis.fetch=async(_input,init)=>{
+  const body=JSON.parse(String(init?.body));requests.push(body);
+  return Response.json({model:wrongModel?'gpt-5-mini':body.model,output_text:JSON.stringify({orderedIds:['p1','p0']}),
+   usage:{input_tokens:1000,output_tokens:200,input_tokens_details:{cached_tokens:400,cache_write_tokens:100}}});
+ };
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgres://localhost/pdf_acceptance_20261006';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';process.env.AI_MONTHLY_BUDGET='200';
+  const mini=await selectDocumentPagesWithAI(fixture.pool(),'astra','same question',hits,2);
+  assert.equal(mini[0].rerank_model,'gpt-5-mini');
+  const first=await withDocumentRerankRunPolicy(base,()=>selectDocumentPagesWithAI(fixture.pool(),'astra','same question',hits,2));
+  assert.equal(first[0].rerank_model,'gpt-6-astra');assert.equal(first[0].rerank_reasoning_effort,'high');
+  assert.equal(first[0].rerank_max_output_tokens,16384);assert.equal(first[0].evidence_id,hits[1].evidence_id);
+  await withDocumentRerankRunPolicy({...base,deadlineMs:180000},()=>selectDocumentPagesWithAI(fixture.pool(),'astra','same question',hits,2));
+  assert.equal(requests.length,2,'deadline does not change successful content cache');
+  await withDocumentRerankRunPolicy({...base,reasoningEffort:'low'},()=>selectDocumentPagesWithAI(fixture.pool(),'astra','same question',hits,2));
+  await withDocumentRerankRunPolicy({...base,maxOutputTokens:8192},()=>selectDocumentPagesWithAI(fixture.pool(),'astra','same question',hits,2));
+  assert.equal(requests.length,4);assert.equal(fixture.cache.size,4);assert.equal(new Set(journals).size,3);
+  assert.deepEqual(requests.slice(1).map(body=>[body.model,body.reasoning.effort,body.max_output_tokens]),
+   [['gpt-6-astra','high',16384],['gpt-6-astra','low',16384],['gpt-6-astra','high',8192]]);
+  assert.ok(timeouts[0]<=30000&&timeouts[0]>29000);assert.ok(timeouts.slice(1).every(ms=>ms<=120000&&ms>119000));
+  await selectDocumentPagesWithAI(fixture.pool(),'astra','ordinary sibling',hits,2);
+  assert.equal(requests.at(-1).model,'gpt-5-mini');assert.equal(requests.at(-1).reasoning.effort,'low');assert.equal(requests.at(-1).max_output_tokens,4000);
+  const charged=(await database.prepare("SELECT charged FROM ai_ledger WHERE kind='pdf-search-rerank' AND charged>? AND status='settled'").bind(.01).all<{charged:number}>()).results;
+  assert.equal(charged.filter(row=>Math.abs(row.charged-.01665)<1e-10).length,3,'actual cached/read/write/output tokens settled at Astra rates');
+  const size=fixture.cache.size;wrongModel=true;
+  await assert.rejects(withDocumentRerankRunPolicy(base,()=>selectDocumentPagesWithAI(fixture.pool(),'astra','wrong model',hits,2)),/different model/);
+  assert.equal(fixture.cache.size,size,'a foreign returned model cannot publish cache');
+ }finally{timeoutSpy.mock.restore();globalThis.fetch=original;
+  // Only this mocked test's rows: its deliberately ambiguous reservation must
+  // not consume the later legacy fixture's $5 allowance.
+  for(const row of (await database.prepare('SELECT id FROM ai_ledger').all<{id:string}>()).results)
+   if(!ledgerBefore.has(row.id))await database.prepare('DELETE FROM ai_ledger WHERE id=?').bind(row.id).run();
+  for(const name of ['KERNEL_ADMIN_DEVELOPMENT_RUN','KERNEL_DATABASE_URL','DATABASE_URL','AI_MONTHLY_BUDGET']){
+  if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
+});
+
+test('Astra long-context charges use actual usage tier and retain ambiguous reservations',async()=>{
+ const {database}=await import('../lib/database.ts'),{paidOpenAI}=await import('../lib/ai-budget.ts');
+ const original=globalThis.fetch,previous=process.env.AI_MONTHLY_BUDGET;
+ process.env.AI_MONTHLY_BUDGET='200';const kind='astra-long-fixture';let usage:any={input_tokens:272001,output_tokens:1000,
+  input_tokens_details:{cached_tokens:72001,cache_write_tokens:100000}};
+ globalThis.fetch=async()=>Response.json({model:'gpt-6-astra',usage});
+ try{
+  await paidOpenAI('responses',{model:'gpt-6-astra',input:'x'.repeat(300000),max_output_tokens:16384},undefined,{kind,dailyLimit:200});
+  const row=await database.prepare('SELECT reserved,charged,status FROM ai_ledger WHERE kind=?').bind(kind).first<{reserved:number;charged:number;status:string}>();
+  const expected=((100000+72001*.1+100000*1.25)*10*2+1000*50*1.5)/1e6;
+  assert.ok(Math.abs(row!.charged-expected)<1e-10);assert.equal(row!.status,'settled');assert.ok(row!.reserved>row!.charged);
+  for(const invalid of [{input_tokens:272001,output_tokens:1000,input_tokens_details:{cached_tokens:300000}},
+   {input_tokens:1000},{input_tokens:'1000',output_tokens:1000},{input_tokens:1000,output_tokens:null},
+   {input_tokens:1000,output_tokens:1000,input_tokens_details:{cache_write_tokens:null}}]){
+   usage=invalid;await paidOpenAI('responses',{model:'gpt-6-astra',input:'example',max_output_tokens:16384},undefined,{kind,dailyLimit:200});
+  }
+  const pending=(await database.prepare("SELECT charged,status FROM ai_ledger WHERE kind=? AND status='reserved'").bind(kind).all<{charged:number|null;status:string}>()).results;
+  assert.equal(pending.length,5);assert.ok(pending.every(row=>row.charged===null));
+ }finally{globalThis.fetch=original;await database.prepare('DELETE FROM ai_ledger WHERE kind=?').bind(kind).run();
+  if(previous===undefined)delete process.env.AI_MONTHLY_BUDGET;else process.env.AI_MONTHLY_BUDGET=previous;}
+});
 
 test('hybrid rescues an omitted strong lexical page from its validated tail without foreign or stale evidence',async()=>{
  const fixture=new Fixture(),hits=[...fixture.hits('owner'),...fixture.hits('owner-middle'),...fixture.hits('owner-last')];
