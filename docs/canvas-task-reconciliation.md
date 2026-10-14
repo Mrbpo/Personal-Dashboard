@@ -26,7 +26,7 @@ If an old planner version lacks a typed reference, the report leaves it unresolv
 
 ## Historical planner reference backfill
 
-The regular Canvas scan keeps its moving 120-day past / 180-day future planner window. For older unresolved planner tasks, the server administrator can review a bounded historical plan after the new kernel migration is applied:
+The regular Canvas scan keeps its moving 120-day past / 180-day future planner window. For older unresolved planner tasks, the server administrator can review a bounded historical plan after migration `009_canvas_planner_backfill.sql` is applied:
 
 ```text
 npm run kernel:backfill-canvas-planner -- --as-of 2026-09-28
@@ -42,6 +42,16 @@ npm run kernel:backfill-canvas-planner -- --status --expected-plan HASH
 `--apply` requires the reviewed count and hash. The first invocation persists that exact plan; a later invocation with the same count and hash resumes its incomplete windows, even if successful earlier windows changed the live reconciliation report. An OS user can supply the actor when `--actor` is omitted. Run from a named administrator shell with `KERNEL_DATABASE_URL` and a read-only Canvas token configured in the service vault or environment. Only one backfill can run at a time. A window is fetched completely before any write. Each accepted planner source enters through the normal Canvas normalization and KernelService transaction, preserving prior source versions and facts. The stored course/source identity and Canvas's typed reference are verified first. Missing, ambiguous, or contradictory references stay in `review` and are retried on the next invocation. HTTP 403, partial pagination, and other errors leave the window in `error` with its last error and no advanced checkpoint. A crash between two source transactions likewise leaves that window resumable; repeated source hashes are idempotent.
 
 The command never marks a Canvas course scan complete or declares absent historical planner items missing. After successful backfill, run the read-only reconciliation report again. Merging verified pairs remains a separate, reviewed `kernel:reconcile-canvas` operation with its own count and plan hash. This backfill does not perform a merge, deployment, or production execution.
+
+### Integration order and migration identity
+
+Merge in the coordinator-reviewed order **PR #52 → #54 → #57 → #48**. PDF migrations reserve `003` through `007`; course-video archival reserves `008`; this historical Canvas Planner backfill uses `009`. The former `003_canvas_planner_backfill.sql` in this unshipped PR has been renamed, with identical SQL bytes. The latest canonical-task-preservation fix and its tests remain in place. No source/fact algorithm, plan guard or actual backfill execution is changed by this integration correction.
+
+The kernel migration ledger identifies migrations by the integer filename prefix. Two different `003` files would collide; a highest-version health check alone does not establish that every required table exists. Before deployment, check the combined migration directory's unique prefixes and the approved dependency order. This branch's standalone CI can apply `001`, `002`, `009` to a fresh isolated schema; that does not prove the PDF/video dependencies have been deployed.
+
+This rename is valid because the Planner migration has not been applied in production. Do not rename existing ledger rows or alter an already-applied PDF migration `003`. If any persistent environment has already applied the old Planner `003`, stop and prepare a separate reviewed reconciliation; do not run `009` blindly against those existing tables.
+
+Delivery status for this correction: **code complete**; byte identity and additive/version checks are locally verified, with the new head's **CI pending**. **Services are not deployed** and **production is not switched** by this PR. The historical planner CLI has not been run against production. The separate fresh PDF three-group retrieval gate has not passed in every group; this numbering change is not evidence of that gate passing.
 
 If a historical item has no due date, lies outside the bounded range, or fails source identity checks, it is listed under `excluded` and needs separate review. A typed mismatch or missing direct object remains pending. Do not substitute equal titles, URL shapes, or numeric IDs for Canvas's exact typed reference.
 
