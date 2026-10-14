@@ -74,6 +74,32 @@ recovery_required=1
 printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
+# Stop before any cache import if this bounded owner batch needs pagination.
+# Machine formula fidelity is not approved for automatic production enrichment.
+"${compose[@]}" run --rm -T web node --input-type=module <<'JS'
+import {createClient} from '@libsql/client';
+if(process.env.DOCLING_FORMULA_ENRICHMENT!=='false'||(process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling')!=='docling')
+  throw new Error('PDF cutover requires formula enrichment disabled and Docling scan backend');
+const sqlite=createClient({url:process.env.DATABASE_URL||'file:./data/course-radar-v2.db',authToken:process.env.DATABASE_AUTH_TOKEN||undefined});
+try{
+  const count=Number((await sqlite.execute({sql:"SELECT count(*) n FROM library_documents WHERE owner_id=? AND deleted=0 AND mime='application/pdf'",args:['local-owner']})).rows[0].n);
+  if(count>500)throw new Error('PDF cache cutover exceeds 500 documents; complete an explicit paginated migration before cutover');
+}finally{sqlite.close();}
+JS
+cache_report="/app/data/private/pdf-cache-cutover-${sha}.json"
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/import-legacy-pdf-cache.ts \
+  --owner local-owner --limit 500 --report "$cache_report" --apply
+"${compose[@]}" run --rm -T web node --input-type=module - "$cache_report" <<'JS'
+import {readFile} from 'node:fs/promises';
+const report=JSON.parse(await readFile(process.argv[2],'utf8'));
+const actions=report.actionCounts;
+if(report.mode!=='apply'||report.scope.owner!=='local-owner'||report.scope.total>500||
+   report.records.length!==report.scope.total||report.counts.error||actions.blocked||
+   actions.imported+actions.protected+actions.alreadyImported+actions.queued!==report.scope.total)
+  throw new Error('PDF cache cutover report is incomplete; preserve new database and resolve before starting writers');
+console.log(JSON.stringify({action:'pdf-cache-cutover',total:report.scope.total,actionCounts:actions,
+  note:'Queued documents remain processing; parser and vector work run after worker startup'}));
+JS
 # All old executors are stopped. Clear only the executor lease so the new
 # worker can become primary immediately; job leases and progress are retained.
 "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
