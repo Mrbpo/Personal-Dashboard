@@ -81,7 +81,8 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
       let charged=(input*rate.input+output*rate.output)/1e6+toolMax;
       if(astra){
         const actualInput=p.usage.input_tokens,actualOutput=p.usage.output_tokens;
-        const cached=p.usage.input_tokens_details?.cached_tokens??0,written=p.usage.input_tokens_details?.cache_write_tokens??0;
+        const details=p.usage.input_tokens_details;
+        const cached=details?.cached_tokens===undefined?0:details.cached_tokens,written=details?.cache_write_tokens===undefined?0:details.cache_write_tokens;
         // Malformed usage or an unexpected model cannot silently undercharge.
         // Keep the durable reservation pending a provider/operator reconciliation.
         if(p.model!==body.model||![actualInput,actualOutput,cached,written].every(n=>typeof n==='number'&&Number.isInteger(n)&&n>=0)||cached+written>input)return response;

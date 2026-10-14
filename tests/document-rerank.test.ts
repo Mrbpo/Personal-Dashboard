@@ -191,11 +191,12 @@ test('Astra long-context charges use actual usage tier and retain ambiguous rese
   const expected=((100000+72001*.1+100000*1.25)*10*2+1000*50*1.5)/1e6;
   assert.ok(Math.abs(row!.charged-expected)<1e-10);assert.equal(row!.status,'settled');assert.ok(row!.reserved>row!.charged);
   for(const invalid of [{input_tokens:272001,output_tokens:1000,input_tokens_details:{cached_tokens:300000}},
-   {input_tokens:1000},{input_tokens:'1000',output_tokens:1000},{input_tokens:1000,output_tokens:null}]){
+   {input_tokens:1000},{input_tokens:'1000',output_tokens:1000},{input_tokens:1000,output_tokens:null},
+   {input_tokens:1000,output_tokens:1000,input_tokens_details:{cache_write_tokens:null}}]){
    usage=invalid;await paidOpenAI('responses',{model:'gpt-6-astra',input:'example',max_output_tokens:16384},undefined,{kind,dailyLimit:200});
   }
   const pending=(await database.prepare("SELECT charged,status FROM ai_ledger WHERE kind=? AND status='reserved'").bind(kind).all<{charged:number|null;status:string}>()).results;
-  assert.equal(pending.length,4);assert.ok(pending.every(row=>row.charged===null));
+  assert.equal(pending.length,5);assert.ok(pending.every(row=>row.charged===null));
  }finally{globalThis.fetch=original;await database.prepare('DELETE FROM ai_ledger WHERE kind=?').bind(kind).run();
   if(previous===undefined)delete process.env.AI_MONTHLY_BUDGET;else process.env.AI_MONTHLY_BUDGET=previous;}
 });
