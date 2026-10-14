@@ -8,6 +8,7 @@ import type {DocumentTextHit} from './document-search.ts';
 export const DOCUMENT_RERANK_MODEL='gpt-5-mini';
 export const DOCUMENT_RERANK_PROMPT_VERSION='document-page-rerank-v1';
 export const DOCUMENT_RERANK_SELECTION_PROMPT_VERSION='document-page-selection-v3-context';
+export const DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION='document-page-adjacent-refinement-v1';
 export const DOCUMENT_RERANK_CANDIDATE_LIMIT=40;
 type Database=Pick<Pool,'query'>;
 type Page={document_id:string;version_id:string;source_version_id:string;page_number:number;body:string;
@@ -17,9 +18,10 @@ const key=(document:string,page:number)=>JSON.stringify([document,page]);
 const flights=new WeakMap<Pool,Map<string,Promise<string[]>>>();
 export type DocumentRerankModel='gpt-5-mini'|'gpt-6-astra';
 export type DocumentRerankReasoningEffort='low'|'medium'|'high'|'xhigh'|'max';
+export type DocumentRerankAttempt={phase:'initial'|'adjacent-refinement';promptVersion:string;candidateCount:number};
 type RerankRunPolicy={dailyLimit:number;maxAttempts:1|2;scope?:'development';
  model?:DocumentRerankModel;reasoningEffort?:DocumentRerankReasoningEffort;maxOutputTokens?:number;deadlineMs?:number;
- beforeAttempt?:(cacheIdentity:string)=>Promise<void>};
+ beforeAttempt?:(cacheIdentity:string,attempt?:Readonly<DocumentRerankAttempt>)=>Promise<void>};
 type ModelPolicy={model:DocumentRerankModel;reasoningEffort:DocumentRerankReasoningEffort;maxOutputTokens:number;deadlineMs:number};
 const defaultModelPolicy:Readonly<ModelPolicy>={model:DOCUMENT_RERANK_MODEL,reasoningEffort:'low',maxOutputTokens:4000,deadlineMs:30000};
 const runPolicies=new AsyncLocalStorage<Readonly<RerankRunPolicy>>();
@@ -127,13 +129,14 @@ type InputPage={id:string;text:string;document?:string;course?:{id:string;name:s
 function pageMetadata(page:Page){
  return {document:page.document_name??'',course:{id:page.course_id??'',name:page.course_name??'',code:page.course_code??''},locator:page.locator??''};
 }
-async function requestOrderOnce(query:string,pages:InputPage[],identities:string[],deadline:number,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,selectionCount?:number):Promise<string[]>{
+async function requestOrderOnce(query:string,pages:InputPage[],identities:string[],deadline:number,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,promptVersion:string,selectionCount?:number):Promise<string[]>{
  if(!serviceValue('OPENAI_API_KEY'))throw new Error('AI PDF reranking requires an OpenAI API key');
  const remaining=deadline-Date.now();
  if(remaining<=0)throw new Error('PDF AI reranker time limit reached');
  const response=await paidOpenAI('responses',{
   model:settings.model,store:false,max_output_tokens:settings.maxOutputTokens,reasoning:{effort:settings.reasoningEffort},
-  input:[{role:'developer',content:'Rank these candidate document pages as evidence for the user query. '+
+  input:[{role:'developer',content:(promptVersion===DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION?
+   'Refine selected PDF evidence using its adjacent original pages. ':'')+'Rank these candidate document pages as evidence for the user query. '+
    (selectionCount===undefined?'Return only a permutation of the provided page identities, most useful first. ':
     `Select exactly ${selectionCount} distinct provided page identities, most useful first. Omit all other identities. `)+
    (selectionCount===undefined?'Prefer a page that directly explains or calculates the requested subject over incidental keyword mentions. ':
@@ -146,7 +149,7 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
    (selectionCount===undefined?'Include every provided identity exactly once, even when relevance is low.':
     'Never repeat an identity. Return the best available candidates even when relevance is low.')},
    {role:'user',content:JSON.stringify({query,pages})}],
-  text:{format:{type:'json_schema',name:'document_page_order',strict:true,schema:{type:'object',additionalProperties:false,
+  text:{format:{type:'json_schema',name:promptVersion===DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION?'document_page_refinement':'document_page_order',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{orderedIds:{type:'array',items:{type:'string',enum:identities},
     ...(selectionCount===undefined?{}:{minItems:selectionCount,maxItems:selectionCount})}},required:['orderedIds']}}},
  },AbortSignal.timeout(remaining),{kind:'pdf-search-rerank',dailyLimit:policy.dailyLimit});
@@ -169,10 +172,10 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
  return validateDocumentPageSelection(parsed,identities,selectionCount??identities.length);
 }
 
-async function requestOrder(query:string,pages:InputPage[],identities:string[],verifyCurrent:()=>Promise<void>,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,selectionCount?:number):Promise<string[]>{
+async function requestOrder(query:string,pages:InputPage[],identities:string[],verifyCurrent:()=>Promise<void>,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,promptVersion:string,selectionCount?:number):Promise<string[]>{
  const deadline=Date.now()+settings.deadlineMs;
  for(let attempt=0;;attempt++){
-  try{return await requestOrderOnce(query,pages,identities,deadline,settings,policy,selectionCount);}
+  try{return await requestOrderOnce(query,pages,identities,deadline,settings,policy,promptVersion,selectionCount);}
   catch(error){
    if(error instanceof InvalidPageOrderOutput)console.warn('[pdf-rerank] validation failed',JSON.stringify({
     reason:error.reasonCode,attempt:attempt+1,candidateCount:identities.length,selectionCount:selectionCount??identities.length}));
@@ -184,9 +187,8 @@ async function requestOrder(query:string,pages:InputPage[],identities:string[],v
  }
 }
 
-async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],pages:Page[],cacheKey:string,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,selectionCount?:number):Promise<string[]>{
+async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],pages:Page[],cacheKey:string,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,promptVersion:string,selectionCount?:number):Promise<string[]>{
  const identities=hits.map((_,index)=>'p'+index);
- const promptVersion=selectionCount===undefined?DOCUMENT_RERANK_PROMPT_VERSION:DOCUMENT_RERANK_SELECTION_PROMPT_VERSION;
  const cached=(await pool.query<{ordered_ids:unknown}>(`/* rerank:cache */
   SELECT ordered_ids FROM document_rerank_cache WHERE owner_id=$1 AND cache_key=$2 AND model=$3 AND prompt_version=$4`,
   [owner,cacheKey,settings.model,promptVersion])).rows[0];
@@ -197,8 +199,9 @@ async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentText
   return {id:identities[index],text:Array.from(page.body).slice(0,6000).join(''),
    ...(selectionCount===undefined?{}:pageMetadata(page))};
  });
- await policy.beforeAttempt?.(JSON.stringify([owner,cacheKey]));
- const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined),settings,policy,selectionCount);
+ await policy.beforeAttempt?.(JSON.stringify([owner,cacheKey]),Object.freeze({
+  phase:promptVersion===DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION?'adjacent-refinement':'initial',promptVersion,candidateCount:identities.length}));
+ const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined),settings,policy,promptVersion,selectionCount);
  const client=await pool.connect();
  try{
   await client.query('BEGIN');
@@ -224,8 +227,15 @@ export async function selectDocumentPagesWithAI(pool:Pool,owner:string,query:str
  return rankOrSelectDocumentPages(pool,owner,query,hits,count,true);
 }
 
-async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],limit:number,selection:boolean):Promise<DocumentTextHit[]>{
- const policy=runPolicies.getStore()??defaultRunPolicy,settings=modelPolicy(policy);
+/** Distinct refinement prompt/cache; the original selection namespace is unchanged. */
+export async function selectAdjacentDocumentPagesWithAI(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],count:number):Promise<DocumentTextHit[]>{
+ if(hits.length>15||count>5)throw new Error('Invalid adjacent PDF refinement scope');
+ return rankOrSelectDocumentPages(pool,owner,query,hits,count,true,true);
+}
+
+async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],limit:number,selection:boolean,refinement=false):Promise<DocumentTextHit[]>{
+ const configuredPolicy=runPolicies.getStore()??defaultRunPolicy;
+ const policy=refinement?{...configuredPolicy,maxAttempts:1 as const}:configuredPolicy,settings=modelPolicy(policy);
  if(!owner||hits.length>DOCUMENT_RERANK_CANDIDATE_LIMIT||!Number.isInteger(limit)||limit<1||limit>DOCUMENT_RERANK_CANDIDATE_LIMIT)
   throw new Error('Invalid AI PDF reranker candidate scope or limit');
  if(!hits.length)return [];
@@ -239,7 +249,7 @@ async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hit
  }
  const candidates=[...selected.values()],pages=await readPages(pool,owner,candidates);
  const selectionCount=selection?Math.min(limit,candidates.length):undefined;
- const promptVersion=selection?DOCUMENT_RERANK_SELECTION_PROMPT_VERSION:DOCUMENT_RERANK_PROMPT_VERSION;
+ const promptVersion=refinement?DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION:selection?DOCUMENT_RERANK_SELECTION_PROMPT_VERSION:DOCUMENT_RERANK_PROMPT_VERSION;
  const inputQuery=Array.from(query.normalize('NFKC').replace(/\s+/gu,' ').trim()).slice(0,4000).join('');
  if(!inputQuery)throw new Error('AI PDF reranker query is empty');
  const byPage=new Map(pages.map(page=>[key(page.document_id,page.page_number),page]));
@@ -261,7 +271,7 @@ async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hit
  const flightKey=JSON.stringify([owner,cacheKey,policy.scope??'ordinary',policy.dailyLimit,policy.maxAttempts,settings.deadlineMs]);
  let work=pending.get(flightKey);
  const created=!work;
- if(!work){work=obtainOrder(pool,owner,inputQuery,candidates,pages,cacheKey,settings,policy,selectionCount);pending.set(flightKey,work);}
+ if(!work){work=obtainOrder(pool,owner,inputQuery,candidates,pages,cacheKey,settings,policy,promptVersion,selectionCount);pending.set(flightKey,work);}
  let order:string[];
  try{order=await work;}finally{if(created)pending.delete(flightKey);}
  // Concurrent callers retain their own original snippets; no model text is returned.
