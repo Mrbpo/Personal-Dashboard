@@ -52,6 +52,25 @@ FP32 同一单页只提交一次；首个 300 秒观察结束时仍 `started`，
 
 ## 管理员批量回填
 
+### 首次迁入旧 PDF 整页缓存
+
+```sh
+# 默认只审计；报告含文档/用户标识，必须保存在私有路径。
+npm run pdf:import-cache -- --owner <owner-id> --limit 20 --offset 0 --report /private/pdf-cache-audit.json
+# 仅汇总全生产库，禁止与 --apply 同用。
+npm run pdf:import-cache -- --all-owners --limit 500 --report /private/pdf-cache-audit-all.json
+# 完成部署/迁移并在受控窗口评审后，才显式应用这一用户的范围。
+npm run pdf:import-cache -- --owner <owner-id> --limit 20 --offset 0 --report /private/pdf-cache-apply.json --apply
+```
+
+默认审计仅读取 SQLite 和原件，不迁移数据库、不入队、不解析、不请求模型。`--apply` 也不直接执行解析或生成向量：可验证缓存通过 `KernelService` 原子导入整份文档；缺页、页码未知或正文不完整时，仅为可读取的正确原件排现有持久化 Docling 正文任务，固定公式增强关闭、扫描后端 `docling`。原件校验失败或超过支持页数时报告阻塞，不能直接发布或排不可完成的任务。CLI 要求当前 kernel schema 已部署，不能借运行 CLI 完成上线。
+
+复用要求原件 SHA 相同，读取原 PDF 真实页数，同一已知解析器的缓存唯一连续覆盖原始 `0..N-1` 页。`pdf-page-v1`、`pdf-page-v2` 和 `pdf-page-v3-latex` 的历史实现按明确复制的原始单页索引保存，分别可在提交 `328f63e`、`8e76994` / `9006b80`、`ea2bb4f` 核对；禁止混用多个解析器补齐。`docling-v1` 曾按可能不完整的返回数组重编号，默认拒绝复用。空正文页须核验原 PDF 没有内容流或注释外观；整页未识别标记不能当作有效正文。SQLite `ready`、chunk 数量和文件名均不能证明页码或完整性。
+
+正文原样保存，解析器以 `legacy-cache-<旧 parser>-v1` 及提取方法记录，来源键与原件引用保留，明确记录旧缓存全文/数学符号未重新核验的警告。页覆盖通过不等于数学忠实通过。已有 PG 头受保护；精确相同导入可幂等跳过。所有正常解析和旧缓存导入共用事务级文档锁，首次导入要求事务中仍无当前头，避免并发新解析被旧内容覆盖。旧版本/证据保留；本工具不批量改写旧历史。
+
+2026-10-14 生产只读审计：325 份 PDF 中，**219 份 / 2600 原始页**符合缓存复用条件；106 份需要现有正文流程（49 份非 ready，57 份没有完整可信物理页缓存），最终错误为零。读取使用一次短 SQLite 只读快照，再释放事务检查原件，避免与在线写入争用；早期争用报告保留，不计为有效覆盖。生产 PG 当时仍为 schema 2、没有 PDF 全文表，**没有执行 `--apply`、入队或新解析**。私有审计报告保存在服务器隔离资料目录 `data/private-production-cache-audit-20261014/report.json`，目录 0700、报告 0600；这份审计不是已迁入 PG 的证据。新增独立 PostgreSQL 用例通过，包括缺页拒绝、证据/历史、幂等及真实并发新头保护；未重复三组检索。
+
 在已配置数据库、原件目录和 Docling 的应用运行环境执行：
 
 ```sh

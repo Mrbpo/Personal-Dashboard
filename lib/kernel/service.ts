@@ -748,7 +748,7 @@ export class KernelService {
   async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
-      expectedCurrentVersion?:string;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
+      expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
@@ -793,11 +793,13 @@ export class KernelService {
       }
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`document:${document.id}`]);
       if(options.expectedCurrentVersion!==undefined){
-        const head=(await client.query<{current_version_id:string;owner_id:string;source_hash:string}>(
-          'SELECT current_version_id,owner_id,source_hash FROM document_texts WHERE id=$1 AND hidden=false FOR UPDATE',[document.id])).rows[0];
-        if(!head||head.owner_id!==owner||head.source_hash!==document.hash||head.current_version_id!==options.expectedCurrentVersion)
+        const head=(await client.query<{current_version_id:string|null;owner_id:string;source_hash:string;hidden:boolean}>(
+          'SELECT current_version_id,owner_id,source_hash,hidden FROM document_texts WHERE id=$1 FOR UPDATE',[document.id])).rows[0];
+        const identityMatches=!head||(!head.hidden&&head.owner_id===owner&&head.source_hash===document.hash);
+        if(!identityMatches||(options.expectedCurrentVersion===null?Boolean(head?.current_version_id):!head||head.current_version_id!==options.expectedCurrentVersion))
           throw new Error('Document changed during page repair; previous current version preserved');
         if(options.pageProvenance){
+          if(!head||typeof options.expectedCurrentVersion!=='string')throw new Error('Document page repair requires an existing current-version guard');
           const previous=(await client.query<{page_number:number;evidence_id:string;source_version_id:string}>(
             `SELECT p.page_number,p.evidence_id,v.source_version_id FROM document_text_versions v
              JOIN document_text_pages p ON p.version_id=v.id WHERE v.id=$1 AND v.document_id=$2`,[head.current_version_id,document.id])).rows;
