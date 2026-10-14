@@ -107,3 +107,45 @@ test('superseded captures and a reparse during a network call never publish sear
   assert.equal((await searchDocumentVectorText(pool,owner,vector())).hits.length,0);
   assert.equal((await documentVectorCoverage(pool,owner)).totalPages,1,'equal capture time uses stable identity tie');
 });
+
+test('new parsed versions reuse only same-owner same-document identical full-page vector inputs',async()=>{
+ await migrateKernel();
+ const pool=kernelPool(),tag=randomUUID(),owner='vector-reuse-'+tag,foreignOwner='vector-reuse-foreign-'+tag;
+ const doc=document(owner,'reuse-'+tag),foreign=document(foreignOwner,'foreign-'+tag),other=document(owner,'other-'+tag);
+ const unchanged='A preserved lesson explanation',foreignText='Foreign-owner material',otherText='A different document body';
+ const longPrefix='a'.repeat(6000);
+ const index=async(owner:string,id:string,embed:(inputs:string[],deadline:number)=>Promise<number[][]>)=>{
+  const [jobId]=await queueDocumentVectorJobs(pool,owner,{documentId:id});
+  const job=(await claimIngestionJob(jobId))!;
+  const result=await runDocumentVectorJob(pool,job,{embed});
+  await finishIngestionJob(job.id,job.lease_token);return result;
+ };
+ await kernel.ingestParsedDocument(doc,[page(unchanged),page('A formula before correction',2),page(longPrefix+'old tail',3)],
+  {parserVersion:'reuse-before',expectedPages:3});
+ await index(owner,doc.id,async inputs=>inputs.map(()=>vector()));
+ const oldHead=(await pool.query('SELECT current_version_id FROM document_texts WHERE id=$1',[doc.id])).rows[0].current_version_id;
+ await kernel.ingestParsedDocument(foreign,[page(foreignText)],{parserVersion:'reuse-foreign'});
+ await index(foreignOwner,foreign.id,async inputs=>inputs.map(()=>vector()));
+ await kernel.ingestParsedDocument(other,[page(otherText)],{parserVersion:'reuse-other'});
+ await index(owner,other.id,async inputs=>inputs.map(()=>vector()));
+ await kernel.ingestParsedDocument(doc,[page(unchanged),page('A formula after correction',2),page(foreignText,3),
+  page(otherText,4),page(longPrefix+'new tail',5)],{parserVersion:'reuse-after',expectedPages:5});
+ const [jobId]=await queueDocumentVectorJobs(pool,owner,{documentId:doc.id}),job=(await claimIngestionJob(jobId))!;
+ const inputs:string[]=[];
+ const result=await runDocumentVectorJob(pool,job,{embed:async batch=>{inputs.push(...batch);return batch.map(()=>vector(1));}});
+ assert.equal(result.indexedPages,5);assert.equal(result.reusedPages,1);assert.equal(result.obsolete,false);
+ assert.deepEqual(new Set(inputs),new Set(['A formula after correction',foreignText,otherText,longPrefix]),
+  'foreign owners, other documents and changed tails cannot donate cached vectors');
+ const repeated=await runDocumentVectorJob(pool,job,{embed:async()=>{throw new Error('Already indexed pages must not be embedded again');}});
+ assert.equal(repeated.indexedPages,0);assert.equal(repeated.reusedPages,0);
+ await finishIngestionJob(job.id,job.lease_token);
+ const current=(await pool.query(`SELECT v.id version_id,v.source_version_id,p.evidence_id FROM document_texts d
+  JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=1
+  WHERE d.id=$1`,[doc.id])).rows[0];
+ assert.notEqual(current.version_id,oldHead);
+ const hits=await searchDocumentVectorText(pool,owner,vector(),{documentId:doc.id,limit:5});
+ assert.equal(hits.coverage.complete,true);assert.equal(hits.hits[0].page_number,1);
+ assert.equal(hits.hits[0].evidence_id,current.evidence_id);assert.equal(hits.hits[0].source_version_id,current.source_version_id);
+ assert.equal(Number((await pool.query('SELECT count(*) n FROM document_page_embeddings WHERE owner_id=$1 AND version_id=$2',
+  [owner,current.version_id])).rows[0].n),5);
+});
