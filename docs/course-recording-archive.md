@@ -8,19 +8,23 @@
 
 ### 本轮真实归档验收
 
-五核心课程首次 catalog 已实际执行。化学和数学的原生 gallery 最初只显示 15 张卡，随后通过正常滚动触发页面自身的分页，分别核对到 16 和 29 场，不能以第一页可见数量宣称全量。每场只访问一次规范 entry，使用正式父子列表验证附属视角。
+五核心课程首次 catalog 已实际执行。化学和数学的首次完整元数据扫描经正常滚动分别核对到 16 和 29 场，每场只访问一次规范 entry，以正式父子列表验证附属视角。数学后续下载扫描出现静态 CDN 脚本阻塞，只能读取前 15 场；此前完整清单仍保留，当前范围明确不完整。
 
 | 课程 | 原生场次 | 已验证媒体路数 | 实际归档 | 文件字节 | 解码验收 |
 | --- | ---: | ---: | ---: | ---: | --- |
 | BIOA01 / 440904 | 4 | 8 | 8/8 | 5,358,260,822 | 复用此前通过的 8 份，无重复解码 |
 | CHMA10 / 443350 | 16 | 31 | 31/31 | 22,717,514,447 | 新 31 份 ffprobe + 单帧全部通过 |
-| MATA29 / 452689 | 29 | 58 | 0/58 | 0 | 元数据完整；容量阻塞，未下载 |
+| MATA29 / 452689 | 29 | 58（此前拓扑证据） | 30/58 | 31,235,599,580 | 可访问的新 30 份全部通过；剩余 28 份未下载 |
 | PHYA11 / 458777 | 10 | 20 | 20/20 | 21,759,843,605 | 新 20 份 ffprobe + 单帧全部通过 |
 | STAB22 / 463664 | 0 | 0 | healthy empty | 0 | 实际原生 0 Media，无虚构媒体 |
 
-已落盘 59 路共 49,835,618,874 字节，保留平台原始文件、音频及可用双视角，没有重编码或有损压缩。化学有一场上传资料正式子流列表为空，因此为 16 + 15 路，不虚构第二视角。本轮服务器专用工具已实际运行，但不是原网站视频功能上线。字幕、字幕全文入库和站内查询的真实课程验收仍待录像之后进行。
+生物、物理、化学的 59 路共 49,835,618,874 字节和数学另 30 路共 31,235,599,580 字节，均已上传私有 R2；逐份完整 GET 的 SHA256/字节与原片一致后释放对应缓存。合计 89 路、81,071,218,454 字节，原片均解码通过。全程保留原始音视频，没有重编码或有损压缩。化学一场正式子流列表为空，因此为 16 + 15 路，不虚构第二视角。本轮专用服务器工具已实际运行，但原网站尚未接入。字幕、全文入库和真实课程检索验收仍待录像之后进行。
 
-数学原始文件估计还需 70,835,180,544 字节。化学归档后空余约 54.3 GB，预留网站、PDF 和备份暂存至少 15 GiB 后，仍缺约 32.6 GB。当前默认 `--video-policy original`：没有授权原始格式或容量不足即停止，不自动改成低清格式。未启用 R2，未删旧文件，未降低分辨率；对象存储及释放本地缓存须另获明确授权。不能把数学元数据完整写成五课文件全部完成。
+数学全部原片估计 70,835,180,544 字节。最初磁盘容量不足后，用户明确授权本批约 120 GB 上传私有 R2 `dashboard/course-recordings/`，完整远端 SHA256/大小核对后仅释放对应录像缓存；旧文件和其他资产不删除。已完成 59 路释放后空余约 103.9 GB，数学存储阻塞已解除。当前未完成原因是分页资源受阻：真实 gallery 标签 29 Media，实际卡片 15；独立读取全部可见媒体 ID 和严格频道 ID 都为 15，确认不是 URL 正则漏计。仅一次对实际观察的 jquery 脚本做正常顶层浏览器验证得到 200，但返回 gallery 后该脚本仍被嵌入资源检查阻挡，未反复尝试、改写请求头或绕过浏览器保护。保留 `scopeComplete=false`、已归档 30 路和待下载 28 路；`--archived-subset` 只允许核验可用部分，不宣称整课完成。
+
+`--resume-evidence-report` 可显式复用之前已完成的同课程、同频道报告。它校验原生总数、58 路身份和正式父子列表的完整关系，通过 fresh LTI 获取一个正常媒体会话后，只对报告中尚未归档的准确 ID 做 API 身份、partner、实际 parent 和 flavor 核验；不猜新 ID、替换子流或再次尝试分页资产。先给 `--entry-id` 选历史父录像及其已核验子流作一对验收，移除此参数才续传剩余已知清单。输出独立 `historicalScopeCompletedAt`、`knownInventoryComplete` 和 `currentGalleryScopeComplete=false`；历史清单补齐不等于当前频道全量扫描通过。仅在拥有上述可靠历史报告时使用，失败项保留非零结果。
+
+该恢复路径已实际验证一对剩余录像：身份、partner、真实 parent、原始 1080p flavor 和 3535 秒时长通过，但旧下载模板返回 HTTP 404；按 [Kaltura 官方原文件指南](https://knowledge.kaltura.com/help/how-to-download-a-raw-file) 请求精确 flavor 的 `flavorasset.getUrl`，实际得到 HTTP 200、text/html、零字节而非下载地址，大小写路径形式相同。没有把元数据成功当原片成功，没有下载其他 26 路，保留这两项失败和其余待处理。官方 URL 解析仅用于显式历史恢复，普通已通过的下载流程继续保留；没有调整 KS 权限、Cookie、请求头或转用低清版本。
 
 每课结果保存在 `/srv/study-course-recordings/reports/course-*.json`，含该课原生会员/父子关系、scan、archive 和格式预算，避免下一课覆盖全局 `manifest.scan` 导致误读。新文件解码证据保存 `decode-COURSE_ID.json` 和 SHA 身份的 `decoder-ledger.json`；已通过的相同字节不重复解码。仅条目元数据更新时间变化时，只有可靠 flavor 版本/更新时间/大小一致、字幕一致且现有文件 SHA 通过，才复用视频；否则仍保存新版本。首次 BIO 元数据更新形成的一份同 SHA 历史副本仍保留。
 
@@ -157,6 +161,8 @@ bash /srv/study-course-video-tool/server-run.sh --discover-channels --course-id 
 bash /srv/study-course-video-tool/server-run.sh --catalog /srv/study-course-video-tool/core-courses.catalog.json --dry-run
 # 一次人工发起，依配置顺序补缺；失败课记录后继续下一课。
 bash /srv/study-course-video-tool/server-run.sh --catalog /srv/study-course-video-tool/core-courses.catalog.json --download
+# 原片已授权私有 R2：一条人工命令完成补缺、新文件解码、远端全 SHA 核验及对应缓存释放。
+bash /srv/study-course-video-tool/server-run.sh --catalog /srv/study-course-video-tool/core-courses.catalog.json --archive-r2
 ```
 
 默认 scope 是实测课程 440904 / tool 8084 / channel 814427；其他课程须提供真实数值 `--course-id`、`--tool-id`、`--channel-id` 和已观察的公共 `--observed-asset-url`，不得猜频道或 CDN 版本。默认镜像是服务器已验证的 `study-course-video:interactive1.63.0`，可由管理员通过 `COURSE_VIDEO_IMAGE` 指定已构建版本；使用已验证的 1 GB 内存、2 CPU、256 MiB tmp 和 init 配置。工具使用 dedicated profile 的非阻塞文件锁，拒绝并发使用该浏览器。每次获取 fresh grant，不设置计划任务；结束关闭容器，之后可再次手动运行。需要本人验证时才通过前述 SSH 隧道打开临时网页。完整双流覆盖未通过时 exit 2 和 scopeIncomplete 仍保留，即使一些已验证文件已经成功归档。
@@ -182,7 +188,39 @@ python scripts/course-video/archive.py --course-url COURSE_URL `
 
 缺字幕时可以额外安装 `requirements-asr.txt` 并调用 `transcribe.py VIDEO --model-path EXISTING_LOCAL_MODEL --output caption.vtt --threads 4`。使用本地 faster-whisper CPU int8、单 worker，不自动下载模型、不调付费 API、不自动翻译。原语音字幕的质量必须实际验收，不能等同于官方字幕。此次不开展全课程 ASR。模型恢复为整份重做，下载断点与 ASR 断点是不同能力。
 
-服务器目前磁盘余量有限，大视频默认存本地显式输出目录。未来可接对象存储独立 `course-recordings/` 前缀；**不能使用带 7 天删除规则的备份前缀**。本版本没有声称已经实现或启用 S3 上传。
+### 私有 R2 原片归档与缓存
+
+`r2-archive.py` 和薄入口 `r2-archive.sh` 复用服务器 AWS CLI 与 `/srv/study/backup-s3.env`，不新建存储服务、账号或定时任务。默认仅 dry-run，列原文件大小、待传大小、本地余量和稳定对象键，不发网络请求。只接纳有真实 decoder 通过证据的原文件，不转码，不生成公开 URL。
+
+对象键固定 `course-recordings/COURSE/ENTRY/version-REVISION/SHA256.ext`，独立于现有 `study-backups/`。每个新对象先核对本地 SHA，上传后 HEAD 核对大小，再首次 GET 流式计算整个远端文件 SHA 和字节数，并核对 GET 前后 ETag 一致。全部通过才原子记录 `remote.state=verified`。已有相同版本的真实全文件核验证据且当前 HEAD 身份不变时不重复上传或全 GET；metadata 中的 SHA 和 multipart ETag 不作为内容证明。[Cloudflare 官方兼容表](https://developers.cloudflare.com/r2/api/s3/api/) 将 SHA256 列为 composite checksum，因此此工具不将其冒充整文件 SHA。
+
+所有非预览操作先要求私有生命周期证据文件：包含 bucket、endpointHost、`prefix=course-recordings/`、完整规则清单、核验人员/时间、原截图引用及 private 状态。启用的过期规则前缀只要与录像前缀重叠就拒绝；缺少完整规则、未知 filter 或 API AccessDenied 不能作为安全证明。管理员可依据用户提供的完整 dashboard 截图人工记录证据，但不能由脚本默认补造规则。用户此轮截图显示唯一启用规则 `study-backups-7d`、前缀 `study-backups/`、7 日删除及中止未完成上传，与录像前缀不匹配；实际证据及原图保留私有目录，不进 Git。
+
+```sh
+# 只预览，无网络。
+bash /srv/study-course-video-tool/r2-archive.sh --dry-run
+# 首条真实原片上传、完整 GET SHA 核验后才释放该条缓存。
+bash /srv/study-course-video-tool/r2-archive.sh --course-id 440904 --entry-id 0_l0mx1vr8 \
+  --limit 1 --upload --release-cache \
+  --lifecycle-evidence /srv/study-course-video-state/recordings-lifecycle-evidence.json
+# 以后需要本地处理一条原片时，按需还原并重新核验真实字节。
+bash /srv/study-course-video-tool/r2-archive.sh --course-id COURSE_ID --entry-id ENTRY_ID --fetch-cache \
+  --lifecycle-evidence /srv/study-course-video-state/recordings-lifecycle-evidence.json
+```
+
+`--release-cache` 是显式管理员操作，只删除本次已远端核验、且本地 SHA 再次一致的那一个 video path；不删目录、字幕、索引、清单、旧版本或其他资产。远端证明先持久化，随后释放，本地缺失的已核验远端视频仍作为归档完成，之后人工课程补档不会再下载相同字节。缓存取回仍预留至少 15 GiB，完整 SHA 通过后才移动为最终文件，坏本地副本保留。上传/GET/核验失败保留原文件并停止；没有核验就不能释放。
+
+此节是可审阅实现说明。真实单份上传、远端校验、释放、批量迁移及数学补档完成状态须以服务器操作报告为准，代码和 dry-run 不等于已执行。
+
+三个针对性的本地检查通过；服务器工具已安装，私有生命周期截图证据已保存，单份原片 dry-run 通过。首次操作因授权上下文不足被自动审批拒绝且未执行；用户随后针对私有桶、原片范围、约 120 GB 费用和仅核验后释放缓存明确答复“明确授权按此执行”，恢复执行已通过自动审批。私有目的地来自用户明确确认，截图只证明生命周期规则和 bucket，不将截图作为私有设置独立证明。
+
+实际 pilot 已退出 0：BIO 第 4 讲原片 207,558,864 字节，源 SHA 与完整远端 GET SHA 都是 `ef7dd5af95a4f3ecd56932ae86c97600c60c61986a2dd052ae283039a8d189f8`；前后对象身份一致，持久清单重读为 verified/full_get_sha256，只有该条原片缓存已释放。实际 multipart ETag 为 `01e0a3c94819e8c57e7ef78d591fd466-25`，没有将其冒充 SHA。独立 `r2-pilot.json` 私有保存。继承同一 FD 9 锁的 HEAD-only 核验已真实通过，幂等重跑该条没有再次上传或完整 GET。
+
+正常手动服务器入口在每课采集前后做远端 HEAD 核验，核对已核验对象的大小/ETag/目的地身份，避免释放缓存后只信清单。对象缺失或变更会持久标为 unavailable/retryable_failure，当前课程 scope 和 archive 不能报告完成；退出后待核查或重新归档，不将来源消失或对象缺失当任务取消。已验证版本不反复全 GET。
+
+`--archive-r2` 是显式完整课程模式，不与单 entry、limit 或字幕模式混用；普通 `--download` 不自动上传或释放。catalog、采集、decoder、R2 和报告持有同一继承的 manual lock，报告在远端操作后读取真实清单。新原片只解码一次，已有 SHA ledger 的版本直接复用，失败保留资源和非零结果，不设定时任务。
+
+释放前的 `atomic_json` 会 fsync 文件，replace 后再 fsync Linux 父目录，保证远端证明及对象映射先持久化。`thin-snapshot.py` 仅将 public manifest、decoder/course/catalog JSON 和清单引用的字幕打入 `/srv/study/data/course-recording-archive/snapshot.tar`，完整写入并 fsync 后原子替换；附每个文件的 SHA 清单。它拒绝认证字段、用已有 URL redactor 处理元数据，不含视频、part、profile、Cookie 或 KS，原字幕保持原字节。每课 R2/字幕完成后在同锁下更新，既有 `backup.sh` 的 data 目录覆盖这份薄快照，不新增备份也不重新跑整套备份。最终真实快照为 778,240 字节、25 份 JSON，包含 catalog 配置、89 路远端证明、数学 30 路解码及未完成项；视频和认证状态均为零。
 
 ## 进入 Kernel 与搜索
 

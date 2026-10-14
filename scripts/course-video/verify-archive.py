@@ -5,12 +5,13 @@ import json
 import subprocess
 import time
 from pathlib import Path
-from archive import atomic_json
+from archive import atomic_json, verified_files
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--course-id", required=True)
+    parser.add_argument("--archived-subset", action="store_true", help="Check available archived entries while retaining incomplete course coverage")
     parser.add_argument("--archive", type=Path, default=Path("/srv/study-course-recordings"))
     args = parser.parse_args()
     root = args.archive.resolve()
@@ -18,18 +19,27 @@ def main():
     ledger_path = root / "reports" / "decoder-ledger.json"
     ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
     results = []
+    pending_entries = []
     for key, entry in manifest["entries"].items():
         if entry.get("courseId") != args.course_id:
             continue
         if entry.get("state") != "archived":
+            if args.archived_subset:
+                pending_entries.append(entry["entryId"])
+                continue
             raise ValueError("COURSE_ARCHIVE_INCOMPLETE")
         for item in entry.get("files", []):
             if item.get("kind") != "video":
                 continue
             path = (root / item["path"]).resolve()
-            if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size != item["bytes"]:
+            if not path.is_relative_to(root):
                 raise ValueError("ARCHIVE_FILE_MISMATCH")
             identity = key + ":" + item["sha256"]
+            if not path.is_file() and ledger.get(identity, {}).get("passed") and verified_files(root, {"files": [item]}):
+                results.append({"entryId": entry["entryId"], "bytes": item["bytes"], "previousDecoderPassed": True, "remoteOnly": True})
+                continue
+            if not path.is_file() or path.stat().st_size != item["bytes"]:
+                raise ValueError("ARCHIVE_FILE_MISMATCH")
             if ledger.get(identity, {}).get("passed"):
                 results.append({"entryId": entry["entryId"], "bytes": item["bytes"], "previousDecoderPassed": True})
                 continue
@@ -52,10 +62,13 @@ def main():
             atomic_json(ledger_path, ledger)
             results.append({"entryId": entry["entryId"], **evidence})
     output = {"courseId": args.course_id, "passed": True, "verifiedFiles": results,
+              "coverageComplete": not pending_entries, "archivedSubsetRequested": args.archived_subset,
+              "pendingEntryIds": pending_entries,
               "newlyDecoded": sum(not item.get("previousDecoderPassed") for item in results)}
     atomic_json(root / "reports" / ("decode-" + args.course_id + ".json"), output)
     print(json.dumps({"state": "course_decoder_complete", "courseId": args.course_id,
-                      "files": len(results), "newlyDecoded": output["newlyDecoded"]}), flush=True)
+                      "files": len(results), "coverageComplete": output["coverageComplete"],
+                      "pendingEntries": len(pending_entries), "newlyDecoded": output["newlyDecoded"]}), flush=True)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ jobs:
           docker exec "$POSTGRES_CONTAINER" sh -c 'cp /tmp/study-vector-extension/vector.control /tmp/study-vector-extension/vector--*.sql /usr/share/postgresql/18/extension/; rm -rf /tmp/study-vector-extension'
           docker exec "$POSTGRES_CONTAINER" psql -U study_kernel -d study_kernel -v ON_ERROR_STOP=1 -c "CREATE EXTENSION vector WITH SCHEMA public; SELECT extversion FROM pg_extension WHERE extname='vector';"
       - run: npm ci
-      - run: python3 -m unittest discover -s scripts/course-video -p test_archive.py
+      - run: python3 -m unittest discover -s scripts/course-video -p 'test_*.py'
       - run: npm test
       - run: npm run kernel:test
       - run: npx tsc --noEmit

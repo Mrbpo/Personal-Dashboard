@@ -1,11 +1,38 @@
 import tempfile
 import unittest
 from pathlib import Path
-from archive import Sessions, atomic_json, inventory_entry, media_host, parse_request, plan_video_formats, public_url, response_json, sha256, verified_files
+from archive import Sessions, archive_entry, atomic_json, historical_inventory, inventory_entry, media_host, parse_request, plan_video_formats, public_url, response_json, sha256, verified_files
 from unittest.mock import patch
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_historical_recovery_requires_complete_relations_and_fresh_identity(self):
+        source = "https://example.invalid/courses/1/external_tools/2"
+        common = {"courseId": "1", "channelId": "3", "sourceUrl": source, "seenAt": 1, "partnerId": 4}
+        parent = {**common, "entryId": "0_parent", "parentEntryId": None}
+        child = {**common, "entryId": "0_child", "parentEntryId": "0_parent", "trackRelation": {
+            "method": "baseentry.list.parentEntryIdEqual", "parentEntryId": "0_parent", "childEntryId": "0_child"}}
+        report = {"completedAt": 1, "scan": {"courses": ["1"], "scopeComplete": True},
+            "channels": {"1:3": {"state": "verified", "totalCount": 1, "uniqueEntries": 1, "method": "kaf_native_visible_gallery_total"}},
+            "entries": {"1:0_parent": parent, "1:0_child": child},
+            "streams": {"1:0_parent": {"state": "verified", "childEntryIds": ["0_child"]}}}
+        self.assertEqual(len(historical_inventory(report, "1", "3", source)), 2)
+        report["streams"]["1:0_parent"]["childEntryIds"] = []
+        with self.assertRaisesRegex(ValueError, "invalid_historical_relation"):
+            historical_inventory(report, "1", "3", source)
+        with patch('archive.kaltura_api', return_value={"id": "0_child", "parentEntryId": None}):
+            with self.assertRaisesRegex(RuntimeError, 'historical_parent_identity_mismatch'):
+                inventory_entry(None, {"entryId": "0_child", "_expectedParentEntryId": "0_parent"})
+
+    def test_caption_pass_preserves_original_remote_and_reports_absence(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as directory:
+            original = {"kind": "video", "path": "original.mp4", "remote": {"state": "verified"}}
+            metadata = {"files": [original], "updatedAt": 1}
+            files = archive_entry(None, {"courseId": "440904", "entryId": "0_example"}, metadata,
+                                  {"captions": []}, Path(directory), True, True)
+            self.assertEqual(files, [original])
+            self.assertEqual(metadata["captionArchive"]["state"], "unavailable")
+
     def test_original_policy_never_downgrades_or_exceeds_budget(self):
         original = {"format_id": "0_original", "preference": 10, "height": 1080, "filesize_approx": 1000, "url": "https://example.invalid/SECRET"}
         proxy = {"format_id": "0_proxy", "preference": 0, "height": 360, "filesize_approx": 10}
