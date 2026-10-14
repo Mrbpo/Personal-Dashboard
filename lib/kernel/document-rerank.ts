@@ -45,7 +45,7 @@ async function readPages(db:Database,owner:string,hits:DocumentTextHit[],lock=fa
   WITH requested AS (SELECT * FROM jsonb_to_recordset($2::jsonb)
    AS r(document_id text,page_number integer,source_version_id text,evidence_id text))
   SELECT d.id document_id,v.id version_id,v.source_version_id,p.page_number,p.body,d.name document_name,
-    coalesce(d.course_id,'') course_id,coalesce(course.name,'') course_name,coalesce(course.course_code,'') course_code,p.locator
+    coalesce(d.course_id,'') course_id,coalesce(course.name,'') course_name,coalesce(course.code,'') course_code,p.locator
   FROM requested r JOIN document_texts d ON d.id=r.document_id AND d.owner_id=$1 AND d.hidden=false
    JOIN document_text_versions v ON v.id=d.current_version_id AND v.source_version_id=r.source_version_id
    JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=r.page_number AND p.evidence_id=r.evidence_id
