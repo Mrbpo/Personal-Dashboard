@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {mkdir,readFile,writeFile,stat,utimes} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import type {Pool,PoolClient} from 'pg';
-import type {DocumentTextHit} from './document-search.ts';
+import type {DocumentEvidenceHit} from './document-evidence.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -20,7 +20,7 @@ export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
  source:DocumentContextSource;manifestSha256:string;firstAnchorRank:number;anchorRanks:number[];
  headingMetadata?:{text:string;originalSourceHash:string};status:'available'|'unavailable-size-exceeds-8192';
  sourceNodeCount:number;sourceBodyCodepoints:number;nodeManifest:Array<{evidenceId:string;locator:string;bodySha256:string}>;nodes:DocumentEvidenceNode[]};
-export type DocumentContextRead={anchors:DocumentTextHit[];parents:DocumentParentContext[];images:DocumentImageEvidence[];
+export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:DocumentImageEvidence[];
  accounting:{anchorCount:number;parentCount:number;contextNodeCount:number;contextBodyCodepoints:number;imageCount:number;imageBytes:number};
  sourceContentIsUntrusted:true};
 export type DocumentContextErrorCode='DOCUMENT_CONTEXT_INVALID'|'DOCUMENT_CONTEXT_CHANGED'|'DOCUMENT_STRUCTURE_UNAVAILABLE'|
@@ -213,7 +213,7 @@ export async function readDocumentImages(db:Queryable,owner:string,source:Docume
  }
  await currentSource(db,owner,identity(current));return images;
 }
-export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentTextHit[],options:{includeImages?:boolean}={}):Promise<DocumentContextRead>{
+export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={}):Promise<DocumentContextRead>{
  if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>key!=='includeImages')
   ||(options.includeImages!==undefined&&typeof options.includeImages!=='boolean'))invalid('At most 14 original ranked anchors are allowed');
  const loaded=new Map<string,Awaited<ReturnType<typeof structuredSource>>>(),parents=new Map<string,DocumentParentContext>();

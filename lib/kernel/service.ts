@@ -5,11 +5,11 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint} from './document-source.ts';
-import {readFullDocumentEvidence,DocumentEvidenceChangedError} from './document-evidence.ts';
+import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
+import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,type DocumentAnswerPolicy} from './document-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput} from './document-context.ts';
-import type {DocumentTextHit} from './document-search.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
 import type {IngestionJob} from './jobs.ts';
@@ -880,7 +880,7 @@ export class KernelService {
     return readDocumentOutline(kernelPool(),owner,source);
   }
 
-  readDocumentParents(owner:string,anchors:DocumentTextHit[],options:{includeImages?:boolean}={}){
+  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={}){
     return readDocumentParents(kernelPool(),owner,anchors,options);
   }
 
@@ -890,6 +890,10 @@ export class KernelService {
 
   documentImageBlobHashes(){
     return documentImageBlobHashes(kernelPool());
+  }
+
+  readDocumentNodes(owner:string,expectedSource:DocumentContextSource,evidenceIds:string[]){
+    return readDocumentNodes(kernelPool(),owner,expectedSource,evidenceIds);
   }
 
   /** Non-structured study content only; canonical business facts use their own
