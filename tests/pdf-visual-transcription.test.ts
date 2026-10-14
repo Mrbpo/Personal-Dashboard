@@ -134,10 +134,17 @@ test('fully processed pages preserve uncertainty in place and malformed warning 
 });
 
 test('selected visual pages copy the exact original page, keep global numbering and reuse only source-specific cache',async()=>{
- const {transcribePdfVisualPages}=await import('../lib/document-parser.ts');
+ const {transcribePdfVisualPages,SELECTED_VISUAL_PARSER_VERSION,selectedVisualPageCacheParser}=await import('../lib/document-parser.ts');
+ const {database:db}=await import('../lib/database.ts');
+ const {createHash}=await import('node:crypto');
  const pdf=await PDFDocument.create();
  for(let index=0;index<30;index++)pdf.addPage([400+index,600]);
  const bytes=await pdf.save(),id='selected-original-29';
+ const hash=createHash('sha256').update(bytes).digest('hex');
+ const oldCache='pdf-visual-selected-v2:'+createHash('sha256').update(JSON.stringify({sourceHash:hash,model:'gpt-5-mini',imageInput:false,tiled:false,promptVersion:2})).digest('hex');
+ await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,oldCache,28,'Previous inline-only result').run();
+ assert.equal(SELECTED_VISUAL_PARSER_VERSION,'pdf-visual-selected-v3');
+ assert.notEqual(selectedVisualPageCacheParser(hash,'gpt-5-mini',false),oldCache);
  const original=globalThis.fetch;let calls=0;
  globalThis.fetch=async(_input,init)=>{
   const request=JSON.parse(String(init?.body));
@@ -145,6 +152,11 @@ test('selected visual pages copy the exact original page, keep global numbering 
   const copy=await PDFDocument.load(Buffer.from(uploaded.file_data.split(',')[1],'base64'));
   assert.equal(copy.getPageCount(),1);
   assert.equal(copy.getPage(0).getWidth(),428,'original page 29 must be copied, not page 1');
+  const prompt=request.input[0].content.find((part:{type:string})=>part.type==='input_text').text;
+  assert.match(prompt,/忠实版本 v3/);
+  for(const marker of ['\\mathbf','\\boldsymbol','\\tag','\\[','\\]'])assert.ok(prompt.includes(marker));
+  assert.match(prompt,/不能用行内分隔符代替/);
+  assert.match(prompt,/不进行数学纠错/);
   calls++;
   return Response.json({output_text:JSON.stringify({text:'Faithful selected-page text \\(\\psi\\)',complete:true,uncertain_spans:[]})});
  };
@@ -154,6 +166,7 @@ test('selected visual pages copy the exact original page, keep global numbering 
   assert.deepEqual(pages.map(page=>[page.pageNumber,page.locator]),[[29,'第 29 页']]);
   await transcribePdfVisualPages(id,bytes,options);
   assert.equal(calls,1);
+  assert.equal((await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=28').bind(id,oldCache).first<{body:string}>())?.body,'Previous inline-only result');
   pdf.setTitle('Source revision');
   await transcribePdfVisualPages(id,await pdf.save(),options);
   assert.equal(calls,2,'changed original hash must not reuse the previous selected-page text');
