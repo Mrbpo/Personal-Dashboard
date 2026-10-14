@@ -177,6 +177,8 @@ def main():
         for item in entry.get('files', []):
             if item.get('kind') != 'video' or entry.get('state') != 'archived':
                 continue
+            if args.verify_only and not item.get('remote'):
+                continue  # Newly downloaded local bytes await their first decoder/upload.
             if item.get('selectedFormat', {}).get('isOriginalSource') is False or Path(item['path']).name.split('.')[0] != 'original':
                 raise ValueError('ONLY_ORIGINAL_FILES_SUPPORTED')
             if not ledger.get(identity + ':' + item['sha256'], {}).get('passed'):

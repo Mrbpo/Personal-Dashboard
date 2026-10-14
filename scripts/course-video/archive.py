@@ -263,6 +263,60 @@ def kaltura_api(context, session: dict, service: str, action: str, **parameters)
     return result
 
 
+def historical_media_session(page, sessions: Sessions, entry: dict, gallery_url: str, channel_id: str, settle_ms: int) -> dict:
+    """Let the normal same-course media page issue its entry-scoped player KS."""
+    parent_id = entry.get("parentEntryId") or entry["entryId"]
+    key = entry["courseId"] + ":" + entry["entryId"]
+    cache = getattr(sessions, "historical_authorizations", {})
+    cached = cache.get(entry["courseId"] + ":" + parent_id, {}).get(key)
+    if cached:
+        return cached
+    # The template must come from a real current gallery card, not a stored
+    # URL convention. Only the proven historical entry ID is substituted.
+    frame = next((item for item in page.frames if public_url(item.url) == gallery_url), None)
+    if frame is None:
+        raise RuntimeError("historical_gallery_template_unavailable")
+    template = None
+    for href in frame.locator('a[href*="/media/"]:visible').evaluate_all("nodes => nodes.map(node => node.href)"):
+        parsed = urlparse(href)
+        if parsed.scheme != "https" or parsed.netloc != urlparse(gallery_url).netloc or parsed.query or parsed.fragment:
+            continue
+        match = re.fullmatch(r"/media/[^/]+/([01]_[A-Za-z0-9]+)/" + re.escape(channel_id) + r"/?", parsed.path)
+        if match:
+            template = (parsed, match)
+            break
+    if template is None:
+        raise RuntimeError("historical_media_route_not_observed")
+    parsed, match = template
+    target = urlunparse(parsed._replace(path=parsed.path[:match.start(1)] + parent_id + parsed.path[match.end(1):]))
+    for previous_key, item in list(sessions.entries.items()):
+        if item.get("courseId") == entry["courseId"] and (item.get("entryId") == parent_id or item.get("parentEntryId") == parent_id):
+            sessions.entries.pop(previous_key, None)
+    sessions.entries.pop(key, None)  # Do not accept a representative player's KS.
+    sessions.current_course = entry["courseId"]
+    sessions.current_page = target
+    media_page = page.context.new_page()
+    try:
+        response = media_page.goto(target, wait_until="domcontentloaded", timeout=60000)
+        media_page.wait_for_timeout(max(settle_ms, 6000))
+        if not response or not response.ok or urlparse(media_page.url).netloc != parsed.netloc:
+            raise ReauthRequired()
+        observed = sessions.entries.get(key)
+        if not observed or not observed.get("apiObserved") or not observed.get("ks"):
+            raise ReauthRequired()
+        result = sessions.usable(observed)
+        result["mediaAuthorizationEvidence"] = {"method": "normal_observed_same_course_media_route",
+            "templateUrl": public_url(urlunparse(parsed)), "mediaUrl": public_url(target), "retrievedAt": int(time.time())}
+        cache[entry["courseId"] + ":" + parent_id] = {candidate_key: {**sessions.usable(item),
+            "mediaAuthorizationEvidence": result["mediaAuthorizationEvidence"]} for candidate_key, item in sessions.entries.items()
+            if item.get("apiObserved") and item.get("ks") and item.get("courseId") == entry["courseId"]
+            and item.get("sourceUrl") == public_url(target)}
+        sessions.historical_authorizations = cache
+        return result
+    finally:
+        media_page.close()
+
+
 def inventory_entry(context, session: dict, include_captions: bool = False) -> tuple[dict, dict]:
     info = kaltura_api(context, session, "baseentry", "get", entryId=session["entryId"])
     if not isinstance(info, dict) or info.get("id") != session["entryId"]:
@@ -326,6 +380,8 @@ def inventory_entry(context, session: dict, include_captions: bool = False) -> t
                                     key=lambda item: item["id"]),
               "captions": [{key: item.get(key) for key in ("id", "languageCode", "language", "format", "fileExt", "status", "updatedAt")}
                            for item in captions], "seenAt": int(time.time()), "state": "discovered"}
+    if session.get("mediaAuthorizationEvidence"):
+        public["mediaAuthorizationEvidence"] = session["mediaAuthorizationEvidence"]
     return public, {"formats": formats, "captions": captions}
 
 
@@ -434,7 +490,7 @@ def archive_entry(context, session: dict, metadata: dict, private: dict, root: P
         # official service for the exact already-verified flavor, retaining the
         # normal entitled KS and no manually constructed signature or route.
         for selected in private["formats"] if session.get("_resolveFlavorUrl") else []:
-            download_url = kaltura_api(context, session, "flavorasset", "geturl", id=selected["format_id"])
+            download_url = kaltura_api(context, session, "flavorasset", "getUrl", id=selected["format_id"])
             parsed_download = urlparse(download_url) if isinstance(download_url, str) else None
             if (not parsed_download or parsed_download.scheme != "https" or parsed_download.username or parsed_download.password
                     or not media_host(parsed_download.hostname or "", set(session.get("_allowedMediaHosts", [])))):
@@ -1312,12 +1368,26 @@ def main():
                 complete = False
             for key in sorted(verified_scope):
                 runtime_stage = "query_entry_metadata"
-                observed = sessions.entries[key]
+                # A failed normal parent page may not issue a child token. Keep
+                # that item inside the per-entry failure handler, never accept
+                # a stale token or abort unrelated known items with KeyError.
+                observed = sessions.entries.get(key) if recovery_report else sessions.entries[key]
+                if observed is None:
+                    observed = {**candidate, "entryId": recovery_entries[key]["entryId"], "courseId": courses[0]}
                 session = sessions.usable(observed)
                 sessions.current_course = session["courseId"]
                 sessions.current_page = session["sourceUrl"]
                 previous = manifest["entries"].get(key, {})
                 try:
+                    if recovery_report:
+                        known = recovery_entries[key]
+                        fresh = historical_media_session(page, sessions, known, args.known_gallery_url,
+                                                         args.channel_id, args.settle_ms)
+                        session = {**session, **fresh}
+                        # Keep historical identity constraints; the newly issued
+                        # player session cannot silently alter the saved scope.
+                        session.update({"_expectedParentEntryId": known.get("parentEntryId"), "_expectedPartnerId": known["partnerId"],
+                                        "_resolveFlavorUrl": True, "trackRelation": known.get("trackRelation"), "channelId": args.channel_id})
                     include_captions = args.with_captions or args.subtitles_only
                     public, private = metadata_cache.get(key) or inventory_entry(context, session, include_captions)
                     print(json.dumps({"state": "entry_metadata_verified", "entryId": session["entryId"],

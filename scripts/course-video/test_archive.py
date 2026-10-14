@@ -1,11 +1,60 @@
 import tempfile
 import unittest
 from pathlib import Path
-from archive import Sessions, archive_entry, atomic_json, historical_inventory, inventory_entry, media_host, parse_request, plan_video_formats, public_url, response_json, sha256, verified_files
+from archive import ReauthRequired, Sessions, archive_entry, atomic_json, historical_inventory, historical_media_session, inventory_entry, media_host, parse_request, plan_video_formats, public_url, response_json, sha256, verified_files
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_history_uses_own_observed_parent_page_session_and_reuses_child(self):
+        sessions = Sessions({'kaltura.example.invalid'})
+        sessions.current_course = '1'
+        gallery = 'https://kaltura.example.invalid/channel/1/3'
+        parent = {'courseId': '1', 'entryId': '0_old', 'parentEntryId': None}
+        child = {'courseId': '1', 'entryId': '0_child', 'parentEntryId': '0_old'}
+        for entry in (parent, child):
+            sessions.entries['1:' + entry['entryId']] = {**entry, 'apiObserved': True, 'ks': 'REPRESENTATIVE'}
+        navigated = []
+        class MediaPage:
+            def goto(self, url, **_kwargs):
+                self.url = url
+                navigated.append(url)
+                sessions.remember('0_old', 'https://api.kaltura.com', 'OLD_SPECIFIC', True)
+                sessions.remember('0_child', 'https://api.kaltura.com', 'CHILD_SPECIFIC', True)
+                return SimpleNamespace(ok=True)
+            def wait_for_timeout(self, _timeout): pass
+            def close(self): pass
+        frame = SimpleNamespace(url=gallery, locator=lambda _selector: SimpleNamespace(evaluate_all=lambda _js: [
+            'https://attacker.invalid/media/t/0_visible/3', 'https://kaltura.example.invalid/media/t/0_visible/3']))
+        page = SimpleNamespace(frames=[frame], context=SimpleNamespace(new_page=MediaPage))
+        first = historical_media_session(page, sessions, parent, gallery, '3', 1)
+        second = historical_media_session(page, sessions, child, gallery, '3', 1)
+        self.assertEqual(first['ks'], 'OLD_SPECIFIC')
+        self.assertEqual(second['ks'], 'CHILD_SPECIFIC')
+        self.assertEqual(navigated, ['https://kaltura.example.invalid/media/t/0_old/3'])
+        self.assertNotIn('ks', first['mediaAuthorizationEvidence'])
+
+    def test_history_cannot_accept_unobserved_old_child_representative_session(self):
+        sessions = Sessions({'kaltura.example.invalid'})
+        sessions.current_course = '1'
+        gallery = 'https://kaltura.example.invalid/channel/1/3'
+        child = {'courseId': '1', 'entryId': '0_child', 'parentEntryId': '0_old'}
+        sessions.entries['1:0_child'] = {**child, 'apiObserved': True, 'ks': 'REPRESENTATIVE'}
+        class MediaPage:
+            def goto(self, url, **_kwargs):
+                self.url = url
+                sessions.remember('0_old', 'https://api.kaltura.com', 'OLD_SPECIFIC', True)
+                return SimpleNamespace(ok=True)
+            def wait_for_timeout(self, _timeout): pass
+            def close(self): pass
+        frame = SimpleNamespace(url=gallery, locator=lambda _selector: SimpleNamespace(evaluate_all=lambda _js: [
+            'https://kaltura.example.invalid/media/t/0_visible/3']))
+        page = SimpleNamespace(frames=[frame], context=SimpleNamespace(new_page=MediaPage))
+        with self.assertRaises(ReauthRequired):
+            historical_media_session(page, sessions, child, gallery, '3', 1)
+        self.assertNotIn('1:0_child', sessions.entries)
+
     def test_historical_recovery_requires_complete_relations_and_fresh_identity(self):
         source = "https://example.invalid/courses/1/external_tools/2"
         common = {"courseId": "1", "channelId": "3", "sourceUrl": source, "seenAt": 1, "partnerId": 4}
