@@ -4,11 +4,15 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,validateGroundedDocumentAnswer,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {kernel} from '../lib/kernel/service.ts';
+import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
+import {after} from 'node:test';
 
 process.env.DATABASE_URL=':memory:';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'document-answer-empty-vault-'+randomUUID());
 process.env.OPENAI_API_KEY='dummy-local-test-never-sent';process.env.AI_BUDGET_TEST_BYPASS='false';
 process.env.AI_MONTHLY_BUDGET='5';
+after(async()=>{if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();});
 
 const hash=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const source={documentId:'doc',currentVersionId:'version',sourceVersionId:'source-version',sourceHash:'source-hash'};
@@ -110,4 +114,39 @@ test('development answers reject a provider model mismatch and never label mini 
    beforeAttempt:async()=>{attempts++;}}),/different or unverified model/);
   assert.equal(calls,1);assert.equal(attempts,1);
  }finally{globalThis.fetch=original;for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
+});
+
+test('Kernel study answers use actual PG parent/image evidence and refuse sources hidden during generation',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const tag=randomUUID(),owner='answer-owner-'+tag,id='answer-doc-'+tag,title='Study answer source '+tag;
+ const bodies=[body,'Both samples are compared under identical conditions.','Figure 1: Comparison of two samples.'];
+ await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:title,hash:hash(JSON.stringify(bodies)),mime:'text/plain',
+  origin:'answer-fixture',originKey:id},bodies.map((text,index)=>({pageNumber:index+1,locator:'original-node:'+index,text})),
+  {parserVersion:'answer-fixture-v1',warnings:['Formula fidelity unverified.']});
+ const resolution=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});assert.equal(resolution.status,'resolved');
+ if(resolution.status!=='resolved')throw new Error('Source unresolved');
+ const expected={...resolution.document,courseId:''},nodes=(await kernel.readDocumentSourcePages(owner,expected)).nodes;
+ await kernel.registerDocumentStructure(owner,expected,{rawSourceHash:expected.sourceHash,parserVersion:'original-structure-v1',
+  parents:[{id:'section',heading:'Experimental conditions'}],nodes:nodes.map((node,index)=>({evidenceId:node.evidenceId,
+   locator:node.locator,ordinal:index,kind:index===2?'caption':'paragraph',parentId:index===2?null:'section',bodySha256:node.bodySha256}))});
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j2i8AAAAASUVORK5CYII=','base64');
+ await kernel.registerDocumentImage(owner,expected,{captionEvidenceId:nodes[2].evidenceId,originalReference:'figure.png',
+  provenance:{sourceUrl:'https://example.edu/original/figure.png',revision:'fixture-v1'},bytes});
+ const original=globalThis.fetch;let calls=0,hide=false;
+ globalThis.fetch=async(_url,init)=>{
+  calls++;const request=JSON.parse(String(init?.body)),content=request.input[1].content,
+   input=JSON.parse(content[0].text),support=input.evidence.find((item:{text?:string})=>item.text?.includes('uses two samples.'));
+  assert.ok(support);assert.equal(content.filter((item:{type:string})=>item.type==='input_image').length,1);
+  if(hide)await kernel.hideParsedDocument(owner,id);
+  return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:100},output_text:JSON.stringify({
+   status:'answered',message:'',claims:[{text:'The experiment uses two samples.',citations:[{id:support.id,quote:'uses two samples.'}]}]})});
+ };
+ try{
+  const options={sourceHint:{selectedDocumentTitle:title},semantic:false,aiRerank:false,includeParents:true,includeImages:true};
+  const result=await kernel.answerStudyContent(owner,'How many samples?',options);
+  assert.equal(result.answer.status,'answered');assert.equal(result.imageEvidenceCount,1);assert.equal(result.textEvidenceCount,3);
+  assert.deepEqual(result.warnings,['Formula fidelity unverified.']);assert.equal(calls,1);
+  hide=true;await assert.rejects(kernel.answerStudyContent(owner,'How many samples?',options),/no longer current|Selected document/);
+  assert.equal(calls,2,'a changed source is rejected without a model retry');
+ }finally{globalThis.fetch=original;}
 });
