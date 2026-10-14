@@ -113,7 +113,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
         shortName: presentCourse(course.code, course.name).courseTitle,
         color: ["#315e53", "#a25544", "#60756e", "#567386", "#a7833d"][index % 5],
         count: deadlineTasks.filter((task: any) => task.courseId === course.id).length,
-        weekCount: deadlineTasks.filter((task: any) => task.courseId === course.id && !taskDeadline(task, timezone, asOf)!.overdue && taskDeadline(task, timezone, asOf)!.day < nearEnd).length,
+        upcomingCount: deadlineTasks.filter((task: any) => task.courseId === course.id && !taskDeadline(task, timezone, asOf)!.overdue).length,
       }))
     : [];
   const visibleTasks = deadlineTasks.map((task: any) => ({
@@ -140,7 +140,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
   const overdueCount = visibleTasks.filter((task: any) => task.tone === 'overdue').length;
   const nextCount = visibleTasks.filter((task: any) => task.prerequisiteBlocked || ['locked', 'not_open'].includes(task.canvasStatus)).length;
   const nextDeadline = visibleTasks.find((task: any) => task.tone !== 'overdue');
-  const coursesDueSoon = visibleCourses.filter((course: any) => course.weekCount > 0).sort((a: any, b: any) => b.weekCount - a.weekCount).slice(0, 8);
+  const coursesDueSoon = visibleCourses.filter((course: any) => course.upcomingCount > 0).sort((a: any, b: any) => b.upcomingCount - a.upcomingCount).slice(0, 8);
   const taskGroups = [
     { key: 'must', title: '未完成的逾期作业', note: '保留最后确认的截止日期与当前状态', tasks: visibleTasks.filter((task: any) => task.tone === 'overdue') },
     { key: 'advance', title: '近期截止', note: '今天起 7 个日历日内', tasks: visibleTasks.filter((task: any) => task.tone === 'soon') },
@@ -278,16 +278,16 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
               </section>
 
               <section className="rounded-3xl border bg-card p-6 shadow-sm">
-                <div className="flex items-center gap-2"><CalendarDays className="size-4 text-primary" /><h2 className="font-semibold">未来 7 天</h2></div>
+                <div className="flex items-center gap-2"><CalendarDays className="size-4 text-primary" /><h2 className="font-semibold">未来 16 天</h2></div>
                 <div className="mt-5 space-y-4">
                   {coursesDueSoon.map((course: any, index: number) => (
                     <Link href={"/courses/" + course.id} key={course.id} className="group flex items-center gap-3">
                       <span className="course-tile size-9" style={{ backgroundColor: course.color }}><b className="text-xs text-white drop-shadow">{index + 1}</b></span>
                       <div className="min-w-0 flex-1"><p className="text-sm font-medium">{course.displayCode}</p><p className="truncate text-xs text-muted-foreground">{course.shortName}</p></div>
-                      <span className="text-sm font-semibold">{course.weekCount}</span>
+                      <span className="text-sm font-semibold">{course.upcomingCount}</span>
                     </Link>
                   ))}
-                  {coursesDueSoon.length === 0 && <p className="text-sm text-muted-foreground">未来 7 天没有确定截止事项。</p>}
+                  {coursesDueSoon.length === 0 && <p className="text-sm text-muted-foreground">未来 16 天没有确定截止事项。</p>}
                 </div>
               </section>
               <ShortcutPanel />
