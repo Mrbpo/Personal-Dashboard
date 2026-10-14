@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "issue": "https://github.com/Mrbpo/Personal-Dashboard/issues/68",
+  "status": "preparation-only-no-retrieval-or-scoring",
+  "seed": "issue-68-heldout-study-v1",
+  "selection": {
+    "questionsPerCandidate": 50,
+    "order": "ascending SHA256(seed + LF + source + LF + original question ID), then original ID",
+    "exclude": "all material IDs and normalized question text/IDs present in supplied previous calibration and raw caches; also previously selected candidate question text/IDs in the fixed candidate order",
+    "answerPolicy": "Keep original author gold and all annotations verbatim; never filter on answerability, evidence length, conflict, difficulty, retrieval, or algorithm output.",
+    "corpusPolicy": "Freeze complete eligible QASPER split materials after prior-material exclusion; forum packages are supplementary retrieval gold or future noise, not invented answer gold.",
+    "candidateOrder": ["qasper-validation", "qasper-test", "qasper-unseen-train"],
+    "supplementaryForumOrder": ["physics", "stats", "mathematica"],
+    "forumQuestionOrder": "same seeded hash rule, independent from QASPER selection",
+    "roundPairing": [
+      ["qasper-validation", "cqadupstack-physics"],
+      ["qasper-test", "cqadupstack-stats"],
+      ["qasper-unseen-train", "cqadupstack-mathematica"]
+    ]
+  },
+  "downloadBudgetBytes": 150000000,
+  "prohibited": ["retrieval/scoring", "core imports or core edits", "gold/question IDs in algorithms", "paid models", "production writes", "private Piazza or fabricated mail/Canvas sources", "new services/packages", "UI"],
+  "acceptance": "This freeze is only a candidate input package. Three actual distinct 100% runs and required data-state transitions remain to be executed separately. Forum qrels measure duplicate-document retrieval and do not certify final answer correctness.",
+  "oldMaterialIneligibility": "SyllabusQA previous calibration corpus includes all 63 author syllabi; remaining questions cannot count as unseen material."
+}
