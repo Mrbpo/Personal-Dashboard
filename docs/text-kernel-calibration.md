@@ -57,3 +57,23 @@ DATABASE_URL=:memory: LIBRARY_DIR=/pdf-data/text-calibration-no-originals \
 其余完整资料仅冻结未摄取：63大纲/797段、100论文/4,620段、含50论坛帖的2,141文档/2,929段，以及10课程混合2,920文档/3,654段。各保留原50题；全部JSONL约26.33MB。旧报告中的Piazza、Syllabus和QASPER分数不是本次当前PG基线结果。
 
 此次脚本实现与纯隔离/哈希保护检查完成，真实PG基线执行完成；检索准确率未达标，代码尚待PR/CI/总调度审阅，没有部署或生产切换。
+
+## 关联检索只查询校准
+
+`scripts/benchmark-text-related.mjs`复用同一9,769文档schema、owner、冻结输入和原50题。它不会迁移、创建schema、摄取文档或重做50Truth；实际数据库必须为上述隔离库，并通过PG会话设置及核对`default_transaction_read_only=on`。运行前逐文档核对SHA/课程/当前版本，运行后再核对全文heads指纹及代码文件哈希，代码overlay变动就拒绝比较。
+
+```bash
+KERNEL_SCHEMA=text_calibration_20261014_baseline DATABASE_URL=:memory: \
+  LIBRARY_DIR=/pdf-data/text-calibration-no-originals \
+  node --experimental-strip-types --import ./scripts/pdf-acceptance-env.mjs \
+  scripts/benchmark-text-related.mjs --input /text-input \
+  --baseline /text-reports/baseline/report.json --output /text-reports/related-pass-1.json
+```
+
+这需要总调度已审阅的关联检索源码overlay，普通ea57代码不存在对应模块时不能冒称已启用。选项明确`relatedDocuments=true`、前14上限不变，semantic/hybrid/AI rerank关闭；记录的是运行时源码哈希，而不是把修改后的overlay冒称旧ea57原代码。
+
+2026-10-14 已放行一次完整50题校准：**35→48/50**，14题改善、1题回退；50题所有返回项均核对当前owner/course/source SHA/source version/evidence。总耗时219.709秒，查询中位数4,272ms、p95 5,601ms，代码与全文heads前后指纹均未变化，网络/付费0，答案仍pending。
+
+原失败仍有一题：人物昵称与游戏标题的关联未进前14，泛化的`History`标题带入不相关资料。另有一题从成功回退：`Serri`与`John Fogerty`比较，后者的工程师/专辑等同名资料挤掉前者。记录失败是为了泛化修正；不得在实现中注入这些题的gold来源或特制答案。现结果尚未100%，也不是三轮正式验收。
+
+私有报告：`/srv/study-text-calibration-20261014/reports/related-pass-1.json`，本地`data/text-related-pass-1.json`。它逐题保存旧/新gold覆盖、改善/回退、来源和证据、耗时、输入及实际代码哈希；基线原报告不覆写。初版PR69精确head `e68a26d` 的CI `38545474259`已成功；新增只查询脚本及同步main后的最终head以最后CI为准。
