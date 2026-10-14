@@ -92,14 +92,16 @@ export function validateGroundedDocumentAnswer(value:unknown,supports:readonly P
  for(const claim of answer.claims){
   if(!exactKeys(claim,['text','citations'])||typeof claim.text!=='string'||!claim.text.trim()||claim.text.length>3000||
    !Array.isArray(claim.citations)||!claim.citations.length||claim.citations.length>20)return invalid();
-  const claimIds=new Set<string>();
+  const claimCitations=new Set<string>();
   for(const citation of claim.citations){
    if(!exactKeys(citation,['id','quote'])||typeof citation.id!=='string'||typeof citation.quote!=='string'||
-    citation.quote.length>1200||claimIds.has(citation.id))return invalid();
+    citation.quote.length>1200)return invalid();
+   const citationKey=JSON.stringify([citation.id,whitespace(citation.quote)]);
+   if(claimCitations.has(citationKey))return invalid();
    const support=byId.get(citation.id);if(!support)return invalid();
    if(support.kind==='text'&&(!whitespace(citation.quote)||!whitespace(support.text??'').includes(whitespace(citation.quote))))return invalid();
    if(support.kind==='image'&&citation.quote!=='')return invalid();
-   claimIds.add(citation.id);used.add(citation.id);
+   claimCitations.add(citationKey);used.add(citation.id);
   }
  }
  if(answer.status==='conflicting-evidence'&&(answer.claims.length<2||used.size<2))return invalid();

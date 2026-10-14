@@ -23,6 +23,21 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,i
  evidence_id:'evidence',parser_version:'native-unverified',score:1,evidence_body:'full-page',parser_warnings:['Formula fidelity unverified.']} ]};}
 const answer={status:'answered',message:'',claims:[{text:'The study uses two samples.',citations:[{id:'e0',quote:'uses two samples.'}]}]};
 
+test('one statement may cite distinct actual quotes from the same evidence without duplicating a citation',()=>{
+ const prepared=prepareDocumentAnswer('What was measured and how certain is the result?',context());
+ const combined={status:'answered',message:'',claims:[{text:'Two samples were used and the result is preliminary.',citations:[
+  {id:'e0',quote:'uses two samples.'},{id:'e0',quote:'The result remains preliminary.'}]}]};
+ assert.deepEqual(validateGroundedDocumentAnswer(combined,prepared.supports),combined);
+ for(const quote of ['uses two samples.','uses  two samples.','a conclusive result'])
+  assert.throws(()=>validateGroundedDocumentAnswer({...combined,claims:[{...combined.claims[0],citations:[
+   combined.claims[0].citations[0],{id:'e0',quote}]}]},prepared.supports));
+ const duplicateImage={status:'answered',message:'',claims:[{text:'A supplied image.',citations:[
+  {id:'i0',quote:''},{id:'i0',quote:''}]}]};
+ assert.throws(()=>validateGroundedDocumentAnswer(duplicateImage,[{id:'i0',kind:'image'}]));
+ assert.throws(()=>validateGroundedDocumentAnswer({...combined,status:'conflicting-evidence',claims:[
+  combined.claims[0],{text:'A second statement.',citations:[combined.claims[0].citations[1]]}]},prepared.supports));
+});
+
 test('answers require supplied evidence and reject invented quotes and unreferenced claims',()=>{
  const prepared=prepareDocumentAnswer('How many samples?',context());
  assert.deepEqual(validateGroundedDocumentAnswer(answer,prepared.supports),answer);
