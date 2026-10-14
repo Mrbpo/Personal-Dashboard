@@ -12,6 +12,11 @@ function object(value: unknown): Json | undefined {
 }
 function list(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
+// Orig is source extraction, not enriched LaTeX. Keep it verbatim when the
+// normalized text is empty; otherwise valid source content would disappear.
+function nodeContent(node: Json): string {
+  return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
+}
 
 export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[]} {
   const response = object(result);
@@ -87,8 +92,14 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (consumed !== content.length) throw new Error('Docling spanning item loses text between pages');
   }
 
+  function noteFormula(node: Json): void {
+    if(node.label!=='formula')return;
+    for(const location of provenance(node))formulaPageNumbers.add(location.page_no as number);
+    if(!text(node.text)&&text(node.orig))warnings.push(`第 ${provenance(node)[0].page_no} 页公式保留原始抽取文本；未验证 LaTeX、符号和上下标，请核对原 PDF`);
+  }
+
   function cellText(cell: Json, ancestors: Set<string>, tablePages: Set<unknown>): string {
-    if (!cell.ref) return text(cell.text);
+    if (!cell.ref) return nodeContent(cell);
     const collect = (reference: unknown, stack: Set<string>): string => {
       const {ref, node} = resolve(reference);
       if (stack.has(ref)) throw new Error('Docling document references contain a cycle');
@@ -96,10 +107,11 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       const next = new Set([...stack, ref]);
       if (!ref.startsWith('#/groups/')) {
         if (provenance(node).some(location => !tablePages.has(location.page_no))) throw new Error('Docling rich table cell has ambiguous page provenance');
+        noteFormula(node);
       }
-      return [text(node.text), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
+      return [nodeContent(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
     };
-    return collect(cell.ref, ancestors) || text(cell.text);
+    return collect(cell.ref, ancestors) || nodeContent(cell);
   }
 
   function tableText(node: Json, ancestors: Set<string>): string {
@@ -130,7 +142,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       while (row.length < columnCount) row.push('');
       return `| ${row.join(' | ')} |`;
     }).join('\n');
-    if (!cells.length || !cells.some(cell => text(cell.text) || cell.ref)) throw new Error('Docling table contains no readable cells');
+    if (!cells.length || !cells.some(cell => nodeContent(cell) || cell.ref)) throw new Error('Docling table contains no readable cells');
     return content;
   }
 
@@ -146,13 +158,14 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       add(node, '');
       warnings.push(`第 ${provenance(node)[0].page_no} 页含图片；仅索引已识别文字和图注`);
     } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
-      const content = typeof node.text === 'string' ? node.text : '';
-      if(node.label==='formula')for(const location of provenance(node))formulaPageNumbers.add(location.page_no as number);
+      const content = nodeContent(node);
+      const originalFallback = !text(node.text) && Boolean(text(node.orig));
+      noteFormula(node);
       if (node.label === 'formula' && !content.trim()) {
         if(options.formulaEnriched !== false)throw new Error('Docling formula has no readable LaTeX');
         warnings.push(`第 ${provenance(node)[0].page_no} 页有公式尚未转写，请核对原 PDF`);
       }
-      add(node, node.label === 'formula' && content && options.formulaEnriched !== false ? `$$\n${content}\n$$` : content);
+      add(node, node.label === 'formula' && content && !originalFallback && options.formulaEnriched !== false ? `$$\n${content}\n$$` : content);
     }
     for (const child of [...list(node.children), ...list(node.captions), ...list(node.footnotes), ...list(node.references)]) visit(child, next);
   }
@@ -163,7 +176,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   for (const collection of ['texts', 'tables', 'pictures']) {
     list(document[collection]).forEach((value, index) => {
       const node = object(value);
-      if (!visited.has(`#/${collection}/${index}`) && (text(node?.text) || collection !== 'texts')) {
+      if (!visited.has(`#/${collection}/${index}`) && ((node && nodeContent(node)) || collection !== 'texts')) {
         throw new Error(`Docling contains unreferenced content: #/${collection}/${index}`);
       }
     });
