@@ -5,6 +5,9 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,type DocumentSourceHint} from './document-source.ts';
+import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
+ type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput} from './document-context.ts';
+import type {DocumentTextHit} from './document-search.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
 import type {IngestionJob} from './jobs.ts';
@@ -856,6 +859,35 @@ export class KernelService {
 
   resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
     return resolveDocumentSource(kernelPool(),owner,hint,options);
+  }
+
+  registerDocumentStructure(owner:string,source:DocumentContextSource,input:DocumentStructureInput){
+    return kernelTransaction(client=>registerDocumentStructure(client,owner,source,input));
+  }
+
+  async registerDocumentImage(owner:string,source:DocumentContextSource,input:DocumentImageInput){
+    const prepared=await prepareDocumentImage(kernelPool(),owner,source,input);
+    return kernelTransaction(client=>commitDocumentImage(client,owner,prepared));
+  }
+
+  readDocumentSourcePages(owner:string,source:DocumentContextSource){
+    return readDocumentSourcePages(kernelPool(),owner,source);
+  }
+
+  readDocumentOutline(owner:string,source:DocumentContextSource){
+    return readDocumentOutline(kernelPool(),owner,source);
+  }
+
+  readDocumentParents(owner:string,anchors:DocumentTextHit[],options:{includeImages?:boolean}={}){
+    return readDocumentParents(kernelPool(),owner,anchors,options);
+  }
+
+  readDocumentImages(owner:string,source:DocumentContextSource,captionEvidenceIds:string[]){
+    return readDocumentImages(kernelPool(),owner,source,captionEvidenceIds);
+  }
+
+  documentImageBlobHashes(){
+    return documentImageBlobHashes(kernelPool());
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {
