@@ -32,6 +32,7 @@ export type LearningTask = {
   lockAt: string | null;
   canvasStatus: CanvasStatus;
   localStatus: "active" | "completed" | "ignored";
+  cancelledAt?: string | null;
   urgency: Urgency;
   confidence: "certain" | "inferred";
   analysisStatus?: string;

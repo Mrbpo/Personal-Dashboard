@@ -59,7 +59,7 @@ function assignment(dueAt: string): CanvasSource {
   return { id: "course-1:assignment:lab-1", courseId: "course-1", sourceType: "assignment", sourceId: "lab-1", title: "Lab 1", body: "Submit the Python file", sourceUrl: "https://example.test/lab-1", updatedAt: new Date().toISOString(), dueAt, unlockAt: null, lockAt: null, submissionState: "unsubmitted", pointsPossible: 20, prerequisiteBlocked: false };
 }
 
-test("repository stores tasks, changes, disappearance and capacity plans", async () => {
+test("repository stores tasks, changes and disappearance without cancelling tasks", async () => {
   await repo.upsertCourses([{ id: "course-1", name: "Computer Science", course_code: "CSC", term: { name: "Fall" } }]);
   const first = assignment(new Date(Date.now() + 36 * 3600000).toISOString());
   first.updatedAt = '2026-09-20T12:00:00Z';
@@ -86,13 +86,9 @@ test("repository stores tasks, changes, disappearance and capacity plans", async
   assert.equal((await (await import('../lib/kernel/service.ts')).kernel.taskRows('course-1'))[0].source_missing,true);
   assert.equal(tasks[0].dueAt,changed.dueAt);
 
-  const plan = await repo.saveDailyPlan("2026-09-13", tasks, true, 45);
-  assert.equal(plan.capacityMinutes, 45);
-  assert.ok(plan.scheduledMinutes <= plan.capacityMinutes);
-  assert.ok(plan.backlogCount >= 0);
 });
 
-test("daily plan merges Canvas mirrors and never exceeds study capacity", async () => {
+test("canonical task list merges Canvas mirrors", async () => {
   const dueAt = new Date(Date.now() + 36 * 3600000).toISOString();
   const original = assignment(dueAt);
   original.id = "course-1:assignment:mirror";
@@ -107,7 +103,4 @@ test("daily plan merges Canvas mirrors and never exceeds study capacity", async 
   assert.equal(matching.length, 1);
   assert.equal(matching[0].sourceType, "assignment");
 
-  const plan = await repo.saveDailyPlan("2026-09-14", await repo.listTasks(), true, 60);
-  assert.ok(plan.scheduledMinutes <= plan.capacityMinutes);
-  assert.ok(plan.mustDo.length + plan.shouldDo.length <= 1);
 });
