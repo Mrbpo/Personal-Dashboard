@@ -172,8 +172,8 @@ function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return A
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
 type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;hybrid?:boolean;onTiming?:(detail:SearchTiming)=>void};
-export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
-type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   let contentIdentifiers:string[]=[];
   if(!course){
@@ -205,9 +205,16 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const eligible=documentIds.length?(await db.prepare(`SELECT d.id,d.hash,d.folder_path FROM library_documents d WHERE ${scopeSql}
     AND d.id IN (${documentIds.map(()=>'?').join(',')})`).bind(...scopeArgs,...documentIds).all<{id:string;hash:string;folder_path:string}>()).results:[];
   const allowed=new Map(eligible.map(row=>[row.id,row]));
+  const compatibility=documentIds.length?(await db.prepare(`SELECT id FROM library_documents
+    WHERE id IN (${documentIds.map(()=>'?').join(',')})`).bind(...documentIds).all<{id:string}>()).results:[];
+  const compatibilityIds=new Set(compatibility.map(row=>row.id));
   const indexedDocuments=new Set((await kernel.documentTextHeads(owner)).map(row=>row.id));
-  const persistedRows:CandidateRow[]=persisted.filter(row=>allowed.get(row.document_id)?.hash===row.source_hash)
-    .map(row=>({...row,parser_warnings:row.parser_warnings||[],folder_path:allowed.get(row.document_id)!.folder_path,contentScore:row.score}));
+  // PG-only current complete documents need no duplicate SQLite record. Any
+  // existing compatibility identity still owns its deletion/owner/scope guards;
+  // failure of those guards must never be mistaken for an absent cache.
+  const persistedRows:CandidateRow[]=persisted.filter(row=>compatibilityIds.has(row.document_id)
+      ? allowed.get(row.document_id)?.hash===row.source_hash : !path)
+    .map(row=>({...row,parser_warnings:row.parser_warnings||[],folder_path:allowed.get(row.document_id)?.folder_path||'',contentScore:row.score}));
   let raw:CandidateRow[]=[];
   if(strict){
     raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;
