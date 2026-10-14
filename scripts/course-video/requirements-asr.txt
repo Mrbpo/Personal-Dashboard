@@ -1,2 +1,4 @@
 # Optional local transcription; install separately only if platform captions are absent.
 faster-whisper==1.2.1
+# av19 removed metadata_errors still used by faster-whisper1.2.1.
+av==16.1.0

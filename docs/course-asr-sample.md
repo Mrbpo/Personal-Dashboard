@@ -4,7 +4,7 @@
 
 ## 已准备的运行时与模型
 
-- 隔离运行时：`/srv/study-course-asr-tool/venv`，faster-whisper1.2.1、CTranslate2 4.8.3、PyAV19.0.1、ONNX Runtime1.31.0。实际import与pip check通过，没有加载模型或转写。
+- 隔离运行时：`/srv/study-course-asr-tool/venv`，faster-whisper1.2.1、CTranslate2 4.8.3、PyAV16.1.0、ONNX Runtime1.31.0。初次自动解析得到PyAV19.0.1，import正常但真实解码失败（`metadata_errors`参数已移除），因此固定兼容16.1.0；不能将import检查当转写成功。
 - 模型：`/srv/study-course-asr-state/models/faster-whisper-small.en`。
 - 官方repository `Systran/faster-whisper-small.en`，固定revision `d1d751a5f8271d482d14ca55d9e2deeebbae577f`，四文件486,098,798字节。
 - `model.bin`483,545,366字节，官方LFS与实际SHA256均为 `62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a`。`download-manifest.json`记录所有文件哈希，`runtime-packages.txt`保留依赖版本。
@@ -42,6 +42,10 @@ systemd-run --scope \
 稳定ASR来源进入录播版本身份；模型revision、模型hash、片段或音频身份变化时保留新来源版本，普通PDF与旧平台字幕身份保持不变。不新增SQL迁移，复用009时间片段索引。生产导入须使用已发布的本PR实现，不能把安装运行时当成网站已经接入。
 
 ## 样例验收
+
+2026-10-14 唯一样例已实际运行：BIOA01 `0_l0mx1vr8` 原片600–900秒，300.0秒单声道16kHz音频9,600,078字节。PyAV16.1修复后复用同一音频，不再取原片/模型。CPU转写126.09秒，任务time126.36秒、平均177%CPU、最大RSS965,608KiB（约943MiB）；49条英语字幕，运行结束可用内存约4.86GiB。没有付费AI或生产PG写。
+
+真实VTT和侧车已通过离线导入normalizer与Kernel文档准备检查：原片SHA `ef7dd5af95a4f3ecd56932ae86c97600c60c61986a2dd052ae283039a8d189f8`，model revision/hash有效，原片时间600430–900000ms，首引用10:00.430–10:02.430、末引用14:58.060–15:00.000，证据confidence0.6。可运行`node --experimental-strip-types scripts/validate-asr-sample.ts PRIVATE_SAMPLE_DIRECTORY`复核小型字幕/侧车，脚本不写PG或输出课堂正文。此前失败不是识别结果；正确固定依赖后才有真实转写输出。
 
 自动检查VTT格式、原片时间范围、source/model身份和Kernel/library owner-scoped检索返回的evidence与实际时间。CI中的合成字幕只验证数据链，不证明课堂ASR准确率。
 
