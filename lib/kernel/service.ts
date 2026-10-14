@@ -624,13 +624,43 @@ export class KernelService {
     });
   }
 
-  async ingestCanvasSource(source: CanvasSource, analysis: ExtractedAnalysis | null, hash: string, provenance: 'canvas'|'legacy_import' = 'canvas'): Promise<void> {
+  async ingestCanvasSource(source: CanvasSource, analysis: ExtractedAnalysis | null, hash: string,
+    provenance: 'canvas'|'legacy_import' = 'canvas', expectedExistingPlanner = false): Promise<void> {
     const acquiredAt=new Date().toISOString();
     const raw=source;
     await kernelTransaction(async client => {
+      if (expectedExistingPlanner) {
+        const existing=(await client.query<{source:string;scope:string;course_id:string;external_id:string}>(
+          'SELECT source,scope,course_id,external_id FROM source_items WHERE id=$1 FOR UPDATE',[source.id])).rows[0];
+        if (source.sourceType!=='planner' || !existing || existing.source!=='canvas' ||
+          existing.scope!==source.courseId || existing.course_id!==source.courseId ||
+          existing.external_id!==`planner:${source.sourceId}`)
+          throw new Error('CANVAS_PLANNER_SOURCE_IDENTITY_MISMATCH');
+        const active=(await client.query(
+          `SELECT 1 FROM tasks t JOIN entities e ON e.id=t.entity_id
+           WHERE t.source_item_id=$1 AND t.source_type='planner' AND e.merged_into IS NULL LIMIT 1`,
+          [source.id])).rowCount;
+        if(!active)throw new Error('CANVAS_PLANNER_NO_ACTIVE_TASK');
+        const reference=canvasTaskReference(source);
+        if (!reference) throw new Error('CANVAS_PLANNER_TYPED_REFERENCE_MISSING');
+        if (reference.id!==source.sourceId) throw new Error('CANVAS_PLANNER_SOURCE_REFERENCE_MISMATCH');
+        const prior=(await client.query<{raw_value:CanvasSource}>(
+          'SELECT raw_value FROM source_item_versions WHERE source_item_id=$1',[source.id])).rows;
+        for (const version of prior) {
+          if (version.raw_value?.sourceType!=='planner') continue;
+          const old=canvasTaskReference(version.raw_value);
+          if ((version.raw_value.plannableType != null || version.raw_value.plannableId != null) && !old)
+            throw new Error('CANVAS_PLANNER_PRIOR_REFERENCE_UNVERIFIED');
+          if (old && (old.type!==reference.type || old.id!==reference.id))
+            throw new Error('CANVAS_PLANNER_TYPED_REFERENCE_MISMATCH');
+        }
+      }
       const version=await sourceVersion(client,{id:source.id,source:'canvas',scope:source.courseId,
         externalId:`${source.sourceType}:${source.sourceId}`,courseId:source.courseId,sourceUrl:source.sourceUrl,
         contentHash:provenance==='legacy_import'?`legacy:${hash}`:hash,raw,acquiredAt,remoteUpdatedAt:source.updatedAt});
+      // Historical reference backfill records provenance for a later reviewed merge.
+      // It must not run normal identity resolution or replace either legacy task's facts.
+      if (expectedExistingPlanner) return;
       const deterministic=['assignment','quiz'].includes(source.sourceType) || Boolean(source.dueAt);
       const aiActions=analysis?.actions||[];
       const baseAction={title:source.title,action:`完成并提交 ${source.title}`,requirements:[],

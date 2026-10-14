@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 
 process.env.CANVAS_BASE_URL = "https://canvas.example.test";
 process.env.CANVAS_TOKEN = "test-token";
-const { allPages, downloadCanvasFile, getCourseSources, setCanvasPlannerComplete, textFromHtml } = await import("../lib/canvas.ts");
+const { allPages, downloadCanvasFile, getCourseSources, getHistoricalPlannerSources,
+  setCanvasPlannerComplete, textFromHtml } = await import("../lib/canvas.ts");
 
 test('an optional Canvas endpoint failure marks the course scan incomplete',async()=>{
   const original=globalThis.fetch;
@@ -37,6 +38,46 @@ test('planner normalization retains the outer typed reference even without a URL
     assert.equal(planner?.plannableId,'42');
     assert.equal(planner?.sourceUrl,null);
   }finally{globalThis.fetch=original;}
+});
+
+test('historical planner fetch uses an old bounded window, follows pages and retries 429',async()=>{
+  const original=globalThis.fetch;
+  const calls:string[]=[];
+  globalThis.fetch=(async input=>{
+    const url=String(input);calls.push(url);
+    if(calls.length===1)return new Response('',{status:429,headers:{'retry-after':'0'}});
+    if(calls.length===2)return new Response(JSON.stringify([]),{status:200,
+      headers:{Link:'<https://canvas.example.test/api/v1/planner/items?page=2>; rel="next"'}});
+    return Response.json([{course_id:7,id:900,plannable_type:'assignment',plannable_id:42,
+      plannable:{id:42,title:'Old assignment',due_at:'2026-05-26'}}]);
+  }) as typeof fetch;
+  try{
+    const sources=await getHistoricalPlannerSources('7','2026-05-24','2026-06-01');
+    assert.equal(sources.length,1);
+    assert.equal(sources[0].id,'7:planner:42');
+    assert.equal(sources[0].plannerItemId,'900');
+    assert.equal(sources[0].plannerCourseId,'7');
+    assert.equal(sources[0].plannableType,'assignment');
+    assert.equal(sources[0].plannableId,'42');
+    assert.match(calls[0],/start_date=2026-05-24&end_date=2026-06-01/);
+    assert.equal(calls.length,3);
+  }finally{globalThis.fetch=original;}
+});
+
+test('historical planner rejects a partial second page and a conflicting course',async()=>{
+  const original=globalThis.fetch;
+  let page=0;
+  globalThis.fetch=(async()=>{
+    page++;
+    return page===1?new Response('[]',{headers:{Link:'<https://canvas.example.test/api/v1/planner/items?page=2>; rel="next"'}})
+      :new Response('',{status:403});
+  }) as typeof fetch;
+  try{await assert.rejects(getHistoricalPlannerSources('7','2026-05-24','2026-06-01'),/CANVAS_REQUEST_FAILED_403/);}
+  finally{globalThis.fetch=original;}
+  globalThis.fetch=(async()=>Response.json([{course_id:8,plannable_type:'assignment',
+    plannable_id:42,plannable:{id:42,title:'Wrong course'}}])) as typeof fetch;
+  try{await assert.rejects(getHistoricalPlannerSources('7','2026-05-24','2026-06-01'),/CANVAS_PLANNER_COURSE_MISMATCH/);}
+  finally{globalThis.fetch=original;}
 });
 
 test("Canvas pagination follows the next link and keeps bearer auth", async () => {

@@ -14,6 +14,7 @@
     "worker": "node --experimental-strip-types scripts/worker.ts",
     "kernel:migrate": "node --experimental-strip-types scripts/kernel-migrate.ts",
     "kernel:reconcile-canvas": "node --experimental-strip-types scripts/reconcile-canvas-tasks.ts",
+    "kernel:backfill-canvas-planner": "node --experimental-strip-types scripts/backfill-canvas-planner.ts",
     "kernel:review": "node --experimental-strip-types scripts/kernel-review.ts",
     "kernel:test": "node --experimental-strip-types --test tests/kernel-integration.test.ts",
     "backfill:mail-embeddings": "node --experimental-strip-types scripts/backfill-mail-embeddings.ts",
