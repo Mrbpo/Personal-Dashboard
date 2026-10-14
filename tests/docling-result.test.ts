@@ -24,10 +24,11 @@ test('reading order follows nested body refs, not text array order, with formula
     {text: 'Topic', start_row_offset_idx: 0, start_col_offset_idx: 1},
     {text: 'Week', start_row_offset_idx: 0, start_col_offset_idx: 0},
   ]}}];
-  const decoded = decodeDoclingResult(value, 2);
+  const decoded = decodeDoclingResult(value, 2, {formulaEnriched:true});
   assert.equal(decoded.pages[0].text, 'Introduction\n\n$$\nx^2 + y^2 = z^2\n$$');
   assert.equal(decoded.pages[1].text, '| Week | Topic |\n| Week 7 | Bayes theorem |\n\nStudy schedule\n\nConclusion');
   assert.deepEqual(decoded.pages.map(page => [page.pageNumber, page.locator]), [[1, '第 1 页'], [2, '第 2 页']]);
+  assert.ok(decoded.warnings.includes('第 1 页机器公式未核验符号和上下标，请核对原 PDF'));
 });
 
 test('successful manifest preserves a blank page without shifting later citations', () => {

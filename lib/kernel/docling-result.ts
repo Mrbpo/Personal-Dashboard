@@ -94,8 +94,12 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
 
   function noteFormula(node: Json): void {
     if(node.label!=='formula')return;
-    for(const location of provenance(node))formulaPageNumbers.add(location.page_no as number);
-    if(!text(node.text)&&text(node.orig))warnings.push(`第 ${provenance(node)[0].page_no} 页公式保留原始抽取文本；未验证 LaTeX、符号和上下标，请核对原 PDF`);
+    const locations=provenance(node);
+    for(const location of locations)formulaPageNumbers.add(location.page_no as number);
+    if(!text(node.text)&&text(node.orig))warnings.push(`第 ${locations[0].page_no} 页公式保留原始抽取文本；未验证 LaTeX、符号和上下标，请核对原 PDF`);
+    // Enrichment describes execution, not source fidelity. A nonempty model
+    // result (including valid-looking LaTeX) has not been checked against print.
+    else if(text(node.text))for(const location of locations)warnings.push(`第 ${location.page_no} 页机器公式未核验符号和上下标，请核对原 PDF`);
   }
 
   function cellText(cell: Json, ancestors: Set<string>, tablePages: Set<unknown>): string {
