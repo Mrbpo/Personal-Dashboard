@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   CalendarDays,
   Check,
-  Clock3,
   LayoutDashboard,
   Search,
   Cpu,
@@ -20,13 +19,12 @@ import {
   RefreshCw,
   Settings,
 } from "lucide-react";
-import { DueDayList } from '@/components/due-day-list';
 import { CourseAssistant } from "@/components/course-assistant";
 import { AiUsagePanel } from "@/components/ai-usage-panel";
 import { ShortcutPanel } from "@/components/shortcut-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
+import { addCalendarDays, calendarDay, dueWindow, formatTaskDeadline, taskDeadline } from '@/lib/due-window';
 import { conciseRequirement, conciseTaskAction } from "@/lib/task-presentation";
 import { presentCourse } from "@/lib/course-presentation";
 import {
@@ -104,21 +102,21 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
 
   useEffect(() => { void loadDashboard(); }, [loadDashboard]);
 
+  const asOf = Date.parse(data?.asOf || '1970-01-01T00:00:00Z');
+  const deadlineTasks = dueWindow<any>(data?.tasks || [], timezone, asOf);
+  const today = calendarDay(asOf, timezone);
+  const nearEnd = addCalendarDays(today, 7);
   const visibleCourses = data?.courses?.length
     ? data.courses.map((course: any, index: number) => ({
         ...course,
         displayCode: presentCourse(course.code, course.name).displayCode,
         shortName: presentCourse(course.code, course.name).courseTitle,
         color: ["#315e53", "#a25544", "#60756e", "#567386", "#a7833d"][index % 5],
-        count: data.tasks.filter((task: any) => task.courseId === course.id && task.localStatus === "active" && task.urgency !== "review" && !["completed", "locked", "not_open", "possibly_superseded"].includes(task.canvasStatus)).length,
-        weekCount: data.tasks.filter((task: any) => task.courseId === course.id && task.localStatus === "active" && task.canvasStatus !== "completed" && task.dueAt && new Date(task.dueAt).getTime() >= Date.now() && new Date(task.dueAt).getTime() <= Date.now() + 7 * 86400000).length,
+        count: deadlineTasks.filter((task: any) => task.courseId === course.id).length,
+        upcomingCount: deadlineTasks.filter((task: any) => task.courseId === course.id && !taskDeadline(task, timezone, asOf)!.overdue).length,
       }))
     : [];
-  const plannedTasks = data?.plan
-    ? [...(data.plan.mustDo || []), ...(data.plan.shouldDo || []), ...(data.plan.review || [])]
-    : (data?.tasks || []);
-  const visibleTasks = plannedTasks.length
-    ? [...new Map(plannedTasks.map((task: any) => [task.id, task])).values()].filter((task: any) => task.localStatus !== "ignored").slice(0, 12).map((task: any) => ({
+  const visibleTasks = deadlineTasks.map((task: any) => ({
         id: task.id,
         course: presentCourse(task.courseCode || "", task.courseName || task.courseCode || "").displayCode,
         title: conciseTaskAction(task),
@@ -127,39 +125,26 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
         action: task.action,
         requirements: task.requirements || [],
         evidence: task.evidence,
-        due: task.dueAt ? new Date(task.dueAt).toLocaleString("zh-CN", { timeZone: timezone, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "需要确认",
-        tone: task.urgency,
+        due: formatTaskDeadline(task, timezone),
+        tone: taskDeadline(task, timezone, asOf)!.overdue ? 'overdue' : taskDeadline(task, timezone, asOf)!.day < nearEnd ? 'soon' : 'future',
         source: sourceLabels[task.sourceType] || task.sourceType,
         sourceUrl: task.sourceUrl,
         confidence: task.confidence === "certain" ? "确定" : (task.analysisStatus === "complete" ? "AI 推断" : "规则推断"),
         localStatus: task.localStatus,
         canvasStatus: task.canvasStatus,
         prerequisiteBlocked: task.prerequisiteBlocked,
-        estimatedMinutes: task.estimatedMinutes,
         updatedAt: task.updatedAt,
-      }))
-    : [];
-  const estimatedMinutes = data?.plan?.scheduledMinutes ?? visibleTasks
-    .filter((task: any) => task.tone !== "review" && !(completed.includes(task.id) || task.localStatus === "completed"))
-    .reduce((total: number, task: any) => total + (task.estimatedMinutes || 45), 0);
-  const loadPercent = Math.min(100, Math.round((estimatedMinutes / (data?.settings?.dailyMinutes || 150)) * 100));
-  const urgentCount = visibleTasks.filter((task: any) => task.tone === "urgent").length;
-  const reviewCount = visibleTasks.filter((task: any) => task.tone === "review").length;
+      }));
   const meaningfulChangeTypes = new Set(["dates_updated", "source_missing", "restored", "attachment_updated", "prerequisite_updated"]);
   const recentChanges = data?.changes?.length ? data.changes.filter((change: any) => meaningfulChangeTypes.has(change.type)).slice(0, 3) : [];
-  const scheduledCount = (data?.plan?.mustDo?.length || 0) + (data?.plan?.shouldDo?.length || 0);
-  const mustMinutes = visibleTasks.filter((task: any) => ["urgent", "soon"].includes(task.tone) && task.localStatus !== "completed").reduce((sum: number, task: any) => sum + (task.estimatedMinutes || 45), 0);
-  const advanceMinutes = visibleTasks.filter((task: any) => task.tone === "upcoming" && task.localStatus !== "completed").reduce((sum: number, task: any) => sum + (task.estimatedMinutes || 45), 0);
-  const remainingCapacity = Math.max(0, (data?.settings?.dailyMinutes || 150) - estimatedMinutes);
-  const overdueCount = (data?.tasks || []).filter((task: any) => task.localStatus === "active" && task.canvasStatus === "overdue_open").length;
-  const nextCount = (data?.tasks || []).filter((task: any) => task.localStatus === "active" && (task.prerequisiteBlocked || ["locked", "not_open"].includes(task.canvasStatus))).length;
-  const nextDeadline = visibleTasks.filter((task: any) => task.tone !== "review" && task.due !== "需要确认" && task.localStatus !== "completed")[0];
-  const loadAssessment = loadPercent > 100 ? "已超出今日容量，先保截止任务" : loadPercent >= 80 ? "负荷偏满，暂缓新增任务" : loadPercent >= 50 ? "负荷适中，仍可安排推进" : "负荷较轻，可提前推进";
-  const coursesDueSoon = visibleCourses.filter((course: any) => course.weekCount > 0).sort((a: any, b: any) => b.weekCount - a.weekCount).slice(0, 8);
+  const overdueCount = visibleTasks.filter((task: any) => task.tone === 'overdue').length;
+  const nextCount = visibleTasks.filter((task: any) => task.prerequisiteBlocked || ['locked', 'not_open'].includes(task.canvasStatus)).length;
+  const nextDeadline = visibleTasks.find((task: any) => task.tone !== 'overdue');
+  const coursesDueSoon = visibleCourses.filter((course: any) => course.upcomingCount > 0).sort((a: any, b: any) => b.upcomingCount - a.upcomingCount).slice(0, 8);
   const taskGroups = [
-    { key: "must", title: "必须完成", note: "截止时间或提交状态明确", tasks: visibleTasks.filter((task: any) => ["urgent", "soon"].includes(task.tone)) },
-    { key: "advance", title: "建议推进", note: "按优先分数排入今天容量", tasks: visibleTasks.filter((task: any) => task.tone === "upcoming") },
-    { key: "review", title: "需要确认", note: "日期不明确、已锁定或长期逾期", tasks: visibleTasks.filter((task: any) => task.tone === "review") },
+    { key: 'must', title: '未完成的逾期作业', note: '保留最后确认的截止日期与当前状态', tasks: visibleTasks.filter((task: any) => task.tone === 'overdue') },
+    { key: 'advance', title: '近期截止', note: '今天起 7 个日历日内', tasks: visibleTasks.filter((task: any) => task.tone === 'soon') },
+    { key: 'review', title: '未来截止', note: '第 8 至第 16 个日历日内，尚未开放的作业也保留', tasks: visibleTasks.filter((task: any) => task.tone === 'future') },
   ];
 
   async function previewSync() {
@@ -176,8 +161,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
         const courseResponse = await fetch("/api/sync/courses/" + course.id + "?runId=" + start.runId, { method: "POST" });
         if (!courseResponse.ok) failedCourses.push(course.code);
       }
-      setSyncMessage("正在生成今日计划…");
-      await fetch("/api/plans/" + date + "/generate", { method: "POST" });
+      setSyncMessage("正在更新截止作业…");
       await loadDashboard();
       setSyncMessage(failedCourses.length ? "同步完成；" + failedCourses.join("、") + " 暂时失败" : "同步完成");
     } catch (error) {
@@ -224,8 +208,8 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
         <main className="w-full px-3 py-4 sm:px-5 md:px-7 md:py-5 2xl:px-[clamp(2rem,3vw,6rem)]">
           <section className="grand-overview mb-5">
             <div className="relative z-10 grid gap-4 px-4 py-4 md:grid-cols-[minmax(0,1fr)_minmax(28rem,.8fr)] md:items-center md:px-6">
-              <div><div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className="border-[#b79e66] bg-black/10 text-[#e5d8b8]">{!loaded ? "读取中" : data?.courses?.length ? (data.lastSync?.status === "complete" ? "Canvas 已同步" : "Canvas 准备就绪") : "等待首次同步"}</Badge>{data?.aiAvailable === false && <Badge variant="outline" className="border-amber-300/35 text-amber-100">AI 未配置</Badge>}</div><h1 className="mt-2 text-2xl font-semibold text-[#fff8e8] sm:text-3xl">{displayName} 的今日简报</h1><p className="mt-1 text-sm text-white/62">优先 {visibleTasks.filter((task: any) => ["urgent", "soon"].includes(task.tone)).length} 项 · 待核对 {reviewCount} 项 · 可用课程 {visibleCourses.length} 门</p></div>
-              <div className="overview-ledger grid grid-cols-2 divide-x divide-y md:grid-cols-4 md:divide-y-0"><div><b>{nextDeadline?.due || "—"}</b><span>下一截止</span></div><div><b>{estimatedMinutes}m</b><span>今日投入</span></div><div><b>{overdueCount}</b><span>逾期可交</span></div><div><b>{visibleTasks.filter((task: any) => completed.includes(task.id) || task.localStatus === "completed").length}</b><span>今日完成</span></div></div>
+              <div><div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className="border-[#b79e66] bg-black/10 text-[#e5d8b8]">{!loaded ? "读取中" : data?.courses?.length ? (data.lastSync?.status === "complete" ? "Canvas 已同步" : "Canvas 准备就绪") : "等待首次同步"}</Badge></div><h1 className="mt-2 text-2xl font-semibold text-[#fff8e8] sm:text-3xl">{displayName} 的今日简报</h1><p className="mt-1 text-sm text-white/62">逾期 {overdueCount} 项 · 未来 16 天 {visibleTasks.length - overdueCount} 项 · 可用课程 {visibleCourses.length} 门</p></div>
+              <div className="overview-ledger grid grid-cols-2 divide-x divide-y md:grid-cols-4 md:divide-y-0"><div><b>{nextDeadline?.due || "—"}</b><span>下一截止</span></div><div><b>{visibleTasks.length}</b><span>未完成作业</span></div><div><b>{overdueCount}</b><span>已逾期</span></div><div><b>{nextCount}</b><span>当前受限</span></div></div>
             </div>
           </section>
 
@@ -236,19 +220,19 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
           <div id="learning" className="grid scroll-mt-20 grid-cols-[minmax(0,1fr)] items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(330px,24%)]">
             <section className="min-w-0 space-y-4" aria-labelledby="must-do-title">
               <div className="ornate-section-heading flex items-center justify-between">
-                <div><p className="section-kicker">ACTION QUEUE</p><h2 id="must-do-title" className="text-xl font-semibold">现在要做</h2></div>
-                <span className="text-sm text-muted-foreground">{visibleTasks.filter((task: any) => completed.includes(task.id) || task.localStatus === "completed").length}/{visibleTasks.length} 完成</span>
+                <div><p className="section-kicker">DUE ASSIGNMENTS</p><h2 id="must-do-title" className="text-xl font-semibold">截止作业</h2></div>
+                <span className="text-sm text-muted-foreground">{visibleTasks.length} 项未完成</span>
               </div>
               <div className="status-ledger-frame grid gap-px rounded-2xl border bg-border sm:grid-cols-3">
                 <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">下一个截止</p><p className="mt-1 truncate text-sm font-semibold">{nextDeadline ? `${nextDeadline.course} · ${nextDeadline.due}` : "暂无确定截止"}</p></div>
-                <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">今日投入</p><p className="mt-1 text-sm font-semibold">{estimatedMinutes} 分钟 · {scheduledCount} 项</p></div>
+                <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">日期范围</p><p className="mt-1 text-sm font-semibold">今天起 16 个日历日 · 另含未完成逾期</p></div>
                 <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">阻塞与逾期</p><p className={`mt-1 text-sm font-semibold ${overdueCount + nextCount ? "text-amber-700" : "text-emerald-700"}`}>{overdueCount} 项逾期 · {nextCount} 项受限</p></div>
               </div>
-              {taskGroups.map((group) => group.tasks.length ? <details key={group.key} open={group.key !== "review"} className={`group/list ledger-group ledger-${group.key} min-w-0 overflow-hidden border bg-card`}><summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5"><div><h3 className="text-sm font-semibold after:ml-1 after:text-primary after:content-['＋'] group-open/list:after:content-['－']">{group.title}</h3><p className="mt-0.5 text-xs text-muted-foreground">{group.note}</p></div><Badge variant="secondary">{group.tasks.length} 项</Badge></summary><div className="divide-y">{group.tasks.map((task: any) => {
+              {taskGroups.map((group) => group.tasks.length ? <details key={group.key} open className={`group/list ledger-group ledger-${group.key} min-w-0 overflow-hidden border bg-card`}><summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5"><div><h3 className="text-sm font-semibold after:ml-1 after:text-primary after:content-['＋'] group-open/list:after:content-['－']">{group.title}</h3><p className="mt-0.5 text-xs text-muted-foreground">{group.note}</p></div><Badge variant="secondary">{group.tasks.length} 项</Badge></summary><div className="divide-y">{group.tasks.map((task: any) => {
                 const done = completed.includes(task.id) || task.localStatus === "completed";
-                const reason = task.canvasStatus === "overdue_open" ? "已逾期，仍可提交" : task.prerequisiteBlocked ? "被先修条件阻塞" : task.tone === "urgent" ? "今天必须处理" : task.tone === "soon" ? "截止时间接近" : task.tone === "review" ? "信息需要确认" : "可提前推进";
+                const reason = task.prerequisiteBlocked ? '当前受先修条件限制' : task.canvasStatus === 'locked' ? '当前已锁定' : task.canvasStatus === 'not_open' ? '尚未开放' : ['needs_review', 'possibly_superseded'].includes(task.canvasStatus) ? '状态待确认' : task.tone === 'overdue' ? '已逾期，尚未完成' : task.tone === 'soon' ? '近期截止' : '未来截止';
                 return (
-                  <article key={task.id} className={`flex min-w-0 gap-3 border-l-4 p-4 ${task.tone === "urgent" ? "border-l-rose-500" : task.tone === "soon" ? "border-l-amber-400" : task.tone === "review" ? "border-l-sky-400" : "border-l-emerald-400"} ${done ? "opacity-55" : ""}`}>
+                  <article key={task.id} className={`flex min-w-0 gap-3 border-l-4 p-4 ${task.tone === 'overdue' ? 'border-l-rose-500' : task.tone === 'soon' ? 'border-l-amber-400' : 'border-l-sky-400'} ${done ? 'opacity-55' : ''}`}>
                     <button
                       className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-full border-2 border-muted-foreground/45 text-primary transition hover:scale-105 hover:border-primary"
                       aria-label={done ? "恢复 " + task.title : "完成 " + task.title}
@@ -257,7 +241,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><Badge variant="secondary" className="max-w-40 truncate">{task.course}</Badge><span className="text-xs font-medium text-muted-foreground">{reason}</span></div><h3 className={`mt-1.5 text-[15px] font-semibold leading-5 ${done ? "line-through" : ""}`}>{task.title}</h3></div>
-                        <div className="flex shrink-0 items-center gap-2 text-xs sm:flex-col sm:items-end sm:gap-1"><span className="font-semibold text-foreground">{task.due}</span><span className="text-muted-foreground">约 {task.estimatedMinutes || 45} 分钟</span></div>
+                        <div className="flex shrink-0 items-center gap-2 text-xs sm:flex-col sm:items-end sm:gap-1"><span className="font-semibold text-foreground">{task.due}</span></div>
                       </div>
                       <p className="mt-1.5 truncate text-xs text-muted-foreground">{task.detail}</p>
                       <details className="group mt-2 text-xs text-muted-foreground">
@@ -274,31 +258,17 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
                   </article>
                 );
               })}</div></details> : null)}
-              {loaded && visibleTasks.length === 0 && visibleCourses.length > 0 && <div className="rounded-3xl border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">当前没有未忽略的任务。你可以进入课程页查看所有已读取内容。</div>}
-              {loaded && !loadError && <DueDayList tasks={data?.tasks || []} timezone={timezone} />}
+              {loaded && visibleTasks.length === 0 && visibleCourses.length > 0 && <div className="rounded-3xl border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">没有未完成的逾期作业或未来 16 天内的明确截止作业。</div>}
               <AiUsagePanel />
             </section>
 
             <aside className="space-y-5">
-              <section className="instrument-panel instrument-burgundy p-5">
-                <div className="relative flex items-center justify-between border-b border-[#bca064]/30 pb-3"><div><p className="text-[10px] font-semibold uppercase tracking-[.17em] text-[#c6aa6b]">DAILY CAPACITY</p><h2 className="mt-0.5 text-lg font-semibold">学习负荷</h2></div><Clock3 className="size-4 text-[#d2b978]" /></div>
-                <div className="relative mt-4 flex items-end justify-between"><div><span className="text-3xl font-semibold">{Math.floor(estimatedMinutes / 60)}h {estimatedMinutes % 60}m</span><p className="mt-1 text-xs text-white/55">容量 {data?.settings?.dailyMinutes || 150} 分钟</p></div><span className="border border-white/15 bg-black/10 px-2 py-1 text-xs text-[#dbc487]">{loadPercent}%</span></div>
-                <Progress value={loadPercent} className="relative mt-3 h-1.5 bg-black/25 [&>div]:bg-[#bda15f]" />
-                <p className="relative mt-3 text-sm font-medium text-[#ece4d2]">{loadAssessment}</p>
-                <div className="mt-5 space-y-2.5 text-xs">
-                  <div className="flex items-center justify-between"><span className="text-white/55">保截止任务</span><span className="font-semibold">{mustMinutes} 分钟</span></div>
-                  <div className="flex items-center justify-between"><span className="text-white/55">提前推进</span><span className="font-semibold">{advanceMinutes} 分钟</span></div>
-                  <div className="flex items-center justify-between border-t border-white/10 pt-2.5"><span className="text-white/55">尚可安排</span><span className="font-semibold text-emerald-300">{remainingCapacity} 分钟</span></div>
-                </div>
-                <div className="relative mt-4 grid grid-cols-3 divide-x divide-white/10 border border-white/10 bg-black/10 py-2.5 text-center text-xs text-white/55"><div><b className="block text-base text-white">{urgentCount}</b>紧急</div><div><b className="block text-base text-white">{overdueCount}</b>逾期可交</div><div><b className="block text-base text-white">{reviewCount}</b>待确认</div></div>
-              </section>
-
               <section className="parchment-panel p-5">
                 <div className="flex items-center gap-2 border-b border-[#b8a77f] pb-3"><AlertTriangle className="size-4 text-[#9a533d]" /><div><p className="font-semibold">最近变更</p><p className="text-xs text-muted-foreground">{data?.lastSync ? "同步于 " + new Date(data.lastSync.finishedAt || data.lastSync.startedAt).toLocaleString("zh-CN", { timeZone: timezone }) : "上次检查：尚未同步"}</p></div></div>
                 <div className="mt-5 space-y-4">
                   {recentChanges.map((change: any) => (
                     <div key={change.id} className={`border-l-2 ${change.type === "dates_updated" ? "border-rose-400" : change.type === "source_missing" ? "border-amber-400" : "border-sky-400"} pl-4`}>
-                      <p className="text-xs font-semibold text-muted-foreground">{change.courseCode} · {changeLabels[change.type] || "影响计划的变化"}</p>
+                      <p className="text-xs font-semibold text-muted-foreground">{change.courseCode} · {changeLabels[change.type] || "任务状态变化"}</p>
                       <p className="mt-1 text-sm font-medium leading-5">{change.title}</p>
                     </div>
                   ))}
@@ -308,16 +278,16 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
               </section>
 
               <section className="rounded-3xl border bg-card p-6 shadow-sm">
-                <div className="flex items-center gap-2"><CalendarDays className="size-4 text-primary" /><h2 className="font-semibold">未来 7 天</h2></div>
+                <div className="flex items-center gap-2"><CalendarDays className="size-4 text-primary" /><h2 className="font-semibold">未来 16 天</h2></div>
                 <div className="mt-5 space-y-4">
                   {coursesDueSoon.map((course: any, index: number) => (
                     <Link href={"/courses/" + course.id} key={course.id} className="group flex items-center gap-3">
                       <span className="course-tile size-9" style={{ backgroundColor: course.color }}><b className="text-xs text-white drop-shadow">{index + 1}</b></span>
                       <div className="min-w-0 flex-1"><p className="text-sm font-medium">{course.displayCode}</p><p className="truncate text-xs text-muted-foreground">{course.shortName}</p></div>
-                      <span className="text-sm font-semibold">{course.weekCount}</span>
+                      <span className="text-sm font-semibold">{course.upcomingCount}</span>
                     </Link>
                   ))}
-                  {coursesDueSoon.length === 0 && <p className="text-sm text-muted-foreground">未来 7 天没有确定截止事项。</p>}
+                  {coursesDueSoon.length === 0 && <p className="text-sm text-muted-foreground">未来 16 天没有确定截止事项。</p>}
                 </div>
               </section>
               <ShortcutPanel />

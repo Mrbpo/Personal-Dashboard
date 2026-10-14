@@ -3,6 +3,7 @@ import { classifyCanvasStatus, priorityScore, statusLabels, urgencyForStatus, ur
 import { database, searchIndexAvailable } from "./database.ts";
 import { activitySearchAliases, ftsMatchTerms } from "./search-vocabulary.ts";
 import { kernel } from './kernel/service.ts';
+import { dueWindow } from './due-window.ts';
 export { hashSource } from './canvas-source-hash.ts';
 
 type D1Row = Record<string, any>;
@@ -161,7 +162,7 @@ function deduplicateTasks(tasks: LearningTask[]) {
       continue;
     }
     const normalizedTitle = task.title.toLocaleLowerCase().replace(/\s+/g, " ").trim();
-    const key = `${task.courseId}|${normalizedTitle}|${task.dueAt || "no-date"}`;
+    const key = `${task.courseId}|${normalizedTitle}|${task.duePrecision==='date'?task.dueDate:task.dueAt || "no-date"}`;
     const current = selected.get(key);
     if (!current || (sourceRank[task.sourceType] ?? 99) < (sourceRank[current.sourceType] ?? 99)) selected.set(key, task);
   }
@@ -194,14 +195,14 @@ function rowToTask(row: D1Row, timezone='America/Toronto'): LearningTask {
     duePrecision:row.due_precision??null,dueTimezone:row.due_timezone??null,
     dueLocalTime:row.due_local_time??null,dueOriginal:row.due_original??null,
     unlockAt: row.unlock_at, lockAt: row.lock_at,
-    canvasStatus: liveStatus, localStatus: row.local_status,
+    canvasStatus: liveStatus, localStatus: row.local_status, cancelledAt: row.cancelled_at ?? null,
     urgency: row.due_precision==='date'?urgencyForStatus(liveStatus):urgencyForTask(liveStatus, row.due_at), confidence: row.confidence, analysisStatus: row.analysis_status, evidence: row.evidence,
     estimatedMinutes: row.estimated_minutes, pointsPossible: row.points_possible,
     prerequisiteBlocked: Boolean(row.prerequisite_blocked), priorityScore: score, updatedAt: row.updated_at,
   };
 }
 
-export async function dashboardData(date: string) {
+export async function dashboardData(date: string, timezone = 'America/Toronto', now = Date.now()) {
   const db = getDatabase();
   const [tasks, courseRows, changeRows, syncRow] = await Promise.all([
     listTasks(),
@@ -211,54 +212,14 @@ export async function dashboardData(date: string) {
       ORDER BY detected_at DESC LIMIT 8`).all<D1Row>(),
     db.prepare("SELECT * FROM sync_runs ORDER BY started_at DESC LIMIT 1").first<D1Row>(),
   ]);
-  const plan = await db.prepare("SELECT * FROM daily_plans WHERE date=?").bind(date).first<D1Row>();
   return {
     date,
-    tasks,
+    asOf: new Date(now).toISOString(),
+    tasks: dueWindow(tasks, timezone, now),
     courses: courseRows.filter(row=>row.enabled).map((row) => ({ id: row.id, code: row.code, name: row.name, syncedAt: row.synced_at })),
     changes: changeRows.results.map((row) => ({ id: row.id, courseId: row.course_id, courseCode: courseRows.find(c=>c.id===row.course_id)?.code||'', title: row.title, type: row.change_type, detectedAt: row.detected_at })),
     lastSync: syncRow ? { id: syncRow.id, status: syncRow.status, startedAt: syncRow.started_at, finishedAt: syncRow.finished_at } : null,
-    plan: plan ? JSON.parse(plan.plan_json) : null,
-    aiAvailable: plan ? Boolean(plan.ai_available) : null,
   };
-}
-
-export async function saveDailyPlan(date: string, tasks: LearningTask[], aiAvailable: boolean, dailyMinutes = 150) {
-  const sourceVersion = "v3|" + dailyMinutes + "|" + tasks.map((task) => task.id + ":" + task.updatedAt + ":" + task.localStatus).join("|");
-  const now = new Date().toISOString();
-  let remaining = dailyMinutes;
-  const uniqueTasks = deduplicateTasks(tasks);
-  const actionable = uniqueTasks.filter((task) => task.localStatus === "active" && task.urgency !== "review" && !["completed", "locked", "not_open", "possibly_superseded"].includes(task.canvasStatus));
-  const scheduled: LearningTask[] = [];
-  for (const task of actionable) {
-    const estimate = task.estimatedMinutes || 45;
-    const oldOverdue = task.canvasStatus === "overdue_open" && task.dueAt && (Date.now() - new Date(task.dueAt).getTime()) > 14 * 86400000;
-    if (!oldOverdue && scheduled.length < 8 && estimate <= remaining) { scheduled.push(task); remaining -= estimate; }
-  }
-  const plan = {
-    mustDo: scheduled.filter((task) => ["urgent", "soon"].includes(task.urgency)),
-    shouldDo: scheduled.filter((task) => task.urgency === "upcoming"),
-    review: uniqueTasks.filter((task) => task.localStatus === "active" && task.urgency === "review").slice(0, 8),
-    capacityMinutes: dailyMinutes,
-    scheduledMinutes: scheduled.reduce((sum, task) => sum + (task.estimatedMinutes || 45), 0),
-    backlogCount: Math.max(0, actionable.length - scheduled.length),
-    generatedAt: now,
-  };
-  await getDatabase().prepare(
-    `INSERT INTO daily_plans (date, plan_json, source_version, ai_available, generated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(date) DO UPDATE SET plan_json=excluded.plan_json, source_version=excluded.source_version,
-       ai_available=excluded.ai_available, generated_at=excluded.generated_at`
-  ).bind(date, JSON.stringify(plan), sourceVersion, aiAvailable ? 1 : 0, now).run();
-  return plan;
-}
-
-export async function ensureDailyPlan(date: string, aiAvailable: boolean, dailyMinutes = 150) {
-  const tasks = await listTasks();
-  const sourceVersion = "v3|" + dailyMinutes + "|" + tasks.map((task) => task.id + ":" + task.updatedAt + ":" + task.localStatus).join("|");
-  const cached = await getDatabase().prepare("SELECT source_version, plan_json FROM daily_plans WHERE date=?").bind(date).first<D1Row>();
-  if (cached?.source_version === sourceVersion) return JSON.parse(cached.plan_json);
-  return saveDailyPlan(date, tasks, aiAvailable, dailyMinutes);
 }
 
 export async function setTaskStatus(taskId: string, status: "active" | "completed" | "ignored", syncCanvas=false) {
