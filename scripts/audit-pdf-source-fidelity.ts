@@ -1,0 +1,12 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {auditPdfSourceFidelity,stagePdfSourceFidelity,type PdfSourceMathEvidence} from '../lib/pdf-source-fidelity.ts';
+const args=process.argv.slice(2);
+const value=(name:string)=>{const index=args.indexOf(name);return index<0?undefined:args[index+1];};
+const original=value('--original'),evidence=value('--evidence'),text=value('--text'),report=value('--report');
+if(!original||!evidence||!text||!report||args.includes('--apply'))throw new Error('Audit only: --original PDF --evidence JSON --text UTF8 --report JSON; no apply');
+const bytes=await readFile(original),proof=JSON.parse(await readFile(evidence,'utf8')) as PdfSourceMathEvidence,raw=await readFile(text,'utf8');
+const result=await auditPdfSourceFidelity(bytes,proof,raw);
+await writeFile(report,JSON.stringify(result,null,2)+'\n');
+const staging=value('--stage');
+if(staging)await writeFile(staging,JSON.stringify(await stagePdfSourceFidelity(bytes,proof,raw),null,2)+'\n');
+console.log(JSON.stringify({mode:result.mode,page:result.pageNumber,requiresReview:result.requiresReview,sourceSha256:result.sourceSha256}));
