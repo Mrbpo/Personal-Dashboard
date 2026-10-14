@@ -1,10 +1,11 @@
 import {createHash} from 'node:crypto';
+import type {ASRProvenance} from './recording-caption-import.ts';
 
 export type TranscriptCue={startMs:number;endMs:number;text:string};
 export type RecordingTranscript={ownerId:string;courseId?:string;partnerId:string;entryId:string;
   captionId:string;language:string;title:string;sourceUrl:string;subtitleHash:string;canvasCourseId?:string;
   acquiredAt:string;publishedAt?:string;method:'platform-caption'|'local-asr';
-  model?:string;cues:TranscriptCue[]};
+  model?:string;asr?:ASRProvenance;cues:TranscriptCue[]};
 
 function timestamp(value:string):number {
   const match=/^(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})$/.exec(value);
@@ -88,6 +89,7 @@ export function prepareRecordingTranscript(input:RecordingTranscript){
       text:cue.text,contentKind:'time_segment' as const,startMs:cue.startMs,endMs:cue.endMs})),
     options:{parserVersion:'recording-subtitle-v1',extractionMethod:input.method,evidenceConfidence:input.method==='platform-caption'?0.8:0.6,
       recording:{partnerId:input.partnerId,entryId:input.entryId,captionId:input.captionId,language:input.language,
-        sourceUrl:input.sourceUrl,canvasCourseId:input.canvasCourseId||null,method:input.method,model:input.model||null,publishedAt:input.publishedAt||null}},
+        sourceUrl:input.sourceUrl,canvasCourseId:input.canvasCourseId||null,method:input.method,model:input.model||null,publishedAt:input.publishedAt||null,
+        ...(input.asr?{asr:input.asr}:{})}},
   };
 }

@@ -1,2 +1,2 @@
 # Optional local transcription; install separately only if platform captions are absent.
-faster-whisper>=1.2,<2
+faster-whisper==1.2.1
