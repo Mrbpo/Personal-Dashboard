@@ -42,7 +42,7 @@ function TaskRow({ task, timezone }: { task: LearningTask; timezone: string }) {
         <h3 className="mt-4 break-words text-base font-semibold [overflow-wrap:anywhere]">{task.title}</h3>
         {task.action && <p className="mt-2 text-sm leading-6 text-muted-foreground">{task.action}</p>}
         {task.requirements.length > 0 && <div className="mt-4"><p className="text-sm font-semibold">具体要求</p><ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm leading-6 text-muted-foreground">{task.requirements.map((item) => <li key={item}>{item}</li>)}</ul></div>}
-        <div className="mt-4 grid gap-2 border border-[#c1b69d] bg-muted/60 p-3 text-sm sm:grid-cols-3"><span>建议开始：{formatDate(task.startAt, timezone)}</span><span>截止：{formatDate(task.dueAt, timezone)}</span><span>关闭：{formatDate(task.lockAt, timezone)}</span></div>
+        <div className="mt-4 grid gap-2 border border-[#c1b69d] bg-muted/60 p-3 text-sm sm:grid-cols-2"><span>截止：{formatDate(task.dueAt, timezone)}</span><span>关闭：{formatDate(task.lockAt, timezone)}</span></div>
         {task.evidence && <blockquote className="mt-4 border-l-2 border-primary/30 pl-3 text-sm leading-6 text-muted-foreground">分析依据：{task.evidence}</blockquote>}
         <div className="mt-4 flex flex-wrap items-center gap-3">{task.sourceUrl && <a className="text-sm font-medium text-primary hover:underline" href={task.sourceUrl} target="_blank" rel="noreferrer">打开 Canvas 原文</a>}{task.localStatus === "completed" && <TaskStatusButton taskId={task.id} />}</div>
         {task.analysisStatus==='complete'&&task.confidence!=='certain'&&<MiniAiFeedback sourceType="course-analysis" sourceId={task.id} metadata={{courseId:task.courseId}}/>}

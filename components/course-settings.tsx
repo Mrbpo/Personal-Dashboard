@@ -18,7 +18,7 @@ export function CourseSettings({ initial }: { initial: Course[] }) {
     if (!response.ok) setCourses((items) => items.map((item) => item.id === course.id ? course : item));
   }
 
-  if (!courses.length) return <p className="text-sm text-muted-foreground">首次同步后，可在这里选择要纳入每日计划的课程。</p>;
+  if (!courses.length) return <p className="text-sm text-muted-foreground">首次同步后，可在这里选择要显示的课程。</p>;
   return (
     <div className="space-y-3">
       {courses.map((course) => (
