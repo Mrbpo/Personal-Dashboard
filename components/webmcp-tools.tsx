@@ -28,9 +28,9 @@ export function WebMcpTools() {
     };
 
     register({
-      name: "get_today_plan",
-      title: "读取今日学习计划",
-      description: "读取网站中今天的跨课程学习任务、紧急事项和需要确认的内容。",
+      name: "get_due_assignments",
+      title: "读取近期截止作业",
+      description: "读取未完成的逾期作业和今天起未来16个日历日内截止的作业。",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, untrustedContentHint: true },
       execute: async () => jsonOrThrow(await fetch("/api/dashboard?date=" + await todayForSettings())),
@@ -57,7 +57,7 @@ export function WebMcpTools() {
     register({
       name: "sync_canvas",
       title: "同步 Canvas",
-      description: "从 Quercus 读取所有当前课程并逐门分析，然后更新今日计划。",
+      description: "从 Quercus 读取所有当前课程并逐门分析，更新课程及作业状态。",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute: async () => {
@@ -67,7 +67,6 @@ export function WebMcpTools() {
           const response = await fetch("/api/sync/courses/" + course.id + "?runId=" + start.runId, { method: "POST" });
           results.push(await response.json());
         }
-        await jsonOrThrow(await fetch("/api/plans/" + await todayForSettings() + "/generate", { method: "POST" }));
         window.dispatchEvent(new Event("canvas-sync-complete"));
         return { runId: start.runId, courses: results };
       },
