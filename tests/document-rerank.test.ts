@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import type {Pool} from 'pg';
 import type {DocumentTextHit} from '../lib/kernel/document-search.ts';
+import {selectSupportedHybridDocumentPages} from '../lib/kernel/document-search.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,validateDocumentPageOrder,validateDocumentPageSelection,
  DOCUMENT_RERANK_CANDIDATE_LIMIT,DOCUMENT_RERANK_SELECTION_PROMPT_VERSION,withDocumentRerankRunPolicy} from '../lib/kernel/document-rerank.ts';
 
@@ -54,6 +55,28 @@ class Fixture {
   }};
  }
 }
+
+test('hybrid rescues an omitted strong lexical page from its validated tail without foreign or stale evidence',async()=>{
+ const fixture=new Fixture(),hits=[...fixture.hits('owner'),...fixture.hits('owner-middle'),...fixture.hits('owner-last')];
+ for(const page of fixture.pages)page.owner='owner';
+ const supported={...hits[5],lexical_support:.9},foreign={...supported,document_id:'foreign-document'};
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({orderedIds:['p0','p1','p2','p3','p4']})});};
+ try{
+  const result=await selectSupportedHybridDocumentPages(fixture.pool(),'owner','direct lexical support',
+   [foreign,{...supported,source_version_id:'old-source'},supported],hits,240);
+  assert.equal(result.length,5,'a large library limit must not expose the candidate tail');
+  assert.deepEqual(result.slice(0,4).map(hit=>hit.id),hits.slice(0,4).map(hit=>hit.id));
+  assert.equal(result[4].evidence_id,supported.evidence_id);
+  assert.equal(result[4].source_version_id,supported.source_version_id);
+  assert.equal(result[4].body,supported.body);
+  assert.equal(calls,1);
+  await assert.rejects(selectSupportedHybridDocumentPages(fixture.pool(),'foreign-owner','direct lexical support',[supported],hits,240),/owner scope/);
+  await assert.rejects(selectSupportedHybridDocumentPages(fixture.pool(),'owner','direct lexical support',[supported],
+   [...hits.slice(0,5),{...supported,source_version_id:'old-source'}],240),/stale/);
+  assert.equal(calls,1,'foreign or stale tail candidates are rejected before model selection');
+ }finally{globalThis.fetch=original;}
+});
 
 test('internal one-run policy raises only its daily scope and journals a single paid attempt without repairs',async()=>{
  const {database}=await import('../lib/database.ts'),{budgetMonth}=await import('../lib/ai-budget.ts');
