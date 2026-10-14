@@ -48,13 +48,14 @@ export async function hasRunningIngestionJob(kind:string):Promise<boolean>{
     `SELECT 1 FROM ingestion_jobs WHERE kind=$1 AND state='running' AND lease_until>now() LIMIT 1`,[kind])).rowCount===1;
 }
 
-export async function claimIngestionJob(jobId?:string): Promise<IngestionJob | null> {
+export async function claimIngestionJob(jobId?:string,excludeKinds:string[]=[]): Promise<IngestionJob | null> {
   return kernelTransaction(async client => {
     const result = await client.query<IngestionJob>(
       `SELECT id,kind,source,scope,payload,attempts FROM ingestion_jobs
        WHERE ((state='queued' AND available_at<=now()) OR (state='running' AND lease_until<now()))
          AND ($1::text IS NULL OR id=$1)
-       ORDER BY available_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[jobId??null]);
+         AND NOT(kind=ANY($2::text[]))
+       ORDER BY available_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`,[jobId??null,excludeKinds]);
     const job = result.rows[0];
     if (!job) return null;
     const token = randomUUID();
@@ -66,6 +67,24 @@ export async function claimIngestionJob(jobId?:string): Promise<IngestionJob | n
        ON CONFLICT(source,scope) DO UPDATE SET last_started_at=now(),state='running'`,
       [job.source,job.scope]);
     return { ...job, attempts: job.attempts + 1, lease_token: token };
+  });
+}
+
+/** The refused provider request was not attempted. Preserve earlier completed checkpoints and prior failures,
+ * release this lease and undo only this claim's attempt increment. */
+export async function deferIngestionJob(id:string,token:string,retryAt:Date,reason:string):Promise<boolean>{
+  if(!Number.isFinite(retryAt.getTime()))throw new Error('Invalid budget deferral time');
+  return kernelTransaction(async client=>{
+    const saved=await client.query<{kind:string;source:string;scope:string}>(`UPDATE ingestion_jobs SET state='queued',
+      available_at=GREATEST($3::timestamptz,now()+interval '1 minute')+interval '3 seconds',
+      attempts=GREATEST(0,attempts-1),last_error=$4,lease_token=NULL,lease_until=NULL,updated_at=now()
+      WHERE id=$1 AND lease_token=$2 AND state='running' AND lease_until>now() RETURNING kind,source,scope`,
+      [id,token,retryAt.toISOString(),`AI_BUDGET_DEFERRED:${reason}`]);
+    const job=saved.rows[0];
+    if(job&&['canvas','canvas-course','gmail','piazza'].includes(job.kind))await client.query(
+      `UPDATE source_status SET state='deferred',last_error=$3 WHERE source=$1 AND scope=$2`,
+      [job.source,job.scope,`AI_BUDGET_DEFERRED:${reason}`]);
+    return Boolean(job);
   });
 }
 

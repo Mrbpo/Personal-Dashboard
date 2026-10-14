@@ -197,8 +197,8 @@ export async function queueDocumentVectorJobs(pool:Pick<Pool,'query'>,owner:stri
         attempts=CASE WHEN ingestion_jobs.state IN ('complete','failed') THEN 0 ELSE ingestion_jobs.attempts END,
         available_at=CASE WHEN ingestion_jobs.state IN ('complete','failed') THEN now() ELSE ingestion_jobs.available_at END,
         last_error=CASE WHEN ingestion_jobs.state IN ('complete','failed') THEN NULL ELSE ingestion_jobs.last_error END,
-        updated_at=now() RETURNING id`,[randomUUID(),version.document_id,JSON.stringify(payload),idempotencyKey])).rows[0];
-    ids.push(row.id);
+        updated_at=now() WHERE ingestion_jobs.state!='failed' RETURNING id`,[randomUUID(),version.document_id,JSON.stringify(payload),idempotencyKey])).rows[0];
+    if(row)ids.push(row.id);
   }
   return ids;
 }
