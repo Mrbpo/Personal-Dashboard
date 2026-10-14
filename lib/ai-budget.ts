@@ -15,6 +15,22 @@ export function estimateEmbeddingReservation(input:string[],model:string){
   return Math.max(0.000001,Buffer.byteLength(JSON.stringify(input))*rate.input/1e6);
 }
 export function budgetMonth(now = new Date()) { return now.toLocaleDateString('en-CA',{timeZone:'America/Toronto'}).slice(0,7); }
+export class AiBudgetDeferredError extends Error {
+  readonly reason:'daily'|'monthly'|'reservation-race';
+  readonly retryAt:Date;
+  constructor(reason:'daily'|'monthly'|'reservation-race',retryAt:Date){
+    super('AI 预算或每日请求上限已到；同步与已存资料仍可使用');
+    this.name='AiBudgetDeferredError';this.reason=reason;this.retryAt=retryAt;
+  }
+}
+export function nextBudgetMonth(now:Date):Date {
+  const [year,month]=budgetMonth(now).split('-').map(Number);
+  let lo=Date.UTC(year,month,1),hi=lo+36*3600000;
+  const current=budgetMonth(now);
+  // Find the actual Toronto month boundary, including its DST offset.
+  while(hi-lo>1){const mid=Math.floor((lo+hi)/2);if(budgetMonth(new Date(mid))===current)lo=mid;else hi=mid;}
+  return new Date(hi);
+}
 export async function budgetStatus() {
   const r = await db.prepare('SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) used FROM ai_ledger WHERE month=?').bind(budgetMonth()).first<{used:number}>();
   return {limit: Math.max(0,Number(serviceValue('AI_MONTHLY_BUDGET') || 30)), used:Number(r?.used || 0), month:budgetMonth()};
@@ -26,7 +42,14 @@ export async function reserveBudget(amount:number,kind:string,dailyLimit?:number
   const r=await db.prepare(`INSERT INTO ai_ledger SELECT ?, ?, ?, ?, NULL, 'reserved', ? WHERE
     (SELECT COALESCE(SUM(COALESCE(charged,reserved)),0) FROM ai_ledger WHERE month=?) + ? <= ?
     AND (? IS NULL OR (SELECT COUNT(*) FROM ai_ledger WHERE kind=? AND created_at>=? AND created_at<?) < ?)`).bind(id,month,kind,amount,now,month,amount,limit,dailyLimit??null,kind,dayStart,dayStart+86400000,dailyLimit??0).run();
-  if(!r.rowsAffected) throw new Error('AI 预算或每日请求上限已到；同步与已存资料仍可使用');
+  if(!r.rowsAffected){
+    const fresh=await budgetStatus();
+    const daily=dailyLimit===undefined?0:Number((await db.prepare('SELECT count(*) n FROM ai_ledger WHERE kind=? AND created_at>=? AND created_at<?')
+      .bind(kind,dayStart,dayStart+86400000).first<{n:number}>())?.n||0);
+    const monthlyBlocked=fresh.used+amount>fresh.limit,dailyBlocked=dailyLimit!==undefined&&daily>=dailyLimit;
+    const at=Math.max(monthlyBlocked?nextBudgetMonth(new Date(now)).getTime():0,dailyBlocked?dayStart+86400000:0,now+60000);
+    throw new AiBudgetDeferredError(monthlyBlocked?'monthly':dailyBlocked?'daily':'reservation-race',new Date(at));
+  }
   return id;
 }
 export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,signal?:AbortSignal|null,policy?:{kind:string;dailyLimit:number}) {
