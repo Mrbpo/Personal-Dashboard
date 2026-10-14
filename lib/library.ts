@@ -172,8 +172,8 @@ function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return A
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
 type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;hybrid?:boolean;onTiming?:(detail:SearchTiming)=>void};
-export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;parser_version?:string;retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
-type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;parser_version?:string;retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   let contentIdentifiers:string[]=[];
   if(!course){
@@ -207,12 +207,21 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const allowed=new Map(eligible.map(row=>[row.id,row]));
   const indexedDocuments=new Set((await kernel.documentTextHeads(owner)).map(row=>row.id));
   const persistedRows:CandidateRow[]=persisted.filter(row=>allowed.get(row.document_id)?.hash===row.source_hash)
-    .map(row=>({...row,folder_path:allowed.get(row.document_id)!.folder_path,contentScore:row.score}));
+    .map(row=>({...row,parser_warnings:row.parser_warnings||[],folder_path:allowed.get(row.document_id)!.folder_path,contentScore:row.score}));
   let raw:CandidateRow[]=[];
   if(strict){
     raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;
+    // Current PostgreSQL pages own content matches. Keep a filename-only row
+    // for these documents so metadata search cannot resurrect old cache text.
+    const metadata=new Map<string,CandidateRow>();
+    raw=raw.filter(row=>{
+      if(!indexedDocuments.has(row.document_id))return true;
+      if(!metadata.has(row.document_id))metadata.set(row.document_id,{...row,id:null,body:null,locator:null});
+      return false;
+    });
+    raw.push(...metadata.values());
     raw=[...persistedRows,...raw];
-    const rows=raw.map(row=>({...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
+    const rows=raw.map(row=>({...row,parser_warnings:row.parser_warnings||[],id:row.id||`${row.document_id}:metadata`,body:row.body||'',locator:row.locator||'文件名',folder_path:inferredFolder(row)}));
     const identified=rows.filter(row=>contentIdentifiers.every(code=>containsEvery(`${row.name} ${row.body}`,librarySearchTokens(code))));
     const scoped=path?identified.filter(row=>row.folder_path===path||row.folder_path.startsWith(path+'/')):identified;
     const metadataMatches=scoped.filter(row=>containsEvery(`${row.folder_path} ${row.name}`,words));
@@ -266,7 +275,7 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
     combined.set(key,{...previous,...row,id:row.id||`${row.document_id}:metadata`,body:row.body||'',
       locator:row.locator||'文件名',folder_path:inferredFolder(row),contentScore:row.contentScore??previous?.contentScore,
       evidence_id:row.evidence_id??previous?.evidence_id,page_number:row.page_number??previous?.page_number,
-      parser_version:row.parser_version??previous?.parser_version});
+      parser_version:row.parser_version??previous?.parser_version,parser_warnings:row.parser_warnings??previous?.parser_warnings??[]});
   }
   const rows=[...combined.values()].filter(row=>contentIdentifiers.every(code=>
     containsEvery(`${row.name} ${row.body}`,librarySearchTokens(code))));

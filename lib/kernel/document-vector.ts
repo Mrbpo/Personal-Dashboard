@@ -9,7 +9,7 @@ export type DocumentVectorScope={courseId?:string;documentId?:string};
 export type DocumentVectorCoverage={totalPages:number;searchablePages:number;indexedPages:number;emptyPages:number;complete:boolean};
 export type DocumentVectorResult={hits:DocumentTextHit[];coverage:DocumentVectorCoverage;degradedReason?:'incomplete-vector-index'};
 export type DocumentVectorPayload={owner:string;documentId:string;versionId:string;model:string;pageCursor:number};
-type EmbeddingPage={version_id:string;page_number:number;input:string;input_hash:string};
+type EmbeddingPage={version_id:string;page_number:number;input:string;input_hash:string;cached_embedding:number[]|null};
 type EmbedInputs=(inputs:string[],deadline:number)=>Promise<number[][]>;
 
 // This is precisely JavaScript String.trim's whitespace set. PostgreSQL length
@@ -30,7 +30,7 @@ function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
   const document=scope.documentId?`AND d.id=$${args.push(scope.documentId)}`:'';
   const version=versionId?`AND v.id=$${args.push(versionId)}`:'';
   const sql=`WITH current_documents AS MATERIALIZED (
-    SELECT d.*,v.id version_id,v.source_version_id,v.parser_version,v.page_count
+    SELECT d.*,v.id version_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,v.page_count
     FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id
     WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document} ${version}
       AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
@@ -40,7 +40,7 @@ function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
         FROM document_text_pages WHERE version_id=v.id)),
     current_pages AS MATERIALIZED (
       SELECT d.id document_id,d.course_id,d.name,d.origin,d.origin_key,d.source_hash,
-        d.version_id,d.source_version_id,d.parser_version,p.page_number,p.body,p.evidence_id,p.locator,
+        d.version_id,d.source_version_id,d.parser_version,d.parser_warnings,p.page_number,p.body,p.evidence_id,p.locator,
         btrim(left(p.body,6000),$3::text) input,
         encode(sha256(convert_to(btrim(left(p.body,6000),$3::text),'UTF8')),'hex') input_hash
       FROM current_documents d JOIN document_text_pages p ON p.version_id=d.version_id)`;
@@ -82,7 +82,7 @@ export async function searchDocumentVectorText(pool:Pool,owner:string,queryVecto
       WHERE p.input<>'' AND public.vector_norm(e.embedding_vector)>0),ranked AS (
       SELECT 'pg:'||p.version_id||':'||p.page_number id,p.document_id,coalesce(p.course_id,'') course_id,
         p.name,p.origin,p.origin_key,p.source_hash,p.body,p.locator,p.page_number,p.evidence_id,
-        p.source_version_id,p.parser_version,1-(p.embedding_vector OPERATOR(public.<=>)$${vectorArg}::public.vector) score
+        p.source_version_id,p.parser_version,p.parser_warnings,1-(p.embedding_vector OPERATOR(public.<=>)$${vectorArg}::public.vector) score
       FROM indexed p ORDER BY p.embedding_vector OPERATOR(public.<=>)$${vectorArg}::public.vector,p.document_id,p.page_number LIMIT $${limitArg})
     SELECT jsonb_build_object('total_pages',(SELECT count(*) FROM current_pages),
       'searchable_pages',(SELECT count(*) FROM current_pages WHERE input<>''),
@@ -113,6 +113,68 @@ export function fuseIndependentDocumentRanks(lexical:DocumentTextHit[],dense:Doc
   }
   return [...rows.values()].sort((a,b)=>b.score-a.score||a.hit.document_id.localeCompare(b.hit.document_id)||
     a.hit.page_number-b.hit.page_number).slice(0,limit).map(({hit,score})=>({...hit,score}));
+}
+
+/** Preserve each modality's head before the fused tail: an otherwise strong
+ * lexical-only page must not be removed simply because many weaker pages occur
+ * in both lists. Duplicate heads free slots for actual adjacent-page evidence.
+ * Fully disjoint 20/20 heads already fill the fixed 40-page input budget. */
+export async function buildHybridDocumentCandidates(pool:Pool,owner:string,lexical:DocumentTextHit[],dense:DocumentTextHit[]):Promise<DocumentTextHit[]>{
+  if(!owner?.trim())throw new Error('PDF hybrid candidate owner is required');
+  const fused=fuseIndependentDocumentRanks(lexical,dense,160),selected=new Map<string,DocumentTextHit>();
+  const key=(hit:DocumentTextHit)=>JSON.stringify([hit.document_id,hit.page_number]);
+  const scores=new Map(fused.map(hit=>[key(hit),hit.score]));
+  const add=(hit:DocumentTextHit)=>{
+    const previous=selected.get(key(hit));
+    if(previous&&(previous.source_version_id!==hit.source_version_id||previous.evidence_id!==hit.evidence_id))
+      throw new Error('PDF hybrid candidate versions conflict');
+    if(!previous&&selected.size<40)selected.set(key(hit),{...hit,score:scores.get(key(hit))??hit.score});
+  };
+  for(let index=0;index<20;index++)for(const hit of [lexical[index],dense[index]])if(hit)add(hit);
+  const heads=[...selected.values()];
+  const byDocument=new Map<string,DocumentTextHit>();
+  for(const hit of fused){if(!byDocument.has(hit.document_id))byDocument.set(hit.document_id,hit);if(byDocument.size===4)break;}
+  const anchors=[...byDocument.values()];
+  const neighborKeys=new Set<string>();
+  if(selected.size<40&&anchors.length){
+    const neighbors=(await pool.query<DocumentTextHit&{anchor_number:number}>(`/* vector:adjacent-evidence */
+      WITH requested AS (SELECT * FROM jsonb_to_recordset($2::jsonb)
+        AS r(document_id text,page_number integer,source_version_id text,anchor_number integer))
+      SELECT 'pg:'||v.id||':'||p.page_number id,d.id document_id,coalesce(d.course_id,'') course_id,
+        d.name,d.origin,d.origin_key,d.source_hash,p.body,p.locator,p.page_number,p.evidence_id,
+        v.source_version_id,v.parser_version,v.warnings AS parser_warnings,0::double precision score,r.anchor_number
+      FROM requested r JOIN document_texts d ON d.id=r.document_id AND d.owner_id=$1 AND d.hidden=false
+        JOIN document_text_versions v ON v.id=d.current_version_id AND v.source_version_id=r.source_version_id
+        JOIN document_text_pages p ON p.version_id=v.id AND p.page_number IN (r.page_number-1,r.page_number+1)
+        JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id
+      WHERE p.page_number>=1 AND p.page_number<=v.page_count AND btrim(p.body)<>''
+        AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
+          AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
+          AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+      ORDER BY r.anchor_number,p.page_number`,[owner,JSON.stringify(anchors.map((hit,index)=>({
+        document_id:hit.document_id,page_number:hit.page_number,source_version_id:hit.source_version_id,anchor_number:index})))])).rows;
+    for(const neighbor of neighbors){
+      const {anchor_number,...hit}=neighbor;
+      const anchor=anchors[anchor_number];
+      if(!anchor||hit.document_id!==anchor.document_id||hit.source_version_id!==anchor.source_version_id||
+        Math.abs(hit.page_number-anchor.page_number)!==1||!hit.evidence_id)
+        throw new Error('Invalid PDF adjacent-page evidence');
+      if(!selected.has(key(hit))&&selected.size<40){neighborKeys.add(key(hit));add({...hit,score:anchor.score/2});}
+    }
+  }
+  for(const hit of fused)add(hit);
+  // Keep relevance order for original candidates; neighbors follow their parent
+  // when both are present, rather than being hidden at the end of the input.
+  const output:DocumentTextHit[]=[],seen=new Set<string>();
+  const emit=(hit:DocumentTextHit)=>{const item=selected.get(key(hit));if(item&&!seen.has(key(item))){seen.add(key(item));output.push(item);}};
+  for(const hit of fused){
+    if(!neighborKeys.has(key(hit)))emit(hit);
+    const anchor=anchors.find(anchor=>key(anchor)===key(hit));
+    if(anchor)for(const item of selected.values())if(neighborKeys.has(key(item))&&item.document_id===anchor.document_id&&
+      Math.abs(item.page_number-anchor.page_number)===1)emit(item);
+  }
+  for(const hit of [...heads,...selected.values()])emit(hit);
+  return output;
 }
 
 /** Only missing embeddings in complete, current document versions are queued. */
@@ -152,11 +214,11 @@ function validatePayload(raw:unknown):DocumentVectorPayload{
 /** Worker owns renewal/finish/retry. Network calls occur outside the short cache
  * and checkpoint transaction. Existing successful batches survive all retries. */
 export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{embed?:EmbedInputs}={}):Promise<{
-  indexedPages:number;obsolete:boolean;
+  indexedPages:number;reusedPages:number;obsolete:boolean;
 }>{
   if(job.kind!=='document_vectors'||!job.lease_token)throw new Error('Invalid PDF vector job');
   const initial=validatePayload(job.payload),embed=options.embed??embedDocumentInputs;
-  let indexedPages=0;
+  let indexedPages=0,reusedPages=0;
   for(;;){
     const leased=(await pool.query<{payload:unknown}>(`/* vector:job-read */ SELECT payload FROM ingestion_jobs
       WHERE id=$1 AND lease_token=$2 AND kind='document_vectors' AND state='running' AND lease_until>now()`,
@@ -168,17 +230,34 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
     const {sql,args}=scopeSql(payload.owner,{documentId:payload.documentId},payload.versionId);
     const cursor=args.push(payload.pageCursor),batchLimit=args.push(DOCUMENT_EMBEDDING_BATCH_SIZE);
     const current=(await pool.query<{current:boolean;pages:EmbeddingPage[]}>(`/* vector:missing-pages */ ${sql},missing AS (
-      SELECT p.version_id,p.page_number,p.input,p.input_hash FROM current_pages p
+      SELECT p.version_id,p.page_number,p.input,p.input_hash,cached.embedding cached_embedding FROM current_pages p
+      LEFT JOIN LATERAL (
+        SELECT e.embedding FROM document_text_versions old_version
+        JOIN document_text_pages old_page ON old_page.version_id=old_version.id
+        JOIN document_page_embeddings e ON e.version_id=old_page.version_id AND e.page_number=old_page.page_number
+          AND e.owner_id=$1 AND e.model=$2 AND e.input_hash=p.input_hash
+        WHERE old_version.document_id=p.document_id AND old_version.id<>p.version_id AND old_page.body=p.body
+          AND e.input_hash=encode(sha256(convert_to(btrim(left(old_page.body,6000),$3::text),'UTF8')),'hex')
+          AND public.vector_norm(e.embedding_vector)>0
+        ORDER BY e.version_id,e.page_number LIMIT 1
+      ) cached ON true
       WHERE p.input<>'' AND NOT EXISTS (SELECT 1 FROM document_page_embeddings e WHERE e.owner_id=$1
         AND e.version_id=p.version_id AND e.page_number=p.page_number AND e.model=$2 AND e.input_hash=p.input_hash
         AND public.vector_norm(e.embedding_vector)>0)
       ORDER BY (p.page_number>$${cursor}) DESC,p.page_number LIMIT $${batchLimit})
       SELECT EXISTS(SELECT 1 FROM current_documents) current,
         coalesce((SELECT jsonb_agg(to_jsonb(m) ORDER BY (m.page_number>$${cursor}) DESC,m.page_number) FROM missing m),'[]'::jsonb) pages`,args)).rows[0];
-    if(!current.current)return {indexedPages,obsolete:true};
-    if(!current.pages.length)return {indexedPages,obsolete:false};
+    if(!current.current)return {indexedPages,reusedPages,obsolete:true};
+    if(!current.pages.length)return {indexedPages,reusedPages,obsolete:false};
     const batch=current.pages;
-    const embeddings=await embed(batch.map(page=>page.input),Date.now()+30000);
+    // Reuse only the same owner's same-document full original page body. An
+    // identical truncated input alone cannot hide changes later in the page.
+    // These are vector values, never historical evidence or version pointers.
+    const missing=batch.filter(page=>!page.cached_embedding);
+    const fresh=missing.length?await embed(missing.map(page=>page.input),Date.now()+30000):[];
+    if(fresh.length!==missing.length)throw new Error('Invalid PDF index embedding batch');
+    let freshIndex=0;
+    const embeddings=batch.map(page=>page.cached_embedding??fresh[freshIndex++]);
     if(embeddings.length!==batch.length||embeddings.some(vector=>vector.length!==DOCUMENT_EMBEDDING_DIMENSIONS||
       vector.some(value=>!Number.isFinite(Math.fround(value)))||!vector.some(value=>Math.fround(value)!==0)))throw new Error('Invalid PDF index embedding batch');
     const client=await pool.connect();
@@ -195,7 +274,7 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
           WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
           AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id))) FOR UPDATE`,
         [payload.owner,payload.documentId,payload.versionId])).rows[0];
-      if(!document){await client.query('ROLLBACK');return {indexedPages,obsolete:true};}
+      if(!document){await client.query('ROLLBACK');return {indexedPages,reusedPages,obsolete:true};}
       const saved=await client.query(`/* vector:cache-save */ INSERT INTO document_page_embeddings
         (owner_id,version_id,page_number,model,input_hash,embedding)
         SELECT $1,r.version_id,r.page_number,$2,r.input_hash,
@@ -221,6 +300,7 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
       if(checkpoint.rowCount!==1)throw new Error('PDF vector ingestion lease lost');
       await client.query('COMMIT');
       indexedPages+=saved.rowCount??0;
+      reusedPages+=batch.length-missing.length;
     }catch(error){await client.query('ROLLBACK');throw error;}
     finally{client.release();}
   }

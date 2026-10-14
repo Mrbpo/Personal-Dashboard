@@ -82,6 +82,7 @@ export function mergeArchiveSources(structured: CourseSearchResult[], library: L
     courseCode: codes.get(hit.course_id) || hit.course_id, sourceType: 'document',
     title: `${hit.name} · ${hit.locator}`, excerpt: hit.body.slice(0, 1400), body: hit.body,
     sourceUrl: `/api/library/${hit.document_id}`, updatedAt: null,
+    parser_warnings: hit.parser_warnings || [],
   }));
   const directoryWithoutParsedDuplicate = structured.filter((source) => !(source.sourceType === 'file' && documentKeys.has(`${source.courseId}\0${normalizeName(source.title)}`)));
   const confirmed = directoryWithoutParsedDuplicate.filter((source) => source.sourceType === 'piazza' && source.confirmedAnswer);

@@ -24,10 +24,11 @@ test('reading order follows nested body refs, not text array order, with formula
     {text: 'Topic', start_row_offset_idx: 0, start_col_offset_idx: 1},
     {text: 'Week', start_row_offset_idx: 0, start_col_offset_idx: 0},
   ]}}];
-  const decoded = decodeDoclingResult(value, 2);
+  const decoded = decodeDoclingResult(value, 2, {formulaEnriched:true});
   assert.equal(decoded.pages[0].text, 'Introduction\n\n$$\nx^2 + y^2 = z^2\n$$');
   assert.equal(decoded.pages[1].text, '| Week | Topic |\n| Week 7 | Bayes theorem |\n\nStudy schedule\n\nConclusion');
   assert.deepEqual(decoded.pages.map(page => [page.pageNumber, page.locator]), [[1, '第 1 页'], [2, '第 2 页']]);
+  assert.ok(decoded.warnings.includes('第 1 页机器公式未核验符号和上下标，请核对原 PDF'));
 });
 
 test('successful manifest preserves a blank page without shifting later citations', () => {
@@ -112,4 +113,26 @@ test('text-only mode keeps readable formula text without claiming LaTeX enrichme
   const incomplete=decodeDoclingResult(value,1,{formulaEnriched:false});
   assert.match(incomplete.warnings.join(' '),/尚未转写/);
   assert.deepEqual(incomplete.formulaPageNumbers,[1]);
+});
+
+test('empty normalized text keeps original math verbatim without claiming enriched LaTeX',()=>{
+  const value=result(),doc=value.document.json_content;
+  doc.texts=[item(' ',1,{label:'formula',orig:'  min max θ + α\nΓ(a)Γ(a)  '}),item('Normalized content',1,{orig:'Original content'})];
+  doc.body.children.push(ref('texts/1'));
+  for(const formulaEnriched of [false,true]){
+    const decoded=decodeDoclingResult(value,1,{formulaEnriched});
+    assert.equal(decoded.pages[0].text,'min max θ + α\nΓ(a)Γ(a)  \n\nNormalized content');
+    assert.ok(!decoded.pages[0].text.includes('$$'));
+    assert.match(decoded.warnings.join(' '),/原始抽取文本.*未验证 LaTeX/);
+    assert.deepEqual(decoded.formulaPageNumbers,[1]);
+  }
+});
+
+test('original-only spanning content respects provenance and orphan content cannot disappear',()=>{
+  const spanning=result(2);
+  spanning.document.json_content.texts=[{text:'',orig:'firstsecond',prov:[{page_no:1,charspan:[0,5]},{page_no:2,charspan:[5,11]}]}];
+  assert.deepEqual(decodeDoclingResult(spanning,2).pages.map(page=>page.text),['first','second']);
+  const orphan=result();
+  orphan.document.json_content.texts.push(item('',1,{orig:'Unreferenced original formula'}));
+  assert.throws(()=>decodeDoclingResult(orphan),/unreferenced/);
 });

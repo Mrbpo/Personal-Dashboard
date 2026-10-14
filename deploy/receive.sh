@@ -20,52 +20,65 @@ done < <(docker image ls study-cabinet --format '{{.Repository}}:{{.Tag}}')
 docker image prune -f >/dev/null
 imagefile=$(mktemp /srv/study/image.XXXXXX)
 trap 'rm -f -- "$imagefile"' EXIT
-# Input is only a Docker image, never shell commands; cap incoming bytes at 2 GiB.
+# Input is the application and pinned PostgreSQL images, never shell commands.
+# Keep the existing 2 GiB compressed transfer cap.
 head -c 2147483649 > "$imagefile"
 test "$(stat -c %s "$imagefile")" -lt 2147483649
 gzip -dc "$imagefile" | docker load >/dev/null
 test "$(docker image inspect "study-cabinet:$sha" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$sha"
+docker image inspect study-postgres:18.6-pgvector0.8.7 >/dev/null
 previous=''
 if test -f /srv/study/current-version; then previous=$(cat /srv/study/current-version); fi
 export APP_VERSION="$sha"
 compose=(docker compose -f /srv/study/compose.yml)
 printf '{"version":"%s","status":"deploying"}\n' "$sha" > /srv/study/status/current.json
-cutover_started=0
+recovery_required=0
 rollback() {
   "${compose[@]}" stop worker web || true
   # The stopped worker can leave its short-lived primary lease behind when npm
   # receives SIGTERM before the Node child. No executor is running here, so the
   # lease is safe to clear before restoring the previous worker.
   "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();" || true
-  if test "$cutover_started" = 0 && [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then
+  if test "$recovery_required" = 0 && [[ "$previous" =~ ^[a-f0-9]{40}$ ]]; then
     APP_VERSION="$previous" "${compose[@]}" up -d web worker proxy
     printf '{"version":"%s","previous":"%s","status":"failed_before_cutover"}\n' "$sha" "$previous" > /srv/study/status/current.json
   else
-    # A v1 writer may have committed PostgreSQL changes. Never roll back to v0 automatically.
-    printf '{"version":"%s","previous":"%s","status":"blocked_after_cutover"}\n' "$sha" "$previous" > /srv/study/status/current.json
+    # New schema or application writes may already be committed. Preserve them.
+    printf '{"version":"%s","previous":"%s","status":"blocked_requires_recovery"}\n' "$sha" "$previous" > /srv/study/status/current.json
   fi
 }
 trap 'rollback' ERR
-"${compose[@]}" up -d postgres docling
-"${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
-"${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
-"${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
+if test -z "$previous"; then
+  # Initial installation has no running kernel to dump yet. Bootstrap it;
+  # upgrades below snapshot the existing database before any new migration.
+  "${compose[@]}" up -d postgres docling
+  "${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
+  "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
+fi
 if test -n "$previous"; then APP_VERSION="$previous" "${compose[@]}" stop worker web; fi
 backup_key=$(bash /srv/study/backup.sh)
 backup_name=${backup_key##*/}
 [[ "$backup_name" =~ ^study-v1-[0-9]{8}T[0-9]{6}Z\.tar\.age$ ]]
 bash /srv/study/verify-backup.sh "$backup_name"
 bash /srv/study/verify-offsite-backup.sh "/srv/study/backups/$backup_name" "$backup_key"
+# The one required pre-switch backup precedes PostgreSQL recreation and all
+# new migrations. The same existing volume remains authoritative.
+"${compose[@]}" up -d postgres docling
+"${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
+# New kernel migrations can commit before the application writer starts. The
+# previous application's schema gate may reject that database, so any failure
+# from this point must preserve it for recovery instead of booting old code.
+recovery_required=1
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
+"${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
 # All old executors are stopped. Clear only the executor lease so the new
 # worker can become primary immediately; job leases and progress are retained.
 "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
 started=$(date +%s%3N)
-# Docker may start a v1 writer before `up` returns. From this point, a failed
-# command must preserve PostgreSQL writes rather than booting the v0 writer.
-cutover_started=1
+# The migration boundary above already prevents automatic old-code rollback.
 "${compose[@]}" up -d web worker proxy
 healthy=0
 for n in $(seq 1 30); do

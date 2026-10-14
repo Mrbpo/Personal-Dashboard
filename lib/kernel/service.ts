@@ -748,6 +748,8 @@ export class KernelService {
   async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
+      expectedCurrentVersion?:string;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
+        basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
@@ -759,9 +761,24 @@ export class KernelService {
       : page.startMs!==undefined||page.endMs!==undefined))throw new Error('Invalid content time locator');
     if(options.evidenceConfidence!==undefined&&(!Number.isFinite(options.evidenceConfidence)||
       options.evidenceConfidence<0||options.evidenceConfidence>1))throw new Error('Invalid evidence confidence');
+    if(options.pageProvenance&&(options.pageProvenance.length!==expected||options.pageProvenance.some((page,index)=>
+      page.pageNumber!==index+1||!page.extractionMethod||!page.parserVersion||!page.basedOn?.versionId||!page.basedOn.sourceVersionId||!page.basedOn.evidenceId)))
+      throw new Error('Document page repair provenance is incomplete');
     const parser=options.parserVersion||'docling-v1',owner=document.ownerId||'local-owner';
+    if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
+      throw new Error('Document quality warnings are invalid');
+    const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
+    const extractionMethod=options.extractionMethod?.trim()||parser;
+    // Quality changes are immutable source changes even when the body is the
+    // same. Normalize stable metadata; acquisition times and remote task IDs
+    // intentionally remain outside identity so a replay stays idempotent.
+    const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
+        pageNumber:page.pageNumber,extractionMethod:page.extractionMethod,parserVersion:page.parserVersion,
+        ...(page.model?{model:page.model}:{}),basedOn:{versionId:page.basedOn.versionId,
+          sourceVersionId:page.basedOn.sourceVersionId,evidenceId:page.basedOn.evidenceId}}))}:{})}));
     const textHash=stableId(JSON.stringify(pages));
-    const parsedVersion=stableId(document.id,parser,textHash);
+    const parsedVersion=stableId(document.id,parser,textHash,qualityHash);
     const sourceItemId=`document:${document.id}`,acquiredAt=new Date().toISOString();
     await kernelTransaction(async client=>{
       if(options.ingestionLease){
@@ -772,12 +789,27 @@ export class KernelService {
           (job.payload.sourceHash!==undefined&&job.payload.sourceHash!==document.hash))throw new Error('PDF ingestion lease or source identity lost');
       }
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`document:${document.id}`]);
+      if(options.expectedCurrentVersion!==undefined){
+        const head=(await client.query<{current_version_id:string;owner_id:string;source_hash:string}>(
+          'SELECT current_version_id,owner_id,source_hash FROM document_texts WHERE id=$1 AND hidden=false FOR UPDATE',[document.id])).rows[0];
+        if(!head||head.owner_id!==owner||head.source_hash!==document.hash||head.current_version_id!==options.expectedCurrentVersion)
+          throw new Error('Document changed during page repair; previous current version preserved');
+        if(options.pageProvenance){
+          const previous=(await client.query<{page_number:number;evidence_id:string;source_version_id:string}>(
+            `SELECT p.page_number,p.evidence_id,v.source_version_id FROM document_text_versions v
+             JOIN document_text_pages p ON p.version_id=v.id WHERE v.id=$1 AND v.document_id=$2`,[head.current_version_id,document.id])).rows;
+          const byPage=new Map(previous.map(page=>[page.page_number,page]));
+          if(options.pageProvenance.some(page=>{const old=byPage.get(page.pageNumber);return !old||page.basedOn.versionId!==head.current_version_id||
+            page.basedOn.sourceVersionId!==old.source_version_id||page.basedOn.evidenceId!==old.evidence_id;}))throw new Error('Document page repair evidence identity mismatch');
+        }
+      }else if(options.pageProvenance)throw new Error('Document page repair requires a current-version guard');
       const version=await sourceVersion(client,{id:sourceItemId,source:`document:${document.origin}`,scope:document.courseId||'unscoped',
         externalId:document.id,courseId:document.courseId||null,
-        contentHash:stableId(document.hash,parser,textHash),raw:{id:document.id,name:document.name,mime:document.mime,
-          originKey:document.originKey,parser,extractionMethod:options.extractionMethod||parser,warnings:options.warnings||[],
+        contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
+          originKey:document.originKey,parser,extractionMethod,warnings,
           ...(options.batchProvenance?{batchProvenance:options.batchProvenance}:{}),
           ...(options.recording?{recording:options.recording}:{}),
+          ...(options.pageProvenance?{pageProvenance:options.pageProvenance}:{}),
           pages:pages.map(page=>({locator:page.locator,pageNumber:page.pageNumber,length:page.text.length}))},
         rawUri:document.rawUri||`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
       await client.query(`INSERT INTO document_texts(id,owner_id,course_id,source_item_id,origin,origin_key,name,source_hash,created_at)
@@ -788,7 +820,7 @@ export class KernelService {
       if(existing.owner_id!==owner||existing.source_hash!==document.hash)throw new Error('Document identity mismatch');
       await client.query(`INSERT INTO document_text_versions(id,document_id,source_version_id,parser_version,text_hash,page_count,warnings)
         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
-        [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(options.warnings||[])]);
+        [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(warnings)]);
       let position=0;
       for(const [index,page] of pages.entries()){
         const evidenceId=stableId(version,`page:${index}`);
@@ -796,7 +828,8 @@ export class KernelService {
           `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,original_excerpt,
             parsed_value,confidence,locator) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`,
           [evidenceId,version,`document:${document.origin}`,sourceItemId,acquiredAt,page.text.slice(0,4000),
-            JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.extractionMethod||parser,documentVersion:parsedVersion,
+            JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.pageProvenance?.[index].extractionMethod||extractionMethod,
+              ...(options.pageProvenance?{pageProvenance:options.pageProvenance[index]}:{}),documentVersion:parsedVersion,
               pageNumber:page.pageNumber,contentKind:page.contentKind||'page',startMs:page.startMs??null,endMs:page.endMs??null}),options.evidenceConfidence??0.9,page.locator]);
         await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text,content_kind,start_ms,end_ms)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(version_id,page_number) DO NOTHING`,

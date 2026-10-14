@@ -4,7 +4,7 @@
 
 - 原始 PDF 仍保存在 `LIBRARY_DIR` 的内容哈希 blob 中，文档名称、归属、课程、来源和哈希保留在现有 `library_documents` metadata。转写不会替换原件。
 - PostgreSQL 保存完整逐页正文：`document_texts` 记录文档和当前版本，`document_text_versions` 保存解析器版本、文本哈希、页数及警告，`document_text_pages` 保存全文和实际 PDF 页码。印刷页码或幻灯片编号不代替 PDF 页码。
-- 每页关联 `evidence`；来源版本保留原文件哈希、`library://<hash>` 原件引用和实际提取方法等 metadata。证据摘录可以截短，但全文页表不能截短。重新解析保留旧版本，在短事务中提交新版本并切换当前版本。
+- 每页关联 `evidence`；来源版本保留原文件哈希、`library://<hash>` 原件引用和实际提取方法等 metadata。证据摘录可以截短，但全文页表不能截短。重新解析保留旧版本，在短事务中提交新版本并切换当前版本。 稳定质量 metadata（规范化警告、提取方法及局部修复 provenance）参与解析/来源版本身份；同正文新增警告也须新版本与证据，不能被幂等冲突吞掉。获取时间与远程任务 ID 不参与身份，同输入重放不会生成版本。既有版本不会因代码升级自动改写；纯正文哈希不含警告，完全相同原页的向量仍可合法复用。
 - `document_text_chunks` 是可重建的检索索引；`KernelService.rebuildDocumentSearch(owner, documentId)` 可从 PostgreSQL 当前全文页重建，不需要重新请求 AI。网站 PDF 预览和全文搜索优先读取内核，搜索返回文件、页码及证据引用。SQLite 页和 chunk 是兼容缓存，不能作为新的全文权威层。
 
 ## 解析方式与额度
@@ -19,6 +19,8 @@
 
 没有凭据、超出额度、网络失败或公式无法看清时，正文仍可检索，公式必须核对原 PDF。`docling-v2-search` 表示使用了公式增强流程，不是数学正确性的证明；须同时查看版本警告及原页。
 
+Docling 节点非空 `text` 优先；为空时保留非空 `orig` 原始抽取文本，不能将已经抽取的公式静默丢掉。原始公式回退不添加 LaTeX 显示定界符，并记录“未验证 LaTeX、符号和上下标”警告。非空机器公式也默认记录符号和上下标未核验警告，不能凭启用了增强或输出看似有效 LaTeX 宣称原式正确；真正逐式核验须另有明确 provenance。该默认警告适用于后续解析，不会追写已经保存的旧版本。原始回退不等于启动了公式增强，也不保证数学阅读顺序或内联符号完整。新代码通过可选 `parser_warnings` 将当前版本警告传给 `DocumentTextHit`、严格/普通资料搜索、API/引用及问答/导师的实际模型输入，旧来源默认 `[]`。固定 developer 指令禁止把未验证抽取式断言为精确原式或补造缺失符号，已支持的普通正文可正常回答。该链路代码尚未生产发布；精确公式仍须核对原 PDF，字段存在不代表模型已通过真实数学忠实验收。
+
 | 配置 | 行为 |
 | --- | --- |
 | 默认，或 `DOCLING_FORMULA_BACKEND=ai` | 原生文字快速路径或 Docling 正文/OCR/表格，加受限 AI 公式增强 |
@@ -30,7 +32,23 @@
 
 `DOCLING_FORMULA_ENRICHMENT=false` 只关闭独立公式增强，不关闭已明确配置的 AI 整页视觉转写。零付费正文处理须同时使用默认 `PDF_SCAN_TRANSCRIPTION_BACKEND=docling`；不能将正文模式误称为数学验收成功。
 
-本轮真实 CPU 公式试验中，12 页超过约 15 分钟的轮询窗口；2 GB 配置还出现模型内存不足，因此本地 CPU 公式路径不能作为默认方案。扫描资料的正文/OCR 在临时 3 GB 配置下也曾 OOM，不能宣称提高到 3 GB 即可使用。本地 Compose 与服务器资源均恢复为原来的 2 GB。正式启用扫描 Docling 前仍须解决资源阻塞并实际验收。
+### 官方公式模型资产与持久缓存
+
+`codeformulav2` 需要 [官方 CodeFormulaV2 模型](https://huggingface.co/docling-project/CodeFormulaV2)；公开、非受限访问，许可证为 `cdla-permissive-2.0`。本次准备锁定 commit `ecedbe111d15c2dc60bfd4a823cbe80127b58af4`，共 **13 个文件 / 639,800,205 bytes**；`model.safetensors` 为 630,993,616 bytes，官方 SHA-256 为 `4b04e77af34c4e682a7ab1617628340d658f3c3dcd12456dd2a7fff805cf79d2`。其余文件的官方 Git blob 校验值与本地 SHA/大小也核验，清单位于服务器 `/srv/study/docling-models/code-formula-assets.json`。按固定 revision 的官方 `resolve/<revision>/<file>` 下载完整文件，不使用会变化的 `main` 作为验收版本。
+
+现有官方安装的 `docling-tools models download code_formula --output-dir <cache-root>` 可以选择公式资产，[官方离线模型说明](https://docling-project.github.io/docling/usage/advanced_options/)给出缓存准备机制；当前 CLI 不提供 revision 参数。固定版本准备须明确指定官方 revision，并核对完整文件清单和校验值，不能把仅建立目录或添加挂载当作安装成功。无需新增推理组件，也不全局开启公式增强。
+
+服务器 host 持久资产为 `/srv/study/docling-models/docling-project--CodeFormulaV2`，缓存根目录 mode `0700`、owner UID `1001`，与现有 Docling 运行用户一致。Compose 仅将该子目录只读挂到 `/opt/app-root/src/.cache/docling/models/docling-project--CodeFormulaV2`，保留镜像自带 layout/OCR 等兄弟目录；明确 `DOCLING_SERVE_ARTIFACTS_PATH` 为同一父目录。**host 资产已经实际准备；PDF 应用正式发布尚未进行**。早期先将模型复制进既有容器；随后为了单页 FP32 诊断，仅受控重建 Docling 并通过只覆盖该服务的 overlay 实际挂载同一模型子目录及官方管理员 named preset 配置。PG、web 和 worker 容器保持原样。该隔离诊断运行配置不等于整批 PDF 应用已部署。资产可按固定官方 revision 重新下载，不需要加入冗余数据备份；原件、数据库和恢复配置的现有备份要求不变。
+
+修复前的单页任务在约 5 秒内报告 `CodeFormulaV2 not found in artifacts_path`，未发生 OOM，未输出转写；安装资产不等于公式忠实验收通过。CPU、内存及逐式准确率必须由受控原页探测另行报告，不凭权重存在宣称生产可用。
+
+安装后的 BF16 单页任务最终 `success`，实际 `processing_time=1112.06` 秒（约 18.5 分钟）；早期两个 300 秒观察窗口只记录运行中，不是 conversion failure。5 秒采样的 `memory.current` 最高约 2.82 GiB / 4 GiB，OOM/重启为零；当时 cgroup 历史峰值不能归为该任务。原图核验发现公式 (3) 将加一移入下标、公式 (8) 改变条件下标及帽号，Beta 定义段也存在重复/缺括号；虽然 26 个 ψ 字符重新出现，仍未通过忠实度，结果没有发布。完整结果和人工核验保留在隔离资料目录 `hw4-formula-model-ready.result.json` / `hw4-bf16-manual-review.json`。
+
+虚拟 CPU 无 AVX512_BF16 / AMX_BF16 指令，已安装的默认 CodeFormulaV2 Transformers preset 使用 BF16；实际推理约占三个核。这个配置可解释性能风险，不能断言是唯一原因。管理员通过官方 `DOCLING_SERVE_CONFIG_FILE` 提供 named preset `codeformulav2_cpu_fp32`，仅将原模型 `extra_config.torch_dtype` 改为 `float32`，保持默认 preset 及禁止客户端 custom JSON 的设置。服务健康检查通过，模型 revision、原件/派生输入 SHA、页面及其他请求选项均不变。
+
+FP32 同一单页只提交一次；首个 300 秒观察结束时仍 `started`，后续只读 GET 取得同一任务成功结果，实际 `processing_time=374.77` 秒（约 6.25 分钟），比 BF16 约快 2.97 倍。这个单页 A/B 不能代表全库速度。此次新容器实测 `memory.peak` 达 4 GiB，`memory.events.max=581`，但 `oom=oom_kill=0`、重启为零，表明更高的内存压力。8 个公式节点及全部正文 `text` 与 BF16 完全相同；再次对照原图，公式 (3)、(8) 和 Beta 定义的上述错误仍然存在。因此本页数学忠实度仍未通过，不能用成功速度或 ψ 数量替代准确率。原结果只留在 staging，没有再次提交、没有 OpenAI 调用、没有更改知识库当前版本。完整结果、收据及人工核验位于隔离资料目录 `hw4-fp32.result.json`、`hw4-fp32.receipt.json`、`hw4-fp32-manual-review.json`；named 配置与单服务 overlay 亦保存在该目录。FP32 不作为默认应用配置，该 probe 不能证明全库 CPU 公式增强可用。
+
+早期 4 GB 主机 / 2 GB 容器试验记录（历史）：12 页 CPU 公式识别超过约 15 分钟的轮询窗口，2 GB 配置还出现模型内存不足；扫描资料的正文/OCR 在临时 3 GB 配置下也曾 OOM，不能宣称提高到 3 GB 即可使用。当时曾恢复为 2 GB 容器。**当前为升级后的 8 GB 主机 / 4 GiB 容器**，已完成公开隔离正文资料发布；公式模型的本次单页耗时与未完成忠实验收见上，不把早期资源值当作现状，也不默认启用全库 CPU 公式识别。
 
 ## 管理员批量回填
 
@@ -63,10 +81,12 @@ npm run pdf:reindex -- --owner <owner-id> --rebuild-search --limit 500
 
 公开多文档检索及三页公式样本的执行方法见 [pdf-search-benchmark.md](pdf-search-benchmark.md)。正文命中、公式逐式核对分别报告；没有结果时不填写通过率，也不能把单页样本扩大为全库数学准确率。
 
+截至 2026-10-14，公开隔离资料库已完整发布 **228 份 / 2935 原始页**（新 121 份与旧 107 份干扰资料），没有因此认证全库数学转写。最新完整 fresh 基准记录为 92% / 98% / 100%，三组均需达到 95% 的关口尚未通过；后续小样校准不是完整关口成绩。两页既有 Docling `orig` 缓存经原件/结果/派生输入 SHA 核验后零请求恢复并通过 CAS 发布完整新版本；仅两页变化，16 个原始公式块恢复，ψ 等内联符号仍不完整。四次已失败的视觉识别及 $0.014309 成本仍保留，未发布不忠实结果。详细记录见 [pdf-page-repair.md](pdf-page-repair.md)。下列早期进度与探针按发生时记录，不能当作当前库未完成的证据。
+
 | 状态 | 本轮证据与限制 |
 | --- | --- |
-| 代码完成 | 本地工作树已实现转写、持久化、检索及回填代码，待总调度最终审阅；不代表已合并 |
-| 测试通过 | 旧固定资料修复后前五文件/实际页码命中为 98%/100%/100%，无异常或回退；分批针对性真实 PostgreSQL 检查 16/16 通过、无跳过。新三组 107 份/1,865 页完整关口仍未完成；公式严格符号仍是 7/9，不能宣称全部通过 |
+| 代码完成 | 转写、持久化、检索、回填及通用原始文本回退已实现，位于 PR #52 待总调度最终审阅；不代表已合并 |
+| 测试通过 | 原始文本回退 focused decoder 检查 10/10，类型与 targeted lint 通过；此前真实 PostgreSQL 针对性检查及完整正文发布证据保留。fresh 三组检索关口仍未全部通过；两页数学符号仍不完整，不能宣称全库公式通过 |
 | 服务已部署 | **未部署 PDF 应用代码**；仅 Docling 低并发运行配置已实际应用并健康，隔离转写试验不是应用发布 |
 | 生产已切换 | **未切换**；生产读写不能凭脚本或配置文件视为完成 |
 

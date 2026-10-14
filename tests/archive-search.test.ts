@@ -37,10 +37,13 @@ test('a numbered activity document outranks generic tutorial announcements when 
 });
 
 test('parsed document text replaces a filename-only Canvas directory record',()=>{
-  const merged=mergeArchiveSources([source('stats','STAB22TUT1.pdf'),source('stats','Tutorial module','module')],[hit('stats','STAB22TUT1.pdf','Due Friday; create a frequency table and bar chart.')],courses,12);
+  const warning='原始公式文本未验证 LaTeX、符号和上下标';
+  const merged=mergeArchiveSources([source('stats','STAB22TUT1.pdf'),source('stats','Tutorial module','module')],[{...hit('stats','STAB22TUT1.pdf','Due Friday; create a frequency table and bar chart.'),parser_warnings:[warning]}],courses,12);
   assert.equal(merged[0].sourceType,'document');
   assert.equal(merged[0].courseId,'stats');
   assert.match(merged[0].body,/frequency table/);
+  assert.deepEqual(merged[0].parser_warnings,[warning]);
+  assert.equal(mergeArchiveSources([], [hit('stats','legacy.pdf')],courses,12)[0].parser_warnings?.length,0);
   assert.ok(!merged.some((item)=>item.sourceType==='file'&&item.title==='STAB22TUT1.pdf'));
   assert.deepEqual(merged.map((item)=>item.ref),['S1','S2']);
 });

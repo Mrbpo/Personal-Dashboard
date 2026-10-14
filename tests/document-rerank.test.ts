@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import type {Pool} from 'pg';
 import type {DocumentTextHit} from '../lib/kernel/document-search.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,validateDocumentPageOrder,validateDocumentPageSelection,
- DOCUMENT_RERANK_CANDIDATE_LIMIT,DOCUMENT_RERANK_SELECTION_PROMPT_VERSION} from '../lib/kernel/document-rerank.ts';
+ DOCUMENT_RERANK_CANDIDATE_LIMIT,DOCUMENT_RERANK_SELECTION_PROMPT_VERSION,withDocumentRerankRunPolicy} from '../lib/kernel/document-rerank.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'document-rerank-tests-'));
 process.env.DATABASE_URL=':memory:';process.env.SERVICE_VAULT_DIR=directory;
@@ -54,6 +54,31 @@ class Fixture {
   }};
  }
 }
+
+test('internal one-run policy raises only its daily scope and journals a single paid attempt without repairs',async()=>{
+ const {database}=await import('../lib/database.ts'),{budgetMonth}=await import('../lib/ai-budget.ts');
+ const dayStart=Math.floor(Date.now()/86400000)*86400000,original=globalThis.fetch;
+ const fixture=new Fixture(),hits=fixture.hits('single-run'),attempts=new Set<string>();let calls=0;
+ await database.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<200)
+  INSERT INTO ai_ledger(id,month,kind,reserved,charged,status,created_at)
+  SELECT 'single-run-fixture-'||n,?,'pdf-search-rerank',0,0,'settled',? FROM seq`).bind(budgetMonth(),dayStart).run();
+ globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({orderedIds:['p0','p0']})});};
+ try{
+  await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'single-run','before scope',hits,2),/预算|上限/);
+  assert.equal(calls,0);
+  await withDocumentRerankRunPolicy({dailyLimit:350,maxAttempts:1,beforeAttempt:async identity=>{
+   if(attempts.has(identity))throw new Error('Existing single-attempt journal prevents a second paid attempt');
+   attempts.add(identity);
+  }},async()=>{
+   await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'single-run','same failed query',hits,2),/duplicate/);
+   await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'single-run','same failed query',hits,2),/journal/);
+  });
+  assert.equal(calls,1,'invalid output cannot repair or be retried by the second interface');
+  assert.equal(attempts.size,1);
+  await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'single-run','after scope',hits,2),/预算|上限/);
+  assert.equal(calls,1,'the normal 200/day default is restored after the run');
+ }finally{globalThis.fetch=original;await database.prepare("DELETE FROM ai_ledger WHERE id LIKE 'single-run-fixture-%'").run();}
+});
 
 test('the reranker permits only a complete permutation of supplied page identities',()=>{
  assert.deepEqual(validateDocumentPageOrder({orderedIds:['p1','p0']},['p0','p1']),['p1','p0']);
@@ -260,5 +285,32 @@ test('top-k selection does not publish when the parsed version changes during it
  try{
   await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'alice','motion',hits,1),/version changed/i);
   assert.equal(fixture.cache.size,0);assert.equal(fixture.rollbacks,1);
+ }finally{globalThis.fetch=original;}
+});
+
+test('top-k provenance metadata is model context and participates in the selection cache identity',async()=>{
+ const fixture=new Fixture(),hits=fixture.hits(),original=globalThis.fetch;let calls=0,changeDuringRequest=false;
+ Object.assign(fixture.pages[0],{document_name:'Lecture notes',course_id:'course-1',course_name:'Learning',course_code:'CS101',locator:'Page 1'});
+ globalThis.fetch=async(_input,init)=>{
+  const request=JSON.parse(String(init?.body)),pages=JSON.parse(request.input[1].content).pages;
+  assert.equal(pages[0].document,calls===0?'Lecture notes':calls===1?'Updated notes':'Before-request-change');
+  assert.deepEqual(pages[0].course,{id:'course-1',name:'Learning',code:'CS101'});
+  assert.equal(pages[0].locator,'Page 1');
+  assert.match(request.input[0].content,/not instructions/);
+  if(changeDuringRequest)Object.assign(fixture.pages[0],{document_name:'Changed during the request'});
+  calls++;return Response.json({output_text:JSON.stringify({orderedIds:['p0']})});
+ };
+ try{
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1);
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1);
+  assert.equal(calls,1);
+  Object.assign(fixture.pages[0],{document_name:'Updated notes'});
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1);
+  assert.equal(calls,2,'metadata changes cannot reuse the prior-context selection artifact');
+  assert.equal(fixture.cache.size,2);
+  changeDuringRequest=true;
+  Object.assign(fixture.pages[0],{document_name:'Before-request-change'});
+  await assert.rejects(selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1),/metadata changed/);
+  assert.equal(calls,3);assert.equal(fixture.cache.size,2);assert.equal(fixture.rollbacks,1);
  }finally{globalThis.fetch=original;}
 });

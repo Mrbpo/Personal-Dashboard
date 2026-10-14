@@ -132,3 +132,43 @@ test('fully processed pages preserve uncertainty in place and malformed warning 
   }
  }finally{globalThis.fetch=original;}
 });
+
+test('selected visual pages copy the exact original page, keep global numbering and reuse only source-specific cache',async()=>{
+ const {transcribePdfVisualPages}=await import('../lib/document-parser.ts');
+ const pdf=await PDFDocument.create();
+ for(let index=0;index<30;index++)pdf.addPage([400+index,600]);
+ const bytes=await pdf.save(),id='selected-original-29';
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(_input,init)=>{
+  const request=JSON.parse(String(init?.body));
+  const uploaded=request.input[0].content.find((part:{type:string})=>part.type==='input_file');
+  const copy=await PDFDocument.load(Buffer.from(uploaded.file_data.split(',')[1],'base64'));
+  assert.equal(copy.getPageCount(),1);
+  assert.equal(copy.getPage(0).getWidth(),428,'original page 29 must be copied, not page 1');
+  calls++;
+  return Response.json({output_text:JSON.stringify({text:'Faithful selected-page text \\(\\psi\\)',complete:true,uncertain_spans:[]})});
+ };
+ try{
+  const options={pageNumbers:[29],imageInput:false};
+  const pages=await transcribePdfVisualPages(id,bytes,options);
+  assert.deepEqual(pages.map(page=>[page.pageNumber,page.locator]),[[29,'第 29 页']]);
+  await transcribePdfVisualPages(id,bytes,options);
+  assert.equal(calls,1);
+  pdf.setTitle('Source revision');
+  await transcribePdfVisualPages(id,await pdf.save(),options);
+  assert.equal(calls,2,'changed original hash must not reuse the previous selected-page text');
+ }finally{globalThis.fetch=original;}
+});
+
+test('selected visual page/hash validation rejects before a model request',async()=>{
+ const {transcribePdfVisualPages}=await import('../lib/document-parser.ts');
+ const pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();const bytes=await pdf.save();
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;throw new Error('Unexpected request');};
+ try{
+  for(const pageNumbers of [[],[0],[3],[1,1],[1.5]])
+   await assert.rejects(transcribePdfVisualPages('invalid-selection',bytes,{pageNumbers}),/原始页码无效/);
+  await assert.rejects(transcribePdfVisualPages('wrong-original',bytes,{pageNumbers:[1],expectedSourceHash:'0'.repeat(64)}),/原件校验失败/);
+  assert.equal(calls,0);
+ }finally{globalThis.fetch=original;}
+});

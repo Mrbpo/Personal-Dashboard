@@ -1,12 +1,15 @@
 import type { Pool } from 'pg';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
-import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks} from './document-vector.ts';
+import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
   '∞':' infinity ', 'α':' alpha ', 'β':' beta ', 'γ':' gamma ', 'δ':' delta ',
-  'θ':' theta ', 'λ':' lambda ', 'μ':' mu ', 'σ':' sigma ', 'π':' pi ',
+  'ε':' epsilon ', 'ζ':' zeta ', 'η':' eta ', 'θ':' theta ', 'ι':' iota ', 'κ':' kappa ',
+  'λ':' lambda ', 'μ':' mu ', 'ν':' nu ', 'ξ':' xi ', 'ο':' omicron ', 'π':' pi ',
+  'ρ':' rho ', 'σ':' sigma ', 'ς':' sigma ', 'τ':' tau ', 'υ':' upsilon ', 'φ':' phi ',
+  'χ':' chi ', 'ψ':' psi ', 'ω':' omega ',
   '∩':' cap intersection ', '⋅':' cdot multiply ', '≤':' le less equal ', '≥':' ge greater equal ',
 };
 const queryStopWords=new Set(('a an the and or of to in on at for from with by as is are was were be been being '+
@@ -22,10 +25,11 @@ export function documentSearchText(value:string):string {
     [...formula.replace(/\\[a-z]+/giu,' ').toLowerCase().matchAll(/[a-z]/gu)].map(([letter])=>`math${letter}`)))];
   const text=value.normalize('NFKC').toLowerCase()
     .replace(/([\p{L}])-\s*\r?\n\s*([\p{L}])/gu,'$1$2')
-    .replace(/[∫∑∏√∞αβγδθλμσπ∩⋅≤≥]/gu,symbol=>symbolNames[symbol])
+    .replace(/[∫∑∏√∞αβγδεζηθικλμνξοπρσςτυφχψω∩⋅≤≥]/gu,symbol=>symbolNames[symbol])
     .replace(/\\(?:left|right|mathrm|mathbf|operatorname|text)\b/gu,' ')
     .replace(/\\int\b/gu,' int integral ').replace(/\\sum\b/gu,' sum summation ')
     .replace(/\\(?:tfrac|dfrac|frac)\b/gu,' frac fraction ').replace(/\\sqrt\b/gu,' sqrt root ')
+    .replace(/\\var(epsilon|theta|kappa|pi|rho|sigma|phi)\b/gu,' $1 ')
     .replace(/\\([a-z]+)/gu,' $1 ')
     .replace(/([\p{L}])([\p{N}])/gu,'$1 $2').replace(/([\p{N}])([\p{L}])/gu,'$1 $2')
     .replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim();
@@ -43,7 +47,7 @@ export function splitDocumentText(text:string):string[] {
 
 export type DocumentTextHit={id:string;document_id:string;course_id:string;name:string;origin:string;
   origin_key:string;source_hash:string;body:string;locator:string;page_number:number;
-  evidence_id:string;source_version_id:string;parser_version:string;score:number;
+  evidence_id:string;source_version_id:string;parser_version:string;score:number;parser_warnings?:string[];
   content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;
   // IDF-weighted stored search-text coverage, not factual confidence. Existing
   // transcription warnings and repeated headers can also contain matching terms.
@@ -82,7 +86,7 @@ function rankingFailure(error:unknown):string{
   if(/budget|预算|上限/iu.test(message))return 'budget-limit';
   if(/timeout|aborted|time limit|signal/iu.test(message))return 'timeout';
   if(/incomplete/iu.test(message))return 'incomplete-output';
-  if(/stale|version changed/iu.test(message))return 'stale-version';
+  if(/stale|version changed|metadata changed/iu.test(message))return 'stale-version';
   if(/format|permutation|foreign|indices|invalid JSON|dimension/iu.test(message))return 'invalid-output';
   if(/API key|凭据/iu.test(message))return 'credentials-unavailable';
   return 'unavailable';
@@ -141,7 +145,7 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     diverse AS (SELECT *,row_number() OVER (PARTITION BY document_id,page_number ORDER BY score DESC,position) page_rank FROM scored)
     SELECT 'pg:'||coalesce(snippet.id,c.id) AS id,d.id AS document_id,coalesce(d.course_id,'') AS course_id,
       d.name,d.origin,d.origin_key,d.source_hash,coalesce(snippet.body,c.body) body,p.locator,p.page_number,p.content_kind,p.start_ms::double precision,p.end_ms::double precision,
-      p.evidence_id,v.source_version_id,v.parser_version,c.score,c.lexical_support
+      p.evidence_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,c.score,c.lexical_support
     FROM diverse c JOIN document_texts d ON d.id=c.document_id CROSS JOIN q
       JOIN document_text_versions v ON v.id=c.version_id
       JOIN document_text_pages p ON p.version_id=c.version_id AND p.page_number=c.page_number
@@ -159,11 +163,12 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
       (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false,hybrid:false}))
         .map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,degraded_reason:reason}));
     let reordered:DocumentTextHit[]=hits,semanticFailure:string|undefined;
+    let independentDense:DocumentTextHit[]=[];
     if(dense){
       const result=await dense;
       if(result.error)semanticFailure=`semantic:${rankingFailure(result.error)}`;
       else if(!result.value?.coverage.complete)semanticFailure='semantic:index-incomplete';
-      else try{reordered=fuseIndependentDocumentRanks(hits,result.value.hits,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
+      else try{independentDense=result.value.hits;reordered=fuseIndependentDocumentRanks(hits,independentDense,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
       catch(error){semanticFailure=`semantic:${rankingFailure(error)}`;}
     }else{
       try{
@@ -173,9 +178,14 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     if(aiRerank){
       try{
         const candidates=new Map<string,DocumentTextHit>();
-        for(let index=0;index<Math.max(hits.length,reordered.length)&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT;index++){
-          for(const hit of hybrid?[reordered[index]]:[hits[index],reordered[index]]){
-            if(hit&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT)candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
+        if(hybrid){
+          for(const hit of await buildHybridDocumentCandidates(pool,owner,hits,independentDense))
+            candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
+        }else{
+          for(let index=0;index<Math.max(hits.length,reordered.length)&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT;index++){
+            for(const hit of [hits[index],reordered[index]]){
+              if(hit&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT)candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
+            }
           }
         }
         const ranked=hybrid?await selectDocumentPagesWithAI(pool,owner,query,[...candidates.values()],Math.min(5,limit,candidates.size)):

@@ -26,6 +26,8 @@
 
 该恢复路径已实际验证一对剩余录像：身份、partner、真实 parent、原始 1080p flavor 和 3535 秒时长通过，但旧下载模板返回 HTTP 404；按 [Kaltura 官方原文件指南](https://knowledge.kaltura.com/help/how-to-download-a-raw-file) 请求精确 flavor 的 `flavorasset.getUrl`，实际得到 HTTP 200、text/html、零字节而非下载地址，大小写路径形式相同。没有把元数据成功当原片成功，没有下载其他 26 路，保留这两项失败和其余待处理。官方 URL 解析仅用于显式历史恢复，普通已通过的下载流程继续保留；没有调整 KS 权限、Cookie、请求头或转用低清版本。
 
+随后只读旧报告，剩余 14 个父录像均名为 `OLD: MATA29H3 LEC01`，14/14 带 OLD，平台发布时间全部在 2025 年（2025-09-03 至 2025-11-12）。这不是实际拍摄时间、删除、权限或任务取消的判定。首条 `0_454b07e2` 的平台发布时间为 2025-11-07 20:04:03 UTC（多伦多 15:04），时长 3535 秒；用户可从原课程入口 `https://q.utoronto.ca/courses/452689/external_tools/8084`、实际频道 812430 按上述标题和日期确认正常播放或原片下载。没有为这一只读核对发任何课程网络或下载请求。
+
 每课结果保存在 `/srv/study-course-recordings/reports/course-*.json`，含该课原生会员/父子关系、scan、archive 和格式预算，避免下一课覆盖全局 `manifest.scan` 导致误读。新文件解码证据保存 `decode-COURSE_ID.json` 和 SHA 身份的 `decoder-ledger.json`；已通过的相同字节不重复解码。仅条目元数据更新时间变化时，只有可靠 flavor 版本/更新时间/大小一致、字幕一致且现有文件 SHA 通过，才复用视频；否则仍保存新版本。首次 BIO 元数据更新形成的一份同 SHA 历史副本仍保留。
 
 示例课程入口：`https://q.utoronto.ca/courses/440904/external_tools/8084`。已观察到学校媒体域 `kaltura-quercus-prod.utoronto.ca`，必须显式加入允许范围。
