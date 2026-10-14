@@ -11,6 +11,6 @@ export async function GET(request:Request){
     if(course&&!(await listCourseSettings()).some(item=>item.enabled&&(item.id===course||item.code===course)))throw new Error('课程无效');
     const resolved=course?(await listCourseSettings()).find(item=>item.id===course||item.code===course)?.id||course:'';
     const matches=await searchLibrary(owner.userId,query,resolved,true);
-    return Response.json({matches:matches.map(item=>({documentId:item.document_id,courseId:item.course_id,title:item.name,locator:item.locator,excerpt:item.body,score:item.score,url:`/api/library/${item.document_id}`})),count:matches.length},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({matches:matches.map(item=>({documentId:item.document_id,courseId:item.course_id,title:item.name,locator:item.locator,excerpt:item.body,score:item.score,url:`/api/library/${item.document_id}`,parser_warnings:item.parser_warnings||[]})),count:matches.length},{headers:{'Cache-Control':'no-store'}});
   }catch(error){return Response.json({error:error instanceof Error&&/^[\u3400-\u9fff]/.test(error.message)?error.message:'搜索失败'},{status:400});}
 }

@@ -335,6 +335,7 @@ export type CourseSearchResult = {
   updatedAt: string | null;
   confirmedAnswer?: boolean;
   unconfirmedDiscussion?: boolean;
+  parser_warnings?: string[];
 };
 
 function searchTerms(question: string) {
