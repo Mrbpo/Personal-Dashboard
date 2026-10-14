@@ -69,6 +69,31 @@ test('recording evidence is atomically indexed, repeatable, owner-scoped and use
   assert.equal((await head()).id,current.id,'a replay with a new acquisition time is idempotent');
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM document_text_versions WHERE document_id=$1',[first.documentId])).rows[0].count),3);
   assert.equal((await kernel.searchDocumentText(owner,'spectral zephyr'))[0].evidence_id,current.evidence_id);
+  const {searchLibrary}=await import('../lib/library.ts');
+  const {database}=await import('../lib/database.ts');
+  const search=()=>searchLibrary(owner,'spectral zephyr','',false,{kernelSemantic:false,aiRerank:false,hybrid:false});
+  const libraryHit=(await search())[0];
+  assert.equal(libraryHit.document_id,first.documentId);
+  assert.equal(libraryHit.evidence_id,current.evidence_id);
+  assert.equal(libraryHit.content_kind,'time_segment');
+  assert.equal(libraryHit.start_ms,1250);assert.equal(libraryHit.end_ms,3250);
+  assert.match(libraryHit.locator,/00:00:01.250–00:00:03.250/);
+  assert.equal((await searchLibrary('other','spectral zephyr','',false,{kernelSemantic:false,aiRerank:false,hybrid:false})).length,0);
+  assert.equal((await searchLibrary(owner,'spectral zephyr','other-course',false,{kernelSemantic:false,aiRerank:false,hybrid:false})).length,0);
+  assert.equal((await searchLibrary(owner,'spectral zephyr','',false,{strict:true,path:'legacy-folder'})).length,0);
+  const document=prepareRecordingTranscript(input).document;
+  await database.prepare(`INSERT INTO library_documents(id,owner_id,course_id,origin,origin_key,folder_path,name,mime,hash,size,status,created_at,deleted)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(first.documentId,owner,'',document.origin,document.originKey,'legacy-folder',
+      document.name,document.mime,document.hash,1,'ready',input.acquiredAt,0).run();
+  assert.equal((await search())[0].evidence_id,current.evidence_id,'matching compatibility row retains canonical evidence');
+  for(const [field,value] of [['deleted',1],['owner_id','other'],['hash','stale'],['status','pending']] as const){
+    await database.prepare(`UPDATE library_documents SET ${field}=? WHERE id=?`).bind(value,first.documentId).run();
+    assert.equal((await search()).length,0,`existing compatibility ${field} cannot be bypassed as PG-only`);
+    await database.prepare('UPDATE library_documents SET deleted=0,owner_id=?,hash=?,status=? WHERE id=?')
+      .bind(owner,document.hash,'ready',first.documentId).run();
+  }
+  assert.equal((await searchLibrary(owner,'spectral zephyr','',false,{strict:true,path:'different-folder'})).length,0);
+  await database.prepare('DELETE FROM library_documents WHERE id=?').bind(first.documentId).run();
   await assert.rejects(kernel.ingestRecordingTranscript({...input,cues:[{startMs:-1,endMs:1000,text:'bad'}]}),/Invalid/);
   assert.equal((await kernel.searchDocumentText(owner,'spectral zephyr'))[0].start_ms,1250);
 });

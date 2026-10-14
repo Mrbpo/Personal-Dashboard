@@ -236,6 +236,8 @@ node --experimental-strip-types scripts/course-video-import.ts `
 
 字幕文本可使用已有 `KernelService.searchDocumentText` 查询，命中带 `content_kind=time_segment`、`start_ms/end_ms`、原 entry ID locator 和 evidence ID。底层兼容列 `page_number` 是 cue 顺序，不是 PDF 页；消费者应按 `content_kind` 呈现时间引用。此阶段没有更改 UI 的 PDF 页码标签。
 
+统一 `library.searchLibrary` 也接收当前完整且 owner 匹配的 PG-only 字幕，并透传 evidence、真实时间及定位字段，不创建重复 SQLite 文档。若同 ID 的 SQLite 兼容记录存在，原 owner、deleted、hash、课程/document scope 和状态守卫仍必须通过；失败不能按“无缓存”绕过。PG-only 没有旧目录映射，指定目录搜索不会虚构匹配。仅检索后端接入，没有新增原片/附件预览。
+
 字幕正文相同时，稳定录播来源字段、ASR 模型及有效 evidence confidence 也参与版本身份，保留先前来源和证据。获取时间及临时任务 ID 不参与身份；普通 PDF 的质量身份不变。现有字幕 PostgreSQL 用例验证不同模型的新版本、旧历史和重放幂等，真实执行结果以最终 CI 为准，不另建隔离环境或重跑原片。
 
 ASR 生成的 VTT 可以经同一 `KernelService` 调用以 `method=local-asr` 和模型信息导入，但当前批量 manifest importer 只导入已校验的平台字幕。未实现 ASR 自动批量入库，不把它写成已经连通。
