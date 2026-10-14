@@ -776,7 +776,10 @@ export class KernelService {
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
         pageNumber:page.pageNumber,extractionMethod:page.extractionMethod,parserVersion:page.parserVersion,
         ...(page.model?{model:page.model}:{}),basedOn:{versionId:page.basedOn.versionId,
-          sourceVersionId:page.basedOn.sourceVersionId,evidenceId:page.basedOn.evidenceId}}))}:{})}));
+          sourceVersionId:page.basedOn.sourceVersionId,evidenceId:page.basedOn.evidenceId}}))}:{}),
+      ...(options.recording?{recording:Object.fromEntries(
+        ['partnerId','entryId','captionId','language','sourceUrl','canvasCourseId','method','model','publishedAt']
+          .map(key=>[key,options.recording![key]??null])),evidenceConfidence:options.evidenceConfidence??0.9}:{})}));
     const textHash=stableId(JSON.stringify(pages));
     const parsedVersion=stableId(document.id,parser,textHash,qualityHash);
     const sourceItemId=`document:${document.id}`,acquiredAt=new Date().toISOString();

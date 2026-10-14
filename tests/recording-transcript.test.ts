@@ -43,6 +43,32 @@ test('recording evidence is atomically indexed, repeatable, owner-scoped and use
   assert.ok(hits[0].evidence_id);
   assert.equal((await kernel.searchDocumentText('other','spectral zephyr')).length,0);
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM document_text_versions WHERE document_id=$1',[first.documentId])).rows[0].count),1);
+  const head=async()=>(await kernelPool().query(`SELECT v.id,v.source_version_id,p.evidence_id,e.confidence
+    FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id
+    JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=1
+    JOIN evidence e ON e.id=p.evidence_id WHERE d.id=$1`,[first.documentId])).rows[0];
+  const platform=await head();
+  const asr={...input,method:'local-asr' as const,model:'cpu-small'};
+  await kernel.ingestRecordingTranscript(asr);
+  const oldModel=await head();
+  await kernel.ingestRecordingTranscript({...asr,model:'cpu-medium'});
+  const current=await head();
+  assert.notEqual(current.id,oldModel.id,'same subtitle bytes and method with a different model creates a new version');
+  assert.notEqual(current.source_version_id,oldModel.source_version_id);
+  assert.notEqual(current.evidence_id,oldModel.evidence_id);
+  const history=(await kernelPool().query(`SELECT v.id,s.raw_value AS raw,e.confidence FROM document_text_versions v
+    JOIN source_item_versions s ON s.id=v.source_version_id
+    JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=1 JOIN evidence e ON e.id=p.evidence_id
+    WHERE v.document_id=$1`,[first.documentId])).rows;
+  assert.equal(history.length,3);
+  assert.equal(history.find(row=>row.id===oldModel.id).raw.recording.model,'cpu-small');
+  assert.equal(history.find(row=>row.id===current.id).raw.recording.model,'cpu-medium');
+  assert.equal(Number(history.find(row=>row.id===platform.id).confidence),0.8);
+  assert.equal(Number(current.confidence),0.6);
+  await kernel.ingestRecordingTranscript({...asr,model:'cpu-medium',acquiredAt:'2026-10-14T00:00:00Z'});
+  assert.equal((await head()).id,current.id,'a replay with a new acquisition time is idempotent');
+  assert.equal(Number((await kernelPool().query('SELECT count(*) FROM document_text_versions WHERE document_id=$1',[first.documentId])).rows[0].count),3);
+  assert.equal((await kernel.searchDocumentText(owner,'spectral zephyr'))[0].evidence_id,current.evidence_id);
   await assert.rejects(kernel.ingestRecordingTranscript({...input,cues:[{startMs:-1,endMs:1000,text:'bad'}]}),/Invalid/);
   assert.equal((await kernel.searchDocumentText(owner,'spectral zephyr'))[0].start_ms,1250);
 });
