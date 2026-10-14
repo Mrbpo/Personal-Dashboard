@@ -3,6 +3,7 @@ import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMI
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
 import {recallReferencedDocuments} from './document-references.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,DocumentSourceResolutionError,type DocumentSourceHint} from './document-source.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -53,7 +54,11 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   // IDF-weighted stored search-text coverage, not factual confidence. Existing
   // transcription warnings and repeated headers can also contain matching terms.
   lexical_support?:number;
+  retrieval_scope?:'selected-title-scoped';
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+
+export type DocumentSearchOptions={courseId?:string;documentId?:string;sourceHint?:DocumentSourceHint;
+ limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean};
 
 // Use majority available query information as the support target, admitting the
 // half-weight boundary. This is lexical coverage, not calibrated relevance.
@@ -108,9 +113,23 @@ function rankingFailure(error:unknown):string{
   return 'unavailable';
 }
 
-export async function searchDocumentText(pool:Pool,owner:string,query:string,options:{
-  courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean;
-}={}):Promise<DocumentTextHit[]> {
+export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
+  if(options.sourceHint!==undefined){
+    const resolution=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId});
+    const selected=requireResolvedDocumentSource(resolution);
+    if(options.documentId&&options.documentId!==selected.documentId)
+      throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_SCOPE_CONFLICT','Document ID conflicts with the selected title',resolution);
+    const {sourceHint,...scopedOptions}=options;
+    // The original relevance query passes through unchanged. Only a uniquely
+    // resolved visible title can become this internal document scope.
+    const hits=await searchDocumentText(pool,owner,query,{...scopedOptions,documentId:selected.documentId});
+    const current=await resolveDocumentSource(pool,owner,sourceHint,{courseId:options.courseId});
+    if(current.status!=='resolved'||current.document.documentId!==selected.documentId
+      ||current.document.currentVersionId!==selected.currentVersionId
+      ||current.document.sourceVersionId!==selected.sourceVersionId||current.document.sourceHash!==selected.sourceHash)
+      throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Selected source changed during retrieval',current);
+    return hits.map(hit=>({...hit,retrieval_scope:'selected-title-scoped' as const}));
+  }
   const normalized=documentSearchText(query).slice(0,4000);
   const formulaQuery=/[\\^_=∫∑√]/u.test(query);
   const words=[...new Set(normalized.split(' ').filter(word=>word.length>=(formulaQuery?1:2)&&
