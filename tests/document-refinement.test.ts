@@ -19,11 +19,12 @@ process.env.DATABASE_URL=':memory:';process.env.SERVICE_VAULT_DIR=directory;proc
 const originalFetch=globalThis.fetch;let calls=0;
 globalThis.fetch=async()=>{calls++;throw new Error('No unmocked network request permitted');};
 after(async()=>{globalThis.fetch=originalFetch;rmSync(directory,{recursive:true,force:true});if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();});
-async function fixture(bodies:string[],mime='application/pdf'){
+async function fixture(bodies:string[],mime='application/pdf',timeSegmentAnchor=false){
  await migrateKernel();const tag=randomUUID(),owner='adjacent-owner-'+tag,courseId='adjacent-course-'+tag;
  await kernel.upsertCourse({id:courseId,name:'Adjacent evidence fixture',course_code:'ADJ'});
  const document={id:'adjacent-document-'+tag,ownerId:owner,courseId,name:'Fixture source',hash:tag,mime,origin:'adjacent-fixture',originKey:tag};
  const pages=bodies.map((text,index)=>({pageNumber:index+1,locator:'Original page '+(index+1),text}));
+ if(timeSegmentAnchor)Object.assign(pages[0],{contentKind:'time_segment',startMs:0,endMs:1000});
  await kernel.ingestParsedDocument(document,pages,{parserVersion:'adjacent-test-v1',warnings:['Original math remains unverified.']});
  const hits=await kernel.searchDocumentText(owner,'quartz',{limit:14,semantic:false,aiRerank:false,hybrid:false,evidenceBody:'full-page'});
  return {owner,document,pages,hits,pool:kernelPool()};
@@ -52,6 +53,10 @@ test('no new neighbor skips model work; empty and non-PDF sources never invent a
  assert.equal(result[0].refined_from?.[0].evidence_id,item.hits[0].evidence_id);
  const text=await fixture(['Quartz selected paragraph.','Other original paragraph.'],'text/plain');
  assert.equal((await selectedDocumentNeighborhood(text.pool,text.owner,text.hits)).length,1);
+ const timed=await fixture(['Quartz selected interval.','Original physical page.'],'application/pdf',true);
+ assert.equal(timed.hits[0].content_kind,'time_segment');
+ assert.equal((await selectedDocumentNeighborhood(timed.pool,timed.owner,timed.hits)).length,1);
+ assert.equal(calls,before,'a PDF time-segment anchor cannot cause refinement provider work');
 });
 
 test('source changes during neighbor lookup are detected before a refinement provider request',pg,async()=>{

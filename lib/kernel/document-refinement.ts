@@ -28,7 +28,7 @@ export async function selectedDocumentNeighborhood(pool:Pool,owner:string,select
   JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
    AND s.raw_sha256=d.source_hash AND s.raw_value->>'mime'='application/pdf'
   JOIN document_text_pages anchor ON anchor.version_id=v.id AND anchor.page_number=r.page_number
-   AND anchor.evidence_id=r.evidence_id AND 'pg:'||v.id||':'||anchor.page_number=r.id
+   AND anchor.evidence_id=r.evidence_id AND anchor.content_kind='page' AND 'pg:'||v.id||':'||anchor.page_number=r.id
   JOIN document_text_pages p ON p.version_id=v.id AND p.page_number IN (r.page_number-1,r.page_number+1)
   JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id AND e.source_item_id=d.source_item_id
   WHERE p.page_number BETWEEN 1 AND v.page_count AND p.content_kind='page' AND btrim(p.body)<>''
