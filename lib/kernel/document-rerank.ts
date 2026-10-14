@@ -15,9 +15,33 @@ type Page={document_id:string;version_id:string;source_version_id:string;page_nu
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
 const key=(document:string,page:number)=>JSON.stringify([document,page]);
 const flights=new WeakMap<Pool,Map<string,Promise<string[]>>>();
-type RerankRunPolicy={dailyLimit:number;maxAttempts:1|2;scope?:'development';beforeAttempt?:(cacheIdentity:string)=>Promise<void>};
+export type DocumentRerankModel='gpt-5-mini'|'gpt-6-astra';
+export type DocumentRerankReasoningEffort='low'|'medium'|'high'|'xhigh'|'max';
+type RerankRunPolicy={dailyLimit:number;maxAttempts:1|2;scope?:'development';
+ model?:DocumentRerankModel;reasoningEffort?:DocumentRerankReasoningEffort;maxOutputTokens?:number;deadlineMs?:number;
+ beforeAttempt?:(cacheIdentity:string)=>Promise<void>};
+type ModelPolicy={model:DocumentRerankModel;reasoningEffort:DocumentRerankReasoningEffort;maxOutputTokens:number;deadlineMs:number};
+const defaultModelPolicy:Readonly<ModelPolicy>={model:DOCUMENT_RERANK_MODEL,reasoningEffort:'low',maxOutputTokens:4000,deadlineMs:30000};
 const runPolicies=new AsyncLocalStorage<Readonly<RerankRunPolicy>>();
 const defaultRunPolicy:Readonly<RerankRunPolicy>={dailyLimit:200,maxAttempts:2};
+
+/** Trusted operations only: query parameters and service settings cannot enable development. */
+export function assertDocumentDevelopmentRun():void{
+ let isolated=false;
+ try{const url=new URL(process.env.KERNEL_DATABASE_URL||'');
+  isolated=['postgres:','postgresql:'].includes(url.protocol)&&url.pathname==='/pdf_acceptance_20261006';
+ }catch{/* Invalid or missing connections fail closed. */}
+ if(process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true'||!isolated||
+  process.env.DATABASE_URL!=='file:/pdf-data/benchmark.sqlite')
+  throw new Error('Development PDF reranking requires the isolated administrator process and attempt journal');
+}
+
+function modelPolicy(policy:Readonly<RerankRunPolicy>):Readonly<ModelPolicy>{
+ return {...defaultModelPolicy,model:policy.model??defaultModelPolicy.model,
+  reasoningEffort:policy.reasoningEffort??defaultModelPolicy.reasoningEffort,
+  maxOutputTokens:policy.maxOutputTokens??defaultModelPolicy.maxOutputTokens,
+  deadlineMs:policy.deadlineMs??defaultModelPolicy.deadlineMs};
+}
 
 /** Internal administrator-run scope; request parameters and document content
  * never configure budgets. The ordinary application retains its 200/day cap.
@@ -31,13 +55,17 @@ export function withDocumentRerankRunPolicy<T>(policy:RerankRunPolicy,work:()=>P
   throw new Error('Invalid internal PDF reranker run policy');
  if(policy.dailyLimit>350&&policy.scope!=='development')
   throw new Error('PDF reranker limits above 350 require an isolated development scope');
+ if(policy.scope!=='development'&&[policy.model,policy.reasoningEffort,policy.maxOutputTokens,policy.deadlineMs].some(value=>value!==undefined))
+  throw new Error('PDF reranker model options require an isolated development scope');
+ const settings=modelPolicy(policy);
+ const efforts=settings.model==='gpt-6-astra'?['low','medium','high','xhigh','max']:['low','medium','high'];
+ if(!['gpt-5-mini','gpt-6-astra'].includes(settings.model)||!efforts.includes(settings.reasoningEffort)||
+  !Number.isInteger(settings.maxOutputTokens)||settings.maxOutputTokens<1||settings.maxOutputTokens>32768||
+  !Number.isInteger(settings.deadlineMs)||settings.deadlineMs<1000||settings.deadlineMs>180000)
+  throw new Error('Invalid internal PDF reranker model options');
  if(policy.scope==='development'){
-  let isolated=false;
-  try{const url=new URL(process.env.KERNEL_DATABASE_URL||'');
-   isolated=['postgres:','postgresql:'].includes(url.protocol)&&url.pathname==='/pdf_acceptance_20261006';
-  }catch{/* Invalid or missing connections fail closed. */}
-  if(process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true'||!isolated||
-   process.env.DATABASE_URL!=='file:/pdf-data/benchmark.sqlite'||typeof policy.beforeAttempt!=='function')
+  assertDocumentDevelopmentRun();
+  if(typeof policy.beforeAttempt!=='function')
    throw new Error('Development PDF reranking requires the isolated administrator process and attempt journal');
  }
  return runPolicies.run(Object.freeze({...policy}),work);
@@ -99,12 +127,12 @@ type InputPage={id:string;text:string;document?:string;course?:{id:string;name:s
 function pageMetadata(page:Page){
  return {document:page.document_name??'',course:{id:page.course_id??'',name:page.course_name??'',code:page.course_code??''},locator:page.locator??''};
 }
-async function requestOrderOnce(query:string,pages:InputPage[],identities:string[],deadline:number,selectionCount?:number):Promise<string[]>{
+async function requestOrderOnce(query:string,pages:InputPage[],identities:string[],deadline:number,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,selectionCount?:number):Promise<string[]>{
  if(!serviceValue('OPENAI_API_KEY'))throw new Error('AI PDF reranking requires an OpenAI API key');
  const remaining=deadline-Date.now();
  if(remaining<=0)throw new Error('PDF AI reranker time limit reached');
  const response=await paidOpenAI('responses',{
-  model:DOCUMENT_RERANK_MODEL,store:false,max_output_tokens:4000,reasoning:{effort:'low'},
+  model:settings.model,store:false,max_output_tokens:settings.maxOutputTokens,reasoning:{effort:settings.reasoningEffort},
   input:[{role:'developer',content:'Rank these candidate document pages as evidence for the user query. '+
    (selectionCount===undefined?'Return only a permutation of the provided page identities, most useful first. ':
     `Select exactly ${selectionCount} distinct provided page identities, most useful first. Omit all other identities. `)+
@@ -121,7 +149,7 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
   text:{format:{type:'json_schema',name:'document_page_order',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{orderedIds:{type:'array',items:{type:'string',enum:identities},
     ...(selectionCount===undefined?{}:{minItems:selectionCount,maxItems:selectionCount})}},required:['orderedIds']}}},
- },AbortSignal.timeout(remaining),{kind:'pdf-search-rerank',dailyLimit:(runPolicies.getStore()??defaultRunPolicy).dailyLimit});
+ },AbortSignal.timeout(remaining),{kind:'pdf-search-rerank',dailyLimit:policy.dailyLimit});
  if(!response.ok)throw new Error(`PDF AI reranker request failed (${response.status})`);
  if(Date.now()>=deadline)throw new Error('PDF AI reranker time limit reached');
  let payload;
@@ -130,6 +158,9 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
   throw error;
  }
  if(!payload||typeof payload!=='object')throw new InvalidPageOrderOutput('PDF reranker output format is invalid');
+ // An Astra development result must identify the requested model. Old mini
+ // fixtures/providers without this field retain their existing behavior.
+ if(settings.model==='gpt-6-astra'&&payload.model!==settings.model)throw new Error('PDF AI reranker returned a different model');
  if(payload.status==='incomplete'||payload.error)throw new Error('PDF AI reranker response is incomplete');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content||[])
   .map((item:{text?:string})=>item.text||'').join('');
@@ -138,27 +169,27 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
  return validateDocumentPageSelection(parsed,identities,selectionCount??identities.length);
 }
 
-async function requestOrder(query:string,pages:InputPage[],identities:string[],verifyCurrent:()=>Promise<void>,selectionCount?:number):Promise<string[]>{
- const deadline=Date.now()+30000;
+async function requestOrder(query:string,pages:InputPage[],identities:string[],verifyCurrent:()=>Promise<void>,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,selectionCount?:number):Promise<string[]>{
+ const deadline=Date.now()+settings.deadlineMs;
  for(let attempt=0;;attempt++){
-  try{return await requestOrderOnce(query,pages,identities,deadline,selectionCount);}
+  try{return await requestOrderOnce(query,pages,identities,deadline,settings,policy,selectionCount);}
   catch(error){
    if(error instanceof InvalidPageOrderOutput)console.warn('[pdf-rerank] validation failed',JSON.stringify({
     reason:error.reasonCode,attempt:attempt+1,candidateCount:identities.length,selectionCount:selectionCount??identities.length}));
    // One repair attempt for untrusted output only; each request uses the same
    // budget policy and shares the original deadline. Invalid output is not cached.
-   if(attempt+1>=(runPolicies.getStore()??defaultRunPolicy).maxAttempts||!(error instanceof InvalidPageOrderOutput))throw error;
+   if(attempt+1>=policy.maxAttempts||!(error instanceof InvalidPageOrderOutput))throw error;
    await verifyCurrent();
   }
  }
 }
 
-async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],pages:Page[],cacheKey:string,selectionCount?:number):Promise<string[]>{
+async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],pages:Page[],cacheKey:string,settings:Readonly<ModelPolicy>,policy:Readonly<RerankRunPolicy>,selectionCount?:number):Promise<string[]>{
  const identities=hits.map((_,index)=>'p'+index);
  const promptVersion=selectionCount===undefined?DOCUMENT_RERANK_PROMPT_VERSION:DOCUMENT_RERANK_SELECTION_PROMPT_VERSION;
  const cached=(await pool.query<{ordered_ids:unknown}>(`/* rerank:cache */
   SELECT ordered_ids FROM document_rerank_cache WHERE owner_id=$1 AND cache_key=$2 AND model=$3 AND prompt_version=$4`,
-  [owner,cacheKey,DOCUMENT_RERANK_MODEL,promptVersion])).rows[0];
+  [owner,cacheKey,settings.model,promptVersion])).rows[0];
  if(cached){samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined);return validateDocumentPageSelection({orderedIds:cached.ordered_ids},identities,selectionCount??identities.length);}
  const byPage=new Map(pages.map(page=>[key(page.document_id,page.page_number),page]));
  const inputPages=hits.map((hit,index)=>{
@@ -166,8 +197,8 @@ async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentText
   return {id:identities[index],text:Array.from(page.body).slice(0,6000).join(''),
    ...(selectionCount===undefined?{}:pageMetadata(page))};
  });
- await runPolicies.getStore()?.beforeAttempt?.(JSON.stringify([owner,cacheKey]));
- const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined),selectionCount);
+ await policy.beforeAttempt?.(JSON.stringify([owner,cacheKey]));
+ const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined),settings,policy,selectionCount);
  const client=await pool.connect();
  try{
   await client.query('BEGIN');
@@ -175,7 +206,7 @@ async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentText
   await client.query(`/* rerank:save */
    INSERT INTO document_rerank_cache(owner_id,cache_key,model,prompt_version,ordered_ids)
    VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT(owner_id,cache_key,model,prompt_version) DO NOTHING`,
-   [owner,cacheKey,DOCUMENT_RERANK_MODEL,promptVersion,JSON.stringify(order)]);
+   [owner,cacheKey,settings.model,promptVersion,JSON.stringify(order)]);
   await client.query('COMMIT');
  }catch(error){await client.query('ROLLBACK');throw error;}
  finally{client.release();}
@@ -194,6 +225,7 @@ export async function selectDocumentPagesWithAI(pool:Pool,owner:string,query:str
 }
 
 async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],limit:number,selection:boolean):Promise<DocumentTextHit[]>{
+ const policy=runPolicies.getStore()??defaultRunPolicy,settings=modelPolicy(policy);
  if(!owner||hits.length>DOCUMENT_RERANK_CANDIDATE_LIMIT||!Number.isInteger(limit)||limit<1||limit>DOCUMENT_RERANK_CANDIDATE_LIMIT)
   throw new Error('Invalid AI PDF reranker candidate scope or limit');
  if(!hits.length)return [];
@@ -217,16 +249,23 @@ async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hit
   return {document:page.document_id,page:page.page_number,version:page.version_id,textHash:hash(page.body),
    ...(selection?{metadataHash:hash(JSON.stringify(pageMetadata(page)))}:{})};
  });
- const cacheKey=hash(JSON.stringify({query:inputQuery,candidates:fingerprint,model:DOCUMENT_RERANK_MODEL,promptVersion,
+ // The unchanged mini/low/4000 namespace has always fixed these parameters;
+ // keep those historical entries, but every other configuration is explicit.
+ const legacy=settings.model===DOCUMENT_RERANK_MODEL&&settings.reasoningEffort==='low'&&settings.maxOutputTokens===4000;
+ const cacheKey=hash(JSON.stringify({query:inputQuery,candidates:fingerprint,model:settings.model,promptVersion,
+  ...(legacy?{}:{reasoningEffort:settings.reasoningEffort,maxOutputTokens:settings.maxOutputTokens}),
   ...(selection?{selectionCount}:{})}));
  let pending=flights.get(pool);if(!pending){pending=new Map();flights.set(pool,pending);}
- const flightKey=JSON.stringify([owner,cacheKey]);
+ // Content cache may be reused across deadlines, but active requests must not
+ // borrow a different scope's timeout, daily allowance or repair policy.
+ const flightKey=JSON.stringify([owner,cacheKey,policy.scope??'ordinary',policy.dailyLimit,policy.maxAttempts,settings.deadlineMs]);
  let work=pending.get(flightKey);
  const created=!work;
- if(!work){work=obtainOrder(pool,owner,inputQuery,candidates,pages,cacheKey,selectionCount);pending.set(flightKey,work);}
+ if(!work){work=obtainOrder(pool,owner,inputQuery,candidates,pages,cacheKey,settings,policy,selectionCount);pending.set(flightKey,work);}
  let order:string[];
  try{order=await work;}finally{if(created)pending.delete(flightKey);}
  // Concurrent callers retain their own original snippets; no model text is returned.
  samePages(pages,await readPages(pool,owner,candidates),selection);
- return order.slice(0,limit).map((identity,index)=>({...candidates[Number(identity.slice(1))],score:1/(index+1)}));
+ return order.slice(0,limit).map((identity,index)=>({...candidates[Number(identity.slice(1))],score:1/(index+1),
+  rerank_model:settings.model,rerank_reasoning_effort:settings.reasoningEffort,rerank_max_output_tokens:settings.maxOutputTokens}));
 }
