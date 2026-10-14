@@ -61,8 +61,9 @@ const evidenceIdentity=(hit:DocumentTextHit)=>JSON.stringify([
   hit.document_id,hit.page_number,hit.source_version_id,hit.evidence_id]);
 
 /** Protect one supported lexical source without overriding the AI's first four.
- * Only pages already validated by the AI reranker can move. Fuse the complete
- * permutation before slicing so different result limits share the same prefix.
+ * Only candidates validated by the AI reranker can move. Hybrid selection must
+ * supply its validated candidate tail before slicing; an AI-only top five cannot
+ * protect a strongly supported page omitted by that selection.
  */
 export function fuseLexicallySupportedAIRanks(lexical:DocumentTextHit[],ranked:DocumentTextHit[],limit=ranked.length):DocumentTextHit[]{
   const positions=new Map(ranked.map((hit,index)=>[evidenceIdentity(hit),index]));
@@ -78,6 +79,20 @@ export function fuseLexicallySupportedAIRanks(lexical:DocumentTextHit[],ranked:D
     }
   }
   return out.slice(0,Math.max(0,limit)).map((hit,index)=>({...hit,score:1/(index+1)}));
+}
+
+/** Validate the entire current candidate pool before restoring lexical support.
+ * The unselected tail retains original evidence, never model-generated pages.
+ * Hybrid results remain top five even when a library caller requests 240 hits. */
+export async function selectSupportedHybridDocumentPages(pool:Pool,owner:string,query:string,
+ lexical:DocumentTextHit[],candidates:DocumentTextHit[],limit:number):Promise<DocumentTextHit[]>{
+ const count=Math.min(5,limit,candidates.length);
+ const ranked=await selectDocumentPagesWithAI(pool,owner,query,candidates,count);
+ // selectDocumentPagesWithAI checks every candidate's owner/current version and
+ // evidence both before selection and immediately before returning (also cached).
+ const selected=new Set(ranked.map(evidenceIdentity));
+ const tail=candidates.filter(hit=>!selected.has(evidenceIdentity(hit)));
+ return fuseLexicallySupportedAIRanks(lexical,[...ranked,...tail],count);
 }
 
 function rankingFailure(error:unknown):string{
@@ -187,9 +202,10 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
             }
           }
         }
-        const ranked=hybrid?await selectDocumentPagesWithAI(pool,owner,query,[...candidates.values()],Math.min(5,limit,candidates.size)):
-          await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size);
-        return fuseLexicallySupportedAIRanks(hits,ranked,limit)
+        const ranked=hybrid?await selectSupportedHybridDocumentPages(pool,owner,query,hits,[...candidates.values()],limit):
+          fuseLexicallySupportedAIRanks(hits,
+            await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size),limit);
+        return ranked
           .map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'ai-rerank' as const,degraded_reason:semanticFailure}));
       }catch(error){
         return keywordFallback([semanticFailure,`ai:${rankingFailure(error)}`].filter(Boolean).join(';'));
