@@ -167,9 +167,11 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  if(!response.ok)throw new Error(`Document answer request failed (${response.status})`);
  const payload=await response.json();
  if(payload.status!=='completed'||payload.error)throw new Error('Document answer response is incomplete');
+ const actualModel=typeof payload.model==='string'&&payload.model.trim()?payload.model:null;
+ if(model==='gpt-6-astra'&&actualModel!==model)throw new Error('Document answer provider returned a different or unverified model');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content??[]).map((item:{text?:string})=>item.text??'').join('');
  const answer=validateGroundedDocumentAnswer(JSON.parse(raw??''),prepared.supports);
  if(prepareDocumentAnswer(question,await readContext()).fingerprint!==prepared.fingerprint)
   throw new Error('Document evidence changed during answer generation');
- return {answer,model,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt};
+ return {answer,model:actualModel,requestedModel:model,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt};
 }

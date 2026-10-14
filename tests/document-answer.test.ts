@@ -77,7 +77,7 @@ test('synthesis revalidates current sources, rejects incomplete output and makes
   assert.equal(request.reasoning.effort,'low');assert.equal(request.max_output_tokens,4000);
   assert.match(request.input[0].content,/untrusted data/);
   assert.match(request.input[0].content,/canonical Kernel facts/);
-  return Response.json({status:'completed',output_text:JSON.stringify(answer),usage:{input_tokens:100,output_tokens:100}});
+  return Response.json({status:'completed',model:'gpt-5-mini',output_text:JSON.stringify(answer),usage:{input_tokens:100,output_tokens:100}});
  };
  try{
   const result=await synthesizeDocumentAnswer('How many samples?',async()=>{reads++;return context();},
@@ -93,4 +93,21 @@ test('synthesis revalidates current sources, rejects incomplete output and makes
   await assert.rejects(synthesizeDocumentAnswer('How many samples?',async()=>context()),/incomplete/);
   assert.equal(calls,3,'incomplete or stale evidence never triggers an automatic paid retry');
  }finally{globalThis.fetch=original;}
+});
+
+test('development answers reject a provider model mismatch and never label mini as Astra',async()=>{
+ const names=['KERNEL_ADMIN_DEVELOPMENT_RUN','KERNEL_DATABASE_URL','DATABASE_URL','AI_MODEL_RATES'] as const;
+ const saved=Object.fromEntries(names.map(name=>[name,process.env[name]])),original=globalThis.fetch;
+ let calls=0,attempts=0;
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';
+  process.env.AI_MODEL_RATES=JSON.stringify({'gpt-6-astra':{input:10,output:50,context:1050000}});
+  globalThis.fetch=async()=>{calls++;return Response.json({status:'completed',model:'gpt-5-mini',
+   output_text:JSON.stringify(answer),usage:{input_tokens:100,output_tokens:100}});};
+  await assert.rejects(synthesizeDocumentAnswer('How many samples?',async()=>context(),{
+   scope:'development',model:'gpt-6-astra',reasoningEffort:'high',maxOutputTokens:16384,timeoutMs:120000,
+   beforeAttempt:async()=>{attempts++;}}),/different or unverified model/);
+  assert.equal(calls,1);assert.equal(attempts,1);
+ }finally{globalThis.fetch=original;for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
 });
