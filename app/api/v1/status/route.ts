@@ -10,7 +10,7 @@ export async function GET() {
   const owner = await getCurrentOwner();
   const settings = await getSettings(owner!.userId);
   const today = new Date().toLocaleDateString("en-CA", { timeZone: settings.timezone });
-  const data = await dashboardData(today);
+  const data = await dashboardData(today, settings.timezone);
   return Response.json({
     ok: true,
     database: process.env.DATABASE_URL?.startsWith("libsql:") || process.env.DATABASE_URL?.startsWith("https:") ? "remote" : "local",

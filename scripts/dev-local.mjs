@@ -28,10 +28,6 @@ const intervalMinutes = Math.max(1, Number(env.AUTO_SYNC_INTERVAL_MINUTES) || 15
 let syncInProgress = false;
 let piazzaSyncInProgress = false;
 
-function torontoDate() {
-  return new Date().toLocaleDateString("en-CA", { timeZone: env.TIMEZONE || "America/Toronto" });
-}
-
 async function runAutomaticSync() {
   if (syncInProgress) return;
   syncInProgress = true;
@@ -45,7 +41,6 @@ async function runAutomaticSync() {
       const response = await fetch(`${localOrigin}/api/sync/courses/${encodeURIComponent(course.id)}?runId=${encodeURIComponent(start.runId)}&mode=automatic`, { method: "POST" });
       if (!response.ok) failed += 1;
     }
-    await fetch(`${localOrigin}/api/plans/${torontoDate()}/generate`, { method: "POST" });
     const seconds = Math.round((Date.now() - startedAt.getTime()) / 1000);
     console.log(`[auto-sync] 完成：${(start.courses || []).length - failed}/${(start.courses || []).length} 门课程，耗时 ${seconds}s`);
   } catch (error) {
