@@ -1,12 +1,15 @@
-import {readFile,writeFile,mkdir} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,readdir} from 'node:fs/promises';
 import {resolve,join,basename} from 'node:path';
 import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {PDFDocument} from 'pdf-lib';
 
 const root=resolve(process.env.PDF_HELDOUT_DIR||'/pdf-data/heldout');
-const groups=['stanford','algorithms','systems'];
+const groups=(process.env.PDF_HELDOUT_GROUPS||'stanford,algorithms,systems').split(',');
+if(groups.length!==3||new Set(groups).size!==3||groups.some(group=>!/^[a-z][a-z0-9]*$/u.test(group)))
+ throw new Error('Exactly three named independent corpora are required');
 const hash=value=>createHash('sha256').update(value).digest('hex');
-const originalPath=item=>join(root,item.group,basename(item.path));
+const originalPath=item=>join(item.materialRoot||root,item.group,basename(item.path));
 async function referenceFor(item){
  try{return JSON.parse(await readFile(originalPath(item)+'.reference.json','utf8'));}
  catch(error){
@@ -45,6 +48,25 @@ for(const group of groups){
  }
 }
 if(new Set(expected.map(row=>row.id)).size!==150)throw new Error('Duplicate question identity');
+// Fresh validation retains the entire earlier corpus as distractors. Questions
+// are frozen only for the three fresh groups; no query ever filters to a group.
+if(process.env.PDF_DISTRACTOR_DIR){
+ const distractorRoot=resolve(process.env.PDF_DISTRACTOR_DIR);
+ for(const group of ['stanford','algorithms','systems']){
+  const manifest=JSON.parse(await readFile(join(distractorRoot,group,'manifest.json'),'utf8'));
+  if(!Array.isArray(manifest)||new Set(manifest.map(item=>item.path)).size!==manifest.length)throw new Error('Invalid distractor manifest');
+  for(const item of manifest){
+   if(item.group!==group||![basename(item.path),`data/pdf-heldout/${group}/${basename(item.path)}`].includes(item.path)||!item.path.endsWith('.pdf'))throw new Error('Invalid distractor path/group');
+   const material={...item,group,materialRoot:distractorRoot};
+   const bytes=await readFile(originalPath(material));
+   if(hash(bytes)!==item.sha256||bytes.length!==item.bytes||
+     (await PDFDocument.load(bytes,{updateMetadata:false})).getPageCount()!==item.page_count)
+    throw new Error('Frozen distractor original changed');
+   materials.push(material);
+  }
+ }
+}
+if(new Set(materials.map(item=>`${item.group}/${item.path}`)).size!==materials.length)throw new Error('Duplicate corpus identity');
 const expectationSha256=hash(JSON.stringify(expected));
 await mkdir(join(root,'reports'),{recursive:true});
 const frozenFile=join(root,'reports','frozen-expectation.sha256');
@@ -58,6 +80,15 @@ if(process.argv.includes('--validate-only')){
 }
 if(!process.env.KERNEL_DATABASE_URL?.includes('/pdf_acceptance_')||!process.env.LIBRARY_DIR?.startsWith('/pdf-data/'))throw new Error('Dedicated public PDF environment required');
 process.env.DOCLING_FORMULA_ENRICHMENT='false';
+// Freeze the actual source loaded by this process, not a historical commit label.
+// This reads application code only; questions and expected answers are excluded.
+const codeRoot=fileURLToPath(new URL('../',import.meta.url));
+async function algorithmFingerprint(){
+ const paths=['lib/library.ts',...(await readdir(join(codeRoot,'lib/kernel'))).filter(name=>name.endsWith('.ts')).sort().map(name=>`lib/kernel/${name}`)];
+ const files=await Promise.all(paths.map(async path=>({path,sha256:hash(await readFile(join(codeRoot,path)))})));
+ return {revision:process.env.PDF_CODE_BASELINE||process.env.PDF_ALGORITHM_BASELINE||null,sha256:hash(JSON.stringify(files)),files};
+}
+const algorithmFreeze=await algorithmFingerprint();
 const {kernel}=await import('../lib/kernel/service.ts');
 const {kernelPool,migrateKernel}=await import('../lib/kernel/db.ts');
 const library=await import('../lib/library.ts');
@@ -143,9 +174,28 @@ try{
  else{
   const groupFilter=process.argv.find(value=>value.startsWith('--group='))?.slice(8);
   if(groupFilter&&!groups.includes(groupFilter))throw new Error('Invalid group filter');
-  const aiRerank=process.argv.includes('--ai-rerank'),outcomes=[],startedAt=new Date().toISOString();
+  const aiRerank=process.argv.includes('--ai-rerank'),hybrid=process.argv.includes('--hybrid'),outcomes=[],startedAt=new Date().toISOString();
   const selected=expected.filter(row=>!groupFilter||row.group===groupFilter);
   const pathById=new Map([...identities].map(([path,id])=>[id,path]));
+  const materialById=new Map(materials.map(item=>[identities.get(`${item.group}/${item.path}`),item]));
+  async function provenanceErrors(hits){
+   const ids=[...new Set(hits.map(hit=>hit.document_id).filter(id=>typeof id==='string'))];
+   if(!ids.length)return hits.length;
+   // Fresh current-head validation after each search catches stale cached
+   // evidence as well as wrong page ranges, versions, sources and owner scope.
+   const rows=(await kernelPool().query(`SELECT d.id,d.source_hash,v.source_version_id,p.page_number,p.evidence_id
+    FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id
+    JOIN document_text_pages p ON p.version_id=v.id
+    JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id
+    WHERE d.owner_id=$1 AND d.hidden=false AND d.id=ANY($2::text[])`,[owner,ids])).rows;
+   const current=new Map(rows.map(row=>[`${row.id}:${row.page_number}`,row]));
+   return hits.filter(hit=>{
+    const material=materialById.get(hit.document_id),page=current.get(`${hit.document_id}:${hit.page_number}`);
+    return !material||!Number.isInteger(hit.page_number)||hit.page_number<1||hit.page_number>material.page_count||
+     !page||page.source_hash!==material.sha256||!hit.evidence_id||page.evidence_id!==hit.evidence_id||
+     !hit.source_version_id||page.source_version_id!==hit.source_version_id;
+   }).length;
+  }
   for(const group of groups.filter(group=>!groupFilter||group===groupFilter)){
    const questions=selected.filter(row=>row.group===group);let next=0;
    async function work(){
@@ -154,20 +204,23 @@ try{
      for(const engine of ['kernel','library']){
       const started=performance.now();let hits=[],error=null;
       try{
-       hits=engine==='kernel'?await kernel.searchDocumentText(owner,question.query,{limit:5,aiRerank}):
-        await library.searchLibrary(owner,question.query,'',aiRerank,{limit:5,kernelSemantic:aiRerank,aiRerank});
+       hits=engine==='kernel'?await kernel.searchDocumentText(owner,question.query,{limit:5,aiRerank,hybrid}):
+        await library.searchLibrary(owner,question.query,'',aiRerank||hybrid,{limit:5,kernelSemantic:aiRerank,aiRerank,hybrid});
       }catch(failure){error=failure.message;}
+      let invalidProvenance=0;
+      try{invalidProvenance=await provenanceErrors(hits);}
+      catch(failure){error=error||`Provenance verification failed: ${failure.message}`;invalidProvenance=hits.length||1;}
       const matches=hit=>question.expected.some(target=>identities.get(`${group}/${target.path}`)===hit.document_id&&target.pages.includes(hit.page_number));
       outcomes.push({id:question.id,group,engine,query:question.query,expected:question.expected,top5Page:hits.some(matches),
        top1Page:Boolean(hits[0]&&matches(hits[0])),error,durationMs:Math.round(performance.now()-started),
-       provenanceErrors:hits.filter(hit=>!pathById.has(hit.document_id)||!hit.evidence_id||!Number.isInteger(hit.page_number)).length,
+       provenanceErrors:invalidProvenance,
        fallback:hits.some(row=>row.retrieval_mode==='keyword-fallback'),componentDegraded:hits.some(row=>row.degraded_reason),
        hits:hits.map(row=>({path:pathById.get(row.document_id)||null,page:row.page_number,evidenceId:row.evidence_id,
         sourceVersionId:row.source_version_id,mode:row.retrieval_mode,degradedReason:row.degraded_reason,excerpt:row.body.slice(0,500)}))});
      }
     }
    }
-   await Promise.all(Array.from({length:aiRerank?4:1},work));
+   await Promise.all(Array.from({length:aiRerank||hybrid?2:1},work));
    await writeFile(join(root,'reports','progress.json'),JSON.stringify({expectationSha256,outcomes},null,2));
    console.log(JSON.stringify({action:'heldout-group-tested',group,count:questions.length}));
   }
@@ -179,13 +232,15 @@ try{
     componentDegraded:rows.filter(row=>row.componentDegraded).length,provenanceErrors:rows.reduce((sum,row)=>sum+row.provenanceErrors,0)});
   }
   const coverageComplete=corpus.every(row=>row.complete);
-  const passed=coverageComplete&&summaries.every(row=>row.count===50&&row.top5Page>=.95&&row.errors===0&&row.fallbacks===0&&row.componentDegraded===0&&row.provenanceErrors===0);
-  const report={startedAt,completedAt:new Date().toISOString(),expectationSha256,algorithmBaseline:'f01644c',parserTransport:'docling-derived-v1',
-   mode:aiRerank?'ai-rerank':'keyword',scope:'All three complete heldout corpora as distractors; no course/document filter',
+  const algorithmUnchanged=(await algorithmFingerprint()).sha256===algorithmFreeze.sha256;
+  const passed=coverageComplete&&algorithmUnchanged&&summaries.every(row=>row.count===50&&row.top5Page>=.95&&row.errors===0&&row.fallbacks===0&&row.componentDegraded===0&&row.provenanceErrors===0);
+  const report={startedAt,completedAt:new Date().toISOString(),expectationSha256,algorithmBaseline:algorithmFreeze.revision||`source-sha256:${algorithmFreeze.sha256}`,algorithmFreeze,algorithmUnchanged,parserTransport:'docling-derived-v1',
+   mode:hybrid?(aiRerank?'hybrid-ai-rerank':'hybrid'):(aiRerank?'ai-rerank':'keyword'),scope:'All three complete heldout corpora plus configured frozen distractors; no course/document filter',
    limitations:['PDF locator recall is not AI answer correctness, Truth Layer accuracy or formula transcription fidelity.',
     'English native-PDF learning corpora; public FAQ HTML is provenance only, not part of this PDF query score.'],
+   questionGroups:groups,selectedGroups:groups.filter(group=>!groupFilter||group===groupFilter),completeThreeGroupGate:!groupFilter&&passed,
    corpus,coverageComplete,passed,summaries,failures:outcomes.filter(row=>!row.top5Page||row.error||row.fallback||row.componentDegraded||row.provenanceErrors),outcomes};
-  await writeFile(join(root,'reports',`${aiRerank?'ai':'keyword'}${groupFilter?'-'+groupFilter:''}.json`),JSON.stringify(report,null,2));
+  await writeFile(join(root,'reports',`${hybrid?'hybrid-':''}${aiRerank?'ai':'keyword'}${groupFilter?'-'+groupFilter:''}.json`),JSON.stringify(report,null,2));
   console.log(JSON.stringify({action:'heldout-gate',passed,coverageComplete,expectationSha256,summaries}));
   if(!passed)process.exitCode=1;
  }
