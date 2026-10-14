@@ -3,7 +3,8 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
-import { documentSearchText, splitDocumentText, searchDocumentText } from './document-search.ts';
+import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
+import {resolveDocumentSource,type DocumentSourceHint} from './document-source.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
 import type {IngestionJob} from './jobs.ts';
@@ -853,7 +854,11 @@ export class KernelService {
     });
   }
 
-  searchDocumentText(owner:string,query:string,options:{courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean}={}) {
+  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
+    return resolveDocumentSource(kernelPool(),owner,hint,options);
+  }
+
+  searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {
     return searchDocumentText(kernelPool(),owner,query,options);
   }
 
