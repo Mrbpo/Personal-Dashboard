@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import type {Pool} from 'pg';
 import {paidOpenAI} from '../ai-budget.ts';
 import {serviceValue} from '../service-vault.ts';
@@ -14,6 +15,19 @@ type Page={document_id:string;version_id:string;source_version_id:string;page_nu
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
 const key=(document:string,page:number)=>JSON.stringify([document,page]);
 const flights=new WeakMap<Pool,Map<string,Promise<string[]>>>();
+type RerankRunPolicy={dailyLimit:number;maxAttempts:1|2;beforeAttempt?:(cacheIdentity:string)=>Promise<void>};
+const runPolicies=new AsyncLocalStorage<Readonly<RerankRunPolicy>>();
+const defaultRunPolicy:Readonly<RerankRunPolicy>={dailyLimit:200,maxAttempts:2};
+
+/** Internal administrator-run scope; request parameters and document content
+ * never configure budgets. The ordinary application retains its 200/day cap.
+ * A durable beforeAttempt journal can prevent paid retries after interruption. */
+export function withDocumentRerankRunPolicy<T>(policy:RerankRunPolicy,work:()=>Promise<T>):Promise<T>{
+ if(!Number.isInteger(policy.dailyLimit)||policy.dailyLimit<1||policy.dailyLimit>350||
+  ![1,2].includes(policy.maxAttempts)||(policy.beforeAttempt!==undefined&&typeof policy.beforeAttempt!=='function'))
+  throw new Error('Invalid internal PDF reranker run policy');
+ return runPolicies.run(Object.freeze({...policy}),work);
+}
 class InvalidPageOrderOutput extends Error {
  readonly reasonCode:string;
  constructor(message:string,reasonCode='invalid-shape'){super(message);this.reasonCode=reasonCode;}
@@ -93,7 +107,7 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
   text:{format:{type:'json_schema',name:'document_page_order',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{orderedIds:{type:'array',items:{type:'string',enum:identities},
     ...(selectionCount===undefined?{}:{minItems:selectionCount,maxItems:selectionCount})}},required:['orderedIds']}}},
- },AbortSignal.timeout(remaining),{kind:'pdf-search-rerank',dailyLimit:200});
+ },AbortSignal.timeout(remaining),{kind:'pdf-search-rerank',dailyLimit:(runPolicies.getStore()??defaultRunPolicy).dailyLimit});
  if(!response.ok)throw new Error(`PDF AI reranker request failed (${response.status})`);
  if(Date.now()>=deadline)throw new Error('PDF AI reranker time limit reached');
  let payload;
@@ -119,7 +133,7 @@ async function requestOrder(query:string,pages:InputPage[],identities:string[],v
     reason:error.reasonCode,attempt:attempt+1,candidateCount:identities.length,selectionCount:selectionCount??identities.length}));
    // One repair attempt for untrusted output only; each request uses the same
    // budget policy and shares the original deadline. Invalid output is not cached.
-   if(attempt>=1||!(error instanceof InvalidPageOrderOutput))throw error;
+   if(attempt+1>=(runPolicies.getStore()??defaultRunPolicy).maxAttempts||!(error instanceof InvalidPageOrderOutput))throw error;
    await verifyCurrent();
   }
  }
@@ -138,6 +152,7 @@ async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentText
   return {id:identities[index],text:Array.from(page.body).slice(0,6000).join(''),
    ...(selectionCount===undefined?{}:pageMetadata(page))};
  });
+ await runPolicies.getStore()?.beforeAttempt?.(JSON.stringify([owner,cacheKey]));
  const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined),selectionCount);
  const client=await pool.connect();
  try{
