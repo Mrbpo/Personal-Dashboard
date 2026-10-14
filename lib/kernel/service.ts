@@ -4,6 +4,7 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText } from './document-search.ts';
+import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
 import type {IngestionJob} from './jobs.ts';
 
@@ -738,17 +739,28 @@ export class KernelService {
     });
   }
 
-  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string},
-    inputPages: Array<{locator:string;text:string;pageNumber?:number}>,
+  async ingestRecordingTranscript(input:RecordingTranscript){
+    const prepared=prepareRecordingTranscript(input);
+    await this.ingestParsedDocument(prepared.document,prepared.pages,prepared.options);
+    return {documentId:prepared.document.id,cues:prepared.pages.length};
+  }
+
+  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
+    inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
-      ingestionLease?:{id:string;token:string};batchProvenance?:unknown}={}) {
+      ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
       pages.some((page,index)=>page.pageNumber!==index+1||typeof page.text!=='string'||!page.locator)||
       !pages.some(page=>page.text.trim()))throw new Error('Document transcription is incomplete');
+    if(pages.some(page=>page.contentKind==='time_segment'
+      ? !Number.isSafeInteger(page.startMs)||!Number.isSafeInteger(page.endMs)||page.startMs!<0||page.endMs!<=page.startMs!
+      : page.startMs!==undefined||page.endMs!==undefined))throw new Error('Invalid content time locator');
+    if(options.evidenceConfidence!==undefined&&(!Number.isFinite(options.evidenceConfidence)||
+      options.evidenceConfidence<0||options.evidenceConfidence>1))throw new Error('Invalid evidence confidence');
     if(options.pageProvenance&&(options.pageProvenance.length!==expected||options.pageProvenance.some((page,index)=>
       page.pageNumber!==index+1||!page.extractionMethod||!page.parserVersion||!page.basedOn?.versionId||!page.basedOn.sourceVersionId||!page.basedOn.evidenceId)))
       throw new Error('Document page repair provenance is incomplete');
@@ -764,7 +776,10 @@ export class KernelService {
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
         pageNumber:page.pageNumber,extractionMethod:page.extractionMethod,parserVersion:page.parserVersion,
         ...(page.model?{model:page.model}:{}),basedOn:{versionId:page.basedOn.versionId,
-          sourceVersionId:page.basedOn.sourceVersionId,evidenceId:page.basedOn.evidenceId}}))}:{})}));
+          sourceVersionId:page.basedOn.sourceVersionId,evidenceId:page.basedOn.evidenceId}}))}:{}),
+      ...(options.recording?{recording:Object.fromEntries(
+        ['partnerId','entryId','captionId','language','sourceUrl','canvasCourseId','method','model','publishedAt']
+          .map(key=>[key,options.recording![key]??null])),evidenceConfidence:options.evidenceConfidence??0.9}:{})}));
     const textHash=stableId(JSON.stringify(pages));
     const parsedVersion=stableId(document.id,parser,textHash,qualityHash);
     const sourceItemId=`document:${document.id}`,acquiredAt=new Date().toISOString();
@@ -798,9 +813,10 @@ export class KernelService {
         contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
           originKey:document.originKey,parser,extractionMethod,warnings,
           ...(options.batchProvenance?{batchProvenance:options.batchProvenance}:{}),
+          ...(options.recording?{recording:options.recording}:{}),
           ...(options.pageProvenance?{pageProvenance:options.pageProvenance}:{}),
           pages:pages.map(page=>({locator:page.locator,pageNumber:page.pageNumber,length:page.text.length}))},
-        rawUri:`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
+        rawUri:document.rawUri||`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
       await client.query(`INSERT INTO document_texts(id,owner_id,course_id,source_item_id,origin,origin_key,name,source_hash,created_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name`,
         [document.id,owner,document.courseId||null,sourceItemId,document.origin,document.originKey,document.name,document.hash,document.createdAt||acquiredAt]);
@@ -818,10 +834,11 @@ export class KernelService {
             parsed_value,confidence,locator) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`,
           [evidenceId,version,`document:${document.origin}`,sourceItemId,acquiredAt,page.text.slice(0,4000),
             JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.pageProvenance?.[index].extractionMethod||extractionMethod,
-              ...(options.pageProvenance?{pageProvenance:options.pageProvenance[index]}:{}),documentVersion:parsedVersion,pageNumber:page.pageNumber}),0.9,page.locator]);
-        await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text)
-          VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(version_id,page_number) DO NOTHING`,
-          [parsedVersion,page.pageNumber,evidenceId,page.locator,page.text,documentSearchText(page.text)]);
+              ...(options.pageProvenance?{pageProvenance:options.pageProvenance[index]}:{}),documentVersion:parsedVersion,
+              pageNumber:page.pageNumber,contentKind:page.contentKind||'page',startMs:page.startMs??null,endMs:page.endMs??null}),options.evidenceConfidence??0.9,page.locator]);
+        await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text,content_kind,start_ms,end_ms)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(version_id,page_number) DO NOTHING`,
+          [parsedVersion,page.pageNumber,evidenceId,page.locator,page.text,documentSearchText(page.text),page.contentKind||'page',page.startMs??null,page.endMs??null]);
         for(const body of splitDocumentText(page.text)){
           await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
             VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,
@@ -858,7 +875,7 @@ export class KernelService {
 
   async parsedDocument(owner:string,id:string) {
     const rows=(await kernelPool().query<{page_number:number;locator:string;body:string;parser_version:string;warnings:string[];extraction_method:string}>(`
-      SELECT p.page_number,p.locator,p.body,v.parser_version,v.warnings,s.raw_value->>'extractionMethod' extraction_method FROM document_texts d
+      SELECT p.page_number,p.locator,p.body,p.content_kind,p.start_ms,p.end_ms,v.parser_version,v.warnings,s.raw_value->>'extractionMethod' extraction_method FROM document_texts d
       JOIN document_text_versions v ON v.id=d.current_version_id
       JOIN source_item_versions s ON s.id=v.source_version_id
       JOIN document_text_pages p ON p.version_id=v.id
