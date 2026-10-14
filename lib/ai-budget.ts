@@ -2,6 +2,7 @@ import { database as db } from './database.ts';
 import { serviceValue } from './service-vault.ts';
 const baseRates: Record<string,{input:number;output:number;context:number}> = {
   'gpt-5-mini': {input:0.25,output:2,context:400000},
+  'gpt-6-astra': {input:10,output:50,context:1050000},
   'text-embedding-3-small': {input:0.02,output:0,context:8192},
 };
 function configuredRate(model:string){
@@ -62,16 +63,33 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   // entire context window. Successful calls are settled with provider usage;
   // ambiguous timeouts retain this bounded reservation.
   const inputBytes=Buffer.byteLength(JSON.stringify(body.input??body));
-  const tokens=endpoint==='embeddings'?inputBytes:Math.min(rate.context,Math.max(1000,Math.ceil(inputBytes/2)));
+  const astra=body.model==='gpt-6-astra';
+  // Astra's UTF-8 byte bound includes schema/request overhead. Reserve all
+  // input at the highest possible cache-write rate; cached reads settle lower.
+  const tokens=endpoint==='embeddings'?inputBytes:astra?
+    Math.min(rate.context,Buffer.byteLength(JSON.stringify(body))+4096):Math.min(rate.context,Math.max(1000,Math.ceil(inputBytes/2)));
+  const longInput=astra&&tokens>272000;
   const toolMax=body.tools?.length ? Math.max(1,body.max_tool_calls || 1) * 0.02 : 0;
-  const reserved=Math.max(0.000001,(tokens*rate.input+maxOutput*rate.output)/1e6+toolMax);
+  const reserved=Math.max(0.000001,(tokens*rate.input*(astra?1.25:1)*(longInput?2:1)+maxOutput*rate.output*(longInput?1.5:1))/1e6+toolMax);
   const id=await reserveBudget(reserved,policy?.kind||endpoint,policy?.dailyLimit);
   // On an ambiguous timeout keep the reservation: provider may have already billed it.
   const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
   const p=await response.clone().json().catch(()=>null);
   if(response.ok && p?.usage) {
     const input=Number(p.usage.input_tokens ?? p.usage.prompt_tokens),output=Number(p.usage.output_tokens ?? 0);
-    if(Number.isFinite(input)&&Number.isFinite(output)) await db.prepare("UPDATE ai_ledger SET charged=?,status='settled' WHERE id=?").bind((input*rate.input+output*rate.output)/1e6+toolMax,id).run();
+    if(Number.isFinite(input)&&input>=0&&Number.isFinite(output)&&output>=0){
+      let charged=(input*rate.input+output*rate.output)/1e6+toolMax;
+      if(astra){
+        const actualInput=p.usage.input_tokens,actualOutput=p.usage.output_tokens;
+        const cached=p.usage.input_tokens_details?.cached_tokens??0,written=p.usage.input_tokens_details?.cache_write_tokens??0;
+        // Malformed usage or an unexpected model cannot silently undercharge.
+        // Keep the durable reservation pending a provider/operator reconciliation.
+        if(p.model!==body.model||![actualInput,actualOutput,cached,written].every(n=>typeof n==='number'&&Number.isInteger(n)&&n>=0)||cached+written>input)return response;
+        const long=input>272000;
+        charged=((input-cached-written+cached*.1+written*1.25)*rate.input*(long?2:1)+output*rate.output*(long?1.5:1))/1e6+toolMax;
+      }
+      await db.prepare("UPDATE ai_ledger SET charged=?,status='settled' WHERE id=?").bind(charged,id).run();
+    }
   } else if(!response.ok && response.status<500) await db.prepare("UPDATE ai_ledger SET charged=0,status='rejected' WHERE id=?").bind(id).run();
   return response;
 }

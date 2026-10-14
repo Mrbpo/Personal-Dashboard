@@ -57,6 +57,8 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   lexical_support?:number;
   evidence_body?:'full-page';
   retrieval_scope?:'selected-title-scoped';
+  rerank_model?:'gpt-5-mini'|'gpt-6-astra';rerank_reasoning_effort?:'low'|'medium'|'high'|'xhigh'|'max';
+  rerank_max_output_tokens?:number;
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 
 export type DocumentSearchOptions={courseId?:string;documentId?:string;sourceHint?:DocumentSourceHint;
@@ -101,7 +103,10 @@ export async function selectSupportedHybridDocumentPages(pool:Pool,owner:string,
  // selectDocumentPagesWithAI checks every candidate's owner/current version and
  // evidence both before selection and immediately before returning (also cached).
  const selected=new Set(ranked.map(evidenceIdentity));
- const tail=candidates.filter(hit=>!selected.has(evidenceIdentity(hit)));
+ const diagnostic=ranked[0];
+ const tail=candidates.filter(hit=>!selected.has(evidenceIdentity(hit))).map(hit=>({...hit,
+  rerank_model:diagnostic?.rerank_model,rerank_reasoning_effort:diagnostic?.rerank_reasoning_effort,
+  rerank_max_output_tokens:diagnostic?.rerank_max_output_tokens}));
  return fuseLexicallySupportedAIRanks(lexical,[...ranked,...tail],count);
 }
 
