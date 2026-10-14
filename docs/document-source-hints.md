@@ -22,7 +22,10 @@ Search accepts only a unique resolved source, converts that visible selection to
 an internal document ID, and passes `originalQuestion` unchanged into existing
 ranking. Returned hits carry `retrieval_scope: 'selected-title-scoped'`. The
 resolver checks the source again before publishing hits; a changed identity or
-current version fails explicitly. No hint preserves existing global behavior.
+current version fails explicitly. Each returned hit must also match that current
+document ID, source hash, and source version, including when a concurrent replay
+restores the initial head after the query read an intermediate version. No hint
+preserves existing global behavior.
 
 `DocumentSourceResolutionError` has a stable `code`, a scope, and the resolver
 result when available:
@@ -51,7 +54,8 @@ any later query-only A diagnostic needs its own protocol and core hashes.
 Five synthetic PG tests passed in the separate `source_hint_20261014_test` schema
 of the existing isolated `pdf_acceptance_20261006` database. They cover owner,
 course, hidden and superseded sources, equal-time origin identity, NFKC ambiguity,
-normal source/query separation, and a source hidden while its query is in flight.
+normal source/query separation, a source hidden while its query is in flight, and
+an ABA replay returning an intermediate source version under restored heads.
 External fetch is blocked and asserted unused. The real 181-paper A corpus was
 neither reingested nor queried by these tests. The first fixture attempt lacked
 its new schema and failed before creating fixtures; isolated bootstrap corrected

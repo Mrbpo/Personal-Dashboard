@@ -76,7 +76,7 @@ test('NFKC source metadata scopes the unchanged relevance query without adding t
  assert.equal((await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:'Finite field guide.txt'})).status,'not-found','no inferred aliases');
 });
 
-test('a selected source hidden after the query cannot publish formerly valid hits',pg,async()=>{
+test('visibility changes and ABA replay cannot publish obsolete selected-source hits',pg,async()=>{
  await migrateKernel();const tag=randomUUID(),owner=`source-race-${tag}`,id=`source-${tag}`,title='Current race fixture';
  await ingest(id,owner,title,'Quartz phase current evidence.');
  const pool=kernelPool();let hid=false;
@@ -93,4 +93,15 @@ test('a selected source hidden after the query cannot publish formerly valid hit
  await assert.rejects(searchDocumentText(concurrentPool,owner,'Quartz phase',{...keyword,sourceHint:{selectedDocumentTitle:title}}),
   errorCode('DOCUMENT_SOURCE_CHANGED'));
  assert.equal(hid,true);
+ // Both resolver reads see v1, while the query observed v2 in between. A replay
+ // restoring v1 must not make v2's evidence publishable under the selected scope.
+ const identity={documentId:'selected',title:'Exact visible title',currentVersionId:'v1',sourceVersionId:'s1',sourceHash:'raw-sha'};
+ const stale={id:'pg:v2:1',document_id:'selected',course_id:'',name:identity.title,origin:'fixture',origin_key:'selected',
+  source_hash:'raw-sha',body:'Quartz phase newer version.',locator:'page1',page_number:1,evidence_id:'e2',source_version_id:'s2',
+  parser_version:'fixture',score:1,lexical_support:1};
+ let calls=0;
+ const replayPool={query:async()=>{calls++;return {rows:calls===2?[stale]:[identity]};}} as unknown as Pool;
+ await assert.rejects(searchDocumentText(replayPool,'owner','Quartz phase',{...keyword,relatedDocuments:false,
+  sourceHint:{selectedDocumentTitle:identity.title}}),errorCode('DOCUMENT_SOURCE_CHANGED'));
+ assert.equal(calls,3);
 });

@@ -128,6 +128,12 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
       ||current.document.currentVersionId!==selected.currentVersionId
       ||current.document.sourceVersionId!==selected.sourceVersionId||current.document.sourceHash!==selected.sourceHash)
       throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Selected source changed during retrieval',current);
+    const finalSource=current.document;
+    // A concurrent replay can restore the original head after search read a
+    // different version. Matching before/after heads alone cannot rule out ABA.
+    if(hits.some(hit=>hit.document_id!==finalSource.documentId||hit.source_hash!==finalSource.sourceHash
+      ||hit.source_version_id!==finalSource.sourceVersionId))
+      throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Returned evidence differs from the current selected source',current);
     return hits.map(hit=>({...hit,retrieval_scope:'selected-title-scoped' as const}));
   }
   const normalized=documentSearchText(query).slice(0,4000);
