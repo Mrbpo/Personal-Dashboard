@@ -65,6 +65,30 @@ test('library query and preview use PostgreSQL even after disposable SQLite chun
   assert.equal((await lib.searchLibrary(owner,'aurora interpolation','',false)).length,0);
 });
 
+test('strict library content search rejects stale SQLite text after a PostgreSQL reparse',async()=>{
+  await migrateKernel();
+  const lib=await import('../lib/library.ts');
+  const {database}=await import('../lib/database.ts');
+  const owner=`strict-current-${randomUUID()}`;
+  const id=await lib.saveDocument(owner,'','upload','current.pdf','RevisionProof.pdf','application/pdf',Buffer.from('%PDF-1.4 original'));
+  const row=await lib.getDocument(owner,id);
+  const document={id,ownerId:owner,courseId:'',name:row.name,hash:row.hash,mime:row.mime,origin:row.origin,originKey:row.origin_key};
+  await kernel.ingestParsedDocument(document,[{pageNumber:1,locator:'第 1 页',text:'Obsolete zephyr draft.'}],{parserVersion:'before',expectedPages:1});
+  await database.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(`${id}:old`,id,0,'第 1 页','Obsolete zephyr draft.','old-cache').run();
+  await database.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+  await kernel.ingestParsedDocument(document,[{pageNumber:1,locator:'第 1 页',text:'Current nebula final.'}],{parserVersion:'after',expectedPages:1});
+  assert.deepEqual(await lib.searchLibrary(owner,'obsolete zephyr','',false,{strict:true}),[]);
+  const current=await lib.searchLibrary(owner,'current nebula','',false,{strict:true});
+  const canonical=(await kernel.searchDocumentText(owner,'current nebula',{strict:true}))[0];
+  assert.equal(current[0].evidence_id,canonical.evidence_id);
+  assert.equal(current[0].source_version_id,canonical.source_version_id);
+  assert.equal(current[0].source_hash,row.hash);
+  assert.equal(current[0].page_number,1);
+  const metadata=await lib.searchLibrary(owner,'RevisionProof','',false,{strict:true,metadataFirst:true});
+  assert.equal(metadata[0].document_id,id);
+  assert.doesNotMatch(metadata[0].body,/obsolete zephyr/i);
+});
+
 test('a database interruption cannot publish half a PDF or its source evidence',async()=>{
   await migrateKernel();
   const id=`interrupted-${randomUUID()}`;
