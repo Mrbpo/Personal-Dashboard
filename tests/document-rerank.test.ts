@@ -1,4 +1,5 @@
-import {test,after} from 'node:test';
+import {test,after,mock} from 'node:test';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
@@ -14,6 +15,62 @@ process.env.DATABASE_URL=':memory:';process.env.SERVICE_VAULT_DIR=directory;
 process.env.OPENAI_API_KEY='dummy-never-sent';process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='5';
 after(()=>rmSync(directory,{recursive:true,force:true}));
 const key=(parts:unknown[])=>JSON.stringify(parts);
+
+test('development reranker limits require exact administrator stores and leave the legacy350 path intact',async()=>{
+ const names=['KERNEL_ADMIN_DEVELOPMENT_RUN','KERNEL_DATABASE_URL','DATABASE_URL'] as const;
+ const saved=Object.fromEntries(names.map(name=>[name,process.env[name]]));let invoked=0;
+ const policy={scope:'development' as const,dailyLimit:1000,maxAttempts:1 as const,beforeAttempt:async()=>{}};
+ const work=async()=>{invoked++;};
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';
+  assert.throws(()=>withDocumentRerankRunPolicy({dailyLimit:1000,maxAttempts:1},work),/development scope/);
+  for(const [name,value] of [
+   ['KERNEL_ADMIN_DEVELOPMENT_RUN','false'],['KERNEL_DATABASE_URL','postgresql://localhost/study'],
+   ['KERNEL_DATABASE_URL','postgresql://localhost/pdf_acceptance_20261006_other'],
+   ['KERNEL_DATABASE_URL','postgresql://localhost/study?database=pdf_acceptance_20261006'],
+   ['KERNEL_DATABASE_URL','https://localhost/pdf_acceptance_20261006'],
+   ['DATABASE_URL','file:/srv/study/data/benchmark.sqlite'],['DATABASE_URL','file:/pdf-data/benchmark.sqlite?mode=rw']
+  ]){
+   const previous=process.env[name];process.env[name]=value;
+   assert.throws(()=>withDocumentRerankRunPolicy(policy,work),/isolated administrator/);process.env[name]=previous;
+  }
+  assert.throws(()=>withDocumentRerankRunPolicy({...policy,beforeAttempt:undefined},work),/attempt journal/);
+  assert.throws(()=>withDocumentRerankRunPolicy({...policy,dailyLimit:1001},work),/Invalid/);
+  assert.throws(()=>withDocumentRerankRunPolicy({...policy,maxAttempts:3 as unknown as 1},work),/Invalid/);
+  assert.equal(invoked,0,'all invalid guards fail before administrator work starts');
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='false';process.env.KERNEL_DATABASE_URL='postgresql://localhost/study';process.env.DATABASE_URL=':memory:';
+  await withDocumentRerankRunPolicy({dailyLimit:350,maxAttempts:1},work);assert.equal(invoked,1,'existing350 calls do not require a new flag');
+ }finally{for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
+});
+
+test('development reranker policy stays in its async scope and cannot leak to concurrent ordinary work',async()=>{
+ const names=['KERNEL_ADMIN_DEVELOPMENT_RUN','KERNEL_DATABASE_URL','DATABASE_URL'] as const;
+ const saved=Object.fromEntries(names.map(name=>[name,process.env[name]]));
+ const originalRun=AsyncLocalStorage.prototype.run;let observed:AsyncLocalStorage<Readonly<{dailyLimit:number}>>|undefined;
+ const spy=mock.method(AsyncLocalStorage.prototype,'run',function(this:AsyncLocalStorage<Readonly<{dailyLimit:number}>>,
+  store:Readonly<{dailyLimit:number}>,callback:(...args:unknown[])=>unknown,...args:unknown[]){
+  if(store?.dailyLimit)observed=this;return originalRun.call(this,store,callback,...args);
+ });
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgres://localhost/pdf_acceptance_20261006';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';
+  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+  const scoped=withDocumentRerankRunPolicy({scope:'development',dailyLimit:1000,maxAttempts:1,beforeAttempt:async()=>{}},async()=>{
+   assert.equal(observed?.getStore()?.dailyLimit,1000);await gate;assert.equal(observed?.getStore()?.dailyLimit,1000);
+   await withDocumentRerankRunPolicy({dailyLimit:350,maxAttempts:2},async()=>{assert.equal(observed?.getStore()?.dailyLimit,350);});
+   assert.equal(observed?.getStore()?.dailyLimit,1000);
+  });
+  await Promise.all([scoped,(async()=>{
+   assert.equal(observed?.getStore(),undefined,'ordinary sibling uses the unchanged200/day default');release();
+   await Promise.resolve();assert.equal(observed?.getStore(),undefined);
+  })()]);
+  assert.equal(observed?.getStore(),undefined);
+  await assert.rejects(withDocumentRerankRunPolicy({scope:'development',dailyLimit:1000,maxAttempts:2,beforeAttempt:async()=>{}},
+   async()=>{throw new Error('fixture interrupted');}),/fixture interrupted/);
+  assert.equal(observed?.getStore(),undefined,'an interrupted scope is restored too');
+ }finally{spy.mock.restore();for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}}
+});
 
 class Fixture {
  pages:{owner:string;document_id:string;version_id:string;source_version_id:string;page_number:number;body:string}[]=[];

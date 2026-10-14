@@ -15,17 +15,31 @@ type Page={document_id:string;version_id:string;source_version_id:string;page_nu
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
 const key=(document:string,page:number)=>JSON.stringify([document,page]);
 const flights=new WeakMap<Pool,Map<string,Promise<string[]>>>();
-type RerankRunPolicy={dailyLimit:number;maxAttempts:1|2;beforeAttempt?:(cacheIdentity:string)=>Promise<void>};
+type RerankRunPolicy={dailyLimit:number;maxAttempts:1|2;scope?:'development';beforeAttempt?:(cacheIdentity:string)=>Promise<void>};
 const runPolicies=new AsyncLocalStorage<Readonly<RerankRunPolicy>>();
 const defaultRunPolicy:Readonly<RerankRunPolicy>={dailyLimit:200,maxAttempts:2};
 
 /** Internal administrator-run scope; request parameters and document content
  * never configure budgets. The ordinary application retains its 200/day cap.
- * A durable beforeAttempt journal can prevent paid retries after interruption. */
+ * A durable beforeAttempt journal can prevent paid retries after interruption.
+ * Development scopes additionally require a trusted process flag and the exact
+ * isolated acceptance stores; neither API input nor service settings enable it. */
 export function withDocumentRerankRunPolicy<T>(policy:RerankRunPolicy,work:()=>Promise<T>):Promise<T>{
- if(!Number.isInteger(policy.dailyLimit)||policy.dailyLimit<1||policy.dailyLimit>350||
+ if(!Number.isInteger(policy.dailyLimit)||policy.dailyLimit<1||policy.dailyLimit>1000||
+  (policy.scope!==undefined&&policy.scope!=='development')||
   ![1,2].includes(policy.maxAttempts)||(policy.beforeAttempt!==undefined&&typeof policy.beforeAttempt!=='function'))
   throw new Error('Invalid internal PDF reranker run policy');
+ if(policy.dailyLimit>350&&policy.scope!=='development')
+  throw new Error('PDF reranker limits above 350 require an isolated development scope');
+ if(policy.scope==='development'){
+  let isolated=false;
+  try{const url=new URL(process.env.KERNEL_DATABASE_URL||'');
+   isolated=['postgres:','postgresql:'].includes(url.protocol)&&url.pathname==='/pdf_acceptance_20261006';
+  }catch{/* Invalid or missing connections fail closed. */}
+  if(process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true'||!isolated||
+   process.env.DATABASE_URL!=='file:/pdf-data/benchmark.sqlite'||typeof policy.beforeAttempt!=='function')
+   throw new Error('Development PDF reranking requires the isolated administrator process and attempt journal');
+ }
  return runPolicies.run(Object.freeze({...policy}),work);
 }
 class InvalidPageOrderOutput extends Error {
