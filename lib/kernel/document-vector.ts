@@ -30,7 +30,7 @@ function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
   const document=scope.documentId?`AND d.id=$${args.push(scope.documentId)}`:'';
   const version=versionId?`AND v.id=$${args.push(versionId)}`:'';
   const sql=`WITH current_documents AS MATERIALIZED (
-    SELECT d.*,v.id version_id,v.source_version_id,v.parser_version,v.page_count
+    SELECT d.*,v.id version_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,v.page_count
     FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id
     WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document} ${version}
       AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
@@ -40,7 +40,7 @@ function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
         FROM document_text_pages WHERE version_id=v.id)),
     current_pages AS MATERIALIZED (
       SELECT d.id document_id,d.course_id,d.name,d.origin,d.origin_key,d.source_hash,
-        d.version_id,d.source_version_id,d.parser_version,p.page_number,p.body,p.evidence_id,p.locator,
+        d.version_id,d.source_version_id,d.parser_version,d.parser_warnings,p.page_number,p.body,p.evidence_id,p.locator,
         btrim(left(p.body,6000),$3::text) input,
         encode(sha256(convert_to(btrim(left(p.body,6000),$3::text),'UTF8')),'hex') input_hash
       FROM current_documents d JOIN document_text_pages p ON p.version_id=d.version_id)`;
@@ -82,7 +82,7 @@ export async function searchDocumentVectorText(pool:Pool,owner:string,queryVecto
       WHERE p.input<>'' AND public.vector_norm(e.embedding_vector)>0),ranked AS (
       SELECT 'pg:'||p.version_id||':'||p.page_number id,p.document_id,coalesce(p.course_id,'') course_id,
         p.name,p.origin,p.origin_key,p.source_hash,p.body,p.locator,p.page_number,p.evidence_id,
-        p.source_version_id,p.parser_version,1-(p.embedding_vector OPERATOR(public.<=>)$${vectorArg}::public.vector) score
+        p.source_version_id,p.parser_version,p.parser_warnings,1-(p.embedding_vector OPERATOR(public.<=>)$${vectorArg}::public.vector) score
       FROM indexed p ORDER BY p.embedding_vector OPERATOR(public.<=>)$${vectorArg}::public.vector,p.document_id,p.page_number LIMIT $${limitArg})
     SELECT jsonb_build_object('total_pages',(SELECT count(*) FROM current_pages),
       'searchable_pages',(SELECT count(*) FROM current_pages WHERE input<>''),
@@ -142,7 +142,7 @@ export async function buildHybridDocumentCandidates(pool:Pool,owner:string,lexic
         AS r(document_id text,page_number integer,source_version_id text,anchor_number integer))
       SELECT 'pg:'||v.id||':'||p.page_number id,d.id document_id,coalesce(d.course_id,'') course_id,
         d.name,d.origin,d.origin_key,d.source_hash,p.body,p.locator,p.page_number,p.evidence_id,
-        v.source_version_id,v.parser_version,0::double precision score,r.anchor_number
+        v.source_version_id,v.parser_version,v.warnings AS parser_warnings,0::double precision score,r.anchor_number
       FROM requested r JOIN document_texts d ON d.id=r.document_id AND d.owner_id=$1 AND d.hidden=false
         JOIN document_text_versions v ON v.id=d.current_version_id AND v.source_version_id=r.source_version_id
         JOIN document_text_pages p ON p.version_id=v.id AND p.page_number IN (r.page_number-1,r.page_number+1)

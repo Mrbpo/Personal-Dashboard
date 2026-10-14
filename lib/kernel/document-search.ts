@@ -47,7 +47,7 @@ export function splitDocumentText(text:string):string[] {
 
 export type DocumentTextHit={id:string;document_id:string;course_id:string;name:string;origin:string;
   origin_key:string;source_hash:string;body:string;locator:string;page_number:number;
-  evidence_id:string;source_version_id:string;parser_version:string;score:number;
+  evidence_id:string;source_version_id:string;parser_version:string;score:number;parser_warnings?:string[];
   // IDF-weighted stored search-text coverage, not factual confidence. Existing
   // transcription warnings and repeated headers can also contain matching terms.
   lexical_support?:number;
@@ -144,7 +144,7 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     diverse AS (SELECT *,row_number() OVER (PARTITION BY document_id,page_number ORDER BY score DESC,position) page_rank FROM scored)
     SELECT 'pg:'||coalesce(snippet.id,c.id) AS id,d.id AS document_id,coalesce(d.course_id,'') AS course_id,
       d.name,d.origin,d.origin_key,d.source_hash,coalesce(snippet.body,c.body) body,p.locator,p.page_number,
-      p.evidence_id,v.source_version_id,v.parser_version,c.score,c.lexical_support
+      p.evidence_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,c.score,c.lexical_support
     FROM diverse c JOIN document_texts d ON d.id=c.document_id CROSS JOIN q
       JOIN document_text_versions v ON v.id=c.version_id
       JOIN document_text_pages p ON p.version_id=c.version_id AND p.page_number=c.page_number
