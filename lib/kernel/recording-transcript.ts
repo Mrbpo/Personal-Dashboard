@@ -1,10 +1,11 @@
 import {createHash} from 'node:crypto';
+import {validateASRProvenance,validateASRAbsoluteCues,type ASRProvenance} from './recording-asr-provenance.ts';
 
 export type TranscriptCue={startMs:number;endMs:number;text:string};
 export type RecordingTranscript={ownerId:string;courseId?:string;partnerId:string;entryId:string;
   captionId:string;language:string;title:string;sourceUrl:string;subtitleHash:string;canvasCourseId?:string;
   acquiredAt:string;publishedAt?:string;method:'platform-caption'|'local-asr';
-  model?:string;cues:TranscriptCue[]};
+  model?:string;asr?:ASRProvenance;cues:TranscriptCue[]};
 
 function timestamp(value:string):number {
   const match=/^(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})$/.exec(value);
@@ -78,6 +79,13 @@ export function prepareRecordingTranscript(input:RecordingTranscript){
   if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||/\/ks\//iu.test(url.pathname))
     throw new Error('Recording source URL must not contain credentials');
   validateCues(input.cues);
+  if(input.method==='platform-caption'&&input.asr!==undefined)throw new Error('ASR provenance requires explicit local-asr method');
+  let asr:ASRProvenance|undefined;
+  if(input.method==='local-asr'){
+    if(!input.model?.trim())throw new Error('Invalid ASR provenance: model is required');
+    asr=validateASRProvenance(input.asr,{model:input.model,language:input.language,subtitleHash:input.subtitleHash});
+    validateASRAbsoluteCues(asr,input.cues);
+  }
   const originKey=`${input.partnerId}:${input.entryId}:${input.captionId}:${input.language}`;
   const id=createHash('sha256').update(JSON.stringify([input.ownerId,originKey,input.subtitleHash])).digest('hex');
   return {
@@ -88,6 +96,7 @@ export function prepareRecordingTranscript(input:RecordingTranscript){
       text:cue.text,contentKind:'time_segment' as const,startMs:cue.startMs,endMs:cue.endMs})),
     options:{parserVersion:'recording-subtitle-v1',extractionMethod:input.method,evidenceConfidence:input.method==='platform-caption'?0.8:0.6,
       recording:{partnerId:input.partnerId,entryId:input.entryId,captionId:input.captionId,language:input.language,
-        sourceUrl:input.sourceUrl,canvasCourseId:input.canvasCourseId||null,method:input.method,model:input.model||null,publishedAt:input.publishedAt||null}},
+        sourceUrl:input.sourceUrl,canvasCourseId:input.canvasCourseId||null,method:input.method,model:input.model||null,publishedAt:input.publishedAt||null,
+        ...(asr?{asr}:{})}},
   };
 }
