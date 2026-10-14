@@ -72,7 +72,7 @@ class DownloadBudget:
     def __init__(self, directory, cap):
         self.directory = directory
         self.ledger_path = directory / "download-ledger.json"
-        self.ledger = json.loads(self.ledger_path.read_text()) if self.ledger_path.exists() else {
+        self.ledger = json.loads(self.ledger_path.read_text(encoding="utf-8")) if self.ledger_path.exists() else {
             "capBytes": cap, "researchReserveBytes": 1000000, "receivedBytes": 0, "sources": []}
         if self.ledger["capBytes"] != cap:
             raise ValueError("Download budget is already frozen; do not reset it")
@@ -128,7 +128,10 @@ def collect_previous(frozen, cache):
     for path in sorted(frozen.glob("*.documents.jsonl")):
         receipts.append({"kind": "frozen-corpus", "name": path.name,
                          "bytes": path.stat().st_size, "sha256": sha256(path.read_bytes())})
-        for line in path.read_text(encoding="utf-8").splitlines():
+        # str.splitlines() also splits literal U+2028/U+2029 inside JSON strings.
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            if not line.strip():
+                continue
             document = json.loads(line)
             if document.get("origin") == "qasper" or document.get("originalId", "").startswith("qasper:"):
                 material_ids.add(document["originalId"].removeprefix("qasper:"))
@@ -138,7 +141,8 @@ def collect_previous(frozen, cache):
             receipts.append({"kind": "frozen-questions", "name": path.name,
                              "bytes": path.stat().st_size, "sha256": sha256(path.read_bytes())})
             for case in data:
-                question_ids.add(str(case["id"]))
+                if "id" in case:
+                    question_ids.add(str(case["id"]))
                 question_texts.add(normalized(case.get("query", case.get("question", ""))))
     for path in sorted(cache.glob("qasper-*.json")):
         if not re.fullmatch(r"qasper-\d+\.json", path.name):
@@ -159,13 +163,13 @@ def collect_previous(frozen, cache):
 
 
 def material_text(paper):
-    segments = [{"locator": "title", "text": paper["title"]}, {"locator": "abstract", "text": paper["abstract"]}]
+    segments = [{"locator": "title", "text": paper["title"] or ""}, {"locator": "abstract", "text": paper["abstract"] or ""}]
     for section_index, section in enumerate(paper["full_text"]):
-        segments.append({"locator": f"section:{section_index}:heading", "text": section["section_name"]})
+        segments.append({"locator": f"section:{section_index}:heading", "text": section["section_name"] or ""})
         for paragraph_index, paragraph in enumerate(section["paragraphs"]):
-            segments.append({"locator": f"section:{section_index}:paragraph:{paragraph_index}", "text": paragraph})
+            segments.append({"locator": f"section:{section_index}:paragraph:{paragraph_index}", "text": paragraph or ""})
     for index, figure in enumerate(paper.get("figures_and_tables", [])):
-        segments.append({"locator": f"figure-or-table:{index}:{figure['file']}", "text": figure["caption"]})
+        segments.append({"locator": f"figure-or-table:{index}:{figure['file']}", "text": figure["caption"] or ""})
     offset = 0
     for segment in segments:
         segment["start"] = offset
@@ -210,7 +214,15 @@ def build_qasper(papers, source, previous, selected_ids, selected_texts, protoco
                 excluded["previousCandidateQuestion"] += 1
             else:
                 eligible[qid] = (paper_id, qa, text, segments)
-    ids = select_ids(eligible, source, protocol["seed"], protocol["selection"]["questionsPerCandidate"])
+    ids, distinct_texts = [], set()
+    for qid in select_ids(eligible, source, protocol["seed"], len(eligible)):
+        query = normalized(eligible[qid][1]["question"])
+        if query in distinct_texts:
+            continue
+        ids.append(qid)
+        distinct_texts.add(query)
+        if len(ids) == protocol["selection"]["questionsPerCandidate"]:
+            break
     if len(ids) != protocol["selection"]["questionsPerCandidate"]:
         raise ValueError(f"Fewer than fixed question count eligible in {source}")
     cases = []
@@ -271,7 +283,7 @@ def forum_sources(budget, previous, protocol):
             budget.fetch(key, url, FORUM_REVISION, "CC-BY-SA-4.0 (official card)", count, digest)
         qrels_url = f"https://huggingface.co/datasets/BeIR/cqadupstack-qrels/resolve/{QRELS_REVISION}/{forum}/test.tsv"
         qrels_path = budget.fetch(f"{forum}/test.tsv", qrels_url, QRELS_REVISION, "CC-BY-SA-4.0 (official card)")
-        qrels = list(csv.DictReader(io.StringIO(qrels_path.read_text()), delimiter="\t"))
+        qrels = list(csv.DictReader(io.StringIO(qrels_path.read_text(encoding="utf-8")), delimiter="\t"))
         rows = []
         for offset in range(0, FORUM_COUNTS[forum]["queries"], 100):
             parameters = urllib.parse.urlencode({"dataset": "BeIR/cqadupstack", "config": forum,
@@ -320,7 +332,7 @@ def main():
     args = parser.parse_args()
     if (args.out / "manifest.json").exists():
         raise ValueError("Frozen manifest already exists; verify it instead of overwriting it")
-    protocol = json.loads(PROTOCOL.read_text())
+    protocol = json.loads(PROTOCOL.read_text(encoding="utf-8"))
     previous = collect_previous(args.previous_frozen, args.previous_cache)
     budget = DownloadBudget(args.out, protocol["downloadBudgetBytes"])
     sources = qasper_sources(budget)
@@ -338,7 +350,9 @@ def main():
     forums = forum_sources(budget, previous, protocol) if args.include_forums else {"status": "not-requested"}
     paths = sorted(path for folder in ["candidates", "originals"] for path in (args.out / folder).glob("*") if path.is_file())
     manifest = {"schemaVersion": 1, "status": "candidate-freeze-only-no-retrieval-or-scoring",
-                "protocolSha256": sha256(PROTOCOL.read_bytes()), "protocol": protocol,
+                "protocolSha256": sha256(canonical(protocol).encode()), "protocolHashNormalization": "canonical-json-utf8",
+                "preparationScriptSha256": sha256(Path(__file__).read_bytes().replace(b"\r\n", b"\n")),
+                "scriptHashNormalization": "LF", "protocol": protocol,
                 "sources": budget.ledger["sources"], "downloadBudget": {
                     key: value for key, value in budget.ledger.items() if key != "sources"},
                 "previousCalibration": {"materials": len(previous["materials"]), "questionIds": len(previous["ids"]),
