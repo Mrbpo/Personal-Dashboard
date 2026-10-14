@@ -6,7 +6,10 @@ import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentR
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
   '∞':' infinity ', 'α':' alpha ', 'β':' beta ', 'γ':' gamma ', 'δ':' delta ',
-  'θ':' theta ', 'λ':' lambda ', 'μ':' mu ', 'σ':' sigma ', 'π':' pi ',
+  'ε':' epsilon ', 'ζ':' zeta ', 'η':' eta ', 'θ':' theta ', 'ι':' iota ', 'κ':' kappa ',
+  'λ':' lambda ', 'μ':' mu ', 'ν':' nu ', 'ξ':' xi ', 'ο':' omicron ', 'π':' pi ',
+  'ρ':' rho ', 'σ':' sigma ', 'ς':' sigma ', 'τ':' tau ', 'υ':' upsilon ', 'φ':' phi ',
+  'χ':' chi ', 'ψ':' psi ', 'ω':' omega ',
   '∩':' cap intersection ', '⋅':' cdot multiply ', '≤':' le less equal ', '≥':' ge greater equal ',
 };
 const queryStopWords=new Set(('a an the and or of to in on at for from with by as is are was were be been being '+
@@ -22,10 +25,11 @@ export function documentSearchText(value:string):string {
     [...formula.replace(/\\[a-z]+/giu,' ').toLowerCase().matchAll(/[a-z]/gu)].map(([letter])=>`math${letter}`)))];
   const text=value.normalize('NFKC').toLowerCase()
     .replace(/([\p{L}])-\s*\r?\n\s*([\p{L}])/gu,'$1$2')
-    .replace(/[∫∑∏√∞αβγδθλμσπ∩⋅≤≥]/gu,symbol=>symbolNames[symbol])
+    .replace(/[∫∑∏√∞αβγδεζηθικλμνξοπρσςτυφχψω∩⋅≤≥]/gu,symbol=>symbolNames[symbol])
     .replace(/\\(?:left|right|mathrm|mathbf|operatorname|text)\b/gu,' ')
     .replace(/\\int\b/gu,' int integral ').replace(/\\sum\b/gu,' sum summation ')
     .replace(/\\(?:tfrac|dfrac|frac)\b/gu,' frac fraction ').replace(/\\sqrt\b/gu,' sqrt root ')
+    .replace(/\\var(epsilon|theta|kappa|pi|rho|sigma|phi)\b/gu,' $1 ')
     .replace(/\\([a-z]+)/gu,' $1 ')
     .replace(/([\p{L}])([\p{N}])/gu,'$1 $2').replace(/([\p{N}])([\p{L}])/gu,'$1 $2')
     .replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim();

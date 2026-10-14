@@ -1,11 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type {Pool} from 'pg';
-import type {DocumentTextHit} from '../lib/kernel/document-search.ts';
+import {documentSearchText,type DocumentTextHit} from '../lib/kernel/document-search.ts';
 import {buildHybridDocumentCandidates,fuseIndependentDocumentRanks} from '../lib/kernel/document-vector.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {randomUUID} from 'node:crypto';
+
+test('Greek Unicode symbols and LaTeX names share the same searchable copy',()=>{
+ const letters=['alpha','beta','gamma','delta','epsilon','zeta','eta','theta','iota','kappa','lambda','mu',
+  'nu','xi','omicron','pi','rho','sigma','tau','upsilon','phi','chi','psi','omega'];
+ assert.equal(documentSearchText('αβγδεζηθικλμνξοπρστυφχψω'),letters.join(' '));
+ for(const [symbol,name] of Array.from('αβγδεζηθικλμνξοπρστυφχψω').map((symbol,index)=>[symbol,letters[index]]))
+  assert.equal(documentSearchText(symbol),documentSearchText('\\'+name));
+ for(const [symbol,name] of [['ϵ','epsilon'],['ϑ','theta'],['ϰ','kappa'],['ϖ','pi'],['ϱ','rho'],['ς','sigma'],['ϕ','phi']])
+  assert.equal(documentSearchText(symbol),documentSearchText('\\var'+name));
+ assert.equal(documentSearchText('Ψ'),documentSearchText('\\psi'));
+});
 
 const hit=(document:string,page=1,version='source-'+document):DocumentTextHit=>({id:document+':'+page,document_id:document,
  course_id:'course',name:document+'.pdf',origin:'upload',origin_key:document,source_hash:'hash-'+document,
