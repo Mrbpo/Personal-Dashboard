@@ -20,6 +20,7 @@ channel_supplied=0
 discover=0
 catalog=
 dry_run=0
+video_policy=original
 usage() {
   echo 'Usage: server-run.sh [--catalog FILE [--dry-run]] [--discover-channels | --download] [--entry-id ID] [--limit N] [--course-id N --tool-id N --channel-id N] [--kaf-host HOST] [--observed-gallery-url URL] [--observed-asset-url URL]'
   echo 'Default is metadata only. Use --download for missing/updated verified recordings.'
@@ -30,6 +31,7 @@ while (( $# )); do
     --discover-channels) discover=1; shift ;;
     --catalog) catalog=${2:?}; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
+    --video-policy) video_policy=${2:?}; shift 2 ;;
     --course-id) course_id=${2:?}; shift 2 ;;
     --tool-id) tool_id=${2:?}; tool_supplied=1; shift 2 ;;
     --channel-id) channel_id=${2:?}; channel_supplied=1; shift 2 ;;
@@ -42,12 +44,15 @@ while (( $# )); do
     *) echo 'Unknown option.' >&2; usage >&2; exit 2 ;;
   esac
 done
+[[ $video_policy == auto || $video_policy == original || $video_policy == hd ]] ||
+  { echo 'Video policy must be auto, original, or hd.' >&2; exit 2; }
 if [[ -n $catalog ]]; then
   [[ $discover == 0 && -z $entry_id && $limit == 0 ]] ||
     { echo 'Catalog runs cannot mix discovery, entry, or limit options.' >&2; exit 2; }
   catalog_args=(--catalog "$catalog")
   (( download == 0 )) || catalog_args+=(--download)
   (( dry_run == 0 )) || catalog_args+=(--dry-run)
+  catalog_args+=(--video-policy "$video_policy")
   exec python3 "$tool_root/server-catalog.py" "${catalog_args[@]}"
 fi
 (( dry_run == 0 )) || { echo 'Dry-run requires a catalog.' >&2; exit 2; }
@@ -79,7 +84,7 @@ else
   [[ -z $asset_url ]] || args+=(--verify-observed-asset-url "$asset_url")
 fi
 [[ -z $entry_id ]] || args+=(--entry-id "$entry_id")
-(( download == 0 )) || args+=(--download --limit "$limit")
+(( download == 0 )) || args+=(--download --limit "$limit" --inventory-first --video-policy "$video_policy" --reserve-gib 15)
 # The vault/token remains in the existing worker; fresh grant flows only on stdin.
 docker exec -i -e COURSE_VIDEO_COURSE_ID="$course_id" -e COURSE_VIDEO_TOOL_ID="$tool_id" \
   -e COURSE_VIDEO_CANVAS_ORIGIN=https://q.utoronto.ca \

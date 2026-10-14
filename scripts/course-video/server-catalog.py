@@ -5,8 +5,10 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
+from archive import atomic_json
 
 
 def validated_catalog(path):
@@ -39,6 +41,7 @@ def main():
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--video-policy", choices=("auto", "original", "hd"), default="original")
     args = parser.parse_args()
     try:
         records = validated_catalog(args.catalog)
@@ -52,17 +55,45 @@ def main():
                           "networkRequested": False}))
         return 0
     results = []
+    run_id = str(time.time_ns())
+    archive_root = Path("/srv/study-course-recordings")
     for record in records:
         command = ["bash", str(Path(__file__).with_name("server-run.sh")),
                    "--course-id", record["courseId"], "--tool-id", record["toolId"],
-                   "--channel-id", record["channelId"], "--observed-gallery-url", record["galleryUrl"]]
+                   "--channel-id", record["channelId"], "--observed-gallery-url", record["galleryUrl"], "--video-policy", args.video_policy]
         if args.download:
             command.append("--download")
         print(json.dumps({"state": "catalog_course_started", "courseId": record["courseId"],
                           "channelId": record["channelId"], "downloadRequested": args.download}), flush=True)
         # argv only; a failed course does not block the remaining explicit list.
         code = subprocess.run(command, check=False).returncode
-        results.append({"courseId": record["courseId"], "channelId": record["channelId"], "exitCode": code})
+        summary = {"courseId": record["courseId"], "channelId": record["channelId"], "exitCode": code}
+        try:
+            manifest = json.loads((archive_root / "manifest.json").read_text())
+            current = manifest.get("scan", {}).get("courses") == [record["courseId"]]
+            report = {**summary, "scanEvidenceCurrent": current, "completedAt": int(time.time()),
+                      "scan": manifest.get("scan") if current else None,
+                      "archive": manifest.get("archive") if current and args.download else None,
+                      "formatAllocation": manifest.get("formatAllocation") if current and args.download and
+                                          manifest.get("formatAllocation", {}).get("courseIds") == [record["courseId"]] else None,
+                      "channels": {key: value for key, value in manifest.get("channels", {}).items() if key.startswith(record["courseId"] + ":")},
+                      "streams": {key: value for key, value in manifest.get("streams", {}).items() if key.startswith(record["courseId"] + ":")},
+                      "entries": {key: value for key, value in manifest.get("entries", {}).items() if value.get("courseId") == record["courseId"]}}
+            if code == 0 and args.download and current:
+                decoder = subprocess.run([sys.executable, str(Path(__file__).with_name("verify-archive.py")),
+                                          "--course-id", record["courseId"]], check=False).returncode
+                report["decoderExitCode"] = decoder
+                if decoder:
+                    summary["exitCode"] = decoder
+            atomic_json(archive_root / "reports" / ("course-" + record["courseId"] + "-" + run_id + ".json"), report)
+            summary["scopeComplete"] = bool(current and manifest["scan"].get("scopeComplete"))
+            summary["archive"] = report["archive"]
+        except Exception:
+            summary["reportState"] = "report_failed"
+            summary["exitCode"] = 2
+        results.append(summary)
+        print(json.dumps({"state": "catalog_course_complete", **summary}), flush=True)
+        atomic_json(archive_root / "reports" / ("catalog-" + run_id + ".json"), {"runId": run_id, "results": results})
     print(json.dumps({"state": "catalog_complete", "results": results,
                       "allSucceeded": all(item["exitCode"] == 0 for item in results)}), flush=True)
     return 0 if all(item["exitCode"] == 0 for item in results) else 2

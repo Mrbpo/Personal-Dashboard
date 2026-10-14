@@ -1,11 +1,23 @@
 import tempfile
 import unittest
 from pathlib import Path
-from archive import Sessions, atomic_json, inventory_entry, media_host, parse_request, public_url, response_json, sha256, verified_files
+from archive import Sessions, atomic_json, inventory_entry, media_host, parse_request, plan_video_formats, public_url, response_json, sha256, verified_files
 from unittest.mock import patch
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_original_policy_never_downgrades_or_exceeds_budget(self):
+        original = {"format_id": "0_original", "preference": 10, "height": 1080, "filesize_approx": 1000, "url": "https://example.invalid/SECRET"}
+        proxy = {"format_id": "0_proxy", "preference": 0, "height": 360, "filesize_approx": 10}
+        public = {"state": "discovered", "mediaAssets": []}
+        private = {"formats": [original, proxy]}
+        blocked = plan_video_formats([("course:entry", {}, public, private)], 999, "original")
+        self.assertEqual(blocked["missingCapacityBytes"], 1)
+        self.assertEqual(private["formats"], [original, proxy])
+        self.assertNotIn("url", blocked["selections"]["course:entry"])
+        with self.assertRaisesRegex(RuntimeError, "no_authorized_original_format"):
+            plan_video_formats([("course:entry", {}, public, {"formats": [proxy]})], 1000, "original")
+
     def test_canvas_cookie_auth_json_guard(self):
         class Response:
             def text(self):

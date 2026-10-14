@@ -38,7 +38,10 @@ def script_error_category(message):
 
 def safe_request_location(url):
     parsed = urlparse(public_url(url))
-    return {"host": parsed.hostname, "path": parsed.path}
+    path = parsed.path
+    if (parsed.hostname or "").endswith(".cloudflare.com") and path.startswith("/cdn-cgi/challenge-platform/"):
+        path = "/cdn-cgi/challenge-platform/[redacted]"
+    return {"host": parsed.hostname, "path": path}
 
 
 class ReauthRequired(Exception):
@@ -295,6 +298,9 @@ def inventory_entry(context, session: dict, include_captions: bool = False) -> t
               "title": info.get("name", session["entryId"]),
               "durationSeconds": info.get("duration"), "publishedAt": info.get("createdAt"),
               "updatedAt": info.get("updatedAt"), "formats": [{key: value for key, value in item.items() if key != "url"} for item in formats],
+              "mediaAssets": sorted([{"id": item["id"], "version": item.get("version"), "updatedAt": item.get("updatedAt"),
+                                      "size": item.get("size")} for item in flavors if str(item.get("id")) in {value["format_id"] for value in formats}],
+                                    key=lambda item: item["id"]),
               "captions": [{key: item.get(key) for key in ("id", "languageCode", "language", "format", "fileExt", "status", "updatedAt")}
                            for item in captions], "seenAt": int(time.time()), "state": "discovered"}
     return public, {"formats": formats, "captions": captions}
@@ -355,7 +361,7 @@ def verified_files(root: Path, record: dict) -> bool:
     return bool(files)
 
 
-def archive_entry(context, session: dict, metadata: dict, private: dict, root: Path, subtitles_only: bool, include_captions: bool = False) -> list[dict]:
+def archive_entry(context, session: dict, metadata: dict, private: dict, root: Path, subtitles_only: bool, include_captions: bool = False, reserve_bytes: int = 15 * 1024**3) -> list[dict]:
     revision = str(metadata.get("updatedAt") or metadata.get("publishedAt") or "unknown")
     if not re.fullmatch(r"[0-9]+|unknown", revision):
         raise RuntimeError("invalid_media_revision")
@@ -390,7 +396,7 @@ def archive_entry(context, session: dict, metadata: dict, private: dict, root: P
         if not private["formats"]:
             raise RuntimeError("no_authorized_download_format")
         maximum = max(item.get("filesize_approx", 0) for item in private["formats"])
-        if shutil.disk_usage(root).free < maximum + 512 * 1024 * 1024:
+        if shutil.disk_usage(root).free < maximum + reserve_bytes:
             raise RuntimeError("insufficient_local_storage")
         # A checksum failure must not be "repaired" by yt-dlp skipping the
         # existing final file. Retain its bytes under a corruption name, then
@@ -407,12 +413,13 @@ def archive_entry(context, session: dict, metadata: dict, private: dict, root: P
             nonlocal last_storage_check
             if progress.get("status") == "downloading" and time.monotonic() - last_storage_check > 2:
                 last_storage_check = time.monotonic()
-                if shutil.disk_usage(root).free < 512 * 1024 * 1024:
+                if shutil.disk_usage(root).free < reserve_bytes:
                     raise RuntimeError("insufficient_local_storage")
         # yt-dlp's public Kaltura extractor starts a widget KS itself. Supplying
         # already-authorized formats avoids replacing the browser's scoped KS.
         with yt_dlp.YoutubeDL({"logger": QuietLogger(), "quiet": True, "no_warnings": True,
-                              "outtmpl": str(directory / "original.%(ext)s"), "continuedl": True,
+                              "outtmpl": str(directory / ("original.%(ext)s" if metadata.get("selectedVideoFormat", {}).get("isOriginalSource", True) else
+                                                         "video-" + str(metadata["selectedVideoFormat"]["formatId"]) + ".%(ext)s")), "continuedl": True,
                               "retries": 3, "fragment_retries": 3, "concurrent_fragment_downloads": 1,
                               "writeinfojson": False, "noprogress": True, "progress_hooks": [guard_storage]}) as downloader:
             result = downloader.process_ie_result({"id": session["entryId"], "title": metadata["title"],
@@ -420,8 +427,61 @@ def archive_entry(context, session: dict, metadata: dict, private: dict, root: P
             filename = Path(result.get("filepath") or downloader.prepare_filename(result))
         if not filename.is_file() or filename.stat().st_size == 0:
             raise RuntimeError("video_download_incomplete")
-        files.append({"kind": "video", "path": str(filename.relative_to(root)), "sha256": sha256(filename), "bytes": filename.stat().st_size})
+        files.append({"kind": "video", "path": str(filename.relative_to(root)), "sha256": sha256(filename), "bytes": filename.stat().st_size,
+                      "selectedFormat": metadata.get("selectedVideoFormat")})
     return files
+
+
+def plan_video_formats(plans, budget: int, policy: str) -> dict:
+    selected = {}
+    pending = [(key, public, private) for key, _session, public, private in plans if public.get("state") != "archived"]
+    for key, public, private in pending:
+        formats = private["formats"]
+        if not formats:
+            raise RuntimeError("no_authorized_download_format")
+        if policy == "original" and not any(item.get("preference", 0) == 10 for item in formats):
+            raise RuntimeError("no_authorized_original_format")
+        selected[key] = max(formats, key=lambda item: (item.get("preference", 0), item.get("height") or 0, item.get("tbr") or 0))
+    original_total = sum(item.get("filesize_approx", 0) for item in selected.values())
+    used_policy = "original"
+    if policy == "hd" or policy == "auto" and original_total > budget:
+        used_policy = "hd"
+        for key, public, private in pending:
+            hd = [item for item in private["formats"] if (item.get("height") or 0) >= 720 and item.get("filesize_approx", 0) > 0]
+            if not hd:
+                raise RuntimeError("no_authorized_hd_format")
+            best_height = max(item["height"] for item in hd)
+            selected[key] = min((item for item in hd if item["height"] == best_height), key=lambda item: item["filesize_approx"])
+        # Prefer 1080p; only choose an available 720p source if needed to fit.
+        while sum(item.get("filesize_approx", 0) for item in selected.values()) > budget:
+            alternatives = []
+            for key, _public, private in pending:
+                cheaper = [item for item in private["formats"] if (item.get("height") or 0) >= 720 and item.get("filesize_approx", 0) > 0
+                           and item["filesize_approx"] < selected[key]["filesize_approx"]]
+                if cheaper:
+                    choice = min(cheaper, key=lambda item: item["filesize_approx"])
+                    alternatives.append((selected[key]["filesize_approx"] - choice["filesize_approx"], key, choice))
+            if not alternatives:
+                break
+            _saving, key, choice = max(alternatives, key=lambda item: item[0])
+            selected[key] = choice
+    total = sum(item.get("filesize_approx", 0) for item in selected.values())
+    result = {"policy": used_policy, "originalEstimatedBytes": original_total, "selectedEstimatedBytes": total,
+              "budgetBytes": max(budget, 0), "missingCapacityBytes": max(total - budget, 0),
+              "unknownSizeEntries": sum(not item.get("filesize_approx") for item in selected.values()),
+              "selections": {key: {field: item.get(field) for field in ("format_id", "height", "width", "filesize_approx", "preference")}
+                             for key, item in selected.items()}}
+    if total > budget:
+        print(json.dumps({"state": "archive_capacity_blocked", **{key: value for key, value in result.items() if key != "selections"}}), flush=True)
+        return result
+    for key, public, private in pending:
+        item = selected[key]
+        asset = next((value for value in public.get("mediaAssets", []) if value["id"] == item["format_id"]), {})
+        public["selectedVideoFormat"] = {"formatId": item["format_id"], "height": item.get("height"), "width": item.get("width"),
+                                        "bitrate": item.get("tbr"), "sourceVersion": asset.get("version"), "sourceUpdatedAt": asset.get("updatedAt"),
+                                        "isOriginalSource": item.get("preference", 0) == 10, "policy": used_policy}
+        private["formats"] = [item]
+    return result
 
 
 def canvas_pages(context, base: str, endpoint: str, max_pages: int):
@@ -469,6 +529,7 @@ def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms
     if "/login" in page.url:
         raise ReauthRequired()
     visited = set()
+    pagination_attempts = set()
     for _ in range(max_pages):
         more = False
         for frame in list(page.frames):
@@ -485,7 +546,11 @@ def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms
                           parents:[n.parentElement,n.parentElement?.parentElement].filter(Boolean).map(p => ({tag:p.tagName,id:p.id,className:String(p.className)}))}));
                       const next = [...document.querySelectorAll('a[rel="next"],button[aria-label="Next"],a[aria-label="Next"],.pagination-next a')].filter(n => n.getBoundingClientRect().width>0)
                         .map(n => ({text:n.innerText.trim().slice(0,40),disabled:n.disabled||n.getAttribute('aria-disabled')==='true'}));
-                      return {totalLabels,anchors,next};
+                      const paginationControls = [...document.querySelectorAll('a,button,[role="button"]')]
+                        .filter(n => n.getBoundingClientRect().width>0 && /load\\s+more|show\\s+more|next/i.test(n.innerText+' '+n.getAttribute('aria-label')))
+                        .map(n => ({tag:n.tagName,id:n.id,className:String(n.className),text:n.innerText.trim().slice(0,80),ariaLabel:n.getAttribute('aria-label'),
+                          path:n.href ? new URL(n.href).pathname : null,disabled:n.disabled||n.getAttribute('aria-disabled')==='true'}));
+                      return {totalLabels,anchors,next,paginationControls};
                     }""")
                     members = set()
                     card_details = []
@@ -504,17 +569,25 @@ def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms
                         sessions.gallery_totals[key] = total
                     sessions.gallery_diagnostics.append({"courseId": sessions.current_course, "channelId": channel_id,
                                                          "totalLabels": summary["totalLabels"], "cardEntries": card_details,
-                                                         "nextControls": summary["next"]})
+                                                         "nextControls": summary["next"], "paginationControls": summary["paginationControls"]})
+                    print(json.dumps({"state": "native_gallery_page", "courseId": sessions.current_course, "channelId": channel_id,
+                                      "totalLabels": summary["totalLabels"], "uniqueCardEntries": len(members),
+                                      "paginationControls": summary["paginationControls"]}), flush=True)
                 # Load per-entry pages to obtain an applicable session/context.
                 anchors = frame.locator('a[href*="/entryid/"], a[href*="/entry_id/"], a[href*="/media/"]').evaluate_all("nodes => nodes.map(n => n.href)")
                 for href in anchors:
                     sessions.remember_channel(href)
                     target = urlparse(href)
-                    if target.scheme != "https" or not media_host(target.hostname or "", sessions.extra_hosts) or href in visited:
+                    media_entry = re.search(r"/([01]_[A-Za-z0-9]+)(?:/|$)", target.path)
+                    visit_key = media_entry[1] if media_entry else public_url(href)
+                    if target.scheme != "https" or not media_host(target.hostname or "", sessions.extra_hosts) or visit_key in visited:
                         continue
                     if entry_id and not re.search(r"(?:/|=)" + re.escape(entry_id) + r"(?:/|&|$)", href):
                         continue
-                    visited.add(href)
+                    visited.add(visit_key)
+                    if media_entry:
+                        print(json.dumps({"state": "observe_entry_page", "courseId": sessions.current_course,
+                                          "entryId": media_entry[1]}), flush=True)
                     child = page.context.new_page()
                     try:
                         child.goto(href, wait_until="domcontentloaded", timeout=60000)
@@ -526,6 +599,24 @@ def inspect_target(page, url: str, sessions: Sessions, max_pages: int, settle_ms
                     next_button.first.click()
                     page.wait_for_timeout(settle_ms)
                     more = True
+                elif gallery_url and public_url(frame.url) == gallery_url and channel_id:
+                    key = f"{sessions.current_course}:{channel_id}"
+                    before = set(sessions.gallery_members.get(key, set()))
+                    expected = sessions.gallery_totals.get(key)
+                    attempt = (key, len(before))
+                    if expected is not None and expected > len(before) and attempt not in pagination_attempts:
+                        pagination_attempts.add(attempt)
+                        print(json.dumps({"state": "native_gallery_scroll", "courseId": sessions.current_course,
+                                          "observedMembers": len(before), "expectedMembers": expected}), flush=True)
+                        # Ordinary gallery scroll can activate its own lazy
+                        # pagination. No synthetic API route or request fields.
+                        frame.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+                        page.wait_for_timeout(settle_ms)
+                        after_urls = frame.locator('a[href*="/media/"]').evaluate_all("nodes => nodes.map(n => new URL(n.href).pathname)")
+                        after = {match[1] for path in after_urls if (match := re.search(r"/media/(?:[^/]+/)*([01]_[A-Za-z0-9]+)/(?:categoryid/)?" + re.escape(channel_id) + r"(?:/|$)", path))}
+                        more = bool(after - before)
+                        print(json.dumps({"state": "native_gallery_scroll_result", "courseId": sessions.current_course,
+                                          "newCardMembers": len(after - before)}), flush=True)
             except ReauthRequired:
                 raise
             except Exception:
@@ -550,6 +641,9 @@ def main():
     parser.add_argument("--max-pages", type=int, default=100)
     parser.add_argument("--settle-ms", type=int, default=2500)
     parser.add_argument("--limit", type=int, default=0, help="Bound first download trial; zero means all discovered entries")
+    parser.add_argument("--inventory-first", action="store_true", help="Validate all authorized entries and budget formats before starting downloads")
+    parser.add_argument("--video-policy", choices=("auto", "original", "hd"), default="original")
+    parser.add_argument("--reserve-gib", type=int, default=15, help="Free space reserved for website, PDF and backup temporary data")
     parser.add_argument("--target-only", action="store_true", help="Visit only supplied pages for a first authorized sample")
     parser.add_argument("--channel-id", help="Explicit observed Kaltura channel for a single-course acceptance scope")
     parser.add_argument("--entry-id", help="One explicitly observed entry for a partial authorized metadata/download trial; does not assert full channel coverage")
@@ -567,10 +661,12 @@ def main():
     host = urls[0].netloc
     if any(value.scheme != "https" or value.netloc != host or not re.match(r"^/courses/\d+", value.path) or value.username for value in urls):
         parser.error("Provide HTTPS Canvas course URLs from one instance")
-    if args.max_pages < 1 or args.settle_ms < 0 or args.limit < 0 or args.login_timeout < 1:
+    if args.max_pages < 1 or args.settle_ms < 0 or args.limit < 0 or args.login_timeout < 1 or args.reserve_gib < 15:
         parser.error("Invalid limits")
     if args.pause_after_inventory and not args.download:
         parser.error("--pause-after-inventory requires --download")
+    if args.inventory_first and not args.download:
+        parser.error("--inventory-first requires --download")
     if args.channel_id and (not args.channel_id.isdigit() or args.all_courses):
         parser.error("--channel-id requires one numeric channel and a single-course run")
     if args.entry_id and (not re.fullmatch(r"[01]_[A-Za-z0-9]+", args.entry_id) or args.all_courses or len(urls) != 1):
@@ -896,10 +992,14 @@ def main():
                         key = f"{course}:{category}"
                         native_members = sessions.gallery_members.get(key, set())
                         native_total = sessions.gallery_totals.get(key)
-                        if native_total is not None and native_total == len(native_members):
-                            manifest["channels"][key] = {"state": "verified", "totalCount": native_total,
+                        if native_total is not None and native_total >= len(native_members):
+                            manifest["channels"][key] = {"state": "verified" if native_total == len(native_members) else "partial", "totalCount": native_total,
                                                         "uniqueEntries": len(native_members), "method": "kaf_native_visible_gallery_total",
-                                                        "nativeLabel": f"{native_total} Media", "restrictedApi": details}
+                                                        "nativeLabel": f"{native_total} Media", "restrictedApi": details,
+                                                        "memberEntryIds": sorted(native_members),
+                                                        "missingMembershipCount": native_total - len(native_members)}
+                            if native_total != len(native_members):
+                                complete = False
                             observed_members = {entry for entry in native_members if f"{course}:{entry}" in sessions.entries}
                             verified_scope.update(f"{course}:{entry}" for entry in observed_members)
                             if observed_members != native_members:
@@ -955,7 +1055,11 @@ def main():
                 return 0 if verified_scope else 2
             # Related streams may never appear as separate gallery cards.
             if sessions.gallery_diagnostics:
-                print(json.dumps({"state": "native_gallery_inventory", "nativeGallery": sessions.gallery_diagnostics}, ensure_ascii=False), flush=True)
+                diagnostics = sessions.gallery_diagnostics if args.entry_id else [
+                    {"courseId": item["courseId"], "channelId": item["channelId"], "totalLabels": item["totalLabels"],
+                     "uniqueCardEntries": len({card["entryId"] for card in item["cardEntries"]}), "nextControls": item["nextControls"]}
+                    for item in sessions.gallery_diagnostics]
+                print(json.dumps({"state": "native_gallery_inventory", "nativeGallery": diagnostics}, ensure_ascii=False), flush=True)
             if args.entry_id:
                 partial_key = f"{courses[0]}:{args.entry_id}"
                 if partial_key not in sessions.entries:
@@ -1061,11 +1165,18 @@ def main():
                     public["files"] = previous.get("files", [])
                     unchanged = public["updatedAt"] == previous.get("updatedAt") and public["captions"] == previous.get("captions")
                     has_video = any(item.get("kind") == "video" for item in public["files"])
-                    if args.pause_after_inventory:
+                    old_assets = previous.get("mediaAssets")
+                    assets_have_revision = bool(public["mediaAssets"] and all(item["version"] is not None or item["updatedAt"] is not None for item in public["mediaAssets"]))
+                    video_assets_unchanged = bool(old_assets and assets_have_revision and old_assets == public["mediaAssets"] and
+                                                  public["captions"] == previous.get("captions"))
+                    if args.pause_after_inventory or args.inventory_first:
                         download_plans.append((key, session, public, private))
-                    if args.download and not args.pause_after_inventory and (not args.limit or processed < args.limit):
-                        if unchanged and previous.get("state") in ("archived", "subtitles_archived") and verified_files(root, previous) and (args.subtitles_only or has_video):
+                    if args.download and not (args.pause_after_inventory or args.inventory_first) and (not args.limit or processed < args.limit):
+                        if (unchanged or video_assets_unchanged) and previous.get("state") in ("archived", "subtitles_archived") and verified_files(root, previous) and (args.subtitles_only or has_video):
                             public["state"] = "archived"
+                            if video_assets_unchanged and not unchanged:
+                                print(json.dumps({"state": "video_assets_reused", "entryId": session["entryId"],
+                                                  "entryMetadataUpdated": True}), flush=True)
                         else:
                             public["state"] = "downloading"
                             manifest["entries"][key] = public
@@ -1073,11 +1184,11 @@ def main():
                             runtime_stage = "download_entry"
                             print(json.dumps({"state": "download_started", "entryId": session["entryId"],
                                               "estimatedMaximumBytes": max([item.get("filesize_approx", 0) for item in private["formats"]] or [0])}), flush=True)
-                            public["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, include_captions)
+                            public["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, include_captions, args.reserve_gib * 1024**3)
                             public["state"] = "archived" if not args.subtitles_only else "subtitles_archived"
                             public["archivedAt"] = int(time.time())
                         processed += 1
-                    elif unchanged and previous.get("state") in ("archived", "subtitles_archived") and verified_files(root, previous):
+                    elif (unchanged or video_assets_unchanged) and previous.get("state") in ("archived", "subtitles_archived") and verified_files(root, previous):
                         public["state"] = previous.get("state", "discovered")
                     manifest["entries"][key] = public
                     atomic_json(path, manifest)
@@ -1110,13 +1221,21 @@ def main():
             # missing until a platform-specific total-count check is verified.
             atomic_json(path, manifest)
             estimated = sum(max([fmt.get("filesize_approx", 0) for fmt in record.get("formats", [])] or [0]) for record in manifest["entries"].values())
-            if args.pause_after_inventory:
+            if args.pause_after_inventory or args.inventory_first:
                 print(json.dumps({"state": "inventory_ready", "entries": len(download_plans), "estimatedMaximumBytes": estimated,
                                   "freeLocalBytes": shutil.disk_usage(root).free, "manifest": str(path)}, ensure_ascii=False), flush=True)
-                if not manifest["scan"]["scopeComplete"] or not download_plans:
+                if args.pause_after_inventory and (not manifest["scan"]["scopeComplete"] or not download_plans):
                     print("Inventory scope is not fully verified; no video download started.", file=sys.stderr)
                     return 2
-                input("Review the saved inventory; press Enter to continue downloads in this same login, or Ctrl+C to stop. ")
+                if not args.subtitles_only:
+                    allocation = plan_video_formats(download_plans, shutil.disk_usage(root).free - args.reserve_gib * 1024**3, args.video_policy)
+                    manifest["formatAllocation"] = {**allocation, "reservedBytes": args.reserve_gib * 1024**3, "courseIds": courses}
+                    print(json.dumps({"state": "archive_format_budget", **{key: value for key, value in manifest["formatAllocation"].items() if key != "selections"}}), flush=True)
+                    atomic_json(path, manifest)
+                    if allocation["missingCapacityBytes"]:
+                        raise RuntimeError("insufficient_local_storage")
+                if args.pause_after_inventory:
+                    input("Review the saved inventory; press Enter to continue downloads in this same login, or Ctrl+C to stop. ")
                 for index, (key, session, public, private) in enumerate(download_plans):
                     if args.limit and index >= args.limit:
                         break
@@ -1125,8 +1244,11 @@ def main():
                         continue
                     record["state"] = "downloading"
                     atomic_json(path, manifest)
+                    print(json.dumps({"state": "download_started", "entryId": session["entryId"],
+                                      "selectedFormat": public.get("selectedVideoFormat")}), flush=True)
                     try:
-                        record["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, args.with_captions or args.subtitles_only)
+                        record["files"] = archive_entry(context, session, public, private, root, args.subtitles_only, args.with_captions or args.subtitles_only,
+                                                       args.reserve_gib * 1024**3)
                         record["state"] = "subtitles_archived" if args.subtitles_only else "archived"
                         record["archivedAt"] = int(time.time())
                     except Exception as error:
@@ -1157,6 +1279,10 @@ def main():
             return 2
         except Exception as error:
             manifest["scan"]["state"] = "retryable_failure"
+            if args.download:
+                manifest["archive"] = {"state": "incomplete", "courseIds": courses,
+                                       "failureReason": "insufficient_local_storage" if str(error) == "insufficient_local_storage" else "runtime_failure",
+                                       "completedAt": int(time.time())}
             atomic_json(path, manifest)
             print(json.dumps(safe_runtime_failure(error)), file=sys.stderr, flush=True)
             return 2
