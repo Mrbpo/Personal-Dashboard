@@ -2,6 +2,10 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {PDFDocument} from 'pdf-lib';
+import {mkdtemp,writeFile,readFile,link,symlink,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,resolve} from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {auditPdfSourceFidelity,stagePdfSourceFidelity,type PdfSourceMathEvidence} from '../lib/pdf-source-fidelity.ts';
 
 async function fixture(){
@@ -42,6 +46,35 @@ test('source audit maps vectors within numbered regions and reports external mat
  const duplicated=await auditPdfSourceFidelity(original,evidence,body+'\n\\[q_i\\tag{A}\\]');
  assert.equal(duplicated.regions[0].matchingEnvironments,2);
  assert.equal(duplicated.regions[0].vectorMappingUnique,false);
+});
+
+test('complete tokens/scripts and one-to-one equation labels refuse prefix or shared-environment repairs',async()=>{
+ const {original,evidence}=await fixture();
+ const one={...evidence,regions:[{...evidence.regions[0],glyphs:[evidence.regions[0].glyphs[0]]}]};
+ for(const token of ['q_{i+j}','q_\\ell','\\q_i','q_{i}_j'])
+  await assert.rejects(stagePdfSourceFidelity(original,one,`\\[${token}\\tag{A}\\]`),/needs review/);
+ one.regions[0].glyphs[0]={...one.regions[0].glyphs[0],subscript:null};
+ await assert.rejects(stagePdfSourceFidelity(original,one,'\\[q_\\ell\\tag{A}\\]'),/needs review/);
+ for(const body of ['\\[q_i+q_j\\tag{A}\\]\\tag{B}','\\[q_i+q_j\\tag{A}\\tag{B}\\]'])
+  await assert.rejects(stagePdfSourceFidelity(original,evidence,body),/needs review/);
+});
+
+test('CLI refuses input aliases, existing output/cache files and equal outputs before any write',async()=>{
+ const {original,evidence}=await fixture(),directory=await mkdtemp(join(tmpdir(),'source-fidelity-output-'));
+ const pdf=join(directory,'original.pdf'),proof=join(directory,'evidence.json'),text=join(directory,'text.txt'),cache=join(directory,'cache.txt');
+ await writeFile(pdf,original);await writeFile(proof,JSON.stringify(evidence));await writeFile(text,'\\[q_i+q_j\\tag{A}\\]\n\\(r=0\\)\\tag{B}');await writeFile(cache,'Existing raw cache');
+ const before=await Promise.all([pdf,proof,text,cache].map(path=>readFile(path)));
+ const run=(extra:string[])=>spawnSync(process.execPath,['--experimental-strip-types',resolve('scripts/audit-pdf-source-fidelity.ts'),'--original',pdf,'--evidence',proof,'--text',text,...extra],{encoding:'utf8'});
+ try{
+  for(const output of [pdf,proof,text,cache])assert.notEqual(run(['--report',output]).status,0);
+  const same=join(directory,'same.json');assert.notEqual(run(['--report',same,'--stage',same]).status,0);
+  const hard=join(directory,'hard.txt');await link(text,hard);assert.notEqual(run(['--report',hard]).status,0);
+  const aliasDir=join(directory,'alias');await symlink(directory,aliasDir,process.platform==='win32'?'junction':'dir');
+  assert.notEqual(run(['--report',join(directory,'fresh.json'),'--stage',join(aliasDir,'fresh.json')]).status,0);
+  assert.deepEqual(await Promise.all([pdf,proof,text,cache].map(path=>readFile(path))),before);
+  assert.equal(run(['--report',join(directory,'valid-audit.json'),'--stage',join(directory,'valid-stage.json')]).status,0);
+  assert.notEqual(run(['--report',join(directory,'valid-audit.json')]).status,0);
+ }finally{await rm(directory,{recursive:true,force:true});}
 });
 
 test('source audit refuses changed originals, wrong physical pages and unproved geometry',async()=>{

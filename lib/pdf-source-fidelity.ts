@@ -36,14 +36,20 @@ export async function auditPdfSourceFidelity(original:Uint8Array,evidence:PdfSou
   else{math.push({start:open.start,end:offset+2,body:text.slice(open.bodyStart,offset),display:open.display});open=undefined;}
  }
  if(open)boundaryErrors.push('unclosed-math-boundary');
+ const labels=new Map(math.map(environment=>{
+  const internal=[...environment.body.matchAll(/\\tag\{([^}]+)\}/g)].map(match=>match[1]);
+  const adjacent=text.slice(environment.end).match(/^\s*\\(?:hfill\s*\(([^)]+)\)|tag\{([^}]+)\})/);
+  const all=[...internal,...(adjacent?[adjacent[1]??adjacent[2]]:[])];
+  if(all.length>1)boundaryErrors.push('multiple-equation-labels-for-one-environment');
+  return [environment,all] as const;
+ }));
  const outsideMath=[...text.matchAll(/\\(?:tag\{[^}]*\}|hfill|[{}])/g)].filter(match=>
   !math.some(environment=>match.index!>=environment.start&&match.index!<environment.end))
   .map(match=>({token:match[0],offset:match.index!}));
  const regions=evidence.regions.map(region=>{
   const numbered=math.filter(environment=>{
-   const tagged=[...environment.body.matchAll(/\\tag\{([^}]+)\}/g)].map(match=>match[1]);
-   const external=text.slice(environment.end).match(/^\s*\\(?:hfill\s*\(([^)]+)\)|tag\{([^}]+)\})/);
-   return tagged.includes(region.number)||external?.[1]===region.number||external?.[2]===region.number;
+   const numbers=labels.get(environment)!;
+   return numbers.length===1&&numbers[0]===region.number;
   });
   const reasons:string[]=[];
   if(numbered.length!==1)reasons.push('equation-number-not-unique');
@@ -72,17 +78,35 @@ function vectorMappings(region:SourceMathRegion,body:string){
  const bold=region.glyphs.filter(glyph=>glyph.bold===true);
  return bold.map((glyph,index)=>{
   const base=greek[glyph.symbol]?'\\'+greek[glyph.symbol]:glyph.symbol;
-  const escaped=base.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-  const pattern=new RegExp('(?<![A-Za-z])(?:\\\\(?:mathbf|boldsymbol)\\{)?'+escaped+'(?![A-Za-z])\\}?(?:_\\{?([A-Za-z0-9]+)\\}?)?','g');
   const sourceOfBase=region.glyphs.filter(item=>item.symbol===glyph.symbol);
   const literalRanges=[...body.matchAll(/\\(?:text|tag|operatorname)\{[^}]*\}/g)];
-  const matches=[...body.matchAll(pattern)].filter(match=>!literalRanges.some(literal=>
-   match.index!>=literal.index!&&match.index!<literal.index!+literal[0].length));
-  const expected=sourceOfBase.map(item=>item.subscript),observed=matches.map(match=>match[1]??null);
-  const orderMatches=JSON.stringify(expected)===JSON.stringify(observed);
+  // Scan complete control sequences: a literal q never matches inside \q.
+  const matches=[...body.matchAll(/\\[A-Za-z]+|[A-Za-z]/g)].filter(match=>match[0]===base&&
+   (base.startsWith('\\')||(!/[A-Za-z]/.test(body[match.index!-1]??'')&&!/[A-Za-z]/.test(body[match.index!+1]??'')))&&
+   !literalRanges.some(literal=>match.index!>=literal.index!&&match.index!<literal.index!+literal[0].length))
+   .map(match=>{
+    const offset=match.index!,prefix=body.slice(0,offset),alreadyBold=/\\(?:mathbf|boldsymbol)\{$/.test(prefix);
+    let end=offset+base.length;
+    if(alreadyBold&&body[end]==='}')end++;
+    while(/\s/.test(body[end]??'')&&end<body.length)end++;
+    let subscript:string|null=null,valid=true;
+    if(body[end]==='_'){
+     end++;while(/\s/.test(body[end]??'')&&end<body.length)end++;
+     if(body[end]==='{'){
+      const closing=body.indexOf('}',end+1),full=closing<0?'':body.slice(end+1,closing);
+      valid=/^[A-Za-z0-9]+$/.test(full);subscript=valid?full:null;end=closing<0?body.length:closing+1;
+     }else if(/^[A-Za-z0-9]$/.test(body[end]??'')){subscript=body[end];end++;}
+     else valid=false; // command, missing or complex script: never infer null.
+     while(/\s/.test(body[end]??'')&&end<body.length)end++;
+     if(body[end]==='_')valid=false;
+    }else if(body[end]==='^')valid=false; // Unknown postfix order may hide a later script.
+    return {offset,alreadyBold,subscript,valid};
+   });
+  const expected=sourceOfBase.map(item=>item.subscript),observed=matches.map(match=>match.subscript);
+  const orderMatches=matches.every(match=>match.valid)&&JSON.stringify(expected)===JSON.stringify(observed);
   const position=sourceOfBase.indexOf(glyph),match=matches[position];
-  const alreadyBold=Boolean(match&&/^\\(?:mathbf|boldsymbol)\{/.test(match[0]));
-  const baseOffset=match?match.index!+(alreadyBold?match[0].indexOf('{')+1:0):null;
+  const alreadyBold=match?.alreadyBold??false;
+  const baseOffset=match?.offset??null;
   return {symbol:glyph.symbol,subscript:glyph.subscript,bbox:glyph.bbox,index,base,
    alreadyBold,
    unique:orderMatches&&sourceOfBase.every(item=>item.bold!==null)&&Boolean(match)&&Boolean(greek[glyph.symbol]||/^[A-Za-z]$/.test(glyph.symbol)),
