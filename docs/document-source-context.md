@@ -31,6 +31,10 @@ Bounded PNG bytes are retained by SHA256 in the existing `LIBRARY_DIR`; only
 attachment metadata is stored in PostgreSQL. A caption is never a replacement
 for pixels. Registering conflicting attachments leaves explicit ambiguity.
 These assets belong to the existing non-core library backup scope.
+Source/caption preflight and blob staging/checks run outside a transaction.
+Only afterwards does a short Kernel transaction recheck the current source,
+structure and caption and insert metadata. A changed source cannot publish the
+attachment; its already retained content-addressed blob remains reusable.
 
 ## Reads and accounting
 
@@ -66,6 +70,7 @@ not by itself proof of answer correctness or document transcription fidelity.
 fetch blocked. It covers actual search-hit preservation, complete manifests,
 immutable/cyclic hierarchy rejection, owner/course/hidden/current/newest-origin
 guards, the Unicode size boundary, actual image bytes, missing/ambiguous/corrupt
-assets and a source hidden during image reads. CI performs the existing build
+assets, a source hidden during image reads, and source changes between
+transaction-free blob staging and metadata commit. CI performs the existing build
 and PostgreSQL integration gates. Merge and CI success do not deploy the service
 or constitute the three full document/PDF acceptance sets.

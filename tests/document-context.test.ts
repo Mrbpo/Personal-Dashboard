@@ -5,8 +5,9 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import type {Pool} from 'pg';
 import {kernel} from '../lib/kernel/service.ts';
-import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
-import {DocumentContextError,readDocumentImages,type DocumentContextSource,type DocumentStructureInput} from '../lib/kernel/document-context.ts';
+import {kernelPool,kernelTransaction,migrateKernel} from '../lib/kernel/db.ts';
+import {DocumentContextError,readDocumentImages,prepareDocumentImage,commitDocumentImage,
+ type DocumentContextSource,type DocumentStructureInput} from '../lib/kernel/document-context.ts';
 const digest=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 let externalCalls=0;globalThis.fetch=async()=>{externalCalls++;throw new Error('Context fixture prohibits external calls');};
 after(async()=>{try{assert.equal(externalCalls,0);}finally{if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();}});
@@ -122,4 +123,21 @@ test('pixels require actual hash-bound bytes and current caption identity; missi
  finally{await writeFile(path,original);}
  await kernel.registerDocumentImage(item.owner,item.source,{captionEvidenceId:caption,originalReference:'other-original.png',provenance,bytes:png});
  await assert.rejects(kernel.readDocumentImages(item.owner,item.source,[caption]),code('DOCUMENT_IMAGE_AMBIGUOUS'));
+});
+
+test('image bytes stage without a transaction lock; a changed source cannot publish the staged attachment',pg,async()=>{
+ const item=await fixture();await kernel.registerDocumentStructure(item.owner,item.source,item.structure);
+ const pool=kernelPool(),withoutLock=new Proxy(pool,{get(target,key){if(key!=='query')return Reflect.get(target,key);
+  return async(...args:Parameters<Pool['query']>)=>{
+   assert.ok(typeof args[0]==='string');assert.doesNotMatch(args[0],/\b(?:BEGIN|FOR\s+UPDATE)\b/i);
+   return (target.query as (...values:unknown[])=>Promise<unknown>).apply(target,args);
+  };}}) as Pool;
+ const prepared=await prepareDocumentImage(withoutLock,item.owner,item.source,{captionEvidenceId:item.read.nodes[2].evidenceId,
+  originalReference:'staged-original.png',provenance,bytes:png});
+ assert.equal(digest(await readFile(resolve(process.env.LIBRARY_DIR||'./data/library',prepared.sha256))),prepared.sha256);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM document_image_attachments WHERE version_id=$1',[item.source.currentVersionId])).rows[0].n,0);
+ await kernel.hideParsedDocument(item.owner,item.id);
+ await assert.rejects(kernelTransaction(client=>commitDocumentImage(client,item.owner,prepared)),code('DOCUMENT_CONTEXT_CHANGED'));
+ assert.equal((await pool.query('SELECT count(*)::int n FROM document_image_attachments WHERE version_id=$1',[item.source.currentVersionId])).rows[0].n,0);
+ assert.equal(digest(await readFile(resolve(process.env.LIBRARY_DIR||'./data/library',prepared.sha256))),prepared.sha256);
 });

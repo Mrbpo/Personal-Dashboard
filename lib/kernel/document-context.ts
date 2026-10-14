@@ -12,6 +12,7 @@ export type DocumentStructureInput={rawSourceHash:string;parserVersion:string;
 export type DocumentEvidenceNode={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;ordinal:number;kind:DocumentNodeKind;parentId?:string|null;body:string;bodySha256:string};
 export type DocumentImageProvenance={sourceUrl:string;revision:string;archiveSha256?:string;archiveMember?:string;license?:string;attribution?:string};
+export type DocumentImageInput={captionEvidenceId:string;originalReference:string;provenance:DocumentImageProvenance;bytes:Uint8Array};
 export type DocumentImageEvidence={attachmentId:string;assetId:string;captionEvidenceId:string;source:DocumentContextSource;
  mime:'image/png';sha256:string;byteLength:number;width:number;height:number;originalReference:string;
  provenance:DocumentImageProvenance;bytes:Uint8Array};
@@ -135,27 +136,46 @@ const pngDimensions=(bytes:Uint8Array)=>{
  const width=data.readUInt32BE(16),height=data.readUInt32BE(20);
  if(!width||!height||width>100000||height>100000)invalid('Invalid original PNG dimensions');return {width,height};
 };
-export async function registerDocumentImage(db:Queryable,owner:string,source:DocumentContextSource,input:{captionEvidenceId:string;
- originalReference:string;provenance:DocumentImageProvenance;bytes:Uint8Array}){
- const data=await structuredSource(db,owner,source),current=await currentSource(db,owner,identity(data.current),true);
+type PreparedDocumentImage={owner:string;source:DocumentContextSource;manifestSha256:string;captionEvidenceId:string;
+ captionBodySha256:string;originalReference:string;provenance:DocumentImageProvenance;sha256:string;attachmentId:string;
+ byteLength:number;width:number;height:number};
+const preparedImages=new WeakSet<PreparedDocumentImage>();
+/** Validate and retain immutable image bytes without a transaction or row lock. */
+export async function prepareDocumentImage(db:Queryable,owner:string,source:DocumentContextSource,input:DocumentImageInput){
+ const data=await structuredSource(db,owner,source),current=data.current;
  if(!data.nodes.some(node=>node.evidenceId===input.captionEvidenceId&&node.kind==='caption')||!bounded(input.originalReference)
   ||!bounded(input.provenance?.sourceUrl)||!bounded(input.provenance?.revision)||!/^https?:\/\//.test(input.provenance.sourceUrl)
   ||(input.provenance.archiveSha256&&!isSha(input.provenance.archiveSha256))||!(input.bytes instanceof Uint8Array)
   ||Object.keys(input.provenance).some(key=>!['sourceUrl','revision','archiveSha256','archiveMember','license','attribution'].includes(key))
   ||Object.values(input.provenance).some(value=>!bounded(value,4000)))invalid('Image requires a current caption and original-source provenance');
- const dimensions=pngDimensions(input.bytes),sha=hash(input.bytes),id=hash(canonical([current.currentVersionId,input.captionEvidenceId,sha,input.originalReference,input.provenance]));
+ const bytes=Buffer.from(input.bytes),provenance=Object.freeze({...input.provenance}),captionEvidenceId=input.captionEvidenceId,
+  originalReference=input.originalReference,dimensions=pngDimensions(bytes),sha=hash(bytes),
+  id=hash(canonical([current.currentVersionId,captionEvidenceId,sha,originalReference,provenance]));
  await mkdir(blobRoot(),{recursive:true,mode:0o700});
- try{await writeFile(resolve(blobRoot(),sha),input.bytes,{flag:'wx',mode:0o600});}
+ try{await writeFile(resolve(blobRoot(),sha),bytes,{flag:'wx',mode:0o600});}
  catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
- if((await stat(resolve(blobRoot(),sha))).size!==input.bytes.length||hash(await readFile(resolve(blobRoot(),sha)))!==sha)
+ if((await stat(resolve(blobRoot(),sha))).size!==bytes.length||hash(await readFile(resolve(blobRoot(),sha)))!==sha)
   throw new DocumentContextError('DOCUMENT_IMAGE_CHANGED','Original image blob hash differs');
+ await currentSource(db,owner,identity(current));
+ const prepared=Object.freeze({owner,source:Object.freeze(identity(current)),manifestSha256:data.manifestSha256,
+  captionEvidenceId,captionBodySha256:data.nodes.find(node=>node.evidenceId===captionEvidenceId)!.bodySha256,
+  originalReference,provenance,sha256:sha,attachmentId:id,byteLength:bytes.length,...dimensions});
+ preparedImages.add(prepared);return prepared;
+}
+/** Called only in Kernel's short metadata transaction after prepare has completed. */
+export async function commitDocumentImage(db:Queryable,owner:string,prepared:PreparedDocumentImage){
+ if(!preparedImages.has(prepared)||prepared.owner!==owner)invalid('Image has no verified staging receipt');
+ const current=await currentSource(db,owner,prepared.source,true),data=await structuredSource(db,owner,identity(current));
+ if(data.manifestSha256!==prepared.manifestSha256||!data.nodes.some(node=>node.evidenceId===prepared.captionEvidenceId
+  &&node.kind==='caption'&&node.bodySha256===prepared.captionBodySha256))changed();
  await db.query(`INSERT INTO document_image_attachments(id,version_id,source_version_id,source_hash,caption_evidence_id,asset_sha256,byte_length,width,height,mime,original_reference,provenance)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'image/png',$10,$11::jsonb) ON CONFLICT DO NOTHING`,
- [id,current.currentVersionId,current.sourceVersionId,current.sourceHash,input.captionEvidenceId,sha,input.bytes.length,
- dimensions.width,dimensions.height,input.originalReference,canonical(input.provenance)]);
- const stored=(await db.query<{id:string}>('SELECT id FROM document_image_attachments WHERE id=$1',[id])).rows[0];
+ [prepared.attachmentId,current.currentVersionId,current.sourceVersionId,current.sourceHash,prepared.captionEvidenceId,
+ prepared.sha256,prepared.byteLength,prepared.width,prepared.height,prepared.originalReference,canonical(prepared.provenance)]);
+ const stored=(await db.query<{id:string}>('SELECT id FROM document_image_attachments WHERE id=$1',[prepared.attachmentId])).rows[0];
  if(!stored)throw new DocumentContextError('DOCUMENT_STRUCTURE_CONFLICT','Image attachment provenance is immutable');
- await currentSource(db,owner,identity(current));return {attachmentId:id,assetId:sha,source:identity(current),...dimensions,byteLength:input.bytes.length};
+ await currentSource(db,owner,identity(current));return {attachmentId:prepared.attachmentId,assetId:prepared.sha256,
+  source:identity(current),width:prepared.width,height:prepared.height,byteLength:prepared.byteLength};
 }
 type ImageRow={id:string;caption_evidence_id:string;asset_sha256:string;byte_length:number;width:number;height:number;
  mime:'image/png';original_reference:string;provenance:DocumentImageProvenance};

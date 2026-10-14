@@ -5,8 +5,8 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,type DocumentSourceHint} from './document-source.ts';
-import {registerDocumentStructure,registerDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,
- type DocumentContextSource,type DocumentStructureInput,type DocumentImageProvenance} from './document-context.ts';
+import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,
+ type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput} from './document-context.ts';
 import type {DocumentTextHit} from './document-search.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
@@ -865,9 +865,9 @@ export class KernelService {
     return kernelTransaction(client=>registerDocumentStructure(client,owner,source,input));
   }
 
-  registerDocumentImage(owner:string,source:DocumentContextSource,input:{captionEvidenceId:string;originalReference:string;
-    provenance:DocumentImageProvenance;bytes:Uint8Array}){
-    return kernelTransaction(client=>registerDocumentImage(client,owner,source,input));
+  async registerDocumentImage(owner:string,source:DocumentContextSource,input:DocumentImageInput){
+    const prepared=await prepareDocumentImage(kernelPool(),owner,source,input);
+    return kernelTransaction(client=>commitDocumentImage(client,owner,prepared));
   }
 
   readDocumentSourcePages(owner:string,source:DocumentContextSource){
