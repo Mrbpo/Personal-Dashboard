@@ -6,7 +6,7 @@
   "selection": {
     "questionsPerCandidate": 50,
     "order": "ascending SHA256(seed + LF + source + LF + original question ID), then original ID",
-    "exclude": "all material IDs and question text/IDs present in supplied previous calibration and raw caches",
+    "exclude": "all material IDs and normalized question text/IDs present in supplied previous calibration and raw caches; also previously selected candidate question text/IDs in the fixed candidate order",
     "answerPolicy": "Keep original author gold and all annotations verbatim; never filter on answerability, evidence length, conflict, difficulty, retrieval, or algorithm output.",
     "corpusPolicy": "Freeze complete eligible QASPER split materials after prior-material exclusion; forum packages are supplementary retrieval gold or future noise, not invented answer gold.",
     "candidateOrder": ["qasper-validation", "qasper-test", "qasper-unseen-train"],
