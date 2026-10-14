@@ -18,7 +18,7 @@ export async function readDocumentNodes(pool:Pool,owner:string,expected:Document
  const rows=(await pool.query<Omit<DocumentSelectedNodeHit,'reader_selection'|'retrieval_mode'|'evidence_body'>>(`
   SELECT 'pg:'||v.id||':'||p.page_number id,d.id document_id,coalesce(d.course_id,'') course_id,d.name,d.origin,d.origin_key,
    d.source_hash,''::text body,p.locator,p.page_number,p.evidence_id,v.source_version_id,v.parser_version,
-   v.warnings parser_warnings,p.content_kind,p.start_ms,p.end_ms
+   v.warnings parser_warnings,p.content_kind,p.start_ms::double precision start_ms,p.end_ms::double precision end_ms
   FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
   JOIN document_text_pages p ON p.version_id=v.id

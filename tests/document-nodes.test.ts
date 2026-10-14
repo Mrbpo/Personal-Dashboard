@@ -48,6 +48,16 @@ test('current evidence-node selections preserve full bodies/order and refuse for
  if(other.status!=='resolved')throw new Error('Other fixture source unresolved');
  const otherNode=(await kernel.readDocumentSourcePages(owner,{...other.document,courseId:''})).nodes[0].evidenceId;
  await assert.rejects(kernel.readDocumentNodes(owner,source,[ids[0],otherNode]),DocumentEvidenceChangedError);
+ const segmentId='segment-'+randomUUID(),segmentTitle='Recorded segment '+tag;
+ await kernel.ingestParsedDocument({...document,id:segmentId,name:segmentTitle,originKey:segmentId},[
+  {pageNumber:1,locator:'00:00.000–00:02.500',text:'Original recording transcript.',contentKind:'time_segment',startMs:0,endMs:2500}
+ ],{parserVersion:'node-transcript-v1'});
+ const segment=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:segmentTitle});
+ if(segment.status!=='resolved')throw new Error('Transcript source unresolved');
+ const segmentSource={...segment.document,courseId:''},segmentNode=(await kernel.readDocumentSourcePages(owner,segmentSource)).nodes[0];
+ const [segmentHit]=await kernel.readDocumentNodes(owner,segmentSource,[segmentNode.evidenceId]);
+ assert.equal(segmentHit.content_kind,'time_segment');assert.equal(typeof segmentHit.start_ms,'number');assert.equal(segmentHit.start_ms,0);
+ assert.equal(typeof segmentHit.end_ms,'number');assert.equal(segmentHit.end_ms,2500);
  await kernel.ingestParsedDocument(document,[{...pages[0],text:'Reparsed original observations.'},...pages.slice(1)],{parserVersion:'node-fixture-v2'});
  await assert.rejects(kernel.readDocumentNodes(owner,source,ids),DocumentEvidenceChangedError);
  const current=await resolveCurrent(),currentNodes=(await kernel.readDocumentSourcePages(owner,current)).nodes;
