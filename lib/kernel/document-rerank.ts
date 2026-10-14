@@ -59,10 +59,12 @@ async function readPages(db:Database,owner:string,hits:DocumentTextHit[],lock=fa
  return rows;
 }
 
-function samePages(original:Page[],current:Page[]){
- const versions=new Map(original.map(page=>[key(page.document_id,page.page_number),page.version_id]));
- if(current.some(page=>versions.get(key(page.document_id,page.page_number))!==page.version_id))
+function samePages(original:Page[],current:Page[],selectionMetadata=false){
+ const versions=new Map(original.map(page=>[key(page.document_id,page.page_number),page]));
+ if(current.some(page=>versions.get(key(page.document_id,page.page_number))?.version_id!==page.version_id))
   throw new Error('PDF version changed during AI page reranking');
+ if(selectionMetadata&&current.some(page=>JSON.stringify(pageMetadata(versions.get(key(page.document_id,page.page_number))!))!==
+   JSON.stringify(pageMetadata(page))))throw new Error('PDF metadata changed during AI page reranking');
 }
 
 type InputPage={id:string;text:string;document?:string;course?:{id:string;name:string;code:string};locator?:string};
@@ -129,18 +131,18 @@ async function obtainOrder(pool:Pool,owner:string,query:string,hits:DocumentText
  const cached=(await pool.query<{ordered_ids:unknown}>(`/* rerank:cache */
   SELECT ordered_ids FROM document_rerank_cache WHERE owner_id=$1 AND cache_key=$2 AND model=$3 AND prompt_version=$4`,
   [owner,cacheKey,DOCUMENT_RERANK_MODEL,promptVersion])).rows[0];
- if(cached){samePages(pages,await readPages(pool,owner,hits));return validateDocumentPageSelection({orderedIds:cached.ordered_ids},identities,selectionCount??identities.length);}
+ if(cached){samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined);return validateDocumentPageSelection({orderedIds:cached.ordered_ids},identities,selectionCount??identities.length);}
  const byPage=new Map(pages.map(page=>[key(page.document_id,page.page_number),page]));
  const inputPages=hits.map((hit,index)=>{
   const page=byPage.get(key(hit.document_id,hit.page_number))!;
   return {id:identities[index],text:Array.from(page.body).slice(0,6000).join(''),
    ...(selectionCount===undefined?{}:pageMetadata(page))};
  });
- const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits)),selectionCount);
+ const order=await requestOrder(query,inputPages,identities,async()=>samePages(pages,await readPages(pool,owner,hits),selectionCount!==undefined),selectionCount);
  const client=await pool.connect();
  try{
   await client.query('BEGIN');
-  samePages(pages,await readPages(client,owner,hits,true));
+  samePages(pages,await readPages(client,owner,hits,true),selectionCount!==undefined);
   await client.query(`/* rerank:save */
    INSERT INTO document_rerank_cache(owner_id,cache_key,model,prompt_version,ordered_ids)
    VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT(owner_id,cache_key,model,prompt_version) DO NOTHING`,
@@ -196,6 +198,6 @@ async function rankOrSelectDocumentPages(pool:Pool,owner:string,query:string,hit
  let order:string[];
  try{order=await work;}finally{if(created)pending.delete(flightKey);}
  // Concurrent callers retain their own original snippets; no model text is returned.
- samePages(pages,await readPages(pool,owner,candidates));
+ samePages(pages,await readPages(pool,owner,candidates),selection);
  return order.slice(0,limit).map((identity,index)=>({...candidates[Number(identity.slice(1))],score:1/(index+1)}));
 }

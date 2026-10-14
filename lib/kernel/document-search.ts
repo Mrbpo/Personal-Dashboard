@@ -81,7 +81,7 @@ function rankingFailure(error:unknown):string{
   if(/budget|预算|上限/iu.test(message))return 'budget-limit';
   if(/timeout|aborted|time limit|signal/iu.test(message))return 'timeout';
   if(/incomplete/iu.test(message))return 'incomplete-output';
-  if(/stale|version changed/iu.test(message))return 'stale-version';
+  if(/stale|version changed|metadata changed/iu.test(message))return 'stale-version';
   if(/format|permutation|foreign|indices|invalid JSON|dimension/iu.test(message))return 'invalid-output';
   if(/API key|凭据/iu.test(message))return 'credentials-unavailable';
   return 'unavailable';
