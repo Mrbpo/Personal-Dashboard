@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
+import {recallReferencedDocuments} from './document-references.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -108,7 +109,7 @@ function rankingFailure(error:unknown):string{
 }
 
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:{
-  courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;
+  courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean;
 }={}):Promise<DocumentTextHit[]> {
   const normalized=documentSearchText(query).slice(0,4000);
   const formulaQuery=/[\\^_=∫∑√]/u.test(query);
@@ -169,8 +170,10 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
         ORDER BY ts_rank_cd(chunk.search_vector,q.broad,0) DESC,chunk.position LIMIT 1) snippet ON true
     WHERE c.page_rank=1
     ORDER BY score DESC,d.id,c.position LIMIT $4`,args);
-  const hits=rows.rows.map(row=>({...row,score:Number(row.score),
+  let hits:DocumentTextHit[]=rows.rows.map(row=>({...row,score:Number(row.score),
     lexical_support:row.lexical_support===undefined?undefined:Number(row.lexical_support),retrieval_mode:'keyword' as const}));
+  if(options.relatedDocuments&&!options.strict&&!options.documentId)
+    hits=await recallReferencedDocuments(pool,owner,query,hits,semantic?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:limit,options.courseId);
   if(semantic&&(hits.length||hybrid)){
     // A model request can outlive the parsed version used for its candidates.
     // Re-read current evidence once, retaining the scope and making no AI calls.

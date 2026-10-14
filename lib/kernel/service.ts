@@ -853,7 +853,7 @@ export class KernelService {
     });
   }
 
-  searchDocumentText(owner:string,query:string,options:{courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean}={}) {
+  searchDocumentText(owner:string,query:string,options:{courseId?:string;documentId?:string;limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean}={}) {
     return searchDocumentText(kernelPool(),owner,query,options);
   }
 
