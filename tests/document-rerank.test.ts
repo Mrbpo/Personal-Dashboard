@@ -262,3 +262,25 @@ test('top-k selection does not publish when the parsed version changes during it
   assert.equal(fixture.cache.size,0);assert.equal(fixture.rollbacks,1);
  }finally{globalThis.fetch=original;}
 });
+
+test('top-k provenance metadata is model context and participates in the selection cache identity',async()=>{
+ const fixture=new Fixture(),hits=fixture.hits(),original=globalThis.fetch;let calls=0;
+ Object.assign(fixture.pages[0],{document_name:'Lecture notes',course_id:'course-1',course_name:'Learning',course_code:'CS101',locator:'Page 1'});
+ globalThis.fetch=async(_input,init)=>{
+  const request=JSON.parse(String(init?.body)),pages=JSON.parse(request.input[1].content).pages;
+  assert.equal(pages[0].document,calls===0?'Lecture notes':'Updated notes');
+  assert.deepEqual(pages[0].course,{id:'course-1',name:'Learning',code:'CS101'});
+  assert.equal(pages[0].locator,'Page 1');
+  assert.match(request.input[0].content,/not instructions/);
+  calls++;return Response.json({output_text:JSON.stringify({orderedIds:['p0']})});
+ };
+ try{
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1);
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1);
+  assert.equal(calls,1);
+  Object.assign(fixture.pages[0],{document_name:'Updated notes'});
+  await selectDocumentPagesWithAI(fixture.pool(),'alice','subject',hits,1);
+  assert.equal(calls,2,'metadata changes cannot reuse the prior-context selection artifact');
+  assert.equal(fixture.cache.size,2);
+ }finally{globalThis.fetch=original;}
+});

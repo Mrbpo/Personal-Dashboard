@@ -115,6 +115,68 @@ export function fuseIndependentDocumentRanks(lexical:DocumentTextHit[],dense:Doc
     a.hit.page_number-b.hit.page_number).slice(0,limit).map(({hit,score})=>({...hit,score}));
 }
 
+/** Preserve each modality's head before the fused tail: an otherwise strong
+ * lexical-only page must not be removed simply because many weaker pages occur
+ * in both lists. Duplicate heads free slots for actual adjacent-page evidence.
+ * Fully disjoint 20/20 heads already fill the fixed 40-page input budget. */
+export async function buildHybridDocumentCandidates(pool:Pool,owner:string,lexical:DocumentTextHit[],dense:DocumentTextHit[]):Promise<DocumentTextHit[]>{
+  if(!owner?.trim())throw new Error('PDF hybrid candidate owner is required');
+  const fused=fuseIndependentDocumentRanks(lexical,dense,160),selected=new Map<string,DocumentTextHit>();
+  const key=(hit:DocumentTextHit)=>JSON.stringify([hit.document_id,hit.page_number]);
+  const scores=new Map(fused.map(hit=>[key(hit),hit.score]));
+  const add=(hit:DocumentTextHit)=>{
+    const previous=selected.get(key(hit));
+    if(previous&&(previous.source_version_id!==hit.source_version_id||previous.evidence_id!==hit.evidence_id))
+      throw new Error('PDF hybrid candidate versions conflict');
+    if(!previous&&selected.size<40)selected.set(key(hit),{...hit,score:scores.get(key(hit))??hit.score});
+  };
+  for(let index=0;index<20;index++)for(const hit of [lexical[index],dense[index]])if(hit)add(hit);
+  const heads=[...selected.values()];
+  const byDocument=new Map<string,DocumentTextHit>();
+  for(const hit of fused){if(!byDocument.has(hit.document_id))byDocument.set(hit.document_id,hit);if(byDocument.size===4)break;}
+  const anchors=[...byDocument.values()];
+  const neighborKeys=new Set<string>();
+  if(selected.size<40&&anchors.length){
+    const neighbors=(await pool.query<DocumentTextHit&{anchor_number:number}>(`/* vector:adjacent-evidence */
+      WITH requested AS (SELECT * FROM jsonb_to_recordset($2::jsonb)
+        AS r(document_id text,page_number integer,source_version_id text,anchor_number integer))
+      SELECT 'pg:'||v.id||':'||p.page_number id,d.id document_id,coalesce(d.course_id,'') course_id,
+        d.name,d.origin,d.origin_key,d.source_hash,p.body,p.locator,p.page_number,p.evidence_id,
+        v.source_version_id,v.parser_version,0::double precision score,r.anchor_number
+      FROM requested r JOIN document_texts d ON d.id=r.document_id AND d.owner_id=$1 AND d.hidden=false
+        JOIN document_text_versions v ON v.id=d.current_version_id AND v.source_version_id=r.source_version_id
+        JOIN document_text_pages p ON p.version_id=v.id AND p.page_number IN (r.page_number-1,r.page_number+1)
+        JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id
+      WHERE p.page_number>=1 AND p.page_number<=v.page_count AND btrim(p.body)<>''
+        AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
+          AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
+          AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+      ORDER BY r.anchor_number,p.page_number`,[owner,JSON.stringify(anchors.map((hit,index)=>({
+        document_id:hit.document_id,page_number:hit.page_number,source_version_id:hit.source_version_id,anchor_number:index})))])).rows;
+    for(const neighbor of neighbors){
+      const {anchor_number,...hit}=neighbor;
+      const anchor=anchors[anchor_number];
+      if(!anchor||hit.document_id!==anchor.document_id||hit.source_version_id!==anchor.source_version_id||
+        Math.abs(hit.page_number-anchor.page_number)!==1||!hit.evidence_id)
+        throw new Error('Invalid PDF adjacent-page evidence');
+      if(!selected.has(key(hit))&&selected.size<40){neighborKeys.add(key(hit));add({...hit,score:anchor.score/2});}
+    }
+  }
+  for(const hit of fused)add(hit);
+  // Keep relevance order for original candidates; neighbors follow their parent
+  // when both are present, rather than being hidden at the end of the input.
+  const output:DocumentTextHit[]=[],seen=new Set<string>();
+  const emit=(hit:DocumentTextHit)=>{const item=selected.get(key(hit));if(item&&!seen.has(key(item))){seen.add(key(item));output.push(item);}};
+  for(const hit of fused){
+    if(!neighborKeys.has(key(hit)))emit(hit);
+    const anchor=anchors.find(anchor=>key(anchor)===key(hit));
+    if(anchor)for(const item of selected.values())if(neighborKeys.has(key(item))&&item.document_id===anchor.document_id&&
+      Math.abs(item.page_number-anchor.page_number)===1)emit(item);
+  }
+  for(const hit of [...heads,...selected.values()])emit(hit);
+  return output;
+}
+
 /** Only missing embeddings in complete, current document versions are queued. */
 export async function queueDocumentVectorJobs(pool:Pick<Pool,'query'>,owner:string,scope:DocumentVectorScope={}):Promise<string[]>{
   const {sql,args}=scopeSql(owner,scope);

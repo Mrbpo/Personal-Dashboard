@@ -1,7 +1,7 @@
 import type { Pool } from 'pg';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
-import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks} from './document-vector.ts';
+import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -158,11 +158,12 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
       (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false,hybrid:false}))
         .map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,degraded_reason:reason}));
     let reordered:DocumentTextHit[]=hits,semanticFailure:string|undefined;
+    let independentDense:DocumentTextHit[]=[];
     if(dense){
       const result=await dense;
       if(result.error)semanticFailure=`semantic:${rankingFailure(result.error)}`;
       else if(!result.value?.coverage.complete)semanticFailure='semantic:index-incomplete';
-      else try{reordered=fuseIndependentDocumentRanks(hits,result.value.hits,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
+      else try{independentDense=result.value.hits;reordered=fuseIndependentDocumentRanks(hits,independentDense,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
       catch(error){semanticFailure=`semantic:${rankingFailure(error)}`;}
     }else{
       try{
@@ -172,9 +173,14 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
     if(aiRerank){
       try{
         const candidates=new Map<string,DocumentTextHit>();
-        for(let index=0;index<Math.max(hits.length,reordered.length)&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT;index++){
-          for(const hit of hybrid?[reordered[index]]:[hits[index],reordered[index]]){
-            if(hit&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT)candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
+        if(hybrid){
+          for(const hit of await buildHybridDocumentCandidates(pool,owner,hits,independentDense))
+            candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
+        }else{
+          for(let index=0;index<Math.max(hits.length,reordered.length)&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT;index++){
+            for(const hit of [hits[index],reordered[index]]){
+              if(hit&&candidates.size<DOCUMENT_RERANK_CANDIDATE_LIMIT)candidates.set(`${hit.document_id}:${hit.page_number}`,hit);
+            }
           }
         }
         const ranked=hybrid?await selectDocumentPagesWithAI(pool,owner,query,[...candidates.values()],Math.min(5,limit,candidates.size)):
