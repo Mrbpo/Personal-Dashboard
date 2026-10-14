@@ -4,6 +4,7 @@ import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CAND
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
 import {recallReferencedDocuments} from './document-references.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,DocumentSourceResolutionError,type DocumentSourceHint} from './document-source.ts';
+import {readFullDocumentEvidence} from './document-evidence.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -54,11 +55,13 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   // IDF-weighted stored search-text coverage, not factual confidence. Existing
   // transcription warnings and repeated headers can also contain matching terms.
   lexical_support?:number;
+  evidence_body?:'full-page';
   retrieval_scope?:'selected-title-scoped';
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 
 export type DocumentSearchOptions={courseId?:string;documentId?:string;sourceHint?:DocumentSourceHint;
- limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean};
+ limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean;
+ evidenceBody?:'snippet'|'full-page'};
 
 // Use majority available query information as the support target, admitting the
 // half-weight boundary. This is lexical coverage, not calibrated relevance.
@@ -114,6 +117,22 @@ function rankingFailure(error:unknown):string{
 }
 
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
+  const {evidenceBody,...rankingOptions}=options;
+  if(evidenceBody!==undefined&&evidenceBody!=='snippet'&&evidenceBody!=='full-page')
+    throw new Error('Invalid document evidence body mode');
+  const hits=await searchDocumentSnippets(pool,owner,query,rankingOptions);
+  if(evidenceBody!=='full-page')return hits;
+  const full=await readFullDocumentEvidence(pool,owner,hits);
+  if(options.sourceHint&&full.length){
+    const current=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId});
+    if(current.status!=='resolved'||full.some(hit=>hit.document_id!==current.document.documentId
+      ||hit.source_hash!==current.document.sourceHash||hit.source_version_id!==current.document.sourceVersionId))
+      throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Full evidence differs from the current selected source',current);
+  }
+  return full;
+}
+
+async function searchDocumentSnippets(pool:Pool,owner:string,query:string,options:DocumentSearchOptions):Promise<DocumentTextHit[]> {
   if(options.sourceHint!==undefined){
     const resolution=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId});
     const selected=requireResolvedDocumentSource(resolution);
