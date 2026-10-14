@@ -41,11 +41,15 @@ systemd-run --scope \
 
 稳定ASR来源进入录播版本身份；模型revision、模型hash、片段或音频身份变化时保留新来源版本，普通PDF与旧平台字幕身份保持不变。不新增SQL迁移，复用009时间片段索引。生产导入须使用已发布的本PR实现，不能把安装运行时当成网站已经接入。
 
+适配层与Kernel入口共用完整ASR来源校验；直接调用`KernelService.ingestRecordingTranscript`也必须提供匹配的model/revision/hash/片段来源。Kernel接受的cues必须已经是原片绝对时间，只验证范围、不再偏移；`timestampBasis`描述原始VTT的时间基准。平台字幕携带ASR来源或缺少ASR来源的`local-asr`均拒绝。
+
 ## 样例验收
 
 2026-10-14 唯一样例已实际运行：BIOA01 `0_l0mx1vr8` 原片600–900秒，300.0秒单声道16kHz音频9,600,078字节。PyAV16.1修复后复用同一音频，不再取原片/模型。CPU转写126.09秒，任务time126.36秒、平均177%CPU、最大RSS965,608KiB（约943MiB）；49条英语字幕，运行结束可用内存约4.86GiB。没有付费AI或生产PG写。
 
 真实VTT和侧车已通过离线导入normalizer与Kernel文档准备检查：原片SHA `ef7dd5af95a4f3ecd56932ae86c97600c60c61986a2dd052ae283039a8d189f8`，model revision/hash有效，原片时间600430–900000ms，首引用10:00.430–10:02.430、末引用14:58.060–15:00.000，证据confidence0.6。可运行`node --experimental-strip-types scripts/validate-asr-sample.ts PRIVATE_SAMPLE_DIRECTORY`复核小型字幕/侧车，脚本不写PG或输出课堂正文。此前失败不是识别结果；正确固定依赖后才有真实转写输出。
+
+已将样例VTT、来源侧车、单entry导入manifest、原片R2引用、模型receipt、runtime版本和运行结果独立保存在`/srv/study/data/course-recording-archive/asr-sample-62/`：7个小文件共11,276字节，由现有每日加密备份覆盖，未另做备份。与平台字幕清单分开，平台扫描不能覆盖此派生来源。9.6MB音频保留在私有ASR状态目录，清单记录原片SHA/R2键及600–900秒、16kHz单声道PCM重建参数；486MB模型不进入备份，按固定revision/SHA重建。原片仍使用已核验R2引用，不重复复制。
 
 自动检查VTT格式、原片时间范围、source/model身份和Kernel/library owner-scoped检索返回的evidence与实际时间。CI中的合成字幕只验证数据链，不证明课堂ASR准确率。
 

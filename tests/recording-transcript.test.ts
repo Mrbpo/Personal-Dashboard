@@ -5,6 +5,12 @@ import {parseSubtitles,prepareRecordingTranscript} from '../lib/kernel/recording
 import {kernel} from '../lib/kernel/service.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {recordingCaptionInput} from '../lib/kernel/recording-caption-import.ts';
+import type {ASRProvenance} from '../lib/kernel/recording-asr-provenance.ts';
+
+const asrProof=(subtitleSha256:string,model='cpu-small'):ASRProvenance=>({schemaVersion:1,method:'local-asr',model,
+  modelRevision:'d1d751a5f8271d482d14ca55d9e2deeebbae577f',modelSha256:'b'.repeat(64),sourceVideoSha256:'a'.repeat(64),
+  sourceAudioSha256:'c'.repeat(64),subtitleSha256,clipStartMs:0,clipEndMs:5000,
+  timestampBasis:'source-absolute',computeType:'int8',language:'en'});
 
 test('subtitle timing is preserved across SRT, WebVTT and TTML; malformed timing fails',()=>{
   assert.deepEqual(parseSubtitles('1\n00:02:03,125 --> 00:02:07,250\n<b>Eigenvectors</b> &amp; matrices\n','srt'),
@@ -25,6 +31,14 @@ test('recording identity is deterministic and refuses credential-bearing source 
   assert.match(prepareRecordingTranscript(input).pages[0].locator,/00:00:01.250–00:00:03.250/);
   assert.throws(()=>prepareRecordingTranscript({...input,sourceUrl:input.sourceUrl+'?ks=secret'}),/credentials/);
   assert.throws(()=>prepareRecordingTranscript({...input,ownerId:''}),/identity/);
+  assert.throws(()=>prepareRecordingTranscript({...input,method:'local-asr',model:'cpu-small'}),/ASR provenance/);
+  const proof=asrProof(input.subtitleHash);
+  assert.throws(()=>prepareRecordingTranscript({...input,asr:proof}),/explicit local-asr/);
+  assert.throws(()=>prepareRecordingTranscript({...input,method:'local-asr',model:'different',asr:proof}),/ASR provenance/);
+  assert.throws(()=>prepareRecordingTranscript({...input,method:'local-asr',model:proof.model,
+    asr:{...proof,clipStartMs:600000,clipEndMs:900000,timestampBasis:'clip-relative'}}),/outside declared source window/);
+  const prepared=prepareRecordingTranscript({...input,method:'local-asr',model:proof.model,asr:proof});
+  assert.equal(prepared.pages[0].startMs,1250,'kernel accepts only absolute times and never applies an offset');
 });
 
 test('recording evidence is atomically indexed, repeatable, owner-scoped and uses actual time offsets',async()=>{
@@ -49,10 +63,12 @@ test('recording evidence is atomically indexed, repeatable, owner-scoped and use
     JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=1
     JOIN evidence e ON e.id=p.evidence_id WHERE d.id=$1`,[first.documentId])).rows[0];
   const platform=await head();
-  const asr={...input,method:'local-asr' as const,model:'cpu-small'};
+  await assert.rejects(kernel.ingestRecordingTranscript({...input,method:'local-asr',model:'cpu-small'}),/ASR provenance/);
+  const asr={...input,method:'local-asr' as const,model:'cpu-small',asr:asrProof(input.subtitleHash)};
+  const medium={...asr,model:'cpu-medium',asr:{...asr.asr,model:'cpu-medium'}};
   await kernel.ingestRecordingTranscript(asr);
   const oldModel=await head();
-  await kernel.ingestRecordingTranscript({...asr,model:'cpu-medium'});
+  await kernel.ingestRecordingTranscript(medium);
   const current=await head();
   assert.notEqual(current.id,oldModel.id,'same subtitle bytes and method with a different model creates a new version');
   assert.notEqual(current.source_version_id,oldModel.source_version_id);
@@ -66,7 +82,7 @@ test('recording evidence is atomically indexed, repeatable, owner-scoped and use
   assert.equal(history.find(row=>row.id===current.id).raw.recording.model,'cpu-medium');
   assert.equal(Number(history.find(row=>row.id===platform.id).confidence),0.8);
   assert.equal(Number(current.confidence),0.6);
-  await kernel.ingestRecordingTranscript({...asr,model:'cpu-medium',acquiredAt:'2026-10-14T00:00:00Z'});
+  await kernel.ingestRecordingTranscript({...medium,acquiredAt:'2026-10-14T00:00:00Z'});
   assert.equal((await head()).id,current.id,'a replay with a new acquisition time is idempotent');
   assert.equal(Number((await kernelPool().query('SELECT count(*) FROM document_text_versions WHERE document_id=$1',[first.documentId])).rows[0].count),3);
   assert.equal((await kernel.searchDocumentText(owner,'spectral zephyr'))[0].evidence_id,current.evidence_id);

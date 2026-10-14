@@ -1,9 +1,7 @@
 import {createHash} from 'node:crypto';
 import {parseSubtitles,validateCues,type RecordingTranscript} from './recording-transcript.ts';
-
-export type ASRProvenance={schemaVersion:1;method:'local-asr';model:string;modelRevision:string;modelSha256:string;
-  sourceVideoSha256:string;sourceAudioSha256:string;subtitleSha256:string;clipStartMs:number;clipEndMs:number;
-  timestampBasis:'clip-relative'|'source-absolute';computeType:'int8';language:string};
+import {validateASRProvenance,validateASRAbsoluteCues,type ASRProvenance} from './recording-asr-provenance.ts';
+export type {ASRProvenance} from './recording-asr-provenance.ts';
 export type CaptionFile={kind:string;path:string;sha256:string;captionId:string;language:string;format:'srt'|'vtt'|'ttml';
   method?:'platform-caption'|'local-asr';provenancePath?:string};
 
@@ -16,13 +14,7 @@ export function recordingCaptionInput(record:Record<string,unknown>,file:Caption
   let cues=parseSubtitles(bytes.toString('utf8'),file.format),asr:ASRProvenance|undefined;
   if(provenance!==undefined&&method!=='local-asr')throw new Error('ASR provenance requires explicit local-asr method');
   if(method==='local-asr'){
-    const data=provenance as ASRProvenance|undefined;
-    if(!data||data.schemaVersion!==1||data.method!=='local-asr'||typeof data.model!=='string'||!data.model.trim()||
-      !/^[a-f0-9]{40}$/u.test(data.modelRevision)||data.computeType!=='int8'||data.language!==file.language||
-      ![data.modelSha256,data.sourceVideoSha256,data.sourceAudioSha256,data.subtitleSha256].every(hash=>/^[a-f0-9]{64}$/u.test(hash))||
-      data.subtitleSha256!==file.sha256||!Number.isSafeInteger(data.clipStartMs)||data.clipStartMs<0||
-      !Number.isSafeInteger(data.clipEndMs)||data.clipEndMs<=data.clipStartMs||
-      !['clip-relative','source-absolute'].includes(data.timestampBasis))throw new Error('Invalid ASR provenance');
+    const data=validateASRProvenance(provenance,{language:file.language,subtitleHash:file.sha256});
     const videos=(record.files||[]) as Array<{kind:string;sha256:string}>;
     if(!videos.some(video=>video.kind==='video'&&video.sha256===data.sourceVideoSha256))throw new Error('ASR original video identity mismatch');
     if(!Number.isFinite(Number(record.durationSeconds))||data.clipEndMs>Number(record.durationSeconds)*1000)
@@ -34,10 +26,8 @@ export function recordingCaptionInput(record:Record<string,unknown>,file:Caption
     }
     if(data.timestampBasis==='clip-relative')cues=validateCues(cues.map(cue=>({...cue,
       startMs:cue.startMs+data.clipStartMs,endMs:cue.endMs+data.clipStartMs})));
-    // Explicit stable fields, excluding machine paths and processing times.
-    asr={schemaVersion:1,method:'local-asr',model:data.model,modelRevision:data.modelRevision,modelSha256:data.modelSha256,
-      sourceVideoSha256:data.sourceVideoSha256,sourceAudioSha256:data.sourceAudioSha256,subtitleSha256:data.subtitleSha256,
-      clipStartMs:data.clipStartMs,clipEndMs:data.clipEndMs,timestampBasis:data.timestampBasis,computeType:'int8',language:data.language};
+    validateASRAbsoluteCues(data,cues);
+    asr=data;
   }
   const acquiredAt=Number(record.archivedAt||record.seenAt);
   if(!Number.isFinite(acquiredAt)||acquiredAt<=0)throw new Error('Invalid caption acquisition time');
