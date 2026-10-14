@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {mkdir,readFile,writeFile,stat} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,stat,utimes} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import type {Pool,PoolClient} from 'pg';
 import type {DocumentTextHit} from './document-search.ts';
@@ -156,6 +156,8 @@ export async function prepareDocumentImage(db:Queryable,owner:string,source:Docu
  catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error;}
  if((await stat(resolve(blobRoot(),sha))).size!==bytes.length||hash(await readFile(resolve(blobRoot(),sha)))!==sha)
   throw new DocumentContextError('DOCUMENT_IMAGE_CHANGED','Original image blob hash differs');
+ // Reusing an uncommitted old hash must retain the existing GC upload grace.
+ await utimes(resolve(blobRoot(),sha),new Date(),new Date());
  await currentSource(db,owner,identity(current));
  const prepared=Object.freeze({owner,source:Object.freeze(identity(current)),manifestSha256:data.manifestSha256,
   captionEvidenceId,captionBodySha256:data.nodes.find(node=>node.evidenceId===captionEvidenceId)!.bodySha256,
@@ -179,6 +181,10 @@ export async function commitDocumentImage(db:Queryable,owner:string,prepared:Pre
 }
 type ImageRow={id:string;caption_evidence_id:string;asset_sha256:string;byte_length:number;width:number;height:number;
  mime:'image/png';original_reference:string;provenance:DocumentImageProvenance};
+/** Maintenance-only reference set, including hidden sources and historical versions. */
+export async function documentImageBlobHashes(db:Queryable):Promise<string[]>{
+ return (await db.query<{asset_sha256:string}>('SELECT DISTINCT asset_sha256 FROM document_image_attachments')).rows.map(row=>row.asset_sha256);
+}
 export async function readDocumentImages(db:Queryable,owner:string,source:DocumentContextSource,captionEvidenceIds:string[]):Promise<DocumentImageEvidence[]>{
  if(!Array.isArray(captionEvidenceIds)||captionEvidenceIds.length>14||new Set(captionEvidenceIds).size!==captionEvidenceIds.length)invalid('At most 14 distinct current caption references are allowed');
  const data=await structuredSource(db,owner,source),current=data.current;
@@ -230,7 +236,7 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
    ||data.current.origin!==anchor.origin||data.current.originKey!==anchor.origin_key||data.current.courseId!==anchor.course_id
    ||data.current.parserVersion!==anchor.parser_version)changed();
   const parent=node.parentId?data.structure.parents.find(parent=>parent.id===node.parentId):undefined;
-  const key=canonical([node.documentId,node.documentVersionId,parent?.id||node.evidenceId]);
+  const key=canonical([node.documentId,node.documentVersionId,parent?'section':'single-node',parent?.id||node.evidenceId]);
   if(parents.has(key)){parents.get(key)!.anchorRanks.push(anchorIndex+1);continue;}
   const belongs=(candidate:DocumentEvidenceNode)=>{let next=candidate.parentId;while(next){if(next===parent?.id)return true;next=data!.structure.parents.find(row=>row.id===next)?.parentId;}return false;};
   const nodes=parent?data.nodes.filter(belongs):[node],points=nodes.reduce((sum,item)=>sum+Array.from(item.body).length,0);

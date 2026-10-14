@@ -36,7 +36,9 @@ async function fixture(options:{bodies?:string[];course?:string;key?:string;crea
 }
 
 test('actual ranked anchors keep their bodies/order; exact original parent and caption context are separate',pg,async()=>{
- const item=await fixture();await kernel.registerDocumentStructure(item.owner,item.source,item.structure);
+ const item=await fixture(),collisionId=item.read.nodes[2].evidenceId;
+ item.structure.parents[0].id=collisionId;for(const node of item.structure.nodes)if(node.parentId==='section')node.parentId=collisionId;
+ await kernel.registerDocumentStructure(item.owner,item.source,item.structure);
  const hits=await kernel.searchDocumentText(item.owner,'quartz phase',{...keyword,sourceHint:{selectedDocumentTitle:item.title}});
  assert.equal(hits.length,3);const before=JSON.stringify(hits);
  const result=await kernel.readDocumentParents(item.owner,hits);
@@ -140,4 +142,23 @@ test('image bytes stage without a transaction lock; a changed source cannot publ
  await assert.rejects(kernelTransaction(client=>commitDocumentImage(client,item.owner,prepared)),code('DOCUMENT_CONTEXT_CHANGED'));
  assert.equal((await pool.query('SELECT count(*)::int n FROM document_image_attachments WHERE version_id=$1',[item.source.currentVersionId])).rows[0].n,0);
  assert.equal(digest(await readFile(resolve(process.env.LIBRARY_DIR||'./data/library',prepared.sha256))),prepared.sha256);
+});
+
+test('existing library GC preserves PG image evidence and skips deletion when Kernel references are unavailable',pg,async()=>{
+ const item=await fixture();await kernel.registerDocumentStructure(item.owner,item.source,item.structure);
+ const caption=item.read.nodes[2].evidenceId;
+ await kernel.registerDocumentImage(item.owner,item.source,{captionEvidenceId:caption,originalReference:'retained-original.png',provenance,bytes:png});
+ const {collectUnusedBlobs,saveBlob,readBlob}=await import('../lib/library.ts');
+ const orphan=await saveBlob(Buffer.from('unreferenced context GC control'));
+ assert.ok(await collectUnusedBlobs(Date.now()+2*86400000)>0);
+ await assert.rejects(readBlob(orphan));
+ assert.deepEqual((await kernel.readDocumentImages(item.owner,item.source,[caption]))[0].bytes,png);
+ assert.ok((await kernel.documentImageBlobHashes()).includes(digest(png)));
+ const pending=await saveBlob(Buffer.from('must remain if PG reference lookup fails')),original=kernel.documentImageBlobHashes;
+ kernel.documentImageBlobHashes=async()=>{throw new Error('Kernel reference lookup unavailable');};
+ try{assert.equal(await collectUnusedBlobs(Date.now()+2*86400000),0);assert.ok((await readBlob(pending)).length);}
+ finally{kernel.documentImageBlobHashes=original;}
+ const configured=process.env.KERNEL_DATABASE_URL;delete process.env.KERNEL_DATABASE_URL;
+ try{assert.equal(await collectUnusedBlobs(Date.now()+2*86400000),0);assert.ok((await readBlob(pending)).length);}
+ finally{process.env.KERNEL_DATABASE_URL=configured;}
 });

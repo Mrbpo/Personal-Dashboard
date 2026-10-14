@@ -149,7 +149,15 @@ export async function collectUnusedBlobs(now=Date.now()){
  const documents=(await db.prepare('SELECT hash FROM library_documents WHERE deleted=0').all<{hash:string}>()).results;
  const messages=(await db.prepare('SELECT attachments_json FROM tutor_messages').all<{attachments_json:string}>()).results;
  const used=new Set(documents.map(d=>d.hash));for(const m of messages)for(const a of JSON.parse(m.attachments_json))if(a.hash)used.add(a.hash);
- if(process.env.KERNEL_DATABASE_URL)for(const hash of await doclingStageBlobHashes())used.add(hash);
+ try{
+  if(!process.env.KERNEL_DATABASE_URL)throw new Error('Kernel reference configuration unavailable');
+  for(const hash of await doclingStageBlobHashes())used.add(hash);
+  for(const hash of await kernel.documentImageBlobHashes())used.add(hash);
+ }catch{
+  // Incomplete authoritative references must never authorize asset deletion.
+  console.warn('Library collection skipped: Kernel asset references unavailable');
+  return 0;
+ }
  let removed=0;await mkdir(root(),{recursive:true,mode:0o700});
  for(const name of await readdir(/* turbopackIgnore: true */ root())){
   if(!/^[a-f0-9]{64}$/.test(name)||used.has(name))continue;

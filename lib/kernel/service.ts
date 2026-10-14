@@ -5,7 +5,7 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,type DocumentSourceHint} from './document-source.ts';
-import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,
+import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput} from './document-context.ts';
 import type {DocumentTextHit} from './document-search.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
@@ -884,6 +884,10 @@ export class KernelService {
 
   readDocumentImages(owner:string,source:DocumentContextSource,captionEvidenceIds:string[]){
     return readDocumentImages(kernelPool(),owner,source,captionEvidenceIds);
+  }
+
+  documentImageBlobHashes(){
+    return documentImageBlobHashes(kernelPool());
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {
