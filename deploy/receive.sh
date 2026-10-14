@@ -83,6 +83,11 @@ JS
 printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
+# Reuse completed migration only after its receipt and PostgreSQL history,
+# evidence and durable jobs still agree. Exit 2 means no prior receipt exists.
+reuse=0
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/verify-legacy-pdf-cutover.ts --previous "$previous" || reuse=$?
+if test "$reuse" = 2; then
 # Stop before any cache import if this bounded owner batch needs pagination.
 # Machine formula fidelity is not approved for automatic production enrichment.
 "${compose[@]}" run --rm -T web node --input-type=module <<'JS'
@@ -109,6 +114,12 @@ if(report.mode!=='apply'||report.scope.owner!=='local-owner'||report.scope.total
 console.log(JSON.stringify({action:'pdf-cache-cutover',total:report.scope.total,actionCounts:actions,
   note:'Queued documents remain processing; parser and vector work run after worker startup'}));
 JS
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/verify-legacy-pdf-cutover.ts --report "$cache_report"
+elif test "$reuse" != 0; then
+  # An existing but inconsistent receipt requires administrator investigation.
+  # Preserve the database; do not silently repeat or overwrite the import.
+  false
+fi
 # All old executors are stopped. Clear only the executor lease so the new
 # worker can become primary immediately; job leases and progress are retained.
 "${compose[@]}" run --rm web node --experimental-strip-types --input-type=module -e "import {database} from './lib/database.ts'; await database.prepare(\"DELETE FROM service_leases WHERE id='worker-primary'\").run();"
