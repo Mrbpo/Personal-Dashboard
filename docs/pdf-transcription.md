@@ -4,7 +4,7 @@
 
 - 原始 PDF 仍保存在 `LIBRARY_DIR` 的内容哈希 blob 中，文档名称、归属、课程、来源和哈希保留在现有 `library_documents` metadata。转写不会替换原件。
 - PostgreSQL 保存完整逐页正文：`document_texts` 记录文档和当前版本，`document_text_versions` 保存解析器版本、文本哈希、页数及警告，`document_text_pages` 保存全文和实际 PDF 页码。印刷页码或幻灯片编号不代替 PDF 页码。
-- 每页关联 `evidence`；来源版本保留原文件哈希、`library://<hash>` 原件引用和实际提取方法等 metadata。证据摘录可以截短，但全文页表不能截短。重新解析保留旧版本，在短事务中提交新版本并切换当前版本。
+- 每页关联 `evidence`；来源版本保留原文件哈希、`library://<hash>` 原件引用和实际提取方法等 metadata。证据摘录可以截短，但全文页表不能截短。重新解析保留旧版本，在短事务中提交新版本并切换当前版本。 稳定质量 metadata（规范化警告、提取方法及局部修复 provenance）参与解析/来源版本身份；同正文新增警告也须新版本与证据，不能被幂等冲突吞掉。获取时间与远程任务 ID 不参与身份，同输入重放不会生成版本。既有版本不会因代码升级自动改写；纯正文哈希不含警告，完全相同原页的向量仍可合法复用。
 - `document_text_chunks` 是可重建的检索索引；`KernelService.rebuildDocumentSearch(owner, documentId)` 可从 PostgreSQL 当前全文页重建，不需要重新请求 AI。网站 PDF 预览和全文搜索优先读取内核，搜索返回文件、页码及证据引用。SQLite 页和 chunk 是兼容缓存，不能作为新的全文权威层。
 
 ## 解析方式与额度

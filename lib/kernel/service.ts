@@ -753,8 +753,20 @@ export class KernelService {
       page.pageNumber!==index+1||!page.extractionMethod||!page.parserVersion||!page.basedOn?.versionId||!page.basedOn.sourceVersionId||!page.basedOn.evidenceId)))
       throw new Error('Document page repair provenance is incomplete');
     const parser=options.parserVersion||'docling-v1',owner=document.ownerId||'local-owner';
+    if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
+      throw new Error('Document quality warnings are invalid');
+    const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
+    const extractionMethod=options.extractionMethod?.trim()||parser;
+    // Quality changes are immutable source changes even when the body is the
+    // same. Normalize stable metadata; acquisition times and remote task IDs
+    // intentionally remain outside identity so a replay stays idempotent.
+    const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
+        pageNumber:page.pageNumber,extractionMethod:page.extractionMethod,parserVersion:page.parserVersion,
+        ...(page.model?{model:page.model}:{}),basedOn:{versionId:page.basedOn.versionId,
+          sourceVersionId:page.basedOn.sourceVersionId,evidenceId:page.basedOn.evidenceId}}))}:{})}));
     const textHash=stableId(JSON.stringify(pages));
-    const parsedVersion=stableId(document.id,parser,textHash);
+    const parsedVersion=stableId(document.id,parser,textHash,qualityHash);
     const sourceItemId=`document:${document.id}`,acquiredAt=new Date().toISOString();
     await kernelTransaction(async client=>{
       if(options.ingestionLease){
@@ -781,8 +793,8 @@ export class KernelService {
       }else if(options.pageProvenance)throw new Error('Document page repair requires a current-version guard');
       const version=await sourceVersion(client,{id:sourceItemId,source:`document:${document.origin}`,scope:document.courseId||'unscoped',
         externalId:document.id,courseId:document.courseId||null,
-        contentHash:stableId(document.hash,parser,textHash),raw:{id:document.id,name:document.name,mime:document.mime,
-          originKey:document.originKey,parser,extractionMethod:options.extractionMethod||parser,warnings:options.warnings||[],
+        contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
+          originKey:document.originKey,parser,extractionMethod,warnings,
           ...(options.batchProvenance?{batchProvenance:options.batchProvenance}:{}),
           ...(options.pageProvenance?{pageProvenance:options.pageProvenance}:{}),
           pages:pages.map(page=>({locator:page.locator,pageNumber:page.pageNumber,length:page.text.length}))},
@@ -795,7 +807,7 @@ export class KernelService {
       if(existing.owner_id!==owner||existing.source_hash!==document.hash)throw new Error('Document identity mismatch');
       await client.query(`INSERT INTO document_text_versions(id,document_id,source_version_id,parser_version,text_hash,page_count,warnings)
         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
-        [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(options.warnings||[])]);
+        [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(warnings)]);
       let position=0;
       for(const [index,page] of pages.entries()){
         const evidenceId=stableId(version,`page:${index}`);
@@ -803,7 +815,7 @@ export class KernelService {
           `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,original_excerpt,
             parsed_value,confidence,locator) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`,
           [evidenceId,version,`document:${document.origin}`,sourceItemId,acquiredAt,page.text.slice(0,4000),
-            JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.pageProvenance?.[index].extractionMethod||options.extractionMethod||parser,
+            JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.pageProvenance?.[index].extractionMethod||extractionMethod,
               ...(options.pageProvenance?{pageProvenance:options.pageProvenance[index]}:{}),documentVersion:parsedVersion,pageNumber:page.pageNumber}),0.9,page.locator]);
         await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text)
           VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(version_id,page_number) DO NOTHING`,
