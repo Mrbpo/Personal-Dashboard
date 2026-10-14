@@ -23,3 +23,9 @@ Hybrid retrieval still presents up to 40 independently fused candidates. The v2 
 The strict schema uses supported `minItems`/`maxItems` constraints. [Official OpenAI documentation](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses). `gpt-5-mini`, the 4,000-token allowance, and all budget policies remain unchanged; lower costs or better accuracy still require real measurement.
 
 Three new mock tests passed, with no real API requests. Before the fresh three-group gate, finish ingestion and vector indexing for the entire frozen owner scope. Do not change that scope during querying, bypass limits, alter gold, or call this polluted run an acceptance pass.
+
+## Review correction before the fresh gate
+
+Strict library search could still match stale SQLite chunks after PostgreSQL published a reparse. Commit `da29fb6` removes those cached bodies from strict results while retaining filename-only metadata search. One new real PostgreSQL regression passed in an independent temporary schema (1/1, no old tests rerun and no model calls); type checking also passed. Current page results expose source hash and source-version identity for provenance checks.
+
+The new corpus is fully parsed and indexed: 228 originals / 2,935 current original pages, including the fresh 121 originals / 1,070 pages and the old corpus as distractors. The fresh three-group run uses a frozen source/version/vector snapshot and the reviewed provenance gate. Its final accuracy results are pending; index completion is not a retrieval acceptance pass.

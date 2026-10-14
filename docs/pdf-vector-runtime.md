@@ -22,7 +22,9 @@ Build without sending application data, credentials or backup files as Docker co
 docker build -t study-postgres:18.6-pgvector0.8.7 - < deploy/postgres-vector.Dockerfile
 ```
 
-The release must build/load this image on the server **before** Compose starts PostgreSQL and before migration 007. The image can be saved/transferred like the application image. `deploy/compose.yml` references this local, pinned version label.
+The release builds this image before its PostgreSQL tests and transfers it with the application image in the existing restricted Docker-image stream. The receiver checks that it is available, stops writers and verifies the one pre-switch backup before recreating PostgreSQL or running migration 007. `deploy/compose.yml` references this local, pinned version label.
+
+Before the first vector release, the server administrator must install the reviewed `compose.yml` and `receive.sh` into their existing root-owned paths. They are host configuration, not files silently changed by the application image. Later daily backup restarts must use this same PostgreSQL image. Check the compressed two-image artifact against the existing 2 GiB transfer cap during the release build.
 
 A temporary install into a running stock PostgreSQL container is suitable only for isolated acceptance. Its files disappear when the container is recreated. It is **not a deployed or recoverable runtime**. Production rollout requires the immutable image, controlled PostgreSQL recreation using its existing volume, health checks, and the existing backup/switch procedure. Do not let a backup job recreate PostgreSQL from the old stock image after the extension has become a production dependency.
 

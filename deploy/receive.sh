@@ -20,11 +20,13 @@ done < <(docker image ls study-cabinet --format '{{.Repository}}:{{.Tag}}')
 docker image prune -f >/dev/null
 imagefile=$(mktemp /srv/study/image.XXXXXX)
 trap 'rm -f -- "$imagefile"' EXIT
-# Input is only a Docker image, never shell commands; cap incoming bytes at 2 GiB.
+# Input is the application and pinned PostgreSQL images, never shell commands.
+# Keep the existing 2 GiB compressed transfer cap.
 head -c 2147483649 > "$imagefile"
 test "$(stat -c %s "$imagefile")" -lt 2147483649
 gzip -dc "$imagefile" | docker load >/dev/null
 test "$(docker image inspect "study-cabinet:$sha" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$sha"
+docker image inspect study-postgres:18.6-pgvector0.8.7 >/dev/null
 previous=''
 if test -f /srv/study/current-version; then previous=$(cat /srv/study/current-version); fi
 export APP_VERSION="$sha"
@@ -46,17 +48,26 @@ rollback() {
   fi
 }
 trap 'rollback' ERR
-"${compose[@]}" up -d postgres docling
-"${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
-"${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
-"${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
+if test -z "$previous"; then
+  # Initial installation has no running kernel to dump yet. Bootstrap it;
+  # upgrades below snapshot the existing database before any new migration.
+  "${compose[@]}" up -d postgres docling
+  "${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
+  "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
+fi
 if test -n "$previous"; then APP_VERSION="$previous" "${compose[@]}" stop worker web; fi
 backup_key=$(bash /srv/study/backup.sh)
 backup_name=${backup_key##*/}
 [[ "$backup_name" =~ ^study-v1-[0-9]{8}T[0-9]{6}Z\.tar\.age$ ]]
 bash /srv/study/verify-backup.sh "$backup_name"
 bash /srv/study/verify-offsite-backup.sh "/srv/study/backups/$backup_name" "$backup_key"
+# The one required pre-switch backup precedes PostgreSQL recreation and all
+# new migrations. The same existing volume remains authoritative.
+"${compose[@]}" up -d postgres docling
+"${compose[@]}" exec -T postgres pg_isready -U study_kernel -d study_kernel
+"${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts
+"${compose[@]}" run --rm web node -e "fetch('http://docling:5001/docs').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+printf '{"version":"%s","status":"services_deployed"}\n' "$sha" > /srv/study/status/current.json
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/migrate.ts
 "${compose[@]}" run --rm web node --experimental-strip-types scripts/kernel-migrate.ts --import-legacy
 # All old executors are stopped. Clear only the executor lease so the new
