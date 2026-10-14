@@ -5,6 +5,7 @@ import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentR
 import {recallReferencedDocuments} from './document-references.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,DocumentSourceResolutionError,type DocumentSourceHint} from './document-source.ts';
 import {readFullDocumentEvidence} from './document-evidence.ts';
+import {refineSelectedDocumentPages} from './document-refinement.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -59,10 +60,13 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   retrieval_scope?:'selected-title-scoped';
   rerank_model?:'gpt-5-mini'|'gpt-6-astra';rerank_reasoning_effort?:'low'|'medium'|'high'|'xhigh'|'max';
   rerank_max_output_tokens?:number;
+  refinement_mode?:'adjacent-pages'|'no-new-neighbors';refinement_candidate_count?:number;
+  refined_from?:Array<{document_id:string;page_number:number;source_version_id:string;evidence_id:string}>;
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 
 export type DocumentSearchOptions={courseId?:string;documentId?:string;sourceHint?:DocumentSourceHint;
  limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean;
+ refineAdjacent?:boolean;
  evidenceBody?:'snippet'|'full-page'};
 
 // Use majority available query information as the support target, admitting the
@@ -125,6 +129,8 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
   const {evidenceBody,...rankingOptions}=options;
   if(evidenceBody!==undefined&&evidenceBody!=='snippet'&&evidenceBody!=='full-page')
     throw new Error('Invalid document evidence body mode');
+  if(options.refineAdjacent!==undefined&&typeof options.refineAdjacent!=='boolean')
+    throw new Error('Invalid adjacent PDF refinement option');
   const hits=await searchDocumentSnippets(pool,owner,query,rankingOptions);
   if(evidenceBody!=='full-page')return hits;
   const full=await readFullDocumentEvidence(pool,owner,hits);
@@ -168,6 +174,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
   const limit=Math.max(1,Math.min(240,options.limit||30));
   const aiRerank=Boolean((options.aiRerank??(process.env.KERNEL_DOCUMENT_RERANK==='true'))&&!options.strict);
   const hybrid=Boolean((options.hybrid??(process.env.KERNEL_DOCUMENT_HYBRID==='true'))&&!options.strict);
+  if(options.refineAdjacent&&(!hybrid||!aiRerank))throw new Error('Adjacent PDF refinement requires hybrid AI retrieval');
   const semantic=Boolean((options.semantic||aiRerank||hybrid)&&!options.strict);
   // Dense recall and keyword scoring are independent. Start the bounded query
   // embedding concurrently; document embeddings are prepared by the worker.
@@ -227,7 +234,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
     // A model request can outlive the parsed version used for its candidates.
     // Re-read current evidence once, retaining the scope and making no AI calls.
     const keywordFallback=async(reason:string):Promise<DocumentTextHit[]>=>
-      (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false,hybrid:false}))
+      (await searchDocumentText(pool,owner,query,{...options,limit,semantic:false,aiRerank:false,hybrid:false,refineAdjacent:false}))
         .map(hit=>({...hit,retrieval_mode:'keyword-fallback' as const,degraded_reason:reason}));
     let reordered:DocumentTextHit[]=hits,semanticFailure:string|undefined;
     let independentDense:DocumentTextHit[]=[];
@@ -258,7 +265,8 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
         const ranked=hybrid?await selectSupportedHybridDocumentPages(pool,owner,query,hits,[...candidates.values()],limit):
           fuseLexicallySupportedAIRanks(hits,
             await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size),limit);
-        return ranked
+        const refined=options.refineAdjacent?await refineSelectedDocumentPages(pool,owner,query,ranked,Math.min(5,limit)):ranked;
+        return refined
           .map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'ai-rerank' as const,degraded_reason:semanticFailure}));
       }catch(error){
         return keywordFallback([semanticFailure,`ai:${rankingFailure(error)}`].filter(Boolean).join(';'));

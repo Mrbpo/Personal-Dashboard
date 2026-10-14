@@ -8,7 +8,8 @@ import type {Pool} from 'pg';
 import type {DocumentTextHit} from '../lib/kernel/document-search.ts';
 import {selectSupportedHybridDocumentPages} from '../lib/kernel/document-search.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,validateDocumentPageOrder,validateDocumentPageSelection,
- DOCUMENT_RERANK_CANDIDATE_LIMIT,DOCUMENT_RERANK_SELECTION_PROMPT_VERSION,withDocumentRerankRunPolicy} from '../lib/kernel/document-rerank.ts';
+ DOCUMENT_RERANK_CANDIDATE_LIMIT,DOCUMENT_RERANK_SELECTION_PROMPT_VERSION,withDocumentRerankRunPolicy,
+ selectAdjacentDocumentPagesWithAI,DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION} from '../lib/kernel/document-rerank.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'document-rerank-tests-'));
 process.env.DATABASE_URL=':memory:';process.env.SERVICE_VAULT_DIR=directory;
@@ -131,6 +132,32 @@ class Fixture {
   }};
  }
 }
+
+test('adjacent refinement has an independent cache and journal phase, reuses successes and never repairs paid output',async()=>{
+ const fixture=new Fixture(),hits=fixture.hits('adjacent'),original=globalThis.fetch;
+ const phases:string[]=[],identities:string[]=[],schemas:string[]=[];let calls=0,invalid=false;
+ globalThis.fetch=async(_input,init)=>{
+  calls++;const request=JSON.parse(String(init?.body));schemas.push(request.text.format.name);
+  return Response.json({output_text:JSON.stringify({orderedIds:invalid?['p0','p0']:['p1','p0']})});
+ };
+ try{
+  await withDocumentRerankRunPolicy({dailyLimit:200,maxAttempts:2,beforeAttempt:async(id,attempt)=>{
+   assert.ok(attempt);phases.push(attempt.phase);identities.push(id);assert.equal(attempt.candidateCount,2);
+   assert.equal(attempt.promptVersion,attempt.phase==='initial'?DOCUMENT_RERANK_SELECTION_PROMPT_VERSION:DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION);
+  }},async()=>{
+   await selectDocumentPagesWithAI(fixture.pool(),'adjacent','original question',hits,2);
+   await selectAdjacentDocumentPagesWithAI(fixture.pool(),'adjacent','original question',hits,2);
+   await selectDocumentPagesWithAI(fixture.pool(),'adjacent','original question',hits,2);
+   await selectAdjacentDocumentPagesWithAI(fixture.pool(),'adjacent','original question',hits,2);
+   assert.equal(calls,2);assert.equal(fixture.cache.size,2);assert.equal(new Set(identities).size,2);
+   assert.deepEqual(phases,['initial','adjacent-refinement']);assert.deepEqual(schemas,['document_page_order','document_page_refinement']);
+   invalid=true;await assert.rejects(selectAdjacentDocumentPagesWithAI(fixture.pool(),'adjacent','different question',hits,2),/duplicate/);
+   assert.equal(calls,3,'even an ordinary two-attempt policy cannot repair the refinement request');
+   assert.equal(fixture.cache.size,2);
+  });
+  await assert.rejects(selectAdjacentDocumentPagesWithAI(fixture.pool(),'adjacent','q',Array(16).fill(hits[0]),5),/refinement scope/);
+ }finally{globalThis.fetch=original;}
+});
 
 test('Astra request cache diagnostics and billing bind model/effort/output without leaking to ordinary mini',async()=>{
  const {database}=await import('../lib/database.ts');
