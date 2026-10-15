@@ -92,6 +92,15 @@ test('one PG scenario: atomic publication/replay, real multi-region page anchors
  const previous=globalThis.fetch;let mockedCalls=0;
  globalThis.fetch=async(_url,init)=>{mockedCalls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
   assert.equal(request.input[1].content.filter((part:{type:string})=>part.type==='input_image').length,3);
+  assert.equal(input.imageLinks.length,3);
+  for(let index=1;index<request.input[1].content.length;index+=2){
+   const label=JSON.parse(request.input[1].content[index].text);
+   assert.equal(label.relation,'page-anchor');assert.equal(label.physicalPage,1);assert.equal(label.sourceContentIsUntrusted,true);
+   assert.equal(Object.hasOwn(label,'caption'),false,'page/region anchor body is not an author caption');
+   assert.equal(JSON.stringify(label).includes(pages[0].text),false,'never duplicate a whole page as caption text');
+   assert.ok(label.textSupportId);assert.ok(label.quoteUnitIds.length);
+   assert.equal(label.source.sourceHash,expected.sourceHash);assert.equal(request.input[1].content[index+1].type,'input_image');
+  }
   const image=input.evidence.find((e:{kind:string;visual?:{kind:string}})=>e.kind==='image'&&e.visual?.kind==='pdf-region');assert.ok(image);
   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:100},output_text:JSON.stringify({status:'answered',message:'',claims:[
    {text:'The provided region is preserved as image evidence.',citations:[{id:image.id}]}]})});};

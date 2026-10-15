@@ -1,0 +1,13 @@
+# Verified image-caption links: candidate
+
+Issue [#127](https://github.com/Mrbpo/Personal-Dashboard/issues/127) exposes an existing verified relationship in the grounded answer request. An author image links only to a supplied text support with the same document, current version, source version, source hash and caption evidence ID. Its selectable quote-unit IDs are explicit; immediately before the actual PNG, a JSON label repeats the original caption units, including original IDs, text and offsets. This label is untrusted source content, not instructions.
+
+If the caption text is not in the supplied context, the existing image remains available with an empty text link and an explicit unavailable-caption label. No source is fetched or merged to fill it. Foreign/stale text cannot acquire a link. PDF pages and regions expose only their actual page-anchor relation/IDs and physical page; their page body is never repeated as a caption.
+
+All original text, quote-unit IDs/offsets and selected PNG bytes remain unchanged. `imageLinks` participates in the input fingerprint; request policy identity becomes `grounded-document-answer-v6-image-caption-links`. The text-first claim schema, quote protocol, models and input/output/image limits remain unchanged. Added caption text counts against existing request limits. No verifier, repair loop, canonical state write or UI is added.
+
+The model is told that a caption establishes only its own words; claims depending on image values, chart geometry or visual comparisons require the actual image ID. These instructions and links do not prove that the model obeys them or reads every value correctly. The preceding schema-order experiment was a negative calibration, not an accepted improvement.
+
+Keep the PR draft until coordinator evidence review. Plan a controlled comparison using only the same five exposed public sources. Reuse prior v5 baseline responses only if a freshly rebuilt old-policy body is byte-exact (including images), original raw/request/ledger receipts match, and current complete source/version/manifest and old-policy fingerprint match. New protocol fingerprints intentionally differ. Missing checks are not exact reuse; do not pay for a replacement baseline without separate authorization. Current main's optional ranked-image metadata must not be stripped if it is actually present in the source context.
+
+No provider execution or new source DB preflight is part of this change. Candidate-only calibration, if later authorized, would use at most five mini54 requests and preserve all prior raw, Gold and scores. Refusals, deleted material facts and wrong references do not count as improvements. Structural CI is insufficient to merge, deploy or claim semantic accuracy.

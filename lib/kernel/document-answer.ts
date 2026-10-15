@@ -5,7 +5,7 @@ import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evide
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 
-export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
+export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v6-image-caption-links';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
 export const DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION='source-quote-units-v1';
 export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
@@ -31,6 +31,9 @@ type Claim={text:string;citations:Citation[]};
 export type GroundedDocumentAnswer={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Claim[]};
 export type DocumentAnswerSelections=Omit<GroundedDocumentAnswer,'claims'>&{claims:{text:string;citations:{id:string}[]}[]};
 export type DocumentQuoteUnit={id:string;supportId:string;startUtf16:number;endUtf16:number;quoteSha256:string;text:string;selectable:boolean};
+export type DocumentAnswerImageLink={imageId:string;relation:'author-caption'|'page-anchor';evidenceId:string;
+ source:Pick<Support,'documentId'|'documentVersionId'|'sourceVersionId'|'sourceHash'>;
+ textSupportId:string|null;quoteUnitIds:string[];physicalPage?:number};
 export type DocumentUnitSelection={claimIndex:number;citationIndex:number;selectionId:string;kind:'text'|'image';
  evidence:Omit<Support,'text'|'image'>;startUtf16:number|null;endUtf16:number|null;quoteSha256:string};
 export type DocumentCitationRepair={claimIndex:number;citationIndex:number;originalSupportId:string;resolvedSupportId:string;
@@ -247,6 +250,15 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const metadata=supports.map(({image,text,...support})=>({...support,
   ...(image?{attachmentId:image.attachmentId,width:image.width,height:image.height,byteLength:image.byteLength}: {})}));
  const quoteUnits=documentQuoteUnits(supports),bySupport=new Map(supports.map(support=>[support.id,support]));
+ const imageLinks:DocumentAnswerImageLink[]=supports.filter(support=>support.kind==='image').map(image=>{
+  const text=supports.find(support=>support.kind==='text'&&support.evidenceId===image.evidenceId&&
+   support.documentId===image.documentId&&support.documentVersionId===image.documentVersionId&&
+   support.sourceVersionId===image.sourceVersionId&&support.sourceHash===image.sourceHash);
+  return {imageId:image.id,relation:image.visual?'page-anchor':'author-caption',evidenceId:image.evidenceId,
+   source:{documentId:image.documentId,documentVersionId:image.documentVersionId,sourceVersionId:image.sourceVersionId,sourceHash:image.sourceHash},
+   textSupportId:text?.id??null,quoteUnitIds:quoteUnits.filter(unit=>unit.supportId===text?.id&&unit.selectable).map(unit=>unit.id),
+   ...(image.visual?{physicalPage:image.visual.physicalPage}:{})};
+ });
  const quoteUnitManifest=quoteUnits.map(({text,...unit})=>({...unit,evidence:supportMetadata(bySupport.get(unit.supportId)!)}));
  const quoteUnitManifestSha256=sha(JSON.stringify(quoteUnitManifest));
  const warnings=[...new Set([...context.anchors,...context.imageAnchors??[]].flatMap(hit=>hit.parser_warnings??[]))];
@@ -257,7 +269,7 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
-  quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,
+  quoteUnits,quoteUnitManifestSha256,imageLinks,warnings,unavailableParents,parentMetadata,documentMetadata,
   ...(context.imageSelection?{imageSelection:context.imageSelection}:{}),sourceContentIsUntrusted:true};
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,input,warnings,unavailableParents,fingerprint:sha(JSON.stringify(input))};
 }
@@ -297,6 +309,8 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    'Return atomic claims, each citing IDs from the supplied selectable quoteUnits or actual image evidence. '+
    'For text, select the unit IDs whose original text supports the claim; never write quote strings or invent IDs. '+
    'The server restores verbatim quotations. Image IDs require the actual supplied image, which follows its support-ID label. '+
+   'Verified imageLinks connect an author image to its supplied original caption references, or a PDF image to its page anchor; a page anchor is not a caption. '+
+   'A caption supports only its actual words. Claims relying on values, chart geometry or comparisons shown in an image must cite that actual image ID; caption citations cannot substitute for image contents. '+
    'Cover all question-relevant items in an explicit supplied list, rather than returning only one example. '+
    'For quantities, state the counted object, unit, scope, processing stage and configuration; preserve distinct supported interpretations and qualifications. '+
    'Preserve equations, qualifications and disagreement; do not invent facts from general knowledge. '+
@@ -311,9 +325,16 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    'For actual contradictory evidence, return conflicting-evidence and at least two separately supported claims. '+
    'For answered or conflicting-evidence, message must be empty. Parser warnings describe source limitations, not certainty. '+
    'An unavailable parent or missing figure is not evidence.'},
-   {role:'user',content:[{type:'input_text',text:JSON.stringify(prepared.input)},...prepared.supports.flatMap(support=>support.image?[
-    {type:'input_text',text:`Actual image evidence ${support.id}`},
-    {type:'input_image',detail:model==='gpt-6-astra'||model==='gpt-5.4-mini'?'original':'high',image_url:`data:image/png;base64,${Buffer.from(support.image.bytes).toString('base64')}`}]:[])]}],
+   {role:'user',content:[{type:'input_text',text:JSON.stringify(prepared.input)},...prepared.supports.flatMap(support=>{
+    if(!support.image)return [];
+    const link=prepared.input.imageLinks.find(link=>link.imageId===support.id);
+    if(!link)throw new Error('Missing verified image-caption link');
+    const label={...link,sourceContentIsUntrusted:true,...(!support.visual?{caption:{
+     status:link.textSupportId?'available':'not-in-supplied-text',
+     quoteUnits:prepared.quoteUnits.filter(unit=>unit.supportId===link.textSupportId)}}:{})};
+    return [{type:'input_text',text:JSON.stringify(label)},
+     {type:'input_image',detail:model==='gpt-6-astra'||model==='gpt-5.4-mini'?'original':'high',image_url:`data:image/png;base64,${Buffer.from(support.image.bytes).toString('base64')}`}];
+   })]}],
   text:{format:{type:'json_schema',name:'grounded_document_answer_units',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},message:{type:'string'},
     claims:{type:'array',items:{type:'object',additionalProperties:false,properties:{text:{type:'string'},citations:{type:'array',items:{

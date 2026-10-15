@@ -256,9 +256,41 @@ test('actual PNG bytes are bound to image citations; captions cannot impersonate
  // Complete, small public-domain test PNG, not merely a caption or an IHDR stub.
  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j2i8AAAAASUVORK5CYII=','base64');
  const c=context(),sha=hash(bytes);
+ const caption='Table 1. Original caption.\n'+('Unicode caption 😀; '.repeat(100));
+ c.anchors.push({...c.anchors[0],id:'pg:version:2',page_number:2,evidence_id:'caption',locator:'original:caption',body:caption});
  c.images=[{attachmentId:'attachment',assetId:sha,captionEvidenceId:'caption',sha256:sha,byteLength:bytes.length,
   width:1,height:1,mime:'image/png',bytes,source}];
  const prepared=prepareDocumentAnswer('What does the figure show?',c);
+ const textOnly=prepareDocumentAnswer('What does the figure show?',{...c,images:[]}),link=prepared.input.imageLinks[0];
+ assert.deepEqual(prepared.quoteUnits,textOnly.quoteUnits,'images and links cannot rewrite/reorder original text, IDs or offsets');
+ assert.deepEqual(link,{imageId:'i0',relation:'author-caption',evidenceId:'caption',
+  source:{documentId:'doc',documentVersionId:'version',sourceVersionId:source.sourceVersionId,sourceHash:source.sourceHash},
+  textSupportId:'e1',quoteUnitIds:prepared.quoteUnits.filter(unit=>unit.supportId==='e1'&&unit.selectable).map(unit=>unit.id)});
+ assert.equal(prepared.fingerprint,hash(JSON.stringify(prepared.input)));
+ const oldInput=Object.fromEntries(Object.entries(prepared.input).filter(([key])=>key!=='imageLinks'));
+ assert.notEqual(prepared.fingerprint,hash(JSON.stringify(oldInput)),'relations participate in the input fingerprint');
+ const request=buildDocumentAnswerRequest(prepared,{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:4000}),parts=request.input[1].content;
+ assert.ok(Array.isArray(parts));const label=JSON.parse(parts[1].text!);
+ assert.equal(label.imageId,'i0');assert.equal(label.sourceContentIsUntrusted,true);assert.equal(label.caption.status,'available');
+ assert.deepEqual(label.quoteUnitIds,link.quoteUnitIds);assert.deepEqual(label.caption.quoteUnits,prepared.quoteUnits.filter(unit=>unit.supportId==='e1'));
+ assert.equal(label.caption.quoteUnits.map((unit:{text:string})=>unit.text).join(''),caption);
+ const imagePart=parts[2];assert.equal(imagePart.type,'input_image');assert.ok('image_url' in imagePart);
+ assert.equal(imagePart.image_url,`data:image/png;base64,${bytes.toString('base64')}`);
+ assert.deepEqual(Object.keys(request.text.format.schema.properties.claims.items.properties),['text','citations']);
+ assert.match(String(request.input[0].content),/caption citations cannot substitute for image contents/);
+ for(const field of ['documentId','currentVersionId','sourceVersionId','sourceHash'] as const){
+  const changed=structuredClone(c);changed.images[0].source[field]='foreign-or-stale';
+  const unlinked=prepareDocumentAnswer('What does the figure show?',changed);
+  assert.equal(unlinked.input.imageLinks[0].textSupportId,null);assert.deepEqual(unlinked.input.imageLinks[0].quoteUnitIds,[]);
+  assert.equal(unlinked.supports.filter(s=>s.kind==='image').length,1,'keep verified pixels; do not fabricate a foreign caption link');
+  assert.notEqual(unlinked.fingerprint,prepared.fingerprint);
+ }
+ const missing=structuredClone(c);missing.anchors.pop();
+ const unlinked=prepareDocumentAnswer('What does the figure show?',missing),unlinkedBody=buildDocumentAnswerRequest(unlinked,
+  {model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:4000}),unlinkedParts=unlinkedBody.input[1].content;
+ assert.ok(Array.isArray(unlinkedParts));assert.equal(JSON.parse(unlinkedParts[1].text!).caption.status,'not-in-supplied-text');
+ const unlinkedImage=unlinkedParts[2];assert.ok('image_url' in unlinkedImage);
+ assert.equal(unlinkedImage.image_url,imagePart.image_url,'missing extra caption never drops or substitutes the image');
  const illustrated={status:'answered',message:'',claims:[{text:'The supplied figure is one pixel.',citations:[{id:'i0',quote:''}]}]};
  assert.deepEqual(validateGroundedDocumentAnswer(illustrated,prepared.supports),illustrated);
  assert.throws(()=>validateGroundedDocumentAnswer({...illustrated,claims:[{text:'A figure.',citations:[{id:'i0',quote:'invented OCR'}]}]},prepared.supports));
@@ -291,7 +323,7 @@ test('synthesis revalidates current sources, rejects incomplete output and makes
   const result=await synthesizeDocumentAnswer('How many samples?',async()=>{reads++;return context();},
    {beforeAttempt:async()=>{attempts++;}});
   assert.equal(result.answer.status,'answered');assert.equal(result.model,'gpt-5-mini');
-  assert.equal(result.promptVersion,'grounded-document-answer-v5');
+  assert.equal(result.promptVersion,'grounded-document-answer-v6-image-caption-links');
   assert.equal(result.providerRequestSha256,requestHash);assert.equal(result.selectedUnits.length,1);
   assert.equal(reads,2);assert.equal(attempts,1);assert.equal(calls,1);
   reads=0;
