@@ -70,7 +70,7 @@ test('one PG scenario: atomic publication/replay, real multi-region page anchors
  await migrateKernel();const item=await stagedFixture(true),pool=kernelPool(),document={id:item.id,ownerId:item.owner,courseId:'',name:item.id,
   hash:item.sourceHash,mime:'application/pdf',origin:'pdf-visual-fixture',originKey:item.id};
  const pages=[{pageNumber:1,locator:'第 1 页',text:'The original page has image evidence. Source formula must be checked against its pixels.'}];
- await pool.query(`CREATE FUNCTION reject_pdf_manifest_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture interruption'; END $$`);
+ await pool.query(`CREATE FUNCTION reject_pdf_manifest_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture interruption'; END; $$`);
  await pool.query('CREATE TRIGGER reject_pdf_manifest_fixture BEFORE INSERT ON document_pdf_visual_manifests FOR EACH ROW EXECUTE FUNCTION reject_pdf_manifest_fixture()');
  await assert.rejects(kernel.ingestParsedDocument(document,pages,{parserVersion:'pdf-fixture-v1',pdfVisuals:item.prepared}),/fixture interruption/);
  assert.equal((await pool.query('SELECT id FROM document_texts WHERE id=$1',[item.id])).rows.length,0);
