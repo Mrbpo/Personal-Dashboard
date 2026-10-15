@@ -16,7 +16,7 @@ type Provenance={pageNumber:number;extractionMethod:string;parserVersion:string;
 export type CachedDoclingAudit={schema:1;owner:string;documentId:string;sourceHash:string;expectedCurrentVersion:string;
  decision:'eligible'|'unchanged';pageCount:number;changedPages:number[];warnings:string[];pages:Array<{pageNumber:number;locator:string;text:string}>;
  pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;visualLayout:DoclingVisualLayout;
- visualEvidence:{status:'missing'|'matching'|'layout-changed'|'render-incomplete';manifestSha256:string|null;layoutSha256:string};visualOnly:boolean;reviewHash:string};
+ visualEvidence:{status:'missing'|'matching'|'layout-changed'|'render-incomplete';manifestSha256:string|null;contentSha256:string|null;layoutSha256:string};visualOnly:boolean;reviewHash:string};
 const normalizedWarnings=(warnings:string[])=>[...new Set(warnings.map(w=>w.trim()).filter(Boolean))].sort();
 
 /** No remote fallback: missing/corrupt drafts must fail, never request parsing. */
@@ -119,7 +119,7 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
  const audit={schema:1 as const,owner,documentId,sourceHash:document.source_hash,expectedCurrentVersion:document.current_version_id,
   decision:decision as CachedDoclingAudit['decision'],pageCount:document.page_count,changedPages,warnings,
   pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress,visualLayout:decoded.visualLayout,
-  visualEvidence:{status:visualStatus,manifestSha256:visualRow?.manifest_sha256??null,layoutSha256},visualOnly:!textChanged&&visualStatus!=='matching'};
+  visualEvidence:{status:visualStatus,manifestSha256:visualRow?.manifest_sha256??null,contentSha256:visualRow?.content_sha256??null,layoutSha256},visualOnly:!textChanged&&visualStatus!=='matching'};
  return {...audit,reviewHash:digest(JSON.stringify(audit))};
 }
 
@@ -133,6 +133,17 @@ export async function applyCachedDoclingReplay(reviewed:CachedDoclingAudit,expec
  const d=current.document;
  const pdfVisuals=await preparePdfVisualEvidence({owner:d.owner_id,documentId:d.id,sourceHash:d.source_hash,
   pdfBytes:await readBlob(d.source_hash),layout:current.visualLayout},renderer);
+ if(current.visualOnly&&pdfVisuals.contentSha256===current.visualEvidence.contentSha256){
+  const unchanged=(await kernelPool().query(`SELECT d.id FROM document_texts d
+   JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+   JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
+   JOIN document_pdf_visual_manifests m ON m.version_id=v.id AND m.source_version_id=s.id AND m.source_hash=d.source_hash
+   WHERE d.owner_id=$1 AND d.id=$2 AND d.current_version_id=$3 AND v.source_version_id=$4 AND d.source_hash=$5
+   AND s.raw_sha256=$5 AND NOT d.hidden AND m.manifest_sha256=$6 AND m.content_sha256=$7`,
+   [d.owner_id,d.id,expectedCurrentVersion,d.source_version_id,d.source_hash,current.visualEvidence.manifestSha256,pdfVisuals.contentSha256])).rows;
+  if(unchanged.length!==1)throw new Error('Cached replay current source changed while preparing unchanged visuals');
+  return {action:'unchanged',currentVersion:expectedCurrentVersion,visualStatus:pdfVisuals.content.renderStatus};
+ }
  await kernel.ingestParsedDocument({id:d.id,ownerId:d.owner_id,courseId:d.course_id||'',name:d.name,hash:d.source_hash,
   mime:'application/pdf',origin:d.origin,originKey:d.origin_key,createdAt:d.created_at.toISOString()},current.pages,
   {parserVersion:current.visualOnly?d.parser_version:CACHED_DOCLING_REPLAY_VERSION,

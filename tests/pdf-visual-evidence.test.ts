@@ -126,6 +126,10 @@ test('one PG scenario: atomic publication/replay, real multi-region page anchors
  await applyCachedDoclingReplay(audit,audit.expectedCurrentVersion,async()=>null);
  const incomplete=await auditCachedDoclingReplay(item.owner,cachedId);assert.equal(incomplete.visualEvidence.status,'render-incomplete');
  assert.equal(incomplete.decision,'eligible');assert.equal(incomplete.visualOnly,true);assert.deepEqual(incomplete.warnings,audit.warnings);
+ const incompleteCount=(await pool.query<{count:number}>('SELECT count(*)::int count FROM document_text_versions WHERE document_id=$1',[cachedId])).rows[0].count;
+ const stillUnavailable=await applyCachedDoclingReplay(incomplete,incomplete.expectedCurrentVersion,async()=>null);
+ assert.equal(stillUnavailable.action,'unchanged');assert.equal(stillUnavailable.currentVersion,incomplete.expectedCurrentVersion);
+ assert.equal((await pool.query<{count:number}>('SELECT count(*)::int count FROM document_text_versions WHERE document_id=$1',[cachedId])).rows[0].count,incompleteCount);
  const incompleteSource=await kernel.resolveDocumentSource(item.owner,{selectedDocumentTitle:cachedId});
  if(incompleteSource.status!=='resolved')throw new Error('incomplete source');
  assert.equal((await kernel.readCompleteDocumentSource(item.owner,incompleteSource.document)).status,'unavailable');
