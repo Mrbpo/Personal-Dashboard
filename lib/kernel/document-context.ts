@@ -3,6 +3,7 @@ import {mkdir,readFile,writeFile,stat,utimes} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import type {Pool,PoolClient} from 'pg';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
+import {readDocumentNodes} from './document-nodes.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -23,6 +24,22 @@ export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
 export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:DocumentImageEvidence[];
  accounting:{anchorCount:number;parentCount:number;contextNodeCount:number;contextBodyCodepoints:number;imageCount:number;imageBytes:number};
  sourceContentIsUntrusted:true};
+/** A separate whole-source reader; these limits do not change ranked readers. */
+export const COMPLETE_DOCUMENT_SOURCE_LIMITS=Object.freeze({nodes:256,bodyCodepoints:65536,bodyUtf8Bytes:131072,
+ images:24,imageBytes:24*1024*1024,imageInputTokens:65536,requestInputTokens:200000,framingTokens:16384});
+export type CompleteDocumentSourceReason='source-size-limit'|'structure-unavailable'|
+ 'image-count-limit'|'image-byte-limit'|'image-input-limit'|'image-unavailable'|'image-ambiguous'|'request-input-limit';
+export type CompleteDocumentSourceManifest={method:'complete-current-source';nodeOrder:'original-source';complete:boolean;
+ reason:CompleteDocumentSourceReason|null;source:DocumentContextSource;sourceNodeCount:number;returnedNodeCount:number;
+ sourceBodyCodepoints:number;sourceBodyUtf8Bytes:number;orderedTextSha256:string|null;structureManifestSha256:string|null;
+ parserWarnings:string[];document:{name:string;origin:string;originKey:string;parserVersion:string};
+ hierarchy:DocumentStructureInput['parents'];nodes:Array<Omit<DocumentEvidenceNode,'body'>>;
+ images:Array<{attachmentId:string;captionEvidenceId:string;sha256:string;byteLength:number;width:number;height:number}>;
+ request?:{nonImageBodyUtf8Bytes:number;imageInputTokenUpper:number;inputTokenUpper:number;nonImageBodySha256:string};
+ requestSchemaLimit?:'enum-count'|'enum-string';
+ imageInputTokenUpper:number;limits:typeof COMPLETE_DOCUMENT_SOURCE_LIMITS;manifestSha256:string};
+export type CompleteDocumentSourceRead={status:'unavailable';reason:CompleteDocumentSourceReason;manifest:CompleteDocumentSourceManifest}|
+ {status:'available';context:DocumentContextRead;manifest:CompleteDocumentSourceManifest};
 export type DocumentContextErrorCode='DOCUMENT_CONTEXT_INVALID'|'DOCUMENT_CONTEXT_CHANGED'|'DOCUMENT_STRUCTURE_UNAVAILABLE'|
  'DOCUMENT_STRUCTURE_CONFLICT'|'DOCUMENT_IMAGE_UNAVAILABLE'|'DOCUMENT_IMAGE_AMBIGUOUS'|'DOCUMENT_IMAGE_CHANGED';
 export class DocumentContextError extends Error{
@@ -254,4 +271,98 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
  const packets=[...parents.values()];return {anchors,parents:packets,images,accounting:{anchorCount:anchors.length,parentCount:packets.length,
   contextNodeCount:packets.reduce((sum,parent)=>sum+parent.nodes.length,0),contextBodyCodepoints:packets.reduce((sum,parent)=>sum+parent.nodes.reduce((n,node)=>n+Array.from(node.body).length,0),0),
   imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)},sourceContentIsUntrusted:true};
+}
+
+/** Complete original body/caption coverage or an honest unavailable result.
+ * No ranking, truncation, OCR, model call, or fallback selection takes place. */
+export async function readCompleteDocumentSource(pool:Pool,owner:string,expected:DocumentContextSource):Promise<CompleteDocumentSourceRead>{
+ const source={...expected},current=await currentSource(pool,owner,source),limits=COMPLETE_DOCUMENT_SOURCE_LIMITS;
+ // Count in PG before materializing a potentially large source or any PNG.
+ const totals=(await pool.query<{nodes:number;points:string;bytes:string;warnings:string[]}>(`SELECT count(*)::int nodes,
+  coalesce(sum(length(p.body)),0)::text points,coalesce(sum(octet_length(p.body)),0)::text bytes,
+  (SELECT warnings FROM document_text_versions WHERE id=$1) warnings FROM document_text_pages p WHERE p.version_id=$1`,
+ [current.currentVersionId])).rows[0];
+ const manifest:Omit<CompleteDocumentSourceManifest,'manifestSha256'>={method:'complete-current-source',nodeOrder:'original-source',complete:false,reason:null,
+  source:identity(current),sourceNodeCount:totals.nodes,returnedNodeCount:0,sourceBodyCodepoints:Number(totals.points),sourceBodyUtf8Bytes:Number(totals.bytes),
+  orderedTextSha256:null,structureManifestSha256:null,parserWarnings:totals.warnings,
+  document:{name:current.name,origin:current.origin,originKey:current.originKey,parserVersion:current.parserVersion},
+  hierarchy:[],nodes:[],images:[],imageInputTokenUpper:0,limits};
+ const finish=(complete:boolean,reason:CompleteDocumentSourceReason|null)=>{
+  const value={...manifest,complete,reason,returnedNodeCount:complete?manifest.sourceNodeCount:0};
+  return {...value,manifestSha256:hash(canonical(value))};
+ };
+ const unavailable=async(reason:CompleteDocumentSourceReason):Promise<CompleteDocumentSourceRead>=>{
+  await currentSource(pool,owner,source);return {status:'unavailable',reason,manifest:finish(false,reason)};
+ };
+ if(!manifest.sourceNodeCount||![manifest.sourceBodyCodepoints,manifest.sourceBodyUtf8Bytes].every(Number.isSafeInteger)||
+  manifest.sourceNodeCount>limits.nodes||manifest.sourceBodyCodepoints>limits.bodyCodepoints||manifest.sourceBodyUtf8Bytes>limits.bodyUtf8Bytes)
+  return unavailable('source-size-limit');
+ let data:Awaited<ReturnType<typeof structuredSource>>;
+ try{data=await structuredSource(pool,owner,source);}
+ catch(error){if(error instanceof DocumentContextError&&error.code==='DOCUMENT_STRUCTURE_UNAVAILABLE')return unavailable('structure-unavailable');throw error;}
+ if(data.nodes.length!==manifest.sourceNodeCount||data.nodes.reduce((sum,n)=>sum+Array.from(n.body).length,0)!==manifest.sourceBodyCodepoints||
+  data.nodes.reduce((sum,n)=>sum+Buffer.byteLength(n.body),0)!==manifest.sourceBodyUtf8Bytes)changed();
+ manifest.orderedTextSha256=hash(canonical(data.nodes.map(n=>n.body)));manifest.structureManifestSha256=data.manifestSha256;
+ manifest.hierarchy=data.structure.parents;manifest.nodes=data.nodes.map(({body,...node})=>node);
+ const captions=data.nodes.filter(n=>n.kind==='caption');
+ if(captions.length>limits.images)return unavailable('image-count-limit');
+ // A caption alone cannot stand in for its table/figure. Page renders without
+ // a registered current original caption are never substituted here.
+ const imageRows=(await pool.query<ImageRow>(`SELECT id,caption_evidence_id,asset_sha256,byte_length,width,height,mime,original_reference,provenance
+  FROM document_image_attachments WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3 AND caption_evidence_id=ANY($4::text[])`,
+ [current.currentVersionId,current.sourceVersionId,current.sourceHash,captions.map(n=>n.evidenceId)])).rows;
+ for(const caption of captions){const count=imageRows.filter(row=>row.caption_evidence_id===caption.evidenceId).length;
+  if(!count)return unavailable('image-unavailable');if(count!==1)return unavailable('image-ambiguous');}
+ if(imageRows.reduce((sum,row)=>sum+Number(row.byte_length),0)>limits.imageBytes)return unavailable('image-byte-limit');
+ const imageTokens=(width:number,height:number)=>Math.ceil(width/32)*Math.ceil(height/32)*2+1;
+ if(imageRows.some(row=>row.mime!=='image/png'||![row.width,row.height,row.byte_length].every(n=>Number.isSafeInteger(n)&&n>0)))changed();
+ manifest.imageInputTokenUpper=imageRows.reduce((sum,row)=>sum+imageTokens(row.width,row.height),0);
+ if(manifest.imageInputTokenUpper>limits.imageInputTokens)return unavailable('image-input-limit');
+ const anchors:DocumentEvidenceHit[]=[],parents=new Map<string,DocumentParentContext>(),images=new Map<string,DocumentImageEvidence>();
+ for(let offset=0;offset<data.nodes.length;offset+=14){
+  const selected=await readDocumentNodes(pool,owner,source,data.nodes.slice(offset,offset+14).map(n=>n.evidenceId));
+  const packet=await readDocumentParents(pool,owner,selected);anchors.push(...packet.anchors);
+  for(const parent of packet.parents){
+   const ranks=parent.anchorRanks.map(rank=>offset+rank),prior=parents.get(parent.parentId);
+   if(prior)prior.anchorRanks.push(...ranks);else parents.set(parent.parentId,{...parent,firstAnchorRank:offset+parent.firstAnchorRank,anchorRanks:ranks});
+  }
+ }
+ // Include every real original heading, including ancestor/empty sections that
+ // have no directly anchored node. Body coverage already comes from anchors.
+ const completeParents=data.structure.parents.map(parent=>{
+  const key=canonical([current.documentId,current.currentVersionId,'section',parent.id]),existing=parents.get(key);
+  if(existing)return existing;
+  const nodes=data.nodes.filter(node=>{let next=node.parentId;while(next){if(next===parent.id)return true;
+   next=data.structure.parents.find(row=>row.id===next)?.parentId;}return false;});
+  const points=nodes.reduce((sum,node)=>sum+Array.from(node.body).length,0),ranks=nodes.map(node=>node.ordinal+1);
+  return {parentId:key,kind:'section' as const,source:identity(current),manifestSha256:data.manifestSha256,
+   firstAnchorRank:ranks[0]??0,anchorRanks:ranks,headingMetadata:{text:parent.heading,originalSourceHash:current.sourceHash},
+   status:points<=8192?'available' as const:'unavailable-size-exceeds-8192' as const,sourceNodeCount:nodes.length,
+   sourceBodyCodepoints:points,nodeManifest:nodes.map(node=>({evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256})),
+   nodes:points<=8192?nodes:[]};
+ });
+ completeParents.push(...[...parents.values()].filter(parent=>parent.kind==='single-node'));
+ // Images follow all original caption nodes independently of parent expansion.
+ // An oversized parent packet has no nodes, but every original body remains in
+ // anchors; neither that status nor a long caption can hide a required PNG.
+ try{for(let offset=0;offset<captions.length;offset+=14)
+  for(const image of await readDocumentImages(pool,owner,source,captions.slice(offset,offset+14).map(n=>n.evidenceId)))images.set(image.attachmentId,image);
+ }catch(error){if(error instanceof DocumentContextError){
+  if(error.code==='DOCUMENT_IMAGE_UNAVAILABLE')return unavailable('image-unavailable');
+  if(error.code==='DOCUMENT_IMAGE_AMBIGUOUS')return unavailable('image-ambiguous');
+ }throw error;}
+ const actualImages=[...images.values()];
+ if(anchors.length!==data.nodes.length||anchors.some((hit,index)=>hit.evidence_id!==data.nodes[index].evidenceId||hit.body!==data.nodes[index].body)||
+  actualImages.length!==captions.length)changed();
+ // Check actual verified bytes/dimensions again, not only PG's size metadata.
+ if(actualImages.reduce((sum,image)=>sum+image.byteLength,0)>limits.imageBytes)return unavailable('image-byte-limit');
+ manifest.imageInputTokenUpper=actualImages.reduce((sum,image)=>sum+imageTokens(image.width,image.height),0);
+ if(manifest.imageInputTokenUpper>limits.imageInputTokens)return unavailable('image-input-limit');
+ manifest.images=actualImages.map(({attachmentId,captionEvidenceId,sha256,byteLength,width,height})=>({attachmentId,captionEvidenceId,sha256,byteLength,width,height}));
+ manifest.parserWarnings=[...new Set(anchors.flatMap(hit=>hit.parser_warnings??[]))];
+ await currentSource(pool,owner,source);
+ const context:DocumentContextRead={anchors,parents:completeParents,images:actualImages,sourceContentIsUntrusted:true,
+  accounting:{anchorCount:anchors.length,parentCount:completeParents.length,contextNodeCount:data.nodes.length,contextBodyCodepoints:manifest.sourceBodyCodepoints,
+   imageCount:actualImages.length,imageBytes:actualImages.reduce((sum,image)=>sum+image.byteLength,0)}};
+ return {status:'available',context,manifest:finish(true,null)};
 }
