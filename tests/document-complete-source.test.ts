@@ -145,10 +145,12 @@ test('actual full request serialization is bounded before any answer reservation
  let attempts=0;const result=await kernel.answerSelectedStudySource(item.owner,'Explain the original source.',item.source,{beforeAttempt:async()=>{attempts++;}});
  assert.equal(result.status,'unavailable');if(result.status==='unavailable')assert.equal(result.reason,'request-input-limit');
  assert.equal(attempts,0);
- const enumOverflow=await fixture({bodies:[Array(1000).fill('Original source paragraph.').join('\n\n')],captions:0});
+ // Each601-codepoint emoji body is1202 UTF16 units and yields two quote units.
+ // These512 original nodes fit source capacity but yield600 IDs/15600 enum chars.
+ const enumOverflow=await fixture({bodies:[...Array(88).fill('😀'.repeat(601)),...Array(424).fill('Original source paragraph.')],captions:0});
  const schema=await kernel.answerSelectedStudySource(enumOverflow.owner,'Explain the original source.',enumOverflow.source,{beforeAttempt:async()=>{attempts++;}});
  assert.equal(schema.status,'unavailable');if(schema.status==='unavailable'){
-  assert.equal(schema.reason,'request-input-limit');assert.equal(schema.manifest.requestSchemaLimit,'enum-count');
+  assert.equal(schema.reason,'request-input-limit');assert.equal(schema.manifest.requestSchemaLimit,'enum-string');
   assert.equal(schema.manifest.returnedNodeCount,0);
  }
  assert.equal(attempts,0,'complete schema enum overflow must still refuse before any reservation');
