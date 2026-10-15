@@ -171,6 +171,11 @@ test('whole-answer input retains uncited source and original refusal; diagnostic
  assert.deepEqual(Object.keys(input.selectedCitations),['c0']);assert.deepEqual(Object.keys(input.selectedCitations.c0),['r0','r1']);
  assert.equal(input.selectedCitations.c0.r0.selectionId,packet.prepared.quoteUnits[0].id);
  assert.equal(input.originalAnswer.claims[0].citations[0].quote,body);assert.deepEqual(input.completeSource,read.manifest);
+ assert.deepEqual(input.allowedSourceIds,[...packet.prepared.quoteUnits.map(unit=>unit.id),'i0']);
+ assert.match(input.sourceIdNamespace.metadataOnly,/eN.*metadata only/);
+ assert.deepEqual(request.text.format.schema.$defs.sourceId.enum,input.allowedSourceIds);
+ const wireSchema=JSON.parse(JSON.stringify(request.text.format.schema));
+ assert.deepEqual(wireSchema.properties.coverage.properties.omissions.items.properties.sourceIds.items,{$ref:'#/$defs/sourceId'});
  assert.equal(request.max_output_tokens,4000);assert.equal(request.model,'gpt-5.4-mini');assert.deepEqual(request.reasoning,{effort:'low'});
  const image=content.find(item=>item.type==='input_image');assert.ok(image&&'image_url'in image);
  assert.equal(image.image_url,'data:image/png;base64,'+bytes.toString('base64'));assert.equal(image.detail,'original');
@@ -188,8 +193,20 @@ test('whole-answer input retains uncited source and original refusal; diagnostic
   {...value,coverage:{...value.coverage,omissions:[{subject:'unsupplied image',sourceIds:['i99']}] }},
   {...value,scopeAndConflicts:{...value.scopeAndConflicts,alignment:'narrower',sourceIds:[]}},
   {...value,scopeAndConflicts:{...value.scopeAndConflicts,alignment:'different',sourceIds:[]}},
+  {...value,scopeAndConflicts:{...value.scopeAndConflicts,sourceIds:['e0']}},
   {...value,scopeAndConflicts:{...value.scopeAndConflicts,conflicts:[{sourceIds:[other],comparability:'same-target',reason:'one side only'}]}}
  ])assert.throws(()=>validateCompleteAnswerAudit(change,packet));
+ const unestablished=structuredClone(value);unestablished.localSupport.c0.citationFindings.r0.judgment='does-not-establish';
+ unestablished.localSupport.c0.citationFindings.r1.judgment='does-not-establish';
+ const before=JSON.stringify(unestablished);assert.throws(()=>validateCompleteAnswerAudit(unestablished,packet));assert.equal(JSON.stringify(unestablished),before);
+ const unclear=structuredClone(unestablished);for(const ref of Object.values(unclear.localSupport.c0.citationFindings))ref.judgment='unclear';
+ assert.throws(()=>validateCompleteAnswerAudit(unclear,packet));
+ const contradicted=structuredClone(value);contradicted.localSupport.c0.citationFindings.r1.judgment='contradicts';
+ assert.throws(()=>validateCompleteAnswerAudit(contradicted,packet));
+ const joint=structuredClone(value);joint.localSupport.c0.citationFindings={r0:{judgment:'supports',reason:'Establishes one material assertion.'},
+  r1:{judgment:'supports',reason:'Establishes the remaining material assertion.'}};
+ assert.deepEqual(validateCompleteAnswerAudit(joint,packet),joint,'partial references may collectively support the entire claim');
+ unestablished.localSupport.c0.judgment='unsupported';assert.deepEqual(validateCompleteAnswerAudit(unestablished,packet),unestablished);
  const refusal={...original,providerSelections:{status:'insufficient-evidence' as const,message:'Original refusal remains unchanged.',claims:[]}};
  const empty=prepareCompleteAnswerAudit(question,c,refusal,read.manifest),emptyValue={...value,localSupport:{}};
  assert.equal(empty.input.originalAnswer.message,refusal.providerSelections.message);
@@ -200,6 +217,8 @@ test('whole-answer input retains uncited source and original refusal; diagnostic
  let enumValues=0;JSON.stringify(buildCompleteAnswerAuditRequest(maximum).text.format.schema,(key,v)=>{
   if(key==='enum')enumValues+=v.length;return v;
  });assert.ok(enumValues<1000,'shared citation schema does not repeat the source allowlist or 600 finding enums');
+ assert.throws(()=>buildCompleteAnswerAuditRequest({...packet,input:{...packet.input,
+  allowedSourceIds:Array.from({length:978},(_,n)=>'q:'+n)}}),/enum count/);
  assert.equal(JSON.stringify(original),snapshot);
 });
 
@@ -274,7 +293,7 @@ test('actual PostgreSQL owner/current-source reads restore text and PNG and reje
  const originalFetch=globalThis.fetch;let calls=0,hide=false;
  globalThis.fetch=async(_url,init)=>{
   calls++;const request=JSON.parse(String(init?.body)),content=request.input[1].content,input=JSON.parse(content[0].text);
-  if(request.text.format.name==='complete_answer_diagnostics_v1'){
+  if(request.text.format.name==='complete_answer_diagnostics_v2'){
    assert.equal(input.quoteUnits.length,2);assert.equal(input.originalAnswer.claims[0].citations[0].quote,body);
    assert.equal(input.selectedCitations.c0.r1.selectionId,'i0');
    return Response.json({...response(),output_text:JSON.stringify(wholeDiagnostics())});

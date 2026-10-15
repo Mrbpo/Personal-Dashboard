@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
-import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
+import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,DocumentAnswerRequestLimitError,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,type CompleteDocumentSourceRead,type CompleteDocumentSourceManifest} from './document-context.ts';
 
 export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v2';
@@ -126,7 +126,7 @@ export async function auditDocumentCitationClaim(question:string,readContext:()=
   providerRequestSha256,requestIdentity,rawResponseSha256:rawSha256,binding:prepared.binding,bindingSha256:prepared.bindingSha256};
 }
 
-export const COMPLETE_ANSWER_AUDIT_VERSION='complete-answer-diagnostics-v1';
+export const COMPLETE_ANSWER_AUDIT_VERSION='complete-answer-diagnostics-v2';
 export type CompleteAnswerAuditBinding=Omit<DocumentCitationAuditBinding,'claimIndex'>;
 export type CompleteAnswerAuditPolicy=DocumentCitationAuditPolicy;
 export const COMPLETE_ANSWER_AUDIT_DEVELOPER='Diagnose the entire supplied original answer, without rewriting it. '+
@@ -134,14 +134,18 @@ export const COMPLETE_ANSWER_AUDIT_DEVELOPER='Diagnose the entire supplied origi
  'Keep localSupport strictly separate from coverage and scopeAndConflicts. cN denotes original claim index N; rN denotes its actual citation position N. '+
  'For every claim, assess all material parts and each actual selected citation independently, including object, role, quantity, unit, population, subset, processing stage, configuration and aggregation. '+
  'Local support may use only that claim\'s selectedCitations, restored quotes and actual selected images. Correct evidence elsewhere cannot rescue an incorrect or irrelevant selected reference. '+
- 'supported means every material part is established by those citations collectively; unsupported means a necessary part is not established or is contradicted, without proving the claim false elsewhere; uncertain means ambiguity or unreadability prevents judgment. '+
+ 'For each citation, supports means it establishes at least one material assertion of the claim, not necessarily the entire claim; does-not-establish means it establishes no material assertion. Multiple partially supporting citations may jointly establish the complete claim. '+
+ 'For the aggregate claim, supported means every material assertion is established collectively by its actual selected citations, with no unresolved contradiction; unsupported means a necessary part is not established or is contradicted, without proving the claim false elsewhere; uncertain means ambiguity or unreadability prevents judgment. '+
+ 'The aggregate reason and objectUnitScope.evidence must describe only what those selected citations establish. Never use an unselected full-source quote or image to justify localSupport, even when it confirms the claim; report such evidence only in the separate coverage/scope/conflict view. '+
+ 'A supported aggregate requires at least one supports finding and no contradicts finding; do not label the aggregate supported when all actual references establish nothing or are unclear. Never upgrade or silently replace a selected citation. '+
  'A caption naming a table is not its numerical contents; an image must show the claimed values and row/column meaning. A true but uncited fact is not thereby false. '+
  'Assess coverage against all supplied quoteUnits and actual images: identify question-relevant material omitted from the original answer, binding each omission to real source IDs. '+
  'Retain useful correct facts; a refused or empty answer still needs coverage review and does not pass merely by having no claims. Never propose deleting claims to pass. '+
  'Scope must distinguish the question\'s requested target from a locally correct but narrower object, attribute, unit, subset, stage, configuration or aggregation. '+
  'For potential conflicts, cite both source statements and distinguish comparable same-target disagreement from different stages, subsets or configurations, or unresolved comparability. Do not select a winning value or invent reconciliation. '+
  'Coverage is only relative to supplied context, never the library or outside knowledge. Preserve parser warnings, unavailable context and omitted-image limitations; missing or unreadable evidence is not proof of absence. '+
- 'Use original selectable quote-unit IDs or actual supplied image IDs for sourceIds, never eN text-support IDs or invented quotes. No new answer, authoritative facts, corrections or benchmark verdict. Keep reasons concise.';
+ 'Every output sourceIds entry must come exactly from allowedSourceIds: selectable q: quote-unit IDs or actual supplied iN image IDs. eN IDs and supportId are metadata links only, including originalAnswer citation metadata; they are never selectable output source IDs. '+
+ 'No new answer, authoritative facts, corrections or benchmark verdict. Keep reasons concise.';
 
 /** The whole answer is restored independently of the claim-local packet. */
 export function prepareCompleteAnswerAudit(question:string,context:DocumentAnswerContext,binding:CompleteAnswerAuditBinding,
@@ -154,6 +158,11 @@ export function prepareCompleteAnswerAudit(question:string,context:DocumentAnswe
   throw new Error('Complete-answer source or context changed');
  const restored=resolveDocumentAnswerSelections(binding.providerSelections,prepared.supports);
  const originalAnswer={...restored.answer,message:restored.providerSelections.message};
+ const allowedSourceIds=[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
+  ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
+ const sourceIdNamespace={selectableText:'quoteUnits.id where selectable=true (q: IDs)',selectableImages:'actual supplied image IDs (iN)',
+  metadataOnly:'eN IDs and supportId, including originalAnswer citation IDs, link metadata only; never output them in sourceIds',
+  localReferences:'cN/rN refers only to that original claim and citation position in selectedCitations'};
  const selectedCitations=Object.fromEntries(restored.answer.claims.map((_claim,claimIndex)=>[`c${claimIndex}`,
   Object.fromEntries(restored.selectedUnits.filter(unit=>unit.claimIndex===claimIndex).map(unit=>[`r${unit.citationIndex}`,unit]))]));
  const receipt={inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
@@ -161,29 +170,36 @@ export function prepareCompleteAnswerAudit(question:string,context:DocumentAnswe
   sourceManifestSha256:manifest.manifestSha256,quoteUnitManifest:prepared.quoteUnitManifest,
   selectedCitations,sources:prepared.input.evidence,warnings:prepared.warnings,unavailableParents:prepared.unavailableParents};
  return {prepared,restored,selectedCitations,binding:receipt,bindingSha256:sha(JSON.stringify(receipt)),
-  input:{...prepared.input,completeSource:manifest,originalAnswer,selectedCitations}};
+  input:{...prepared.input,completeSource:manifest,originalAnswer,selectedCitations,sourceIdNamespace,allowedSourceIds}};
 }
 
 /** Pure actual-wire builder; source reads and execution authority remain in Kernel. */
 export function buildCompleteAnswerAuditRequest(packet:ReturnType<typeof prepareCompleteAnswerAudit>){
+ const allowedSourceIds=packet.input.allowedSourceIds;
+ if(!allowedSourceIds.length||new Set(allowedSourceIds).size!==allowedSourceIds.length)throw new Error('Missing or ambiguous complete-answer source IDs');
+ // Shared definitions keep each enum in the provider's schema only once.
+ if(allowedSourceIds.length+23>1000)throw new DocumentAnswerRequestLimitError('enum-count');
+ if(allowedSourceIds.length>250&&allowedSourceIds.reduce((size,id)=>size+id.length,0)>15000)throw new DocumentAnswerRequestLimitError('enum-string');
  const string={type:'string'},enumeration=(values:string[])=>({type:'string',enum:values}),
   object=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)}),
-  ids={type:'array',items:string};
+  ids={type:'array',items:{$ref:'#/$defs/sourceId'}};
  const citationFinding=object({judgment:enumeration(['supports','does-not-establish','contradicts','unclear']),reason:string});
  const localSupport=object(Object.fromEntries(Object.entries(packet.selectedCitations).map(([id,citations])=>[id,object({
-  judgment:enumeration(['supported','unsupported','uncertain']),reason:string,
+  judgment:{$ref:'#/$defs/claimJudgment'},reason:string,
   citationFindings:object(Object.fromEntries(Object.keys(citations).map(ref=>[ref,{$ref:'#/$defs/citationFinding'}]))),
-  objectUnitScope:object({claim:string,evidence:string,alignment:enumeration(['same','different','not-established','not-applicable'])})})])));
+  objectUnitScope:object({claim:string,evidence:string,alignment:{$ref:'#/$defs/objectAlignment'}})})])));
  const schema={...object({localSupport,coverage:object({status:enumeration(['complete','partial','ambiguous','unavailable']),reason:string,
   omissions:{type:'array',items:object({subject:string,sourceIds:ids})}}),
   scopeAndConflicts:object({requested:string,answered:string,alignment:enumeration(['aligned','narrower','different','ambiguous','unavailable']),
    reason:string,sourceIds:ids,conflicts:{type:'array',items:object({sourceIds:ids,
-    comparability:enumeration(['same-target','different-context','unresolved']),reason:string})}})}),$defs:{citationFinding}};
+    comparability:enumeration(['same-target','different-context','unresolved']),reason:string})}})}),$defs:{citationFinding,
+     sourceId:enumeration(allowedSourceIds),claimJudgment:enumeration(['supported','unsupported','uncertain']),
+     objectAlignment:enumeration(['same','different','not-established','not-applicable'])}};
  return {model:'gpt-5.4-mini',store:false,reasoning:{effort:'low'},max_output_tokens:4000,
   input:[{role:'developer',content:COMPLETE_ANSWER_AUDIT_DEVELOPER},{role:'user',content:[{type:'input_text',text:JSON.stringify(packet.input)},
    ...packet.prepared.supports.flatMap(support=>support.image?[{type:'input_text',text:`Actual image evidence ${support.id}`},
     {type:'input_image',detail:'original',image_url:`data:image/png;base64,${Buffer.from(support.image.bytes).toString('base64')}`}]:[])]}],
-  text:{format:{type:'json_schema',name:'complete_answer_diagnostics_v1',strict:true,schema}}};
+  text:{format:{type:'json_schema',name:'complete_answer_diagnostics_v2',strict:true,schema}}};
 }
 
 export type CompleteAnswerAuditDiagnostics={localSupport:Record<string,Omit<DocumentCitationAuditDiagnostics,'claimId'>>;
@@ -203,6 +219,8 @@ export function validateCompleteAnswerAudit(value:unknown,packet:ReturnType<type
   const finding=result.localSupport[id];if(!exact(finding,['judgment','reason','citationFindings','objectUnitScope']))return invalid();
   // Reuse the strict local shape, with only this claim's actual reference keys.
   validateDocumentCitationAudit({claimId:'c0',...finding},Object.keys(citations));
+  const judgments=Object.values(finding.citationFindings).map(ref=>ref.judgment);
+  if(finding.judgment==='supported'&&(!judgments.includes('supports')||judgments.includes('contradicts')))return invalid();
  }
  const coverage=result.coverage,scope=result.scopeAndConflicts;
  if(!exact(coverage,['status','reason','omissions'])||!['complete','partial','ambiguous','unavailable'].includes(coverage.status)||!text(coverage.reason)||
