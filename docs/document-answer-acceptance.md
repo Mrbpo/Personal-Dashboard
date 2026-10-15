@@ -25,7 +25,7 @@
 
 模型的 citation 仅为 `{id: 已提供的可选单元编号或真实图片编号}`，不允许自写 `quote`。服务端恢复公共回答并执行原严格验证；未知编号、重复选择、非法形状、缺少引用，以及将同一来源的不同单元冒充两个冲突来源均失败。保留原始 `providerSelections`；`selectedUnits` 分别记录选择位置、来源身份、偏移和恢复引文 SHA。`quoteUnitManifest` 记录全部文字单元的无正文清单与来源身份，含不可选空白片，并返回清单 SHA。
 
-新提示词版本为 `grounded-document-answer-v4`，`quoteUnitProtocolVersion` 和清单 SHA 与完整输入指纹一同绑定请求身份；新返回的 `referencePolicyVersion` 也明确标识原文单元协议。旧 literal 协议标识仍保留给历史解析器。现有模型、请求次数和预算规则不变，没有额外生成、付费修复循环或隐藏回退。分片元数据会增加少量输入开销。
+当前提示词版本为 `grounded-document-answer-v5`，`quoteUnitProtocolVersion` 和清单 SHA 与完整输入指纹一同绑定请求身份；新返回的 `referencePolicyVersion` 也明确标识原文单元协议。旧 literal 协议标识仍保留给历史解析器。没有额外生成、付费修复循环或隐藏回退。分片元数据会增加少量输入开销。
 
 仅 `document-answer` 的现有预算预留改为计算完整序列化请求，包含单元元数据及 `text.format` 的 schema/enum；其他 kind 和费率不变。mini 原有 bytes/2 仍是估算，不能称为严格费用上界。任何有 hard cap 的真实试运行必须在发请求前按完整 UTF-8 payload（含 schema）、framing 和真实图像 patch 的保守界核验；不能只计算 source body，也不能等 provider 结算后才检查超帽。实际调用仍按 provider usage 结算并保留账本，不新增预算系统。
 
@@ -43,7 +43,13 @@
 
 隔离开发作用域通过已审核的 `withDocumentRerankRunPolicy` 环境校验复用精确开发数据库、SQLite 账本和管理员进程标记，并要求请求记录回调。开发默认使用 `gpt-5-mini`、low reasoning、4000 输出 token、30 秒期限；先冻结小批范围及 hard cap，复用已成功的阶段与缓存。旧 Astra 高档运行仅保留为历史证据；高档模型只用于有具体理由且范围明确的少数难题，不能默认整批使用或自动升级。实际计费通过 `paidOpenAI`，保留账本，不使用 bypass。每题的持久化请求和成功检查点由验收运行器管理，不能把回调存在当成已经持久化。
 
-原始图表在 Astra 中使用 `detail: original`，mini 使用 `high`。[官方图像输入说明](https://developers.openai.com/api/docs/guides/images-vision)。模型身份、reasoning、输出上限、prompt/引用协议版本、原文单元清单 SHA 和完整输入指纹共同构成请求身份。返回的 `model` 记录 provider 的实际模型字段，`requestedModel` 记录请求模型；Astra 开发结果必须与实际 provider 模型一致，否则拒绝发布。开发模型通过不证明其他生产模型也通过。
+Issue #107 允许在上述显式开发策略中选择 `model: 'gpt-5.4-mini'`，通过原有 `KernelService.answerStudyContent` 或 `answerSelectedStudySource` 调用；不修改请求 body 来冒充模型支持。两条入口均在来源读取或检索前验证策略。完整来源入口仍固定 low/4000/30s，普通调用仍仅允许旧 mini；不新增 UI 模型开关，不修改生产设置或重排模型。纯 `buildDocumentAnswerRequest` 可离线预检新模型，但不能授予执行权限。
+
+原始图表在 Astra 中使用 `detail: original`，两个 mini 均使用 `high`。[官方图像输入说明](https://developers.openai.com/api/docs/guides/images-vision)规定 5.4-mini high 不放大图片，最多 2500 个 32px patch、最长边 2048，patch token 乘数为 1.2。设原图 `P = ceil(width/32) * ceil(height/32)`，其图像 token 不超过 `ceil(1.2 * min(P,2500))`；现完整来源清单按每图 `2P+1` 计入的上界仍更保守，包含 1px 小图，现图片限额保持。此论证仅针对本入口实际的 high 请求，不外推 PDF parser 的 original 模式，也不把预算 bytes/2 估算当作严格费用上界。完整请求仍包括 schema/enum、图片结构、framing 和已验证的原始 PNG。
+
+模型身份、reasoning、输出上限、prompt/引用协议版本、原文单元清单 SHA 和完整输入指纹共同构成请求身份。返回的 `model` 记录 provider 的实际模型字段，`requestedModel` 记录请求模型；请求 SHA 绑定实际 body。Astra 保留既有严格模型校验；5.4-mini 只接受官方明确列出的 `gpt-5.4-mini` 或 `gpt-5.4-mini-2026-03-17`，缺失、其他模型或未知日期快照均拒绝，不重试或自动换模型。此时账本保留预留款待核对，不按所请求的较低费率擅自结算。
+
+`paidOpenAI` 增加标准 5.4-mini 费率：每百万输入 US$0.75、输出 US$4.50、上下文 400000，依据[官方模型与快照说明](https://developers.openai.com/api/docs/models/gpt-5.4-mini)。已有 `AI_MODEL_RATES` 显式覆盖仍保留；此前实验提供了同费率，现应用不再依赖实验脚本补费率。月限额、普通 200/day、开发最多 1000/day、真实 usage 账本均不改变。沿用现通用计费以标准输入价保守计入 cached input，不宣称精确体现缓存折扣；不扩至 Batch、Flex 或区域处理费率。配置和 mock 检查通过不等于语义、文件保真度或其他生产模型通过。
 
 ## 当前交付边界
 

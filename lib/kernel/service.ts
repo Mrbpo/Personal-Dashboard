@@ -7,7 +7,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText, type Documen
 import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -934,12 +934,13 @@ export class KernelService {
   /** Explicit selected-source route. Complete refers to source coverage, never
    * semantic correctness or a relevance ranking. No paid planner or fallback. */
   async answerSelectedStudySource(owner:string,question:string,expectedSource:DocumentContextSource,policy:DocumentAnswerPolicy={}){
-    if((policy.model??'gpt-5-mini')!=='gpt-5-mini'||(policy.reasoningEffort??'low')!=='low'||
+    if(!['gpt-5-mini','gpt-5.4-mini'].includes(policy.model??'gpt-5-mini')||(policy.reasoningEffort??'low')!=='low'||
       (policy.maxOutputTokens??4000)!==4000||(policy.timeoutMs??30000)!==30000)
       throw new Error('Complete selected-source answers require the fixed mini low/4000/30s policy');
+    const {model}=await documentAnswerSettings(policy);
     const source={...expectedSource},initial=await this.readCompleteDocumentSource(owner,source);
     if(initial.status==='unavailable')return initial;
-    const limits=COMPLETE_DOCUMENT_SOURCE_LIMITS,settings={model:'gpt-5-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:4000};
+    const limits=COMPLETE_DOCUMENT_SOURCE_LIMITS,settings={model,reasoningEffort:'low' as const,maxOutputTokens:4000};
     let latest=initial;
     const requestManifest=():CompleteDocumentSourceManifest=>{
       const prepared=prepareDocumentAnswer(question,latest.context);
@@ -984,6 +985,7 @@ export class KernelService {
    * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
   async answerStudyContent(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
+    await documentAnswerSettings(policy);
     const {includeParents=false,includeImages=false,...searchOptions}=options;
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
