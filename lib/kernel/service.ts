@@ -49,9 +49,10 @@ export function parseDeadline(raw: string | null, timezone: string | null = null
     : { date: null, at: null, localTime: null, timezone: null, precision: null, original: raw };
   // Only an explicit offset or Z establishes an instant. A local time without a zone stays a candidate.
   const match = /^(\d{4}-\d{2}-\d{2})T(\d{2})(?::(\d{2}))?(?::(\d{2})(?:\.\d+)?)?([Zz]|[+-]\d{2}:?\d{2})$/.exec(raw);
-  if (!match || !Number.isFinite(Date.parse(raw))) return { date: null, at: null, localTime: null, timezone: null, precision: null, original: raw };
+  const normalized=match && match[3]===undefined ? raw.replace(/T(\d{2})(?=[Zz]|[+-])/,'T$1:00') : raw;
+  if (!match || !Number.isFinite(Date.parse(normalized))) return { date: null, at: null, localTime: null, timezone: null, precision: null, original: raw };
   const precision = match[4] !== undefined ? 'second' : match[3] !== undefined ? 'minute' : 'hour';
-  const instant = new Date(raw).toISOString();
+  const instant = new Date(normalized).toISOString();
   if(!realCalendarDate(match[1]) || (!timezone && !/^[Zz]$/.test(match[5])))
     return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};
   // An explicit offset identifies the instant. Preserve local wall time in a trusted IANA zone;
@@ -73,6 +74,26 @@ export function parseDeadline(raw: string | null, timezone: string | null = null
     return {date:null,at:null,localTime:null,timezone:null,precision:null,original:raw};
   return {date:instant.slice(0,10),at:instant,localTime:instant.slice(11,19),
     timezone:'Etc/UTC',precision,original:raw};
+}
+
+export type MailDeadlineInput={at:string|null;text:string;confidence:number;evidence:string;sourceTimezone?:string|null};
+
+/** A proposed zone is not trusted merely because extraction supplied it. Only a
+ * directly paired ISO time (IANA zone), or ISO time [IANA zone], in a verbatim
+ * original-body excerpt is supported here. Other natural-language forms remain
+ * candidates; do not infer a zone from sender, thread, UI or machine settings. */
+function mailDeadlineSource(body:string,claim:MailDeadlineInput){
+  const excerpt=(claim.evidence||claim.text).slice(0,4000),zone=claim.sourceTimezone??null;
+  const pairs=(text:string)=>Array.from(text.matchAll(/\b(\d{4}-\d{2}-\d{2}T\d{2}(?::\d{2})?(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)\s*(?:\(([A-Za-z0-9_+\-/]+)\)|\[([A-Za-z0-9_+\-/]+)\])/g))
+    .map(match=>({at:match[1],zone:match[2]??match[3]}));
+  const quoted=pairs(excerpt),sameTime=pairs(body).filter(pair=>pair.at===claim.at);
+  const verified=typeof zone==='string'&&Boolean(zone)&&Boolean(excerpt)&&body.includes(excerpt)&&
+    quoted.length===1&&quoted[0].at===claim.at&&quoted[0].zone===zone&&
+    sameTime.length>0&&sameTime.every(pair=>pair.zone===zone);
+  const due=zone&&!verified&&!/^\d{4}-\d{2}-\d{2}$/.test(claim.at??'')
+    ? {...parseDeadline(null),original:claim.at} : parseDeadline(claim.at,verified?zone:null);
+  return {at:claim.at,text:claim.text,confidence:claim.confidence,excerpt,sourceTimezone:zone,
+    sourceTimezoneVerified:verified,due};
 }
 
 async function sourceVersion(client: PoolClient, input: {
@@ -602,7 +623,7 @@ export class KernelService {
     const termId = termName ? `term:${String(term?.id ?? termName).toLowerCase()}` : null;
     const raw = { id, termId, name: course.name ?? course.course_code ?? '未命名课程',
       enabled: course.enabled !== false && course.enabled !== 0,
-      code: course.course_code ?? course.code ?? course.name ?? id, termName,
+      code: course.course_code ?? course.code ?? course.name ?? id, termName,sourceTimezone:course.time_zone??null,
       startsAt: course.start_at ?? term?.start_at ?? null, endsAt: course.end_at ?? term?.end_at ?? null };
     const hash = stableId(JSON.stringify(raw));
     await kernelTransaction(async client => {
@@ -658,7 +679,7 @@ export class KernelService {
           acquiredAt,publishedAt:source.updatedAt});
         const rawDue=deterministic?source.dueAt:action.inferredDueAt;
         if (rawDue) {
-          const due=parseDeadline(rawDue);
+          const due=parseDeadline(rawDue,source.sourceTimezone??null);
           await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,source:provenance,
             sourceItemId:source.id,originalExcerpt:rawDue,confidence:source.dueAt?1:0.5,
             authority:source.dueAt&&due.precision?provenance:'ai',
@@ -674,7 +695,7 @@ export class KernelService {
             locator:`ai_task_payload:${index}:${aiIndex}:${stableId(JSON.stringify(aiPayload))}`,
             acquiredAt,publishedAt:source.updatedAt});
           if(aiAction.inferredDueAt){
-            const due=parseDeadline(aiAction.inferredDueAt);
+            const due=parseDeadline(aiAction.inferredDueAt,source.sourceTimezone??null);
             await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,
               source:provenance,sourceItemId:source.id,originalExcerpt:(aiAction.evidence||aiAction.inferredDueAt).slice(0,2000),
               confidence:0.5,authority:'ai',
@@ -715,7 +736,7 @@ export class KernelService {
       await recordCandidate(client,{entityId,attribute:'task_payload',value:payload,sourceVersionId:version,
         source:'legacy_import',sourceItemId,originalExcerpt:JSON.stringify(row).slice(0,4000),confidence:0.8,
         authority:'legacy_import',locator:`task_payload:${id}`,acquiredAt,publishedAt:iso(row.updated_at)});
-      if(row.due_at){const due=parseDeadline(String(row.due_at));await recordCandidate(client,{entityId,attribute:'due',
+      if(row.due_at){const due=parseDeadline(String(row.due_at),typeof row.due_timezone==='string'?row.due_timezone:null);await recordCandidate(client,{entityId,attribute:'due',
         value:due,sourceVersionId:version,source:'legacy_import',sourceItemId,originalExcerpt:String(row.due_at),
         confidence:0.8,authority:due.precision?'legacy_import':'ai',locator:`due:${id}`,acquiredAt,
         publishedAt:iso(row.updated_at)});}
@@ -979,13 +1000,15 @@ export class KernelService {
   }
 
   async ingestMailAnalysis(mail: {id:string;account:string;sender:string;subject:string;body:string;
-    receivedAt:string;hash:string}, analysis: {deadlines:Array<{at:string|null;text:string;confidence:number;evidence:string}>;
+    receivedAt:string;hash:string}, analysis: {deadlines:MailDeadlineInput[];
       referencedUrls?:string[];actionItems?:Array<{title:string;description:string;evidence:string;confidence:number}>}) {
     const acquiredAt=new Date().toISOString(),sourceItemId=`gmail:${mail.account}:${mail.id}`;
+    const deadlineSources=analysis.deadlines.map(claim=>mailDeadlineSource(mail.body,claim));
+    const contentHash=stableId('mail-deadline-source-timezone-v1',mail.hash,stableId(mail.body),JSON.stringify(deadlineSources));
     await kernelTransaction(async client=>{
       const version=await sourceVersion(client,{id:sourceItemId,source:'gmail',scope:mail.account,
-        externalId:mail.id,contentHash:mail.hash,raw:{subject:mail.subject,sender:mail.sender,
-          receivedAt:mail.receivedAt,bodyHash:mail.hash},rawUri:`sqlite-mail://${mail.account}/${mail.id}`,
+        externalId:mail.id,contentHash,raw:{subject:mail.subject,sender:mail.sender,
+          receivedAt:mail.receivedAt,bodyHash:stableId(mail.body),originalMailHash:mail.hash,deadlineSources},rawUri:`sqlite-mail://${mail.account}/${mail.id}`,
         rawSha256:mail.hash,acquiredAt,publishedAt:mail.receivedAt});
       const urls=analysis.referencedUrls||[];
       let matchedTask:{entity_id:string}|undefined;
@@ -994,13 +1017,13 @@ export class KernelService {
           'SELECT entity_id FROM tasks WHERE source_url=ANY($1::text[]) LIMIT 2',[urls])).rows;
         if(matches.length===1)matchedTask=matches[0];
       }
-      for(const [index,claim] of analysis.deadlines.entries()){
+      for(const [index,claim] of deadlineSources.entries()){
         if(!claim.at)continue;
         const entityId=matchedTask?.entity_id||stableId('mail_claim',sourceItemId,String(index));
         if(!matchedTask)await entity(client,entityId,'mail_claim',`${sourceItemId}:${index}`,null,null);
-        const due=parseDeadline(claim.at);
+        const due=claim.due;
         await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,
-          source:'gmail',sourceItemId,originalExcerpt:(claim.evidence||claim.text).slice(0,4000),
+          source:'gmail',sourceItemId,originalExcerpt:claim.excerpt,
           confidence:Math.max(0,Math.min(1,claim.confidence)),authority:'ai',locator:`deadline:${index}`,
           acquiredAt,publishedAt:mail.receivedAt});
       }

@@ -57,6 +57,8 @@ export type CanvasSource = {
   sourceUrl: string | null;
   updatedAt: string | null;
   dueAt: string | null;
+  /** Explicit source metadata (for Canvas, the fetched course time_zone). */
+  sourceTimezone?: string | null;
   unlockAt: string | null;
   lockAt: string | null;
   submissionState?: string | null;

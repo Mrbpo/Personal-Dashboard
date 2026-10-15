@@ -34,6 +34,14 @@ Use a named administrator shell with `KERNEL_DATABASE_URL` set. `npm run kernel:
 
 For a maintenance-window projection repair, stop web and worker writers, run `npm run kernel:migrate -- --rebuild-projections`, compare the returned counts with the prior snapshot, and then restart writers. This rebuilds course, task and event projections from PostgreSQL canonical facts and evidence; it does not import SQLite again.
 
+## Deadline source timezones
+
+Canvas carries the fetched course `time_zone` as `CanvasSource.sourceTimezone`; it participates in the source hash, retained raw metadata and deadline evidence. An explicit Z instant is displayed in that IANA zone; a numeric offset must agree with it. Date-only deadlines remain dates, and hour/minute/second precision and original strings are preserved. Invalid zones, offset disagreement and local strings without an offset, including DST folds or gaps, remain candidates.
+
+A mail deadline's optional `sourceTimezone` is only a proposed extraction value. Kernel independently requires a verbatim original-body excerpt directly pairing the same original ISO time with `(IANA/Zone)` or `[IANA/Zone]`; conflicting pairs for that time are rejected. Missing proof, AI-only timezone fields and unparsed natural-language expressions remain pending. This narrow contract does not automatically interpret all email date/time prose. The source version includes extraction/timezone provenance so changing it cannot silently reuse earlier evidence; the original mail hash is retained separately. Mail candidates still require explicit identity linking and review before becoming task facts.
+
+This change does not address floating calendar events, change event models, or add a tenant model.
+
 ## Delivery evidence
 
 Report four independent states: code complete (commit and PR), tests passed (CI run and restore exercise), services deployed (actual container IDs and health output), and production switched (live kernel reads/writes, final parity checks and release status). If credentials, server capacity, approval or restore verification are missing, label the affected state **blocked** and name the missing item. Do not infer deployment from this runbook or Compose files.
