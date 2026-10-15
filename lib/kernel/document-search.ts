@@ -4,7 +4,7 @@ import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CAND
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
 import {recallReferencedDocuments} from './document-references.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,DocumentSourceResolutionError,type DocumentSourceHint} from './document-source.ts';
-import {readFullDocumentEvidence} from './document-evidence.ts';
+import {readFullDocumentEvidence,DocumentEvidenceChangedError} from './document-evidence.ts';
 import {refineSelectedDocumentPages} from './document-refinement.ts';
 
 const symbolNames: Record<string,string> = {
@@ -62,6 +62,7 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   rerank_max_output_tokens?:number;
   refinement_mode?:'adjacent-pages'|'no-new-neighbors';refinement_candidate_count?:number;
   refined_from?:Array<{document_id:string;page_number:number;source_version_id:string;evidence_id:string}>;
+  refinement_seeds?:Array<{document_id:string;page_number:number;source_version_id:string;evidence_id:string}>;
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 
 export type DocumentSearchOptions={courseId?:string;documentId?:string;sourceHint?:DocumentSourceHint;
@@ -95,6 +96,32 @@ export function fuseLexicallySupportedAIRanks(lexical:DocumentTextHit[],ranked:D
     }
   }
   return out.slice(0,Math.max(0,limit)).map((hit,index)=>({...hit,score:1/(index+1)}));
+}
+
+/** Supplement, never replace, protected selections. Seeds must belong to the
+ * same verified initial pool; modality snippets cannot substitute identities. */
+export function independentDocumentRefinementSeeds(selected:DocumentTextHit[],lexical:DocumentTextHit[],
+ dense:DocumentTextHit[],candidates:DocumentTextHit[]):DocumentTextHit[]{
+ if(selected.length>5||candidates.length>DOCUMENT_RERANK_CANDIDATE_LIMIT)throw new Error('Invalid independent PDF seed scope');
+ const pageKey=(hit:DocumentTextHit)=>JSON.stringify([hit.document_id,hit.page_number]);
+ const byPage=new Map(candidates.map(hit=>[pageKey(hit),hit]));
+ if(byPage.size!==candidates.length)throw new Error('Ambiguous independent PDF seed pool');
+ const current=(hit:DocumentTextHit)=>{
+  const actual=byPage.get(pageKey(hit));if(!actual)return undefined;
+  if(evidenceIdentity(actual)!==evidenceIdentity(hit)||
+   ['source_hash','course_id','name','origin','origin_key','parser_version'].some(field=>
+    actual[field as keyof DocumentTextHit]!==hit[field as keyof DocumentTextHit]))throw new DocumentEvidenceChangedError();
+  return actual;
+ };
+ for(const hit of selected)if(!current(hit))throw new DocumentEvidenceChangedError();
+ const used=new Set(selected.map(evidenceIdentity));
+ const eligible=(hit:DocumentTextHit)=>{const actual=current(hit);return actual&&!used.has(evidenceIdentity(actual))?actual:undefined;};
+ const denseSeed=dense.map(eligible).find(Boolean);if(denseSeed)used.add(evidenceIdentity(denseSeed));
+ const lexicalSeed=lexical.filter(hit=>Number.isFinite(hit.lexical_support)&&
+  hit.lexical_support!>=DOCUMENT_LEXICAL_SUPPORT_THRESHOLD&&hit.lexical_support!<=1).map(eligible).find(Boolean);
+ const seeds=new Map<string,DocumentTextHit>();
+ for(const hit of [denseSeed,lexicalSeed])if(hit)seeds.set(evidenceIdentity(hit),hit);
+ return [...seeds.values()];
 }
 
 /** Validate the entire current candidate pool before restoring lexical support.
@@ -265,7 +292,8 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
         const ranked=hybrid?await selectSupportedHybridDocumentPages(pool,owner,query,hits,[...candidates.values()],limit):
           fuseLexicallySupportedAIRanks(hits,
             await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size),limit);
-        const refined=options.refineAdjacent?await refineSelectedDocumentPages(pool,owner,query,ranked,Math.min(5,limit)):ranked;
+        const seeds=options.refineAdjacent?independentDocumentRefinementSeeds(ranked,hits,independentDense,[...candidates.values()]):[];
+        const refined=options.refineAdjacent?await refineSelectedDocumentPages(pool,owner,query,ranked,Math.min(5,limit),seeds):ranked;
         return refined
           .map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'ai-rerank' as const,degraded_reason:semanticFailure}));
       }catch(error){
