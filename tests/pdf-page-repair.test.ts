@@ -49,7 +49,7 @@ test('repair plan is bounded to two exact original pages before any external wor
 test('page repair atomically retains all original PNG/region evidence beyond answer limits and refuses a stale version',
  {skip:!process.env.KERNEL_DATABASE_URL},async t=>{
  await migrateKernel();
- const owner='public-page-repair-'+randomUUID(),pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();
+ const owner='public-page-repair-'+randomUUID(),pdf=await PDFDocument.create();pdf.addPage([612,792]);pdf.addPage([612,792]);
  const bytes=await pdf.save(),id=await saveDocument(owner,'','upload','repair-test','repair-test.pdf','application/pdf',bytes);
  const doc=await getDocument(owner,id);
  const document={id,ownerId:owner,courseId:'',name:doc.name,hash:doc.hash,mime:doc.mime,origin:doc.origin,originKey:doc.origin_key};
