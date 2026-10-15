@@ -3,6 +3,8 @@ import {digest,readBlob} from '../library.ts';
 import {kernelPool} from './db.ts';
 import {kernel} from './service.ts';
 import {validateDoclingProgress,decodeDerivedDoclingResult,type DoclingIdentity,type DoclingProgress} from './docling-batches.ts';
+import type {DoclingVisualLayout} from './docling-result.ts';
+import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
 
 export const CACHED_DOCLING_REPLAY_VERSION='docling-cached-replay-v1';
 const rawMethods=new Set(['docling-text','docling-original-text-fallback','cached-docling-redecode']);
@@ -13,7 +15,7 @@ type Provenance={pageNumber:number;extractionMethod:string;parserVersion:string;
  basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}};
 export type CachedDoclingAudit={schema:1;owner:string;documentId:string;sourceHash:string;expectedCurrentVersion:string;
  decision:'eligible'|'unchanged';pageCount:number;changedPages:number[];warnings:string[];pages:Array<{pageNumber:number;locator:string;text:string}>;
- pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;reviewHash:string};
+ pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;visualLayout:DoclingVisualLayout;reviewHash:string};
 const normalizedWarnings=(warnings:string[])=>[...new Set(warnings.map(w=>w.trim()).filter(Boolean))].sort();
 
 /** No remote fallback: missing/corrupt drafts must fail, never request parsing. */
@@ -31,6 +33,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
    (stream.getContentsSize()===0||(!stream.dict.has(PDFName.of('Filter'))&&!stream.getContentsString().trim()))))?[index+1]:[];
  });
  const pages:Array<{pageNumber:number;locator:string;text:string}>=[],warnings:string[]=[];
+ const visualLayout:DoclingVisualLayout={status:'available',regions:[],pageSizes:[],resultReferences:[]};
  for(const batch of progress.batches){
   const copyIndices=Array.from({length:batch.end-batch.start+1},(_,i)=>batch.start+i-1);
   const derived=await PDFDocument.create();derived.setCreationDate(new Date(0));derived.setModificationDate(new Date(0));
@@ -55,10 +58,16 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
   // This CLI only replays raw Docling text, never reruns or downgrades AI formula pages.
   const decoded=decodeDerivedDoclingResult(saved.result,{...expected},{verifiedBlankPages:blank,formulaEnriched:false});
   pages.push(...decoded.pages);warnings.push(...decoded.warnings);
+  if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
+  visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
+  visualLayout.regions.push(...decoded.visualLayout.regions.map(region=>({...region,resultBlobSha256:batch.resultHash,
+   derivedInputSha256:batch.inputHash,copyIndices:[...copyIndices]})));
+  if(decoded.visualLayout.unavailablePictures)visualLayout.unavailablePictures=[...(visualLayout.unavailablePictures||[]),...decoded.visualLayout.unavailablePictures];
+  visualLayout.resultReferences!.push({resultBlobSha256:batch.resultHash,derivedInputSha256:batch.inputHash,copyIndices});
  }
  if(pages.length!==count||pages.some((page,i)=>page.pageNumber!==i+1)||!pages.some(page=>page.text.trim()))
   throw new Error('Cached replay complete document coverage missing');
- return {pages,warnings:normalizedWarnings(warnings),progress};
+ return {pages,warnings:normalizedWarnings(warnings),progress,visualLayout};
 }
 
 export async function auditCachedDoclingReplay(owner:string,documentId:string):Promise<CachedDoclingAudit>{
@@ -98,7 +107,7 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
    sourceVersionId:document.source_version_id,evidenceId:page.evidence_id}}));
  const audit={schema:1 as const,owner,documentId,sourceHash:document.source_hash,expectedCurrentVersion:document.current_version_id,
   decision:decision as CachedDoclingAudit['decision'],pageCount:document.page_count,changedPages,warnings,
-  pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress};
+  pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress,visualLayout:decoded.visualLayout};
  return {...audit,reviewHash:digest(JSON.stringify(audit))};
 }
 
@@ -109,10 +118,12 @@ export async function applyCachedDoclingReplay(reviewed:CachedDoclingAudit,expec
   throw new Error('Cached replay source/cache/current version changed after audit');
  if(current.decision==='unchanged')return {action:'unchanged',currentVersion:expectedCurrentVersion};
  const d=current.document;
+ const pdfVisuals=await preparePdfVisualEvidence({owner:d.owner_id,documentId:d.id,sourceHash:d.source_hash,
+  pdfBytes:await readBlob(d.source_hash),layout:current.visualLayout});
  await kernel.ingestParsedDocument({id:d.id,ownerId:d.owner_id,courseId:d.course_id||'',name:d.name,hash:d.source_hash,
   mime:'application/pdf',origin:d.origin,originKey:d.origin_key,createdAt:d.created_at.toISOString()},current.pages,
   {parserVersion:CACHED_DOCLING_REPLAY_VERSION,extractionMethod:'mixed-cached-docling-redecode',expectedPages:current.pageCount,
-   expectedCurrentVersion,warnings:current.warnings,pageProvenance:current.pageProvenance,batchProvenance:current.batchProvenance});
+   expectedCurrentVersion,warnings:current.warnings,pageProvenance:current.pageProvenance,batchProvenance:current.batchProvenance,pdfVisuals});
  return {action:'published',currentVersion:(await kernelPool().query<{current_version_id:string}>(
   'SELECT current_version_id FROM document_texts WHERE id=$1 AND owner_id=$2',[d.id,d.owner_id])).rows[0].current_version_id};
 }

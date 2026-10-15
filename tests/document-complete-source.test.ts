@@ -98,7 +98,7 @@ test('generic complete-source capacity retains boundary text and every original 
  const allImages=await kernel.readCompleteDocumentSource(pictures.owner,pictures.source);
  assert.equal(allImages.status,'available');if(allImages.status!=='available')throw new Error('Expected all64 original images');
  assert.equal(allImages.context.images.length,64);assert.equal(allImages.manifest.images.length,64);
- assert.deepEqual(allImages.context.images.map(image=>image.captionEvidenceId),pictures.nodes.slice(1).map(n=>n.evidenceId));
+ assert.deepEqual(allImages.context.images.map(image=>'captionEvidenceId' in image?image.captionEvidenceId:null),pictures.nodes.slice(1).map(n=>n.evidenceId));
  assert.ok(allImages.context.images.every(image=>hash(image.bytes)===hash(png)));
  assert.equal(allImages.context.accounting.imageBytes,64*png.length);
  assert.equal(allImages.manifest.limits.imageInputTokens,65536);assert.equal(allImages.manifest.limits.requestInputTokens,300000);

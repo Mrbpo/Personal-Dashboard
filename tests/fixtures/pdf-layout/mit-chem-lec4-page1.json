@@ -1,0 +1,945 @@
+{
+  "document": {
+    "filename": "page-0.pdf",
+    "md_content": null,
+    "json_content": {
+      "schema_name": "DoclingDocument",
+      "version": "1.10.0",
+      "name": "page-0",
+      "origin": {
+        "mimetype": "application/pdf",
+        "binary_hash": 3538550046766842904,
+        "filename": "page-0.pdf",
+        "uri": null
+      },
+      "furniture": {
+        "self_ref": "#/furniture",
+        "parent": null,
+        "children": [],
+        "content_layer": "furniture",
+        "meta": null,
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "body": {
+        "self_ref": "#/body",
+        "parent": null,
+        "children": [
+          {
+            "$ref": "#/texts/0"
+          },
+          {
+            "$ref": "#/texts/1"
+          },
+          {
+            "$ref": "#/texts/2"
+          },
+          {
+            "$ref": "#/texts/3"
+          },
+          {
+            "$ref": "#/texts/4"
+          },
+          {
+            "$ref": "#/groups/0"
+          },
+          {
+            "$ref": "#/texts/9"
+          },
+          {
+            "$ref": "#/texts/10"
+          },
+          {
+            "$ref": "#/texts/11"
+          },
+          {
+            "$ref": "#/pictures/0"
+          },
+          {
+            "$ref": "#/texts/16"
+          },
+          {
+            "$ref": "#/texts/17"
+          },
+          {
+            "$ref": "#/groups/1"
+          },
+          {
+            "$ref": "#/texts/23"
+          }
+        ],
+        "content_layer": "body",
+        "meta": null,
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "groups": [
+        {
+          "self_ref": "#/groups/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/5"
+            },
+            {
+              "$ref": "#/texts/6"
+            },
+            {
+              "$ref": "#/texts/7"
+            },
+            {
+              "$ref": "#/texts/8"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "name": "group",
+          "label": "key_value_area"
+        },
+        {
+          "self_ref": "#/groups/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/18"
+            },
+            {
+              "$ref": "#/texts/19"
+            },
+            {
+              "$ref": "#/texts/20"
+            },
+            {
+              "$ref": "#/texts/21"
+            },
+            {
+              "$ref": "#/texts/22"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "name": "list",
+          "label": "list"
+        }
+      ],
+      "texts": [
+        {
+          "self_ref": "#/texts/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "meta": null,
+          "label": "page_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 367.2,
+                "t": 718.524,
+                "r": 541.5239999999999,
+                "b": 707.3448991494532,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                29
+              ]
+            }
+          ],
+          "orig": "Wednesday, September 10, 2014",
+          "text": "Wednesday, September 10, 2014",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.2,
+                "t": 718.524,
+                "r": 222.468,
+                "b": 707.3448991494532,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                24
+              ]
+            }
+          ],
+          "orig": "5.111 Lecture Summary #4",
+          "text": "5.111 Lecture Summary #4",
+          "formatting": null,
+          "hyperlink": null,
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/2",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.18310000000001,
+                "t": 693.00768,
+                "r": 532.7950999999998,
+                "b": 640.5804714459293,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                291
+              ]
+            }
+          ],
+          "orig": "Reading for today: Section 1.5 and Section 1.6. (Same sections in 5 th and 4 th editions) Read for Lecture #5: Section 1.3 - Atomic Spectra, Section 1.7 up to equation 9b - Wavefunctions and Energy Levels, Section 1.8 - The Principle Quantum Number. (Same sections in 5 th and 4 th editions)",
+          "text": "Reading for today: Section 1.5 and Section 1.6. (Same sections in 5 th and 4 th editions) Read for Lecture #5: Section 1.3 - Atomic Spectra, Section 1.7 up to equation 9b - Wavefunctions and Energy Levels, Section 1.8 - The Principle Quantum Number. (Same sections in 5 th and 4 th editions)",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/3",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.20420000000001,
+                "t": 612.336,
+                "r": 532.8281999999998,
+                "b": 587.7804714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                156
+              ]
+            }
+          ],
+          "orig": "Pre-lecture questions are a learning tool for you to test your knowledge of the material. They will not be graded on correctness, but rather on competition.",
+          "text": "Pre-lecture questions are a learning tool for you to test your knowledge of the material. They will not be graded on correctness, but rather on competition.",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/4",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 80.17200000000004,
+                "t": 575.976,
+                "r": 554.172,
+                "b": 564.7968991494532,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                79
+              ]
+            }
+          ],
+          "orig": "_______________________________________________________________________________",
+          "text": "_______________________________________________________________________________",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/5",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 80.1642,
+                "t": 562.7760000000001,
+                "r": 119.82419999999999,
+                "b": 551.5968991494533,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "Topics:",
+          "text": "Topics:",
+          "formatting": null,
+          "hyperlink": null,
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/6",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 152.1642,
+                "t": 562.908,
+                "r": 313.8041999999999,
+                "b": 551.5524714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                32
+              ]
+            }
+          ],
+          "orig": "I. Light as a particle continued",
+          "text": "I. Light as a particle continued",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/7",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 152.1642,
+                "t": 549.708,
+                "r": 257.7882,
+                "b": 538.3524714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                19
+              ]
+            }
+          ],
+          "orig": "II.Matter as a wave",
+          "text": "II.Matter as a wave",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/8",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 152.1642,
+                "t": 536.5079999999999,
+                "r": 309.7602,
+                "b": 525.1524714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                28
+              ]
+            }
+          ],
+          "orig": "III.The Schrödinger equation",
+          "text": "III.The Schrödinger equation",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/9",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 80.17200000000004,
+                "t": 523.1759999999999,
+                "r": 560.172,
+                "b": 511.9968991494531,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                80
+              ]
+            }
+          ],
+          "orig": "________________________________________________________________________________",
+          "text": "________________________________________________________________________________",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/10",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 80.16419999999998,
+                "t": 496.7759999999999,
+                "r": 308.15219999999994,
+                "b": 485.5968991494531,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                32
+              ]
+            }
+          ],
+          "orig": "I. LIGHT AS A PARTICLE CONTINUED",
+          "text": "I. LIGHT AS A PARTICLE CONTINUED",
+          "formatting": null,
+          "hyperlink": null,
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/11",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 80.16419999999998,
+                "t": 470.3759999999999,
+                "r": 272.47619999999995,
+                "b": 459.19689914945315,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                34
+              ]
+            }
+          ],
+          "orig": "A)More on the Photoelectric Effect",
+          "text": "A)More on the Photoelectric Effect",
+          "formatting": null,
+          "hyperlink": null,
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/12",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 136.198,
+                "t": 249.24767999999995,
+                "r": 144.26568,
+                "b": 236.42047144592948,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                3
+              ]
+            }
+          ],
+          "orig": "e -",
+          "text": "e -",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/13",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 212.65599999999975,
+                "t": 249.24767999999995,
+                "r": 282.26568,
+                "b": 236.42047144592948,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                11
+              ]
+            }
+          ],
+          "orig": "ejected e -",
+          "text": "ejected e -",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/14",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 350.3659999999997,
+                "t": 249.24767999999995,
+                "r": 423.26568,
+                "b": 236.42047144592948,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                11
+              ]
+            }
+          ],
+          "orig": "ejected e -",
+          "text": "ejected e -",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/15",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 488.6419999999997,
+                "t": 247.77600000000007,
+                "r": 525.2659999999997,
+                "b": 236.42047144592948,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "ejected",
+          "text": "ejected",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/16",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.203,
+                "t": 220.67499999999995,
+                "r": 526.6829999999997,
+                "b": 208.99023537803134,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                66
+              ]
+            }
+          ],
+          "orig": "Three photons, each with an energy equal to φ/2 eject an electron!",
+          "text": "Three photons, each with an energy equal to φ/2 eject an electron!",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/17",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.203,
+                "t": 194.14300000000003,
+                "r": 485.18699999999995,
+                "b": 182.96389914945325,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                72
+              ]
+            }
+          ],
+          "orig": "Terminology tips to help solve problems involving photons and electrons:",
+          "text": "Terminology tips to help solve problems involving photons and electrons:",
+          "formatting": null,
+          "hyperlink": null,
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/18",
+          "parent": {
+            "$ref": "#/groups/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 97.2031,
+                "t": 164.49599999999998,
+                "r": 414.6750999999999,
+                "b": 152.81123537803137,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                61
+              ]
+            }
+          ],
+          "orig": "· photons: also called light, electromagnetic radiation, etc.",
+          "text": "photons: also called light, electromagnetic radiation, etc.",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": false,
+          "marker": "·"
+        },
+        {
+          "self_ref": "#/texts/19",
+          "parent": {
+            "$ref": "#/groups/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 133.2031,
+                "t": 144.57600000000002,
+                "r": 411.6509999999995,
+                "b": 133.22047144592955,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                28
+              ]
+            }
+          ],
+          "orig": "o may be described by , , or",
+          "text": "o may be described by , , or",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": false,
+          "marker": ""
+        },
+        {
+          "self_ref": "#/texts/20",
+          "parent": {
+            "$ref": "#/groups/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 97.2031,
+                "t": 122.49599999999998,
+                "r": 310.8510999999999,
+                "b": 110.81123537803137,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                40
+              ]
+            }
+          ],
+          "orig": "· electrons: also called photoelectrons.",
+          "text": "electrons: also called photoelectrons.",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": false,
+          "marker": "·"
+        },
+        {
+          "self_ref": "#/texts/21",
+          "parent": {
+            "$ref": "#/groups/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 133.2031,
+                "t": 100.41599999999994,
+                "r": 560.8709999999995,
+                "b": 88.73123537803144,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                61
+              ]
+            }
+          ],
+          "orig": "o may be described by , , or λ (see part II of today's notes)",
+          "text": "o may be described by , , or λ (see part II of today's notes)",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": false,
+          "marker": ""
+        },
+        {
+          "self_ref": "#/texts/22",
+          "parent": {
+            "$ref": "#/groups/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 97.2031,
+                "t": 79.08767999999998,
+                "r": 321.6461,
+                "b": 65.93123537803137,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                45
+              ]
+            }
+          ],
+          "orig": "· eV is a unit of energy = 1.6022 x 10 -19 J.",
+          "text": "eV is a unit of energy = 1.6022 x 10 -19 J.",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": false,
+          "marker": "·"
+        },
+        {
+          "self_ref": "#/texts/23",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "meta": null,
+          "label": "page_footer",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 526.8,
+                "t": 47.303999999999974,
+                "r": 532.8,
+                "b": 36.93814498510426,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                1
+              ]
+            }
+          ],
+          "orig": "1",
+          "text": "1",
+          "formatting": null,
+          "hyperlink": null
+        }
+      ],
+      "pictures": [
+        {
+          "self_ref": "#/pictures/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/12"
+            },
+            {
+              "$ref": "#/texts/13"
+            },
+            {
+              "$ref": "#/texts/14"
+            },
+            {
+              "$ref": "#/texts/15"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 91.46943664550781,
+                "t": 433.52252197265625,
+                "r": 528.6716918945312,
+                "b": 236.020751953125,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "image": null,
+          "annotations": []
+        }
+      ],
+      "tables": [],
+      "key_value_items": [],
+      "form_items": [],
+      "pages": {
+        "1": {
+          "size": {
+            "width": 612.0,
+            "height": 792.0
+          },
+          "image": null,
+          "page_no": 1
+        }
+      }
+    },
+    "html_content": null,
+    "text_content": null,
+    "doctags_content": null,
+    "doclang_content": null
+  },
+  "status": "success",
+  "errors": [],
+  "processing_time": 2.9450445270049386,
+  "timings": {},
+  "confidence": {
+    "parse_score": 1.0,
+    "layout_score": 0.8507939224893396,
+    "table_score": null,
+    "ocr_score": null,
+    "mean_score": 0.9253969612446697,
+    "low_score": 0.8582542263648726,
+    "mean_grade": "excellent",
+    "low_grade": "good"
+  }
+}

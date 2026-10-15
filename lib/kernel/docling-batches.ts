@@ -43,12 +43,14 @@ export function decodeDerivedDoclingResult(result:unknown,mapping:{start:number;
   return {...decoded,totalPages:mapping.totalPages,
     pages:decoded.pages.map(page=>({...page,pageNumber:original(page.pageNumber),locator:`第 ${original(page.pageNumber)} 页`})),
     formulaPageNumbers:decoded.formulaPageNumbers.map(original),
+    visualLayout:{...decoded.visualLayout,pageSizes:decoded.visualLayout.pageSizes.map(page=>({...page,pageNumber:original(page.pageNumber)})),
+      regions:decoded.visualLayout.regions.map(region=>({...region,pageNumber:original(region.pageNumber),copyIndices:[...mapping.copyIndices]}))},
     warnings:decoded.warnings.map(warning=>warning.replace(/第 (\d+) 页/g,(_,local)=>`第 ${original(Number(local))} 页`))};
 }
 
 // Atomic rename avoids publishing a pointer to a partially written staging blob.
 // Staging has no library document row and is never included in search.
-async function storeResult(value:unknown):Promise<string>{
+export async function storeDoclingResult(value:unknown):Promise<string>{
   const bytes=Buffer.from(JSON.stringify(value)),hash=digest(bytes);
   const root=resolve(process.env.LIBRARY_DIR||'./data/library');
   await mkdir(root,{recursive:true,mode:0o700});
@@ -114,6 +116,7 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
   const progress=input.progress?validateDoclingProgress(input.progress,input.identity):createDoclingProgress(input.identity);
   await input.persist(progress);
   const pages:DecodedDocling['pages']=[],warnings=new Set<string>(),formulaPages=new Set<number>();
+  const visualLayout:DecodedDocling['visualLayout']={status:'available',regions:[],pageSizes:[]};
   for(const batch of progress.batches){
     const prepared=await input.prepare(batch.start,batch.end);
     if(!/^[a-f0-9]{64}$/.test(prepared.inputHash)||prepared.copyIndices.length!==batch.end-batch.start+1||
@@ -144,7 +147,8 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
       if(blank){
         decoded={pages:Array.from({length:batch.end-batch.start+1},(_,i)=>({pageNumber:batch.start+i,
           locator:`第 ${batch.start+i} 页`,text:''})),totalPages:input.identity.totalPages,
-          warnings:[`第 ${batch.start}–${batch.end} 页已核验原始 PDF 无页面内容，保留为空白页`],formulaPageNumbers:[]};
+          warnings:[`第 ${batch.start}–${batch.end} 页已核验原始 PDF 无页面内容，保留为空白页`],formulaPageNumbers:[],
+          visualLayout:{status:'unavailable',regions:[],pageSizes:[],reason:'Blank range had no layout conversion'}};
         await input.persist(progress);
       }else{
         // Pin input bytes and explicit source indices before submitting or resuming.
@@ -153,13 +157,20 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
           async taskId=>{if(taskId)batch.taskId=taskId;else delete batch.taskId;await input.persist(progress);});
         try{decoded=decode(result);}
         catch(error){delete batch.taskId;await input.persist(progress);throw error;}
-        batch.resultHash=await storeResult({identity,result});delete batch.taskId;
+        batch.resultHash=await storeDoclingResult({identity,result});delete batch.taskId;
         await input.persist(progress);
       }
     }
     pages.push(...decoded.pages);decoded.warnings.forEach(w=>warnings.add(w));decoded.formulaPageNumbers.forEach(p=>formulaPages.add(p));
+    if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
+    visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
+    if(decoded.visualLayout.unavailablePictures)visualLayout.unavailablePictures=[...(visualLayout.unavailablePictures||[]),...decoded.visualLayout.unavailablePictures];
+    if(batch.resultHash)visualLayout.resultReferences=[...(visualLayout.resultReferences||[]),{resultBlobSha256:batch.resultHash,
+      derivedInputSha256:prepared.inputHash,copyIndices:[...prepared.copyIndices]}];
+    visualLayout.regions.push(...decoded.visualLayout.regions.map(region=>({...region,resultBlobSha256:batch.resultHash,
+      derivedInputSha256:prepared.inputHash,copyIndices:[...prepared.copyIndices]})));
   }
   if(pages.length!==input.identity.totalPages||pages.some((page,i)=>page.pageNumber!==i+1)||!pages.some(page=>page.text.trim()))
     throw new Error('Document transcription is incomplete');
-  return {pages,totalPages:input.identity.totalPages,warnings:[...warnings],formulaPageNumbers:[...formulaPages]};
+  return {pages,totalPages:input.identity.totalPages,warnings:[...warnings],formulaPageNumbers:[...formulaPages],visualLayout};
 }

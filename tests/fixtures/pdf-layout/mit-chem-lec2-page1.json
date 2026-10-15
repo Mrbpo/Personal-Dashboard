@@ -1,0 +1,1066 @@
+{
+  "document": {
+    "filename": "page-1.pdf",
+    "md_content": null,
+    "json_content": {
+      "schema_name": "DoclingDocument",
+      "version": "1.10.0",
+      "name": "page-1",
+      "origin": {
+        "mimetype": "application/pdf",
+        "binary_hash": 18162854225482535116,
+        "filename": "page-1.pdf",
+        "uri": null
+      },
+      "furniture": {
+        "self_ref": "#/furniture",
+        "parent": null,
+        "children": [],
+        "content_layer": "furniture",
+        "meta": null,
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "body": {
+        "self_ref": "#/body",
+        "parent": null,
+        "children": [
+          {
+            "$ref": "#/texts/0"
+          },
+          {
+            "$ref": "#/texts/1"
+          },
+          {
+            "$ref": "#/texts/2"
+          },
+          {
+            "$ref": "#/texts/3"
+          },
+          {
+            "$ref": "#/texts/4"
+          },
+          {
+            "$ref": "#/groups/0"
+          },
+          {
+            "$ref": "#/texts/7"
+          },
+          {
+            "$ref": "#/groups/1"
+          },
+          {
+            "$ref": "#/texts/9"
+          },
+          {
+            "$ref": "#/pictures/0"
+          },
+          {
+            "$ref": "#/texts/19"
+          },
+          {
+            "$ref": "#/texts/20"
+          },
+          {
+            "$ref": "#/groups/2"
+          },
+          {
+            "$ref": "#/texts/22"
+          },
+          {
+            "$ref": "#/groups/3"
+          },
+          {
+            "$ref": "#/texts/26"
+          }
+        ],
+        "content_layer": "body",
+        "meta": null,
+        "name": "_root_",
+        "label": "unspecified"
+      },
+      "groups": [
+        {
+          "self_ref": "#/groups/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/5"
+            },
+            {
+              "$ref": "#/texts/6"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "name": "list",
+          "label": "list"
+        },
+        {
+          "self_ref": "#/groups/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/8"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "name": "list",
+          "label": "list"
+        },
+        {
+          "self_ref": "#/groups/2",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/21"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "name": "group",
+          "label": "form_area"
+        },
+        {
+          "self_ref": "#/groups/3",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/23"
+            },
+            {
+              "$ref": "#/texts/24"
+            },
+            {
+              "$ref": "#/texts/25"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "name": "group",
+          "label": "form_area"
+        }
+      ],
+      "texts": [
+        {
+          "self_ref": "#/texts/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "meta": null,
+          "label": "page_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.2,
+                "t": 718.524,
+                "r": 222.468,
+                "b": 707.3448991494532,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                24
+              ]
+            }
+          ],
+          "orig": "5.111 Lecture Summary #2",
+          "text": "5.111 Lecture Summary #2",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/1",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "meta": null,
+          "label": "page_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 412.2,
+                "t": 718.656,
+                "r": 548.7360000000001,
+                "b": 707.3004714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                25
+              ]
+            }
+          ],
+          "orig": "Friday, September 5, 2014",
+          "text": "Friday, September 5, 2014",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/2",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.19630000000001,
+                "t": 693.00768,
+                "r": 532.7975000000001,
+                "b": 653.7804714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                239
+              ]
+            }
+          ],
+          "orig": "Readings for today: Sections A.2-A.3 (5 th ed pgs F9-13, 4 th ed pgs F10-13) - Force and Energy, Sections B.1-B.2 (5 th ed pgs F15-17, 4 th ed pgs F15-18) - Elements and Atoms , Section 1.1 (5 th ed and 4 th ed pgs 1-3) - The Nuclear Atom.",
+          "text": "Readings for today: Sections A.2-A.3 (5 th ed pgs F9-13, 4 th ed pgs F10-13) - Force and Energy, Sections B.1-B.2 (5 th ed pgs F15-17, 4 th ed pgs F15-18) - Elements and Atoms , Section 1.1 (5 th ed and 4 th ed pgs 1-3) - The Nuclear Atom.",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/3",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.197,
+                "t": 651.9359999999999,
+                "r": 532.8090000000001,
+                "b": 627.3804714459294,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                174
+              ]
+            }
+          ],
+          "orig": "Read for Lecture #3: Section 1.2 - The Characteristics of Electromagnetic Radiation, Section 1.4 - Radiation, Quanta, and Photons (focus on pgs 10-12 in the 5 th or 4 th ed).",
+          "text": "Read for Lecture #3: Section 1.2 - The Characteristics of Electromagnetic Radiation, Section 1.4 - Radiation, Quanta, and Photons (focus on pgs 10-12 in the 5 th or 4 th ed).",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/4",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.20470000000006,
+                "t": 530.604,
+                "r": 118.86470000000006,
+                "b": 519.4248991494533,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "Topics:",
+          "text": "Topics:",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/5",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 151.20470000000006,
+                "t": 530.736,
+                "r": 390.3286999999999,
+                "b": 519.3804714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                44
+              ]
+            }
+          ],
+          "orig": "I. Discovery of the electron and the nucleus",
+          "text": "Discovery of the electron and the nucleus",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": true,
+          "marker": "I."
+        },
+        {
+          "self_ref": "#/texts/6",
+          "parent": {
+            "$ref": "#/groups/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 151.20470000000006,
+                "t": 517.5360000000001,
+                "r": 549.0527,
+                "b": 506.1804714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                75
+              ]
+            }
+          ],
+          "orig": "II. (Failure of) the classical description atoms/intro to quantum mechanics",
+          "text": "(Failure of) the classical description atoms/intro to quantum mechanics",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": true,
+          "marker": "II."
+        },
+        {
+          "self_ref": "#/texts/7",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "section_header",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.2047,
+                "t": 475.164,
+                "r": 298.51669999999996,
+                "b": 463.9848991494532,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                31
+              ]
+            }
+          ],
+          "orig": "I. A) DISCOVERY OF THE ELECTRON",
+          "text": "I. A) DISCOVERY OF THE ELECTRON",
+          "formatting": null,
+          "hyperlink": null,
+          "level": 1
+        },
+        {
+          "self_ref": "#/texts/8",
+          "parent": {
+            "$ref": "#/groups/1"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "list_item",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.2047,
+                "t": 448.896,
+                "r": 532.7567,
+                "b": 424.34047144592955,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                149
+              ]
+            }
+          ],
+          "orig": "J.J. Thomson (English physicist, 1856-1940) in 1897 discovers the electron and determines the charge to mass ratio. In 1906, he wins the Nobel Prize.",
+          "text": "J.J. Thomson (English physicist, 1856-1940) in 1897 discovers the electron and determines the charge to mass ratio. In 1906, he wins the Nobel Prize.",
+          "formatting": null,
+          "hyperlink": null,
+          "enumerated": false,
+          "marker": ""
+        },
+        {
+          "self_ref": "#/texts/9",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.1927,
+                "t": 409.29600000000005,
+                "r": 167.2247,
+                "b": 397.9404714459296,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                15
+              ]
+            }
+          ],
+          "orig": "The Experiment:",
+          "text": "The Experiment:",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/10",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 281.5735,
+                "t": 381.6420282,
+                "r": 370.74419611000013,
+                "b": 371.6207514822245,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                20
+              ]
+            }
+          ],
+          "orig": "deflection plate (+)",
+          "text": "deflection plate (+)",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/11",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 188.4716,
+                "t": 341.3513282,
+                "r": 246.88684809999995,
+                "b": 331.33005148222446,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                12
+              ]
+            }
+          ],
+          "orig": "cathode rays",
+          "text": "cathode rays",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/12",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 107.1411203,
+                "t": 346.8401282,
+                "r": 132.98054198,
+                "b": 334.3694942607746,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "H 2 (g)",
+          "text": "H 2 (g)",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/13",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 494.4225,
+                "t": 370.0873282,
+                "r": 534.5938770999998,
+                "b": 360.06605148222445,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "∆V >> 0",
+          "text": "∆V >> 0",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/14",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 83.9005,
+                "t": 367.34942820000003,
+                "r": 183.67239579999998,
+                "b": 357.3281514822245,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                19
+              ]
+            }
+          ],
+          "orig": "cathode(-) anode(+)",
+          "text": "cathode(-) anode(+)",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/15",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 481.5818,
+                "t": 347.8090282,
+                "r": 542.1176797000002,
+                "b": 337.78775148222445,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                13
+              ]
+            }
+          ],
+          "orig": "∆x deflection",
+          "text": "∆x deflection",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/16",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 497.8210961,
+                "t": 329.7925199,
+                "r": 531.4572164799998,
+                "b": 319.77124318222445,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                6
+              ]
+            }
+          ],
+          "orig": "∆V = 0",
+          "text": "∆V = 0",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/17",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 281.5789334,
+                "t": 279.4901503,
+                "r": 368.08277066,
+                "b": 269.46887358222443,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                20
+              ]
+            }
+          ],
+          "orig": "deflection plate (-)",
+          "text": "deflection plate (-)",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/18",
+          "parent": {
+            "$ref": "#/pictures/0"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 83.9060101,
+                "t": 270.6153088,
+                "r": 141.69376199999996,
+                "b": 260.59403208222443,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                12
+              ]
+            }
+          ],
+          "orig": "high voltage",
+          "text": "high voltage",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/19",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 83.9060101,
+                "t": 256.72879209999996,
+                "r": 131.04491908,
+                "b": 246.70751538222441,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                10
+              ]
+            }
+          ],
+          "orig": "difference",
+          "text": "difference",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/20",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.2,
+                "t": 212.736,
+                "r": 549.1799999999997,
+                "b": 186.1802353780314,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                164
+              ]
+            }
+          ],
+          "orig": "If ΔV (the voltage difference between the two deflection plates) = 0 there is no deflection, but when ΔV is >> 0, there is Δx deflection towards the positive plate.",
+          "text": "If ΔV (the voltage difference between the two deflection plates) = 0 there is no deflection, but when ΔV is >> 0, there is Δx deflection towards the positive plate.",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/21",
+          "parent": {
+            "$ref": "#/groups/2"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 79.201,
+                "t": 175.46500000000003,
+                "r": 410.96099999999996,
+                "b": 164.10947144592956,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                44
+              ]
+            }
+          ],
+          "orig": "cathode rays = charged particles = electrons",
+          "text": "cathode rays = charged particles = electrons",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/22",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 97.2,
+                "t": 131.37599999999998,
+                "r": 389.17199999999985,
+                "b": 120.0204714459295,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                51
+              ]
+            }
+          ],
+          "orig": "From classical electromagnetism, Thompson knew that",
+          "text": "From classical electromagnetism, Thompson knew that",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/23",
+          "parent": {
+            "$ref": "#/groups/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 151.2,
+                "t": 101.35699999999997,
+                "r": 184.382,
+                "b": 88.8249488699878,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                7
+              ]
+            }
+          ],
+          "orig": "Δx(-) ∝",
+          "text": "Δx(-) ∝",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/24",
+          "parent": {
+            "$ref": "#/groups/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 260.252,
+                "t": 104.57299999999998,
+                "r": 523.4519999999999,
+                "b": 92.0409488699878,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                30
+              ]
+            }
+          ],
+          "orig": "e(-)= of the negative particle",
+          "text": "e(-)= of the negative particle",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/25",
+          "parent": {
+            "$ref": "#/groups/3"
+          },
+          "children": [],
+          "content_layer": "body",
+          "meta": null,
+          "label": "text",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 260.262,
+                "t": 77.21299999999997,
+                "r": 523.4419999999999,
+                "b": 64.68094886998779,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                31
+              ]
+            }
+          ],
+          "orig": "m(-) = of the negative particle",
+          "text": "m(-) = of the negative particle",
+          "formatting": null,
+          "hyperlink": null
+        },
+        {
+          "self_ref": "#/texts/26",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [],
+          "content_layer": "furniture",
+          "meta": null,
+          "label": "page_footer",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 526.8,
+                "t": 47.303999999999974,
+                "r": 532.8,
+                "b": 36.93814498510426,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                1
+              ]
+            }
+          ],
+          "orig": "1",
+          "text": "1",
+          "formatting": null,
+          "hyperlink": null
+        }
+      ],
+      "pictures": [
+        {
+          "self_ref": "#/pictures/0",
+          "parent": {
+            "$ref": "#/body"
+          },
+          "children": [
+            {
+              "$ref": "#/texts/10"
+            },
+            {
+              "$ref": "#/texts/11"
+            },
+            {
+              "$ref": "#/texts/12"
+            },
+            {
+              "$ref": "#/texts/13"
+            },
+            {
+              "$ref": "#/texts/14"
+            },
+            {
+              "$ref": "#/texts/15"
+            },
+            {
+              "$ref": "#/texts/16"
+            },
+            {
+              "$ref": "#/texts/17"
+            },
+            {
+              "$ref": "#/texts/18"
+            }
+          ],
+          "content_layer": "body",
+          "meta": null,
+          "label": "picture",
+          "prov": [
+            {
+              "page_no": 1,
+              "bbox": {
+                "l": 78.89064025878906,
+                "t": 383.1204528808594,
+                "r": 542.0886840820312,
+                "b": 248.7301025390625,
+                "coord_origin": "BOTTOMLEFT"
+              },
+              "charspan": [
+                0,
+                0
+              ]
+            }
+          ],
+          "captions": [],
+          "references": [],
+          "footnotes": [],
+          "image": null,
+          "annotations": []
+        }
+      ],
+      "tables": [],
+      "key_value_items": [],
+      "form_items": [],
+      "pages": {
+        "1": {
+          "size": {
+            "width": 612.0,
+            "height": 792.0
+          },
+          "image": null,
+          "page_no": 1
+        }
+      }
+    },
+    "html_content": null,
+    "text_content": null,
+    "doctags_content": null,
+    "doclang_content": null
+  },
+  "status": "success",
+  "errors": [],
+  "processing_time": 2.773566298012156,
+  "timings": {},
+  "confidence": {
+    "parse_score": 1.0,
+    "layout_score": 0.8004736247516814,
+    "table_score": null,
+    "ocr_score": null,
+    "mean_score": 0.9002368123758406,
+    "low_score": 0.8104499435140973,
+    "mean_grade": "excellent",
+    "low_grade": "good"
+  }
+}

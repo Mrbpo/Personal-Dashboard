@@ -28,7 +28,7 @@ test('isolated Kernel answers bind mini54 high-image requests, verify snapshots 
   evidence_id:'original-evidence',parser_version:'fixture-v1',score:1,evidence_body:'full-page'}],images:[{
   attachmentId:'image',assetId:hash(bytes),captionEvidenceId:'image-evidence',sha256:hash(bytes),byteLength:bytes.length,
   width:1,height:1,mime:'image/png',bytes,source}]};
- const complete={status:'available',context:{...c,parents:[],images:c.images.map(image=>({...image,originalReference:'source.png',
+ const complete={status:'available',context:{...c,parents:[],images:c.images.map(image=>'anchorEvidenceId' in image?image:({...image,originalReference:'source.png',
   provenance:{sourceUrl:'https://example.edu/source.png',revision:'fixture'}})),accounting:{anchorCount:1,parentCount:0,
   contextNodeCount:1,contextBodyCodepoints:text.length,imageCount:1,imageBytes:bytes.length}},manifest:{
   method:'complete-current-source',nodeOrder:'original-source',complete:true,reason:null,source,sourceNodeCount:1,returnedNodeCount:1,
