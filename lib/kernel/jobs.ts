@@ -11,7 +11,7 @@ export async function queueIngestionJob(kind: string, source: string, scope: str
      VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(idempotency_key) DO UPDATE SET
      updated_at=now(),payload=CASE WHEN $7::boolean AND ingestion_jobs.state IN ('complete','failed')
        THEN excluded.payload || CASE WHEN ingestion_jobs.kind='docling_document'
-         AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['owner','id','sourceHash','formulaEnriched','formulaBackend','scanBackend']) AS settings(key)
+         AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['owner','id','sourceHash','formulaEnriched','formulaBackend','scanBackend','nativeTextHints']) AS settings(key)
            WHERE (ingestion_jobs.payload->key) IS DISTINCT FROM (excluded.payload->key))
          THEN jsonb_strip_nulls(jsonb_build_object('doclingProgress',ingestion_jobs.payload->'doclingProgress',
            'doclingTaskId',ingestion_jobs.payload->'doclingTaskId')) ELSE '{}'::jsonb END

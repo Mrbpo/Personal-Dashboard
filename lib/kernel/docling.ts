@@ -9,6 +9,7 @@ import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
 import {enrichParsedPdfFormulae,transcribePdfVisualPages} from '../document-parser.ts';
 import {localPdfTextPages} from '../local-ocr.ts';
 import {prepareNativeTableCandidates} from './document-table-candidates.ts';
+import {configuredPdfNativeHints,PDF_NATIVE_HINT_POLICY} from '../pdf-native-hints.ts';
 
 export function nativePdfTextIsComplete(pages:string[]|null,expectedPages:number,blankPages:number[]=[]):boolean{
   if(!pages||pages.length!==expectedPages)return false;
@@ -27,7 +28,7 @@ export function nativePdfTextIsComplete(pages:string[]|null,expectedPages:number
     meaningful.filter(page=>page.length>=300).length>expectedPages*.5;
 }
 
-export async function convertDocumentWithDocling(owner: string, id: string, job?:{id:string;leaseToken:string;taskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;progress?:unknown;sourceHash?:string},savedResult?:Record<string,unknown>,savedTaskId?:string): Promise<void> {
+export async function convertDocumentWithDocling(owner: string, id: string, job?:{id:string;leaseToken:string;taskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;nativeTextHints?:string|false;progress?:unknown;sourceHash?:string},savedResult?:Record<string,unknown>,savedTaskId?:string): Promise<void> {
   const base=process.env.DOCLING_URL;
   if(!base)throw new Error('DOCLING_URL is required for v1 PDF parsing');
   const document=await getDocument(owner,id);
@@ -69,6 +70,10 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   const scanBackend=payload?.scanBackend??job?.scanBackend??process.env.PDF_SCAN_TRANSCRIPTION_BACKEND??'docling';
   if(typeof scanBackend!=='string')throw new Error('Unknown PDF scan backend');
   if(!['ai','docling'].includes(scanBackend))throw new Error('Unknown PDF scan backend');
+  // Existing/new queued jobs without this field remain disabled. Queued jobs
+  // freeze their trusted opt-in rather than inheriting worker environment drift.
+  const nativeTextHints=payload?payload.nativeTextHints:job?.nativeTextHints??configuredPdfNativeHints();
+  if(nativeTextHints!==undefined&&nativeTextHints!==false&&nativeTextHints!==PDF_NATIVE_HINT_POLICY)throw new Error('Unknown PDF native hint policy');
   const visual=!savedResult&&!legacyTaskId&&!progress&&!nativeComplete&&scanBackend==='ai';
   const prepare=async(start:number,end:number)=>{
     const copyIndices=Array.from({length:end-start+1},(_,i)=>start+i-1);
@@ -97,7 +102,8 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     async taskId=>{if(job)await rememberDoclingTask(job.id,job.leaseToken,taskId);});
   const decoded:DecodedDocling=result?decodeDoclingResult(result,originalPages,{verifiedBlankPages,formulaEnriched:localFormula}):
     visual?{pages:await transcribePdfVisualPages(id,bytes,{expectedSourceHash:document.hash,
-      pageNumbers:Array.from({length:originalPages},(_,index)=>index+1)}),totalPages:originalPages,
+      pageNumbers:Array.from({length:originalPages},(_,index)=>index+1),
+      ...(nativeTextHints?{nativeTextHints}:{} )}),totalPages:originalPages,
       warnings:['AI 视觉转写；数学、手写及图表请核对原 PDF'],formulaPageNumbers:[],nativeTables:[],
       visualLayout:{status:'unavailable' as const,regions:[],pageSizes:[],reason:'Visual transcription has no Docling layout'}}:
     nativeComplete?{pages:native!.map((text,index)=>({text,pageNumber:index+1,locator:`第 ${index+1} 页`})),
