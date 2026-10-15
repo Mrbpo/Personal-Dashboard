@@ -1100,8 +1100,12 @@ export class KernelService {
       if(!tableCandidates.length)return context;
       const supplemental=await this.readNativeTableCandidateEvidence(owner,tableCandidates);
       const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
+      const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
+      if(images.length>COMPLETE_DOCUMENT_SOURCE_LIMITS.images||images.reduce((sum,image)=>sum+image.byteLength,0)>COMPLETE_DOCUMENT_SOURCE_LIMITS.imageBytes||
+        images.reduce((sum,image)=>sum+2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1,0)>COMPLETE_DOCUMENT_SOURCE_LIMITS.imageInputTokens)
+        throw new DocumentContextError('DOCUMENT_IMAGE_UNAVAILABLE','Supplemental table images exceed the current answer limit');
       return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
-        images:[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()]};
+        images};
     },policy);
   }
 

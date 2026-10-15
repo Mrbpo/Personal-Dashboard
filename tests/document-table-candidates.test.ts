@@ -10,6 +10,8 @@ import {prepareNativeTableArtifact,nativeTableSearchStrings,prepareNativeTableCa
 import {kernel} from '../lib/kernel/service.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
+import type {DocumentSelectedNodeHit} from '../lib/kernel/document-evidence.ts';
+import type {PdfVisualImageEvidence} from '../lib/kernel/pdf-visual-evidence.ts';
 
 let externalCalls=0;globalThis.fetch=async()=>{externalCalls++;throw new Error('Native tables prohibit external calls');};
 after(async()=>{try{assert.equal(externalCalls,0);}finally{if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();}});
@@ -77,6 +79,30 @@ test('saved real MIT native table keeps all raw fields and its upstream original
  assert.equal(decoded.nativeTables[0].cellTexts[8].text,"Gaussian 'Pillbox'");
 });
 
+test('supplemental current page anchors bind real PNGs without creating text supports or replacing protected text',async()=>{
+ const f=await realFixture(),decoded=decodeDerivedDoclingResult(f.raw,{start:1,end:1,totalPages:1,copyIndices:[0]},
+  {verifiedBlankPages:[],formulaEnriched:false});
+ const source={documentId:'fixture-doc',currentVersionId:'fixture-version',sourceVersionId:'fixture-source',sourceHash:digest(f.pdf),courseId:''};
+ const node:DocumentSelectedNodeHit={id:'pg:fixture-version:1',document_id:source.documentId,source_version_id:source.sourceVersionId,
+  source_hash:source.sourceHash,course_id:'',name:'Saved MIT Class 5',origin:'public-fixture',origin_key:'mit-class5',
+  body:decoded.pages[0].text,locator:'第 1 页',page_number:1,evidence_id:'fixture-evidence',parser_version:'saved-real-native',
+  reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'};
+ const image:PdfVisualImageEvidence={kind:'pdf-page',physicalPage:1,attachmentId:digest('fixture-attachment'),assetId:digest(f.png),
+  anchorEvidenceId:node.evidence_id,rawPdfSha256:source.sourceHash,manifestSha256:digest('fixture-manifest'),source,mime:'image/png',
+  sha256:digest(f.png),byteLength:f.png.length,width:f.png.readUInt32BE(16),height:f.png.readUInt32BE(20),bytes:f.png,
+  provenance:{rawPdfSha256:source.sourceHash,pageRenderSha256:digest(f.png),pageSizePoints:{width:612,height:792},rotation:0,
+   rendererPolicy:'already-rendered-public-fixture',sourcePageCropBox:{x:0,y:0,width:612,height:792}}};
+ const context={anchors:[],parents:[],imageAnchors:[node],images:[image],sourceContentIsUntrusted:true as const};
+ const prepared=prepareDocumentAnswer('Which Gaussian surfaces?',context);
+ assert.deepEqual(prepared.quoteUnits,[]);assert.deepEqual(prepared.supports.map(s=>s.kind),['image']);
+ assert.equal(JSON.stringify(prepared.input).includes("Gaussian 'Pillbox'"),false);
+ assert.deepEqual(prepareDocumentAnswer('Which?',{...context,images:[]}).supports,[],'missing image cannot fall back to native/body text');
+ assert.throws(()=>prepareDocumentAnswer('Which?',{...context,images:[{...image,physicalPage:2}]}),/genuine current page/);
+ const protectedContext={...context,anchors:[node]},protectedResult=prepareDocumentAnswer('Which?',protectedContext);
+ assert.deepEqual(protectedResult.supports.map(s=>s.kind),['text','image']);
+ assert.ok(protectedResult.quoteUnits.length>0);assert.equal(protectedResult.supports[0].text,node.body);
+});
+
 test('isolated saved-real native projection recalls true page PNG only; foreign/stale sources and invalid assets cannot support an answer',
  {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
  const {preparePdfVisualEvidence}=await import('../lib/kernel/pdf-visual-evidence.ts');
@@ -89,6 +115,8 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  const table=decoded.nativeTables[0];table.result={resultBlobSha256:rawSha,derivedInputSha256:sourceHash,optionsHash,copyIndices:[0]};
  const nativeTables=await prepareNativeTableCandidates({owner,documentId:id,sourceHash,tables:[table]});
  assert.equal(nativeTables.artifacts[0].status,'available');
+ const forged=structuredClone(table);forged.cellTexts[0].text='Invented cell';
+ assert.ok((await prepareNativeTableCandidates({owner,documentId:id,sourceHash,tables:[forged]})).artifacts[0].reasons.includes('raw-result-unverified'));
  const png=fixture.png;
  const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:original,
   layout:{status:'unavailable',regions:[],pageSizes:[],reason:'Saved real page PNG supplied by offline fixture'}},async()=>png);

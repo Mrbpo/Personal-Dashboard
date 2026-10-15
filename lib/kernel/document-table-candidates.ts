@@ -231,7 +231,7 @@ export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,re
   if(rows.length!==expected.length||expected.some(value=>canonical(actual.get(value.id))!==canonical(value)))throw new DocumentEvidenceChangedError();
  };
  await verify();const imageAnchors:DocumentSelectedNodeHit[]=[],images:PdfVisualImageEvidence[]=[];
- const {readPdfVisualEvidence}=await import('./pdf-visual-evidence.ts');
+ const {readPdfVisualEvidence,PDF_VISUAL_READ_LIMITS}=await import('./pdf-visual-evidence.ts');
  const groups=new Map<string,DerivedTableCandidate[]>();
  for(const item of expected){const key=canonical(item.source);groups.set(key,[...(groups.get(key)||[]),item]);}
  for(const items of groups.values()){
@@ -246,6 +246,9 @@ export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,re
    if(!images.some(value=>value.attachmentId===png.attachmentId))images.push(png);
   }
  }
+ if(images.reduce((sum,image)=>sum+image.byteLength,0)>PDF_VISUAL_READ_LIMITS.bytes||
+  images.reduce((sum,image)=>sum+2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1,0)>PDF_VISUAL_READ_LIMITS.imageInputTokens)
+  throw new Error('Native table original images exceed the read limit');
  await verify();return {imageAnchors,images};
 }
 
