@@ -17,6 +17,7 @@ import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} fro
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
+import {createDocumentImageBudget} from './document-image-budget.ts';
 import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
  searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
  type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
@@ -1095,17 +1096,17 @@ export class KernelService {
             item.source.sourceVersionId!==selected.sourceVersionId||item.source.sourceHash!==selected.sourceHash))
           throw new DocumentEvidenceChangedError();
       }
-      const context=includeParents?await this.readDocumentParents(owner,current,{includeImages}):
+      const imageBudget=includeImages?createDocumentImageBudget():undefined;
+      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
       if(!tableCandidates.length)return context;
-      const supplemental=await this.readNativeTableCandidateEvidence(owner,tableCandidates);
+      const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
+        imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined);
       const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
       const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
-      if(images.length>COMPLETE_DOCUMENT_SOURCE_LIMITS.images||images.reduce((sum,image)=>sum+image.byteLength,0)>COMPLETE_DOCUMENT_SOURCE_LIMITS.imageBytes||
-        images.reduce((sum,image)=>sum+2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1,0)>COMPLETE_DOCUMENT_SOURCE_LIMITS.imageInputTokens)
-        throw new DocumentContextError('DOCUMENT_IMAGE_UNAVAILABLE','Supplemental table images exceed the current answer limit');
       return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
-        images};
+        images,...(imageBudget?{imageSelection:imageBudget.snapshot()}:{}),
+        ...('accounting' in context?{accounting:{...context.accounting,imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
     },policy);
   }
 
