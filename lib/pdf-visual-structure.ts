@@ -7,17 +7,21 @@ export function visualTextControlIssue(text:string):string|null{
 
 export function visualMathStructureIssue(text:string):string|null{
  const stack:Array<{kind:'math'|'environment';name:string}>=[];
+ let mathOpen=false;
  const environment=/\\(begin|end)(?![A-Za-z])\s*\{([^{}\\]*)\}/uy;
  for(let index=0;index<text.length;index++){
   if(text[index]!=='\\')continue;
   const next=text[index+1];
   // A literal escaped backslash or a matrix row break is not a math marker.
   if(next==='\\'){index++;continue;}
-  if(next==='('||next==='['){stack.push({kind:'math',name:next});index++;continue;}
+  if(next==='('||next==='['){
+   if(mathOpen)return `数学边界不能嵌套（位置 ${index}）`;
+   stack.push({kind:'math',name:next});mathOpen=true;index++;continue;
+  }
   if(next===')'||next===']'){
    const current=stack.pop();
    if(current?.kind!=='math'||current.name!==(next===')'?'(':'['))return `数学边界不配对（位置 ${index}）`;
-   index++;continue;
+   mathOpen=false;index++;continue;
   }
   if(!/^\\(?:begin|end)(?![A-Za-z])/u.test(text.slice(index,index+7)))continue;
   environment.lastIndex=index;

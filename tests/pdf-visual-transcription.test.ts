@@ -159,6 +159,7 @@ test('visual structure gate permits whitespace, row breaks and paired math but r
   String.raw`\begin{matrix}x`,String.raw`\end{matrix}`,
   String.raw`\begin{matrix}\end{cases}`,String.raw`\[\begin{matrix}x\]\end{matrix}`,
   String.raw`\begin{}`,String.raw`\begin{matrix`,String.raw`\begin{matrix}\begin{cases}\end{matrix}\end{cases}`,
+  String.raw`\(x\(y\)\)`,String.raw`\[x\(y\)\]`,String.raw`\(x\[y\]\)`,
  ])assert.notEqual(visualMathStructureIssue(text),null,text);
 });
 
