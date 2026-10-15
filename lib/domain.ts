@@ -59,6 +59,8 @@ export type CanvasSource = {
   dueAt: string | null;
   /** Explicit source metadata (for Canvas, the fetched course time_zone). */
   sourceTimezone?: string | null;
+  /** Explicit normalization failure; a missing zone must not erase confirmed local time. */
+  sourceTimezoneUnavailable?: boolean;
   unlockAt: string | null;
   lockAt: string | null;
   submissionState?: string | null;

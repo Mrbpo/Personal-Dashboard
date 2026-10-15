@@ -20,6 +20,7 @@ type CandidateInput = {
   source: string; sourceItemId: string; originalExcerpt: string;
   confidence: number; authority: string; locator: string;
   acquiredAt: string; publishedAt?: string | null; validFrom?: string | null;
+  pendingReason?: string;
 };
 
 const stableId = (...parts: string[]) => createHash('sha256').update(parts.join('\u0000')).digest('hex');
@@ -77,6 +78,12 @@ export function parseDeadline(raw: string | null, timezone: string | null = null
 }
 
 export type MailDeadlineInput={at:string|null;text:string;confidence:number;evidence:string;sourceTimezone?:string|null};
+
+function canvasDeadline(raw:string,source:CanvasSource){
+  const due=parseDeadline(raw,source.sourceTimezone??null);
+  return source.sourceTimezoneUnavailable&&due.precision!=='date'
+    ? {...parseDeadline(null),original:raw} : due;
+}
 
 /** A proposed zone is not trusted merely because extraction supplied it. Only a
  * directly paired ISO time (IANA zone), or ISO time [IANA zone], in a verbatim
@@ -175,9 +182,9 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
       safeDate(input.validFrom)??safeDate(input.publishedAt)??input.acquiredAt,input.locator]);
   const candidateId = stableId(input.entityId,input.attribute,evidenceId);
   await client.query(
-    `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority)
-     VALUES ($1,$2,$3,$4,$5,'pending',$6) ON CONFLICT(id) DO NOTHING`,
-    [candidateId,input.entityId,input.attribute,JSON.stringify(input.value),evidenceId,input.authority]);
+    `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority,reason)
+     VALUES ($1,$2,$3,$4,$5,'pending',$6,$7) ON CONFLICT(id) DO NOTHING`,
+    [candidateId,input.entityId,input.attribute,JSON.stringify(input.value),evidenceId,input.authority,input.pendingReason??null]);
   const existing = (await client.query<{id:string;canonical_value:unknown;chosen_candidate_id:string;same_value:boolean}>(
     `SELECT id,canonical_value,chosen_candidate_id,canonical_value=$3::jsonb AS same_value
      FROM facts WHERE entity_id=$1 AND attribute=$2 FOR UPDATE`,
@@ -679,12 +686,13 @@ export class KernelService {
           acquiredAt,publishedAt:source.updatedAt});
         const rawDue=deterministic?source.dueAt:action.inferredDueAt;
         if (rawDue) {
-          const due=parseDeadline(rawDue,source.sourceTimezone??null);
+          const due=canvasDeadline(rawDue,source);
           await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,source:provenance,
             sourceItemId:source.id,originalExcerpt:rawDue,confidence:source.dueAt?1:0.5,
             authority:source.dueAt&&due.precision?provenance:'ai',
             locator:deterministic?`due:${index}`:`ai_due:${index}:${stableId(JSON.stringify(due))}`,
-            acquiredAt,publishedAt:source.updatedAt});
+            acquiredAt,publishedAt:source.updatedAt,pendingReason:source.sourceTimezoneUnavailable&&due.precision!=='date'
+              ?'Canvas course timezone metadata unavailable; retain the last confirmed deadline':undefined});
         }
         if(deterministic)for(const [aiIndex,aiAction] of aiActions.entries()){
           const aiPayload=payloadFor(aiAction);
@@ -695,12 +703,13 @@ export class KernelService {
             locator:`ai_task_payload:${index}:${aiIndex}:${stableId(JSON.stringify(aiPayload))}`,
             acquiredAt,publishedAt:source.updatedAt});
           if(aiAction.inferredDueAt){
-            const due=parseDeadline(aiAction.inferredDueAt,source.sourceTimezone??null);
+            const due=canvasDeadline(aiAction.inferredDueAt,source);
             await recordCandidate(client,{entityId,attribute:'due',value:due,sourceVersionId:version,
               source:provenance,sourceItemId:source.id,originalExcerpt:(aiAction.evidence||aiAction.inferredDueAt).slice(0,2000),
               confidence:0.5,authority:'ai',
               locator:`ai_due:${index}:${aiIndex}:${stableId(JSON.stringify(due))}`,
-              acquiredAt,publishedAt:source.updatedAt});
+              acquiredAt,publishedAt:source.updatedAt,pendingReason:source.sourceTimezoneUnavailable&&due.precision!=='date'
+                ?'Canvas course timezone metadata unavailable; retain the last confirmed deadline':undefined});
           }
         }
         // AI's possiblyCancelled flag is deliberately not interpreted as an authoritative cancellation.

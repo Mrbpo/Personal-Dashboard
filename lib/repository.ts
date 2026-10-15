@@ -19,6 +19,7 @@ export async function hashSource(source: CanvasSource): Promise<string> {
     plannableId: source.plannableId ?? null,
     dueAt: source.dueAt,
     sourceTimezone: source.sourceTimezone ?? null,
+    sourceTimezoneUnavailable: Boolean(source.sourceTimezoneUnavailable),
     unlockAt: source.unlockAt,
     lockAt: source.lockAt,
     submissionState: source.submissionState,

@@ -16,7 +16,8 @@ globalThis.fetch=async()=>{throw new Error('Real network/model access is prohibi
 before(async()=>{
  const schema=process.env.KERNEL_SCHEMA??'',database=new URL(process.env.KERNEL_DATABASE_URL??'').pathname;
  if(process.env.CI==='true'&&/^kernel_test_\d+_\d+$/.test(schema))return;
- assert.equal(database,'/pdf_acceptance_20261006');assert.equal(schema,'truth_acceptance_timezone85_20261015_test');
+ assert.equal(database,'/pdf_acceptance_20261006');
+ assert.ok(['truth_acceptance_timezone85_20261015_test','truth_acceptance_timezone85_partial_20261015_test'].includes(schema));
  const admin=new Pool({connectionString:process.env.KERNEL_DATABASE_URL,max:1});
  try{
   assert.equal((await admin.query('SELECT current_database() name')).rows[0].name,'pdf_acceptance_20261006');
@@ -140,4 +141,41 @@ test('legacy import retains its recorded timezone without inventing a source or 
  const ev=(await kernel.canonicalEvidence([], [actual.id], [])).find(item=>item.attribute==='due')!;
  assert.equal(ev.source,'legacy_import');assert.equal(ev.original_excerpt,row.due_at);
  assert.equal((await kernelPool().query('SELECT count(*)::integer n FROM source_item_versions WHERE source_item_id=$1',[sourceItemId])).rows[0].n,1);
+});
+
+test('partial Canvas course metadata cannot replace a confirmed local deadline with UTC',async()=>{
+ await migrateKernel();const courseId=`tz85-partial:${randomUUID()}`;
+ await kernel.upsertCourse({id:courseId,name:'Controlled partial metadata course',course_code:courseId,time_zone:'America/Toronto'});
+ let mode:'available'|'failed'|'missing'='available';
+ const read=async()=>{
+  globalThis.fetch=async(input)=>{
+   const url=new URL(String(input));
+   if(url.pathname.endsWith('/assignments'))return Response.json([
+    {id:501,name:'Controlled exact activity',description:'Controlled fixture',due_at:'2027-06-19T02:15Z',updated_at:mode==='available'?published:'2026-09-23T12:00:00Z'},
+    {id:502,name:'Controlled date activity',description:'Controlled fixture',due_at:'2027-06-18',updated_at:mode==='available'?published:'2026-09-23T12:00:00Z'}]);
+   if(url.pathname===`/api/v1/courses/${courseId}`){
+    if(mode==='failed')throw new Error('Controlled source metadata request failed');
+    return Response.json(mode==='available'?{time_zone:'America/Toronto'}:{});
+   }
+   return Response.json([]);
+  };
+  try{return await getCourseSources(courseId);}finally{globalThis.fetch=async()=>{throw new Error('Real network/model access is prohibited');};}
+ };
+ const initial=await read();for(const item of initial.sources)await ingest(item);
+ const exact=initial.sources[0],date=initial.sources[1],confirmed=await task(exact);
+ assert.deepEqual([confirmed.due_date,confirmed.due_local_time,confirmed.due_timezone],['2027-06-18','22:15:00','America/Toronto']);
+ for(const state of ['failed','missing'] as const){
+  mode=state;const partial=await read();if(state==='failed')assert.equal(partial.complete,false);
+  assert.ok(partial.sources.every(item=>item.sourceTimezoneUnavailable===true&&item.sourceTimezone===null));
+  assert.notEqual(await hashSource(partial.sources[0]),await hashSource(exact));
+  for(const item of partial.sources)await ingest(item);
+  const retained=await task(exact);
+  assert.deepEqual([retained.due_date,retained.due_at,retained.due_local_time,retained.due_timezone],
+   [confirmed.due_date,confirmed.due_at,confirmed.due_local_time,confirmed.due_timezone]);
+  const unresolved=await pending(exact);assert.ok(unresolved);assert.equal(unresolved.value.precision,null);
+  assert.match((await kernel.candidate(unresolved.id)).reason,/timezone metadata unavailable/);
+  assert.equal((await task(date)).due_precision,'date');assert.equal((await task(date)).due_date,'2027-06-18');
+ }
+ const raw=(await kernelPool().query('SELECT raw_value FROM source_item_versions WHERE source_item_id=$1',[exact.id])).rows;
+ assert.ok(raw.some(row=>row.raw_value.sourceTimezoneUnavailable===true));
 });
