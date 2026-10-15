@@ -26,7 +26,7 @@ async function fixture(bodies:string[],mime='application/pdf',timeSegmentAnchor=
  const pages=bodies.map((text,index)=>({pageNumber:index+1,locator:'Original page '+(index+1),text}));
  if(timeSegmentAnchor)Object.assign(pages[0],{contentKind:'time_segment',startMs:0,endMs:1000});
  await kernel.ingestParsedDocument(document,pages,{parserVersion:'adjacent-test-v1',warnings:['Original math remains unverified.']});
- const hits=await kernel.searchDocumentText(owner,'quartz',{limit:14,semantic:false,aiRerank:false,hybrid:false,evidenceBody:'full-page'});
+ const hits=await kernel.searchDocumentText(owner,'quartz',{limit:240,semantic:false,aiRerank:false,hybrid:false,evidenceBody:'full-page'});
  return {owner,document,pages,hits,pool:kernelPool()};
 }
 
@@ -45,12 +45,43 @@ test('only selected PDF pages expand into same-version original neighbors, dedup
  await assert.rejects(selectedDocumentNeighborhood(item.pool,item.owner,[{...chosen[0],course_id:'foreign-course'}]),DocumentEvidenceChangedError);
 });
 
+test('independent seeds retain all five anchors, allow at most21 stored pages and reject invalid supplements',pg,async()=>{
+ const item=await fixture(Array.from({length:21},(_,index)=>'Quartz original page '+(index+1)));
+ const chosen=[2,5,8,11,14].map(page=>item.hits.find(hit=>hit.page_number===page)!),
+  seeds=[17,20].map(page=>item.hits.find(hit=>hit.page_number===page)!);
+ const expanded=await selectedDocumentNeighborhood(item.pool,item.owner,chosen,seeds);
+ assert.equal(expanded.length,21);assert.deepEqual(expanded.slice(0,5),chosen);
+ assert.equal(new Set(expanded.map(hit=>hit.id)).size,21);assert.ok(expanded.some(hit=>hit.page_number===21));
+ const dedup=await selectedDocumentNeighborhood(item.pool,item.owner,chosen,[chosen[0],seeds[0]]);
+ assert.deepEqual(dedup.slice(0,5),chosen);assert.equal(new Set(dedup.map(hit=>hit.id)).size,dedup.length);
+ const before=calls;
+ await assert.rejects(selectedDocumentNeighborhood(item.pool,item.owner,chosen,[...seeds,seeds[0]]),/Invalid/);
+ await assert.rejects(selectedDocumentNeighborhood(item.pool,'foreign-owner',chosen,seeds),DocumentEvidenceChangedError);
+ for(const changed of [{...seeds[0],course_id:'foreign-course'},{...seeds[0],source_version_id:'stale'},
+  {...seeds[0],evidence_id:'foreign'},{...chosen[0],source_hash:'conflicting-duplicate'}])
+  await assert.rejects(selectedDocumentNeighborhood(item.pool,item.owner,chosen,[changed]),DocumentEvidenceChangedError);
+ const nonPdf={...item.document,id:randomUUID(),originKey:randomUUID(),mime:'text/plain'};
+ await kernel.ingestParsedDocument(nonPdf,[{pageNumber:1,locator:'paragraph',text:'Quartz non-PDF supplement.'}],{parserVersion:'fixture'});
+ const paragraph=(await kernel.searchDocumentText(item.owner,'quartz',{limit:240})).find(hit=>hit.document_id===nonPdf.id)!;
+ const mixed=await selectedDocumentNeighborhood(item.pool,item.owner,chosen,[paragraph]);
+ assert.deepEqual(mixed,await selectedDocumentNeighborhood(item.pool,item.owner,chosen),
+  'a legitimate non-PDF modality result is skipped without degrading mixed retrieval');
+ await assert.rejects(selectedDocumentNeighborhood(item.pool,item.owner,chosen,[{...paragraph,source_version_id:'stale'}]),DocumentEvidenceChangedError);
+ assert.equal(calls,before,'all supplement checks are database-only');
+});
+
 test('no new neighbor skips model work; empty and non-PDF sources never invent adjacent evidence',pg,async()=>{
  const item=await fixture(['Quartz actual selected page.','','']);
  const before=calls,result=await refineSelectedDocumentPages(item.pool,item.owner,'quartz',item.hits,5);
  assert.equal(calls,before);assert.equal(result.length,1);assert.equal(result[0].refinement_mode,'no-new-neighbors');
  assert.equal(result[0].refinement_candidate_count,1);assert.equal(result[0].body,item.hits[0].body);
  assert.equal(result[0].refined_from?.[0].evidence_id,item.hits[0].evidence_id);
+ const forum={...item.document,id:randomUUID(),originKey:randomUUID(),mime:'text/plain'};
+ await kernel.ingestParsedDocument(forum,[{pageNumber:1,locator:'post:1',text:'Forum supplementary discussion.'}],{parserVersion:'fixture'});
+ const forumSeed=(await kernel.searchDocumentText(item.owner,'forum supplementary',{limit:5})).find(hit=>hit.document_id===forum.id)!;
+ const mixed=await refineSelectedDocumentPages(item.pool,item.owner,'quartz',item.hits,5,[forumSeed]);
+ assert.deepEqual(mixed[0].refinement_seeds,mixed[0].refined_from,'diagnostics omit the skipped non-PDF supplement');
+ assert.equal(calls,before);
  const text=await fixture(['Quartz selected paragraph.','Other original paragraph.'],'text/plain');
  assert.equal((await selectedDocumentNeighborhood(text.pool,text.owner,text.hits)).length,1);
  const timed=await fixture(['Quartz selected interval.','Original physical page.'],'application/pdf',true);
@@ -118,7 +149,8 @@ test('the Kernel opt-in reuses initial/refinement caches and query vectors throu
   await withDocumentRerankRunPolicy({dailyLimit:200,maxAttempts:1,beforeAttempt:async(_id,attempt)=>{phases.push(attempt!.phase);}},async()=>{
    const first=await kernel.searchDocumentText(item.owner,'quartz calculation',options);
    assert.equal(first.length,5);assert.equal(first[0].page_number,6);assert.equal(first[0].evidence_body,'full-page');
-   assert.equal(first[0].refinement_candidate_count,6);assert.equal(first[0].refined_from?.length,5);
+   assert.equal(first[0].refinement_candidate_count,8);assert.equal(first[0].refined_from?.length,5);
+   assert.equal(first[0].refinement_seeds?.length,7,'distinct modality supplements expand the original five without replacing them');
    const second=await kernel.searchDocumentText(item.owner,'quartz calculation',options);assert.deepEqual(second,first);
    assert.deepEqual(phases,['initial','adjacent-refinement']);assert.deepEqual(requests,['document_page_order','document_page_refinement']);
    assert.equal(embeddingCalls,1,'cached query vector is reused by subsequent stages and resumed calls');

@@ -1,13 +1,29 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {fuseLexicallySupportedAIRanks,DOCUMENT_LEXICAL_SUPPORT_THRESHOLD} from '../lib/kernel/document-search.ts';
+import {fuseLexicallySupportedAIRanks,independentDocumentRefinementSeeds,DOCUMENT_LEXICAL_SUPPORT_THRESHOLD} from '../lib/kernel/document-search.ts';
 import type {DocumentTextHit} from '../lib/kernel/document-search.ts';
 
 const hit=(index:number,support?:number):DocumentTextHit=>({id:`snippet-${index}`,document_id:`document-${index}`,
   course_id:'',name:'Original.pdf',origin:'upload',origin_key:`source-${index}`,source_hash:`hash-${index}`,
   body:`Original evidence body ${index}`,locator:'第 1 页',page_number:1,evidence_id:`evidence-${index}`,
   source_version_id:`version-${index}`,parser_version:'original-parser',score:100-index,lexical_support:support});
+
+test('independent refinement seeds supplement original anchors from the verified pool without changing lexical policy',()=>{
+ const pool=Array.from({length:9},(_,index)=>hit(index,index===6?.5:index===7?.9:.2)),selected=pool.slice(0,5),before=structuredClone(selected);
+ const lexical=[{...pool[0],lexical_support:1},pool[5],pool[6]],dense=[pool[0],pool[7],pool[8]];
+ assert.deepEqual(independentDocumentRefinementSeeds(selected,lexical,dense,pool),[pool[7],pool[6]]);
+ assert.deepEqual(selected,before,'supplements never replace or mutate the original five');
+ assert.deepEqual(independentDocumentRefinementSeeds(selected,[pool[7]],dense,pool),[pool[7]],'same seed from two modalities deduplicates');
+ assert.deepEqual(independentDocumentRefinementSeeds(selected,[pool[7],pool[6]],dense,pool),[pool[7],pool[6]],
+  'lexical continues past the dense seed to use its independent supplement slot');
+ assert.deepEqual(independentDocumentRefinementSeeds(selected,[{...pool[6],lexical_support:NaN}],[],pool),[]);
+ assert.deepEqual(independentDocumentRefinementSeeds(selected,[],[hit(99),pool[7]],pool),[pool[7]],'outside initial-pool pages cannot enter');
+ for(const bad of [{...pool[7],source_version_id:'stale'},{...pool[7],evidence_id:'foreign'},
+  {...pool[7],course_id:'other-course'},{...pool[7],source_hash:'other-source'}])
+  assert.throws(()=>independentDocumentRefinementSeeds(selected,[],[bad],pool),/no longer current/);
+ assert.throws(()=>independentDocumentRefinementSeeds(selected,[],[],[...pool,pool[0]]),/Ambiguous/);
+});
 
 test('one supported lexical page stays in top five while all remaining AI order and evidence survive',()=>{
  const lexical=Array.from({length:20},(_,index)=>hit(index,index===0?.6:.2));

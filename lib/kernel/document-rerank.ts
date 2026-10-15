@@ -8,7 +8,7 @@ import type {DocumentTextHit} from './document-search.ts';
 export const DOCUMENT_RERANK_MODEL='gpt-5-mini';
 export const DOCUMENT_RERANK_PROMPT_VERSION='document-page-rerank-v1';
 export const DOCUMENT_RERANK_SELECTION_PROMPT_VERSION='document-page-selection-v3-context';
-export const DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION='document-page-adjacent-refinement-v1';
+export const DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION='document-page-adjacent-refinement-v2-independent-seeds';
 export const DOCUMENT_RERANK_CANDIDATE_LIMIT=40;
 type Database=Pick<Pool,'query'>;
 type Page={document_id:string;version_id:string;source_version_id:string;page_number:number;body:string;
@@ -136,7 +136,7 @@ async function requestOrderOnce(query:string,pages:InputPage[],identities:string
  const response=await paidOpenAI('responses',{
   model:settings.model,store:false,max_output_tokens:settings.maxOutputTokens,reasoning:{effort:settings.reasoningEffort},
   input:[{role:'developer',content:(promptVersion===DOCUMENT_RERANK_REFINEMENT_PROMPT_VERSION?
-   'Refine selected PDF evidence using its adjacent original pages. ':'')+'Rank these candidate document pages as evidence for the user query. '+
+   'Refine selected PDF evidence using independent retrieval seeds and adjacent original pages. ':'')+'Rank these candidate document pages as evidence for the user query. '+
    (selectionCount===undefined?'Return only a permutation of the provided page identities, most useful first. ':
     `Select exactly ${selectionCount} distinct provided page identities, most useful first. Omit all other identities. `)+
    (selectionCount===undefined?'Prefer a page that directly explains or calculates the requested subject over incidental keyword mentions. ':
@@ -229,7 +229,7 @@ export async function selectDocumentPagesWithAI(pool:Pool,owner:string,query:str
 
 /** Distinct refinement prompt/cache; the original selection namespace is unchanged. */
 export async function selectAdjacentDocumentPagesWithAI(pool:Pool,owner:string,query:string,hits:DocumentTextHit[],count:number):Promise<DocumentTextHit[]>{
- if(hits.length>15||count>5)throw new Error('Invalid adjacent PDF refinement scope');
+ if(hits.length>21||count>5)throw new Error('Invalid adjacent PDF refinement scope');
  return rankOrSelectDocumentPages(pool,owner,query,hits,count,true,true);
 }
 

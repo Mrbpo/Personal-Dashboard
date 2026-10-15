@@ -155,7 +155,23 @@ test('adjacent refinement has an independent cache and journal phase, reuses suc
    assert.equal(calls,3,'even an ordinary two-attempt policy cannot repair the refinement request');
    assert.equal(fixture.cache.size,2);
   });
-  await assert.rejects(selectAdjacentDocumentPagesWithAI(fixture.pool(),'adjacent','q',Array(16).fill(hits[0]),5),/refinement scope/);
+  await assert.rejects(selectAdjacentDocumentPagesWithAI(fixture.pool(),'adjacent','q',Array(22).fill(hits[0]),5),/refinement scope/);
+ }finally{globalThis.fetch=original;}
+});
+
+test('refinement v2 ignores historical v1 cache rows and rejects foreign IDs in its own cache without repair',async()=>{
+ const fixture=new Fixture(),hits=fixture.hits('seed-cache'),original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({orderedIds:['p0','p1']})});};
+ try{
+  await selectAdjacentDocumentPagesWithAI(fixture.pool(),'seed-cache','same input',hits,2);
+  const cacheKey=[...fixture.cache.keys()][0],parts=JSON.parse(cacheKey);
+  assert.equal(parts[3],'document-page-adjacent-refinement-v2-independent-seeds');
+  fixture.cache.delete(cacheKey);fixture.cache.set(key([...parts.slice(0,3),'document-page-adjacent-refinement-v1']),['p99','p0']);
+  await selectAdjacentDocumentPagesWithAI(fixture.pool(),'seed-cache','same input',hits,2);
+  assert.equal(calls,2,'a legacy row cannot masquerade as the new refinement method');
+  fixture.cache.set(cacheKey,['p99','p0']);
+  await assert.rejects(selectAdjacentDocumentPagesWithAI(fixture.pool(),'seed-cache','same input',hits,2),/foreign/);
+  assert.equal(calls,2,'invalid cached identity fails without a paid repair');
  }finally{globalThis.fetch=original;}
 });
 
