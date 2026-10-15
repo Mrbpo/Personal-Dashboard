@@ -231,6 +231,7 @@ test('synthesis revalidates current sources, rejects incomplete output and makes
   const result=await synthesizeDocumentAnswer('How many samples?',async()=>{reads++;return context();},
    {beforeAttempt:async()=>{attempts++;}});
   assert.equal(result.answer.status,'answered');assert.equal(result.model,'gpt-5-mini');
+  assert.equal(result.promptVersion,'grounded-document-answer-v5');
   assert.equal(result.providerRequestSha256,requestHash);assert.equal(result.selectedUnits.length,1);
   assert.equal(reads,2);assert.equal(attempts,1);assert.equal(calls,1);
   reads=0;
