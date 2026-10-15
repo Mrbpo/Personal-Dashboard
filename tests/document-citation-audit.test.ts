@@ -64,7 +64,11 @@ test('audit restores the entire original selection object and only its actual se
   references:[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]});
  assert.equal(request.model,'gpt-5.4-mini');assert.deepEqual(request.reasoning,{effort:'low'});assert.equal(request.max_output_tokens,1000);
  const image=content.find(item=>item.type==='input_image');assert.ok(image&&'image_url' in image);
- assert.equal(image.image_url,'data:image/png;base64,'+bytes.toString('base64'));assert.equal(image.detail,'high');
+ assert.equal(image.image_url,'data:image/png;base64,'+bytes.toString('base64'));assert.equal(image.detail,'original');
+ const legacyHigh=structuredClone(request),legacyContent=legacyHigh.input[1].content;
+ assert.ok(Array.isArray(legacyContent));const legacyImage=legacyContent.find(item=>item.type==='input_image');
+ assert.ok(legacyImage&&'detail' in legacyImage);legacyImage.detail='high';
+ assert.notEqual(hash(JSON.stringify(request)),hash(JSON.stringify(legacyHigh)),'old audits do not replay the new image detail');
  assert.equal(prepared.binding.citations[0].evidence.sourceHash,source.sourceHash);
  assert.equal(prepared.binding.citations[0].quoteSha256,hash(body));assert.equal(prepared.binding.citations[1].evidence.sha256,hash(bytes));
  assert.equal(JSON.stringify(original),snapshot);
@@ -105,6 +109,7 @@ test('Kernel policy and current-source binding fail before fetch; valid calls re
    const result=await kernel.auditSelectedStudySourceClaim('owner',question,source,original,policy(raw,async identity=>{attempts++;identities.push(identity);}));
    assert.equal(result.status,'available');if(result.status!=='available')throw new Error('Expected audit');
    assert.deepEqual(result.result.diagnostics,diagnostics());assert.equal(reads,3);assert.equal(calls,1);assert.equal(attempts,1);
+   assert.equal(result.result.version,'citation-local-audit-v2');
    assert.equal(result.result.requestIdentity,identities[0]);assert.equal(result.result.requestIdentity,raw[0].requestIdentity);
    assert.equal(result.result.providerRequestSha256,raw[0].providerRequestSha256);assert.equal(result.result.rawResponseSha256,hash(raw[0].rawBody));
    assert.equal(raw[0].httpStatus,200);assert.equal(JSON.stringify(original),saved);

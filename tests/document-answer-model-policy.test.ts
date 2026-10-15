@@ -14,7 +14,7 @@ process.env.SERVICE_VAULT_DIR=join(tmpdir(),'document-mini54-empty-vault-'+rando
 process.env.OPENAI_API_KEY='dummy-local-model-policy-never-sent';
 process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='5';
 
-test('isolated Kernel answers bind mini54 high-image requests, verify snapshots and retain unverified charges',async()=>{
+test('isolated Kernel answers bind mini54 original-image requests, verify snapshots and retain unverified charges',async()=>{
  const names=['DATABASE_URL','KERNEL_DATABASE_URL','KERNEL_ADMIN_DEVELOPMENT_RUN','AI_MODEL_RATES'] as const;
  const saved=Object.fromEntries(names.map(name=>[name,process.env[name]])),originalFetch=globalThis.fetch;
  // Initialize the test-only in-memory ledger before testing the literal process
@@ -66,7 +66,13 @@ test('isolated Kernel answers bind mini54 high-image requests, verify snapshots 
   assert.equal(requests[0].model,'gpt-5.4-mini');assert.deepEqual(requests[0].reasoning,{effort:'low'});
   assert.equal(requests[0].max_output_tokens,4000);const content=requests[0].input[1].content;assert.ok(Array.isArray(content));
   const actualImage=content.find(item=>item.type==='input_image');assert.ok(actualImage&&'detail' in actualImage);
-  assert.equal(actualImage.detail,'high');
+  assert.equal(actualImage.detail,'original');
+  assert.ok('image_url' in actualImage);
+  assert.equal(actualImage.image_url,'data:image/png;base64,'+bytes.toString('base64'));
+  const legacyHigh=structuredClone(requests[0]),legacyContent=legacyHigh.input[1].content;
+  assert.ok(Array.isArray(legacyContent));const legacyImage=legacyContent.find(item=>item.type==='input_image');
+  assert.ok(legacyImage&&'detail' in legacyImage);legacyImage.detail='high';
+  assert.notEqual(result.result.providerRequestSha256,hash(JSON.stringify(legacyHigh)),'old high-detail raw is not an exact replay');
   assert.equal(result.result.answer.claims[0].citations[0].quote,text);assert.equal(result.result.answer.claims[0].citations[1].quote,'');
   assert.equal(result.manifest.request?.imageInputTokenUpper,3);assert.equal(result.manifest.request?.inputTokenUpper,
    result.manifest.request!.nonImageBodyUtf8Bytes+3+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens);
@@ -83,9 +89,17 @@ test('isolated Kernel answers bind mini54 high-image requests, verify snapshots 
   }
   actualModel='gpt-5-mini';const ordinary=await kernel.answerSelectedStudySource('owner','How many?',source);
   assert.equal(ordinary.status,'available');assert.equal(requests.at(-1)?.model,'gpt-5-mini');
+  const ordinaryContent=requests.at(-1)!.input[1].content;assert.ok(Array.isArray(ordinaryContent));
+  const ordinaryImage=ordinaryContent.find(item=>item.type==='input_image');
+  assert.ok(ordinaryImage&&'image_url' in ordinaryImage);
+  assert.equal(ordinaryImage.detail,'high');assert.equal(ordinaryImage.image_url,actualImage.image_url);
   assert.notEqual(ordinary.status==='available'&&'requestIdentity' in ordinary.result&&ordinary.result.requestIdentity,identities[0]);
   assert.equal(calls,7);assert.equal(attempts,6);
   const prepared=prepareDocumentAnswer('How many?',c);
+  const astra=buildDocumentAnswerRequest(prepared,{model:'gpt-6-astra',reasoningEffort:'high',maxOutputTokens:4000});
+  const astraContent=astra.input[1].content;assert.ok(Array.isArray(astraContent));
+  const astraImage=astraContent.find(item=>item.type==='input_image');
+  assert.ok(astraImage&&'detail' in astraImage);assert.equal(astraImage.detail,'original');
   assert.throws(()=>buildDocumentAnswerRequest(prepared,{model:'gpt-5.4' as 'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000}),/Invalid/);
  }finally{
   globalThis.fetch=originalFetch;for(const name of names){if(saved[name]===undefined)delete process.env[name];else process.env[name]=saved[name];}
