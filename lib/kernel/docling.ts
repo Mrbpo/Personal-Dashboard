@@ -132,7 +132,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   }
   const pdfVisuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash:document.hash,pdfBytes:bytes,layout:decoded.visualLayout});
   const nativeTables=await prepareNativeTableCandidates({owner,documentId:id,sourceHash:document.hash,
-    tables:'nativeTables' in decoded?decoded.nativeTables:[]});
+    tables:decoded.nativeTables});
   await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,
     hash:document.hash,mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
     {parserVersion,expectedPages:totalPages,warnings,nativeTables,pdfVisuals,expectedCurrentVersion,

@@ -127,6 +127,7 @@ type VisualManifest={content:{rawPdfSha256:string;renderStatus:string;assets:Arr
 export async function commitNativeTableCandidates(db:Queryable,value:PreparedNativeTableCandidates,source:DocumentContextSource,pageEvidenceIds:string[]){
  source={...source};pageEvidenceIds=[...pageEvidenceIds];
  assertPreparedNativeTableCandidates(value,value.owner,source.documentId,source.sourceHash);
+ if(!value.artifacts.length)return {tables:0,available:0,unavailable:0,artifactSha256:value.sha256};
  const current=(await db.query(`SELECT d.id FROM document_texts d
   JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id

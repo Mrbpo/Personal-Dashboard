@@ -147,6 +147,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     }).sort((a, b) => (a.start_row_offset_idx as number) - (b.start_row_offset_idx as number) || (a.start_col_offset_idx as number) - (b.start_col_offset_idx as number));
     const rows = new Map<number, string[]>();
     const tablePages = new Set(provenance(node).map(location => location.page_no));
+    const cellIndices=new Map(list(data.table_cells).map((cell,index)=>[cell,index]));
     const cellTexts:DoclingNativeTable['cellTexts']=[];
     for (const cell of cells) {
       const row = cell.start_row_offset_idx as number;
@@ -154,7 +155,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       const column = cell.start_col_offset_idx as number;
       while (values.length <= column) values.push('');
       const original=cellText(cell, ancestors, tablePages);
-      cellTexts.push({cellIndex:list(data.table_cells).indexOf(cell),text:original});
+      cellTexts.push({cellIndex:cellIndices.get(cell)!,text:original});
       const content = original.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
       if (values[column] && content) throw new Error('Docling table has overlapping cell coordinates');
       values[column] = content;
