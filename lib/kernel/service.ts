@@ -10,6 +10,7 @@ import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
+import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -1088,11 +1089,10 @@ export class KernelService {
     return {status:'available' as const,manifest:initial.manifest,result};
   }
 
-  /** Non-structured study content only; canonical business facts use their own
-   * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
-  async answerStudyContent(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
-    await documentAnswerSettings(policy);
+  /** Shared existing retrieval/current-source callback; the default answering
+   * path keeps the same options, reads, order and provider payload. */
+  private async studyAnswerContextReader(owner:string,question:string,
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={}){
     const {includeParents=false,includeImages=false,...searchOptions}=options;
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
@@ -1104,7 +1104,7 @@ export class KernelService {
       {courseId:searchOptions.courseId})):undefined;
     const tableCandidates=includeImages?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
       documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
-    return synthesizeDocumentAnswer(question,async()=>{
+    return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
         const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
@@ -1126,7 +1126,27 @@ export class KernelService {
       return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
         images,...(imageBudget?{imageSelection:imageBudget.snapshot()}:{}),
         ...('accounting' in context?{accounting:{...context.accounting,imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
-    },policy);
+    };
+  }
+
+  /** Non-structured study content only; canonical business facts use their own
+   * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
+  async answerStudyContent(owner:string,question:string,
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
+    await documentAnswerSettings(policy);
+    return synthesizeDocumentAnswer(question,await this.studyAnswerContextReader(owner,question,options),policy);
+  }
+
+  /** Explicit administrator development lane. A title may occur in query text;
+   * callers cannot secretly replace library retrieval with a document filter. */
+  async planStudyAnswer(owner:string,question:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    await assertStudyAnswerPlanPolicy(policy);
+    if(!options||Object.keys(options).some(key=>key!=='courseId')||
+      (options.courseId!==undefined&&(typeof options.courseId!=='string'||!options.courseId.trim())))
+      throw new Error('Study planning allows only explicit user course context, not document/source filters');
+    const read=await this.studyAnswerContextReader(owner,question,{...options,limit:14,semantic:false,hybrid:false,aiRerank:false,
+      relatedDocuments:true,includeParents:true,includeImages:true});
+    return planRetrievedStudyAnswer(question,read,policy);
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {
