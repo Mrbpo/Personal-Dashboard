@@ -5,6 +5,7 @@ import {paidOpenAI} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {localPageOcr,localPdfPageText,localPdfPageImage,PDF_PAGE_IMAGE_MAX_EDGE} from './local-ocr.ts';
 import {appendPdfLatex,mayContainPdfMath} from './pdf-formulas.ts';
+import {assertVisualCacheStructure,PdfVisualStructureError,VISUAL_UNCERTAINTY_HEADER,visualMathStructureIssue,visualTextControlIssue} from './pdf-visual-structure.ts';
 import mammoth from 'mammoth';
 export const PDF_PARSER_VERSION='pdf-page-v3-latex';
 export const PDF_FORMULA_PAGES_PER_DOCUMENT=24;
@@ -49,7 +50,10 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
  for(const pageNumber of selection){
   const page=pageNumber-1;
   const cached=await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?').bind(id,cacheParser,page).first<{body:string}>();
-  if(cached){pages.push({pageNumber:page+1,locator:`第 ${page+1} 页`,text:cached.body});continue;}
+  if(cached){
+   assertVisualCacheStructure(cached.body,pageNumber);
+   pages.push({pageNumber:page+1,locator:`第 ${page+1} 页`,text:cached.body});continue;
+  }
   const visualInputs:Array<{type:'input_text';text:string}|{type:'input_image';image_url:string;detail:string}|{type:'input_file';filename:string;file_data:string}>=[];
   if(tiledImages){
    const box=pdf.getPage(page).getCropBox();
@@ -92,7 +96,13 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
   const notes=parsed.uncertain_spans;
   if((options.pageNumbers&&notes===undefined)||(notes!==undefined&&(!Array.isArray(notes)||notes.length>100||notes.some((note:unknown)=>typeof note!=='string'||note.length>1000))))
    throw new Error(`第 ${page+1} 页识别警告格式无效`);
-  const text=(notes?.length?'[本页存在无法可靠辨认的片段，须核对原 PDF]\n'+notes.map((note:string)=>`[无法可靠辨认: ${note}]`).join('\n')+'\n':'')+parsed.text.trim();
+  // Check before trim: whitespace trimming would hide leading/trailing C0 such
+  // as form feed. Do not interpret warning notes as page LaTeX syntax.
+  const issue=visualTextControlIssue(parsed.text)||visualMathStructureIssue(parsed.text)||
+   (notes as string[]|undefined)?.map(note=>visualTextControlIssue(note)).find(Boolean);
+  if(issue)throw new PdfVisualStructureError(`第 ${page+1} 页视觉转写结构无效：${issue}；不缓存，不自动重试`,
+   'PDF_VISUAL_TEXT_STRUCTURE_INVALID',raw,'provider-output-json');
+  const text=(notes?.length?VISUAL_UNCERTAINTY_HEADER+'\n'+notes.map((note:string)=>`[无法可靠辨认: ${note}]`).join('\n')+'\n':'')+parsed.text.trim();
   await db.prepare('INSERT OR IGNORE INTO library_parse_pages VALUES (?, ?, ?, ?)').bind(id,cacheParser,page,text).run();
   pages.push({pageNumber:page+1,locator:`第 ${page+1} 页`,text});
  }
