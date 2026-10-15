@@ -8,6 +8,7 @@ import {budgetStatus} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {selectedVisualPageCacheParser,transcribePdfVisualPages,PDF_VISUAL_PAGES_PER_UTC_DAY,SELECTED_VISUAL_PARSER_VERSION} from './document-parser.ts';
 import {assertVisualCacheStructure} from './pdf-visual-structure.ts';
+import {preparePdfVisualEvidence,readPdfVisualEvidence} from './kernel/pdf-visual-evidence.ts';
 
 export const PAGE_REPAIR_MODEL='gpt-5-mini';
 export const PAGE_REPAIR_PARSER='pdf-selected-page-repair-v1';
@@ -81,7 +82,7 @@ export async function recognizePageRepair(owner:string,target:PageRepairTarget):
 }
 
 export async function applyPageRepair(owner:string,target:PageRepairTarget,result:PageRepairResult){
- const {document,rows,originalCount}=await snapshot(owner,target);
+ const {document,bytes,rows,originalCount}=await snapshot(owner,target);
  if(result.documentId!==target.documentId||result.sourceHash!==target.sourceHash||result.expectedVersion!==target.expectedVersion||result.model!==PAGE_REPAIR_MODEL||result.parserVersion!==SELECTED_VISUAL_PARSER_VERSION||
   !Array.isArray(result.pages)||result.pages.length!==target.pageNumbers.length||new Set(result.pages.map(page=>page.pageNumber)).size!==result.pages.length)
   throw new Error('Repair staged result identity mismatch');
@@ -95,6 +96,13 @@ export async function applyPageRepair(owner:string,target:PageRepairTarget,resul
   if(cached?.body!==page.text)throw new Error('Repair must use the validated recognition cache; hand-edited staged text is not accepted');
   assertVisualCacheStructure(page.text,pageNumber);
  }
+ // Read the verified whole layout without selecting image inputs. This keeps
+ // every real region even when a document exceeds the 64-image answer limit.
+ const visual=await readPdfVisualEvidence(kernelPool(),owner,{documentId:document.id,currentVersionId:target.expectedVersion,
+  sourceVersionId:rows[0].source_version_id,sourceHash:target.sourceHash,courseId:document.course_id||''},[]);
+ const pdfVisuals=await preparePdfVisualEvidence({owner,documentId:document.id,sourceHash:target.sourceHash,pdfBytes:bytes,
+  layout:visual.layout??{status:'unavailable',regions:[],pageSizes:[],reason:'Previous version has no registered PDF layout'}});
+ if(pdfVisuals.content.renderStatus!=='available')throw new Error('Repair original PDF page images unavailable; previous version retained');
  const pages=rows.map(page=>({pageNumber:page.page_number,locator:page.locator,text:replacement.get(page.page_number)?.text??page.body}));
  const pageProvenance=rows.map(page=>({pageNumber:page.page_number,
   extractionMethod:replacement.has(page.page_number)?'ai-visual-page-transcription':page.extraction_method,
@@ -106,7 +114,7 @@ export async function applyPageRepair(owner:string,target:PageRepairTarget,resul
  await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,hash:document.hash,
   mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
  {parserVersion:PAGE_REPAIR_PARSER,expectedPages:originalCount,expectedCurrentVersion:target.expectedVersion,
-  extractionMethod:'mixed-original-page-repair',pageProvenance,warnings});
+  extractionMethod:'mixed-original-page-repair',pageProvenance,warnings,pdfVisuals});
  const head=(await kernelPool().query<{current_version_id:string}>('SELECT current_version_id FROM document_texts WHERE id=$1 AND owner_id=$2',[document.id,owner])).rows[0];
  return {documentId:document.id,previousVersion:target.expectedVersion,currentVersion:head.current_version_id,pageCount:originalCount,
   repairedPages:target.pageNumbers,pageProvenance,textHash:createHash('sha256').update(JSON.stringify(pages)).digest('hex')};

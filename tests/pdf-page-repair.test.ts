@@ -5,17 +5,39 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {PDFDocument} from 'pdf-lib';
 import {randomUUID} from 'node:crypto';
+import childProcess from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+import {readFile,writeFile} from 'node:fs/promises';
+import sharp from 'sharp';
 
 const directory=mkdtempSync(join(tmpdir(),'page-repair-tests-'));
 process.env.DATABASE_URL=':memory:';
 process.env.LIBRARY_DIR=directory;
-after(()=>rmSync(directory,{recursive:true,force:true}));
+process.env.LOCAL_OCR='true';
+// The PG scenario uses the real staging/reader/transaction with a bounded local
+// renderer fixture. No Poppler, Docling or provider is run by this test.
+const pageImage=await sharp({create:{width:612,height:792,channels:3,background:'white'}}).png().toBuffer();
+const previousExec=childProcess.execFile,previousFetch=globalThis.fetch;
+let renderCalls=0,externalCalls=0;
+childProcess.execFile=((file:string,args:string[],_options:unknown,callback:(error:Error|null,stdout?:string,stderr?:string)=>void)=>{
+ void (async()=>{
+  assert.equal(file,'pdftoppm');assert.equal((await PDFDocument.load(await readFile(args[6]))).getPageCount(),1);
+  renderCalls++;await writeFile(args[7]+'.png',pageImage);
+ })().then(()=>callback(null,'',''),error=>callback(error));return {};
+}) as unknown as typeof childProcess.execFile;
+syncBuiltinESMExports();
+globalThis.fetch=async()=>{externalCalls++;throw new Error('Page repair fixture forbids external calls');};
+after(()=>{childProcess.execFile=previousExec;syncBuiltinESMExports();globalThis.fetch=previousFetch;
+ assert.equal(externalCalls,0);rmSync(directory,{recursive:true,force:true});});
 const {validatePageRepairPlan,applyPageRepair,verifyAppliedPageRepair}=await import('../lib/pdf-page-repair.ts');
 const {kernel}=await import('../lib/kernel/service.ts');
 const {kernelPool,migrateKernel}=await import('../lib/kernel/db.ts');
 const {saveDocument,getDocument,digest}=await import('../lib/library.ts');
 const {selectedVisualPageCacheParser,SELECTED_VISUAL_PARSER_VERSION}=await import('../lib/document-parser.ts');
 const {database}=await import('../lib/database.ts');
+const {preparePdfVisualEvidence,readPdfVisualEvidence,PDF_VISUAL_READ_LIMITS}=await import('../lib/kernel/pdf-visual-evidence.ts');
+const {decodeDoclingResult}=await import('../lib/kernel/docling-result.ts');
+const {storeDoclingResult}=await import('../lib/kernel/docling-batches.ts');
 
 test('repair plan is bounded to two exact original pages before any external work',()=>{
  const target={documentId:'public-original',sourceHash:'a'.repeat(64),expectedVersion:'b'.repeat(64),pageNumbers:[2]};
@@ -24,15 +46,30 @@ test('repair plan is bounded to two exact original pages before any external wor
   assert.throws(()=>validatePageRepairPlan({owner:'public-owner',documents}),/at most two/);
 });
 
-test('page repair atomically keeps all original pages and prior evidence, and refuses a stale version',
+test('page repair atomically retains all original PNG/region evidence beyond answer limits and refuses a stale version',
  {skip:!process.env.KERNEL_DATABASE_URL},async t=>{
  await migrateKernel();
  const owner='public-page-repair-'+randomUUID(),pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();
  const bytes=await pdf.save(),id=await saveDocument(owner,'','upload','repair-test','repair-test.pdf','application/pdf',bytes);
  const doc=await getDocument(owner,id);
  const document={id,ownerId:owner,courseId:'',name:doc.name,hash:doc.hash,mime:doc.mime,origin:doc.origin,originKey:doc.origin_key};
+ // Reuse the existing saved Docling layout fixture. Repeated controlled regions
+ // exercise 65 total images; they are not a new extraction/fidelity benchmark.
+ const raw=JSON.parse(await readFile(new URL('./fixtures/pdf-layout/mit-chem-lec4-page1.json',import.meta.url),'utf8'));
+ const first=raw.document.json_content.pictures[0];
+ raw.document.json_content.pictures=Array.from({length:63},(_,index)=>({...structuredClone(first),self_ref:`#/pictures/${index}`}));
+ raw.document.json_content.body.children.push(...Array.from({length:62},(_,index)=>({$ref:`#/pictures/${index+1}`})));
+ const derived=await PDFDocument.create();derived.addPage((await derived.copyPages(pdf,[0]))[0]);
+ const inputHash=digest(await derived.save());
+ const resultHash=await storeDoclingResult({identity:{owner,documentId:id,sourceHash:doc.hash,totalPages:2,inputHash,copyIndices:[0]},result:raw});
+ const decoded=decodeDoclingResult(raw,1,{formulaEnriched:false}).visualLayout;
+ const layout={...decoded,status:'unavailable' as const,reason:'Fixture has layout only for original page 1',
+  resultReferences:[{resultBlobSha256:resultHash,derivedInputSha256:inputHash,copyIndices:[0]}],
+  regions:decoded.regions.map(region=>({...region,resultBlobSha256:resultHash,derivedInputSha256:inputHash,copyIndices:[0]}))};
+ const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash:doc.hash,pdfBytes:bytes,layout});
+ assert.equal(visuals.content.assets.length,65);assert.equal(renderCalls,2);
  await kernel.ingestParsedDocument(document,[{locator:'第 1 页',pageNumber:1,text:'Original first page'},
-  {locator:'第 2 页',pageNumber:2,text:'Original second page'}],{parserVersion:'native-test',expectedPages:2,extractionMethod:'native-text'});
+  {locator:'第 2 页',pageNumber:2,text:'Original second page'}],{parserVersion:'native-test',expectedPages:2,extractionMethod:'native-text',pdfVisuals:visuals});
  const original=(await kernelPool().query('SELECT current_version_id FROM document_texts WHERE id=$1',[id])).rows[0].current_version_id as string;
  const target={documentId:id,sourceHash:doc.hash,expectedVersion:original,pageNumbers:[2]};
  const text='Faithful visual second page \\(\\psi\\)';
@@ -54,6 +91,7 @@ test('page repair atomically keeps all original pages and prior evidence, and re
  await database.prepare('INSERT OR REPLACE INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),1,text).run();
  const published=await applyPageRepair(owner,target,result);
  assert.notEqual(published.currentVersion,original);
+ assert.equal(renderCalls,2,'verified existing original pages/regions must use the staging cache without rerendering');
  const old=(await kernelPool().query('SELECT body FROM document_text_pages WHERE version_id=$1 ORDER BY page_number',[original])).rows;
  assert.deepEqual(old.map(page=>page.body),['Original first page','Original second page']);
  const current=(await kernelPool().query(`SELECT p.page_number,p.body,e.parsed_value FROM document_text_pages p
@@ -63,6 +101,26 @@ test('page repair atomically keeps all original pages and prior evidence, and re
  assert.equal(current[1].parsed_value.extractionMethod,'ai-visual-page-transcription');
  assert.equal(current[1].parsed_value.pageProvenance.model,'gpt-5-mini');
  assert.equal(current[0].parsed_value.pageProvenance.basedOn.versionId,original);
+ // The replacement has a new source version. Read it from the actual version,
+ // rather than copying the old source/anchor binding into the new manifest.
+ const currentSource={documentId:id,currentVersionId:published.currentVersion,sourceHash:doc.hash,
+  sourceVersionId:(await kernelPool().query('SELECT source_version_id FROM document_text_versions WHERE id=$1',[published.currentVersion])).rows[0].source_version_id};
+ const manifests=(await kernelPool().query('SELECT version_id,manifest,content_sha256 FROM document_pdf_visual_manifests WHERE version_id=ANY($1::text[])',[[original,published.currentVersion]])).rows;
+ const oldVisual=manifests.find(row=>row.version_id===original),newVisual=manifests.find(row=>row.version_id===published.currentVersion);
+ assert.deepEqual(newVisual.manifest.content,oldVisual.manifest.content);
+ assert.equal(newVisual.content_sha256,oldVisual.content_sha256);
+ assert.equal(newVisual.manifest.bindings.length,65);
+ const currentAnchors=(await kernelPool().query('SELECT page_number,evidence_id FROM document_text_pages WHERE version_id=$1 ORDER BY page_number',[published.currentVersion])).rows;
+ assert.ok(newVisual.manifest.bindings.every((binding:{index:number;anchorEvidenceId:string})=>
+  binding.anchorEvidenceId===currentAnchors[newVisual.manifest.content.assets[binding.index].physicalPage-1].evidence_id));
+ assert.notDeepEqual(newVisual.manifest.bindings,oldVisual.manifest.bindings);
+ const layoutOnly=await readPdfVisualEvidence(kernelPool(),owner,currentSource,[]);
+ assert.equal(layoutOnly.images.length,0);assert.equal(layoutOnly.layout?.regions.length,63);
+ await assert.rejects(readPdfVisualEvidence(kernelPool(),owner,currentSource),/count exceeds limit/);
+ assert.equal(PDF_VISUAL_READ_LIMITS.images,64,'repair must not widen the bounded answer reader');
+ const page2=await readPdfVisualEvidence(kernelPool(),owner,currentSource,[currentAnchors[1].evidence_id]);
+ assert.equal(page2.images.length,1);assert.deepEqual(page2.images[0].bytes,pageImage);
+ await assert.rejects(applyPageRepair(owner,target,result),/complete unchanged current original version/);
  assert.equal(await verifyAppliedPageRepair(owner,target,result,published),true);
  await assert.rejects(verifyAppliedPageRepair(owner,target,result,{...published,currentVersion:original}),/exact current version/);
  const nextText='Second bounded repair of the first page';

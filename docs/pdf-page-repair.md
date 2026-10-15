@@ -1,6 +1,6 @@
 # Bounded original-page repair
 
-This administrator tool stages selected-page visual transcription without running a whole-document reparse or changing the UI. The default visual helper still has its existing behavior; selected pages use a separate source/model/render/prompt-specific cache (`pdf-visual-selected-v2`). The selected subset must have distinct valid original 1-based page numbers, up to the existing 24-page limit. The repair CLI is deliberately limited to two pages total and a maximum $0.236 conservative reservation per invocation. Existing monthly and 60-per-UTC-day limits remain enforced; there is no automatic retry or budget bypass.
+This administrator tool stages selected-page visual transcription without running a whole-document reparse or changing the UI. Selected pages use the source/model/render/prompt-specific cache (`pdf-visual-selected-v3`). Formal Docling conversion also explicitly selects all original pages when it needs this visual branch, so it uses that same faithful policy and cache. The selected subset must have distinct valid original 1-based page numbers, up to the existing 24-page limit. The repair CLI is deliberately limited to two pages total and a maximum $0.236 conservative reservation per invocation. Existing monthly and 60-per-UTC-day limits remain enforced; there is no automatic retry or budget bypass.
 
 A JSON plan contains `{owner,documents:[{documentId,sourceHash,expectedVersion,pageNumbers}]}`. The original blob checksum, owner, current PostgreSQL version and complete original page inventory are checked before recognition. Copying/rendering preserves original page identity. Only the original page image is sent to recognition; no query, gold answer or hand-authored formula is supplied. The fidelity prompt forbids correcting source spelling or mathematics and asks for standard delimited LaTeX in original reading order. A model's `complete:true` is not proof of faithful mathematics.
 
@@ -18,6 +18,14 @@ node --experimental-strip-types scripts/repair-pdf-pages.ts --plan PLAN.json --r
 ```
 
 Apply makes no model call. It accepts only the exact validated cache text and atomically publishes a complete new document version through KernelService, reusing the other current pages. A transaction-level current-version guard rejects concurrent changes. New page evidence stores the repaired page's model/parser or the unchanged page's previous method/model, with links to prior version/source/evidence. Old versions and evidence remain. A partial multi-document apply is recorded after each complete document; a resume verifies the recorded whole current version and text hashes before skipping that document. It cannot skip based solely on a status marker.
+
+## Formal visual policy and original images (Issue #119)
+
+Formal visual conversion passes the verified original SHA and explicit original page numbers to the existing v3 implementation. It does not change that implementation's provider prompt, configured model, rendering configuration, output limit or incomplete/structure checks. An old `pdf-visual-v1` cache remains historical; it is not certified or reused as v3, and no background backfill is scheduled. A matching v3 entry can be reused without another provider request. Native text and Docling parsing decisions remain as before.
+
+Before repair publication, the existing current/source-bound image reader retrieves the full verified layout with an empty image selection. It checks the whole immutable manifest and bindings without loading answer images, so documents with more than 64 stored page/region images do not silently lose assets or widen the answer reader's 64-image limit. The existing visual staging process then verifies the actual original PDF, saved Docling region references and cached PNG blobs outside the transaction. All regions and original page pixels are rebound to the replacement version's new page evidence during the same short CAS transaction as its text. No old anchor binding is copied to the new version.
+
+If no prior layout exists, it is explicitly unavailable and genuine whole-page PNGs are prepared from the original PDF. If the renderer cannot supply the complete original page images, repair stops and keeps the previous current version. A source/version change also rejects publication. These are wiring and provenance checks; preserving page images or using a stronger prompt does not establish mathematical transcription fidelity. Real recognition acceptance and deployment remain separate steps.
 
 ## Actual isolated check (2026-10-14)
 

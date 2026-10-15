@@ -96,7 +96,8 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   if(!result&&legacyTaskId)result=await requestDoclingResult(endpoint,headers,undefined,legacyTaskId,
     async taskId=>{if(job)await rememberDoclingTask(job.id,job.leaseToken,taskId);});
   const decoded:DecodedDocling=result?decodeDoclingResult(result,originalPages,{verifiedBlankPages,formulaEnriched:localFormula}):
-    visual?{pages:await transcribePdfVisualPages(id,bytes),totalPages:originalPages,
+    visual?{pages:await transcribePdfVisualPages(id,bytes,{expectedSourceHash:document.hash,
+      pageNumbers:Array.from({length:originalPages},(_,index)=>index+1)}),totalPages:originalPages,
       warnings:['AI 视觉转写；数学、手写及图表请核对原 PDF'],formulaPageNumbers:[],nativeTables:[],
       visualLayout:{status:'unavailable' as const,regions:[],pageSizes:[],reason:'Visual transcription has no Docling layout'}}:
     nativeComplete?{pages:native!.map((text,index)=>({text,pageNumber:index+1,locator:`第 ${index+1} 页`})),

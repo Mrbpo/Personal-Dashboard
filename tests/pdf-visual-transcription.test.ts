@@ -94,6 +94,52 @@ test('incomplete visual pages are not cached or published and leave the prior in
  }
 });
 
+test('formal visual conversion uses source-bound faithful v3 and never certifies an old v1 cache',async t=>{
+ const {database:db}=await import('../lib/database.ts');
+ const {kernel}=await import('../lib/kernel/service.ts');
+ const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
+ const {selectedVisualPageCacheParser,transcribePdfVisualPages}=await import('../lib/document-parser.ts');
+ const {digest}=await import('../lib/library.ts');
+ const {id,bytes}=await fixture('formal-faithful-policy',1),sourceHash=digest(bytes);
+ const old='Old unversioned visual cache must remain historical';
+ await db.prepare("INSERT INTO library_parse_pages VALUES (?, 'pdf-visual-v1', 0, ?)").bind(id,old).run();
+ const settings={DOCLING_URL:'http://docling.must-not-be-called',DOCLING_NATIVE_TEXT_FASTPATH:'false',
+  PDF_SCAN_TRANSCRIPTION_BACKEND:'ai',PDF_VISUAL_IMAGE_INPUT:'false',LOCAL_OCR:'false'};
+ const previousSettings=Object.fromEntries(Object.keys(settings).map(key=>[key,process.env[key]]));
+ Object.assign(process.env,settings);
+ const publish=t.mock.method(kernel,'ingestParsedDocument',async(...[,pages]:Parameters<typeof kernel.ingestParsedDocument>)=>{
+  assert.deepEqual(pages,[{pageNumber:1,locator:'第 1 页',text:'Faithful source typo \\(\\psi\\)'}]);
+ });
+ const head=t.mock.method(kernel,'documentIngestionHead',async()=>null);
+ const originalFetch=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(input,init)=>{
+  assert.equal(String(input),'https://api.openai.com/v1/responses');calls++;
+  const request=JSON.parse(String(init?.body)),content=request.input[0].content;
+  assert.equal(request.model,'gpt-5-mini');assert.equal(request.max_output_tokens,9000);
+  assert.deepEqual(request.reasoning,{effort:'low'});
+  assert.ok(content[0].text.includes('忠实版本 v3'));
+  assert.ok(content[0].text.includes('严禁根据知识、常见公式或上下文纠正'));
+  assert.equal((await PDFDocument.load(Buffer.from(content[1].file_data.split(',')[1],'base64'))).getPageCount(),1);
+  return Response.json({output_text:JSON.stringify({text:'Faithful source typo \\(\\psi\\)',complete:true,uncertain_spans:[]})});
+ };
+ try{
+  await convertDocumentWithDocling('visual-test-owner',id);
+  const parser=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',false);
+  assert.equal((await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=0')
+   .bind(id,parser).first<{body:string}>())?.body,'Faithful source typo \\(\\psi\\)');
+  assert.equal((await db.prepare("SELECT body FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1' AND page=0")
+   .bind(id).first<{body:string}>())?.body,old);
+  await convertDocumentWithDocling('visual-test-owner',id);
+  assert.equal(calls,1,'the matching faithful source-bound cache must need no additional model request');
+  assert.equal(publish.mock.callCount(),2);
+  await assert.rejects(transcribePdfVisualPages(id,bytes,{pageNumbers:[1],expectedSourceHash:'f'.repeat(64)}),/原件校验失败/);
+  assert.equal(calls,1,'a mismatched source must fail before using the cache or making a request');
+ }finally{
+  globalThis.fetch=originalFetch;publish.mock.restore();head.mock.restore();
+  for(const [key,value] of Object.entries(previousSettings)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+ }
+});
+
 test('24 visual pages are allowed but 25 are rejected before requests or partial caching',async()=>{
  const {database:db}=await import('../lib/database.ts');
  const {transcribePdfVisualPages,PDF_VISUAL_PAGES_PER_DOCUMENT}=await import('../lib/document-parser.ts');
