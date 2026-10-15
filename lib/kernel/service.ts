@@ -8,6 +8,7 @@ import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceH
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
+import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -979,6 +980,24 @@ export class KernelService {
       await policy.beforeAttempt?.(identity);
     }});
     return {status:'available' as const,manifest:ready,result};
+  }
+
+  /** Explicit development diagnostics for a claim bound to a complete source.
+   * The caller supplies selections, never trusted quotes or image bytes. */
+  async auditSelectedStudySourceClaim(owner:string,question:string,expectedSource:DocumentContextSource,
+    binding:DocumentCitationAuditBinding,policy:DocumentCitationAuditPolicy){
+    await assertDocumentCitationAuditPolicy(policy);
+    const source={...expectedSource},original=structuredClone(binding),initial=await this.readCompleteDocumentSource(owner,source);
+    if(initial.status==='unavailable')return initial;
+    let first=true;
+    const result=await auditDocumentCitationClaim(question,async()=>{
+      if(first){first=false;return initial.context;}
+      const current=await this.readCompleteDocumentSource(owner,source);
+      if(current.status!=='available'||current.manifest.manifestSha256!==initial.manifest.manifestSha256)
+        throw new DocumentContextError('DOCUMENT_CONTEXT_CHANGED','Complete citation-audit source changed');
+      return current.context;
+    },original,policy);
+    return {status:'available' as const,manifest:initial.manifest,result};
   }
 
   /** Non-structured study content only; canonical business facts use their own

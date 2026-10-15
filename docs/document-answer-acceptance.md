@@ -51,6 +51,16 @@ Issue #107 允许在上述显式开发策略中选择 `model: 'gpt-5.4-mini'`，
 
 `paidOpenAI` 增加标准 5.4-mini 费率：每百万输入 US$0.75、输出 US$4.50、上下文 400000，依据[官方模型与快照说明](https://developers.openai.com/api/docs/models/gpt-5.4-mini)。已有 `AI_MODEL_RATES` 显式覆盖仍保留；此前实验提供了同费率，现应用不再依赖实验脚本补费率。月限额、普通 200/day、开发最多 1000/day、真实 usage 账本均不改变。沿用现通用计费以标准输入价保守计入 cached input，不宣称精确体现缓存折扣；不扩至 Batch、Flex 或区域处理费率。配置和 mock 检查通过不等于语义、文件保真度或其他生产模型通过。
 
+## 开发用逐陈述引用审计
+
+Issue #109 增加 `KernelService.auditSelectedStudySourceClaim(owner, question, expectedSource, binding, policy)`。这是显式开发诊断入口，暂仅支持上述完整选定来源回答。`binding` 必须含原回答的 `inputFingerprint`、`quoteUnitManifestSha256`、完整 `providerSelections` 和 `claimIndex`，不接受调用方提供的引文或 PNG。Kernel 按 owner 与当前来源版本读取完整正文及真实图片，严格恢复整个原选择对象后，只将该陈述与它实际引用的原文单元和图片送入审计。引用不能被换成更有利的证据；来源、正文、图片或结构在请求前后变化均失败。
+
+`citation-local-audit-v1` 固定使用 `gpt-5.4-mini`、low、1000 输出 token、high 图片和 30 秒期限。沿用精确隔离开发环境、每日/月度账本、模型快照 allowlist 和 `beforeAttempt` 请求记录要求；纯 builder 不提供执行权限。`policy.recordResponse` 必须先持久化真实原始 HTTP body、状态、请求身份和 SHA，后续才检查模型身份、JSON/schema 与来源是否仍当前。回调应采用持久化且避免重复覆盖的记录；仅提供一个函数不能证明实际落盘。HTTP 错误、非法 JSON、错误模型或 schema 不应丢失已收到的 raw；超时没有可伪造的响应，既有账本预留保留待核对。一个调用仅发一个请求，不自动重试、改答案或补找引用。
+
+输出将单条陈述映射为 `c0`、原引用顺序映射为固定的 `r0...rN`，要求每个实际引用都有 finding；返回 `supported`、`unsupported` 或 `uncertain`、简短理由及对象/单位/范围对齐诊断，并绑定原陈述、引用、来源 SHA 和原始选择。`unsupported` 只表示这些引用不足或冲突，不表示陈述在全文中必然为假。它不检查全回答完整性、不读取未引用的纠正材料，也不将模型理由写入事实、候选或权威状态。不新增页面、默认回答拦截、数据库表或网络服务。
+
+开发 pilot 复用既有 10 条真实请求与原始响应：5 条已知引用不足、5 条控制样本，其最终判断与独立审阅相符；原费用 US$0.018954，不重跑。这是见过的校准样本，不是新的盲测或整体准确率。case 11 的某条子理由把 mixed impact 说成 small，存在过度解读，不能将诊断理由当作事实保证；case 2 的局部审计也未看到原实体表，不能声称它独立发现了完整的实体/句子计数事实。原 A50 分数、Gold 和历史输出均不修改。
+
 ## 当前交付边界
 
 纯验证器和输入打包的测试不能代替真实回答测试。新模块须经 PR、评审及 CI；接入 Kernel 当前上下文接口后才运行冻结的真实问题。代码合并、CI 成功、部署和生产切换分别报告。
