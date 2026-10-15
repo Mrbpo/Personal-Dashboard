@@ -7,6 +7,7 @@ import {kernel} from './kernel/service.ts';
 import {budgetStatus} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {selectedVisualPageCacheParser,transcribePdfVisualPages,PDF_VISUAL_PAGES_PER_UTC_DAY,SELECTED_VISUAL_PARSER_VERSION} from './document-parser.ts';
+import {assertVisualCacheStructure} from './pdf-visual-structure.ts';
 
 export const PAGE_REPAIR_MODEL='gpt-5-mini';
 export const PAGE_REPAIR_PARSER='pdf-selected-page-repair-v1';
@@ -92,6 +93,7 @@ export async function applyPageRepair(owner:string,target:PageRepairTarget,resul
   const cached=await database.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?')
    .bind(target.documentId,cacheParser,pageNumber-1).first<{body:string}>();
   if(cached?.body!==page.text)throw new Error('Repair must use the validated recognition cache; hand-edited staged text is not accepted');
+  assertVisualCacheStructure(page.text,pageNumber);
  }
  const pages=rows.map(page=>({pageNumber:page.page_number,locator:page.locator,text:replacement.get(page.page_number)?.text??page.body}));
  const pageProvenance=rows.map(page=>({pageNumber:page.page_number,

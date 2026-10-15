@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {inspect} from 'node:util';
 import {PDFDocument} from 'pdf-lib';
+import {PdfVisualStructureError,visualMathStructureIssue,visualTextControlIssue} from '../lib/pdf-visual-structure.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'pdf-visual-tests-'));
 process.env.DATABASE_URL=':memory:';
@@ -116,20 +118,109 @@ test('fully processed pages preserve uncertainty in place and malformed warning 
  const {database:db}=await import('../lib/database.ts');
  const {transcribePdfVisualPages}=await import('../lib/document-parser.ts');
  const valid=await fixture('uncertain-spans',1),invalid=await fixture('invalid-warning-array',1);
- const source='Visible heading\nLocal equation: [无法可靠辨认]\nVisible conclusion';
- const expected='[本页存在无法可靠辨认的片段，须核对原 PDF]\n[无法可靠辨认: 左下公式末项字迹模糊]\n'+source;
+ const source='Visible heading\nLocal equation: \\(x^2\\) and [无法可靠辨认]\nVisible conclusion';
+ const note='左下未闭合片段 \\[\n\\begin{cases} 无法辨认';
+ const expected='[本页存在无法可靠辨认的片段，须核对原 PDF]\n[无法可靠辨认: '+note+']\n'+source;
  const original=globalThis.fetch;let calls=0;
- globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({text:source,complete:true,uncertain_spans:['左下公式末项字迹模糊']})});};
+ globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({text:source,complete:true,uncertain_spans:[note]})});};
  try{
   assert.equal((await transcribePdfVisualPages(valid.id,valid.bytes))[0].text,expected);
   assert.equal((await db.prepare("SELECT body FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1' AND page=0").bind(valid.id).first<{body:string}>())?.body,expected);
-  assert.equal((await transcribePdfVisualPages(valid.id,valid.bytes))[0].text,expected);
-  assert.equal(calls,1,'honest localized uncertainty can be cached without guessing missing content');
+  await assert.rejects(transcribePdfVisualPages(valid.id,valid.bytes),error=>{
+   assert.ok(error instanceof PdfVisualStructureError);
+   assert.equal(error.code,'PDF_VISUAL_CACHE_STRUCTURE_UNVERIFIED');
+   assert.equal(error.rawOutput,expected);
+   return true;
+  });
+  assert.equal(calls,1,'ambiguous flat warning/body boundaries require review, never a paid automatic retry');
+  assert.equal((await db.prepare("SELECT body FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1' AND page=0").bind(valid.id).first<{body:string}>())?.body,expected);
   for(const uncertain_spans of ['not-an-array',[17],Array(101).fill('region'),['x'.repeat(1001)]]){
    globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({text:source,complete:true,uncertain_spans})});};
    await assert.rejects(transcribePdfVisualPages(invalid.id,invalid.bytes),/识别警告格式无效/);
    assert.equal(await db.prepare("SELECT 1 FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1'").bind(invalid.id).first(),null);
   }
+ }finally{globalThis.fetch=original;}
+});
+
+test('visual structure gate permits whitespace, row breaks and paired math but rejects explicit malformed structure',()=>{
+ for(let code=0;code<32;code++){
+  const value='before'+String.fromCharCode(code)+'after';
+  assert.equal(visualTextControlIssue(value)===null,[9,10,13].includes(code),`C0 U+${code.toString(16)}`);
+ }
+ for(const text of [
+  String.raw`Plain prose and \(\bar{x}+\beta\).`,
+  String.raw`\[A=\begin{bmatrix}1&0\\0&1\end{bmatrix}\]`,
+  String.raw`\begin{align*}x&=1\\y&=2\end{align*}`,
+  String.raw`\(\begin{custom*}\begin{matrix}1\\[2pt]2\end{matrix}\end{custom*}\)`,
+  String.raw`Escaped markers \\( and \\begin{not-a-real-opener}; $ remains outside this gate.`,
+ ])assert.equal(visualMathStructureIssue(text),null,text);
+ for(const text of [
+  String.raw`\(missing`,String.raw`\]`,String.raw`\[x\)`,
+  String.raw`\begin{matrix}x`,String.raw`\end{matrix}`,
+  String.raw`\begin{matrix}\end{cases}`,String.raw`\[\begin{matrix}x\]\end{matrix}`,
+  String.raw`\begin{}`,String.raw`\begin{matrix`,String.raw`\begin{matrix}\begin{cases}\end{matrix}\end{cases}`,
+  String.raw`\(x\(y\)\)`,String.raw`\[x\(y\)\]`,String.raw`\(x\[y\]\)`,
+ ])assert.notEqual(visualMathStructureIssue(text),null,text);
+});
+
+test('decoded visual structure failures preserve raw output and never cache or automatically retry',async()=>{
+ const {database:db}=await import('../lib/database.ts');
+ const {transcribePdfVisualPages}=await import('../lib/document-parser.ts');
+ const original=globalThis.fetch;let calls=0;
+ const backspaces=String.raw`{"text":"Value: \bar{x} + \beta","complete":true,"uncertain_spans":[]}`;
+ assert.equal([...JSON.parse(backspaces).text].filter(char=>char==='\u0008').length,2);
+ const invalid=[backspaces,...[
+  {text:String.raw`Unclosed \[x^2`,uncertain_spans:[]},
+  {text:String.raw`\[\begin{matrix}1&0\\0&1\end{cases}\]`,uncertain_spans:[]},
+  {text:'\u000cVisible text',uncertain_spans:[]},
+  {text:'Valid page',uncertain_spans:['warning\u0000']},
+ ].map(value=>JSON.stringify({...value,complete:true}))];
+ try{
+  for(const [index,raw] of invalid.entries()){
+   const doc=await fixture('invalid-structure-'+index,1),before=calls;
+   globalThis.fetch=async()=>{calls++;return Response.json({output_text:raw});};
+   await assert.rejects(transcribePdfVisualPages(doc.id,doc.bytes),error=>{
+    assert.ok(error instanceof PdfVisualStructureError);
+    assert.equal(error.code,'PDF_VISUAL_TEXT_STRUCTURE_INVALID');
+    assert.equal(error.rawOutput,raw);assert.equal(error.rawFormat,'provider-output-json');
+    assert.equal(Object.prototype.propertyIsEnumerable.call(error,'rawOutput'),false);
+    assert.ok(!error.message.includes(raw));assert.ok(!JSON.stringify(error).includes(raw));assert.ok(!inspect(error).includes(raw));
+    return true;
+   });
+   assert.equal(calls,before+1);
+   assert.equal(await db.prepare('SELECT 1 FROM library_parse_pages WHERE document_id=?').bind(doc.id).first(),null);
+  }
+  const valid=await fixture('valid-matrix-structure',1);
+  const text='Rows\tand\r\n'+String.raw`\[\begin{pmatrix}1&0\\0&1\end{pmatrix}\]`;
+  globalThis.fetch=async()=>{calls++;return Response.json({output_text:JSON.stringify({text,complete:true,uncertain_spans:[]})});};
+  const before=calls;
+  assert.equal((await transcribePdfVisualPages(valid.id,valid.bytes))[0].text,text);
+  assert.equal((await transcribePdfVisualPages(valid.id,valid.bytes))[0].text,text);
+  assert.equal(calls,before+1,'normal paired math and legal whitespace remain reusable');
+ }finally{globalThis.fetch=original;}
+});
+
+test('invalid existing full and selected visual caches are preserved and refused without provider requests',async()=>{
+ const {database:db}=await import('../lib/database.ts');
+ const {transcribePdfVisualPages,selectedVisualPageCacheParser}=await import('../lib/document-parser.ts');
+ const {createHash}=await import('node:crypto');
+ const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;throw new Error('Invalid cache must not trigger a provider request');};
+ try{
+  for(const [index,body] of ['back\u0008space',String.raw`\[unclosed`,String.raw`\begin{matrix}missing`].entries()){
+   const doc=await fixture('invalid-existing-cache-'+index,1);
+   const selected=index===2;
+   const parser=selected?selectedVisualPageCacheParser(createHash('sha256').update(doc.bytes).digest('hex'),'gpt-5-mini',false):'pdf-visual-v1';
+   await db.prepare('INSERT INTO library_parse_pages VALUES(?,?,0,?)').bind(doc.id,parser,body).run();
+   await db.prepare("INSERT INTO library_parse_pages VALUES(?,'unrelated-parser',0,'Untouched other cache')").bind(doc.id).run();
+   await assert.rejects(transcribePdfVisualPages(doc.id,doc.bytes,selected?{pageNumbers:[1],model:'gpt-5-mini',imageInput:false}:{}),error=>{
+    assert.ok(error instanceof PdfVisualStructureError);assert.equal(error.code,'PDF_VISUAL_TEXT_STRUCTURE_INVALID');
+    assert.equal(error.rawOutput,body);assert.equal(error.rawFormat,'cached-page-text');return true;
+   });
+   assert.equal((await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=?').bind(doc.id,parser).first<{body:string}>())?.body,body);
+   assert.equal((await db.prepare("SELECT body FROM library_parse_pages WHERE document_id=? AND parser='unrelated-parser'").bind(doc.id).first<{body:string}>())?.body,'Untouched other cache');
+  }
+  assert.equal(calls,0);
  }finally{globalThis.fetch=original;}
 });
 

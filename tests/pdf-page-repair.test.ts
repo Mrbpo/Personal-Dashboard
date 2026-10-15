@@ -25,7 +25,7 @@ test('repair plan is bounded to two exact original pages before any external wor
 });
 
 test('page repair atomically keeps all original pages and prior evidence, and refuses a stale version',
- {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ {skip:!process.env.KERNEL_DATABASE_URL},async t=>{
  await migrateKernel();
  const owner='public-page-repair-'+randomUUID(),pdf=await PDFDocument.create();pdf.addPage();pdf.addPage();
  const bytes=await pdf.save(),id=await saveDocument(owner,'','upload','repair-test','repair-test.pdf','application/pdf',bytes);
@@ -39,7 +39,19 @@ test('page repair atomically keeps all original pages and prior evidence, and re
  const result={documentId:id,sourceHash:doc.hash,expectedVersion:original,model:'gpt-5-mini',parserVersion:SELECTED_VISUAL_PARSER_VERSION,
   pages:[{pageNumber:2,locator:'第 2 页',text,textHash:digest(text)}]};
  await assert.rejects(applyPageRepair(owner,target,result),/validated recognition cache/);
- await database.prepare('INSERT INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),1,text).run();
+ const publish=t.mock.method(kernel,'ingestParsedDocument',async()=>{throw new Error('Invalid visual cache must not be published');});
+ try{
+  for(const body of ['bad\u0008escape',String.raw`\[\begin{matrix}1\end{cases}\]`,
+   '[本页存在无法可靠辨认的片段，须核对原 PDF]\n[无法可靠辨认: \\[]\nGood page']){
+   await database.prepare('INSERT OR REPLACE INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),1,body).run();
+   const staged={...result,pages:[{...result.pages[0],text:body,textHash:digest(body)}]};
+   await assert.rejects(applyPageRepair(owner,target,staged),/视觉缓存.*(?:结构无效|未结构认证)/);
+   assert.equal(publish.mock.callCount(),0);
+   assert.equal((await kernelPool().query('SELECT current_version_id FROM document_texts WHERE id=$1',[id])).rows[0].current_version_id,original);
+   assert.equal((await database.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=1').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true)).first<{body:string}>())?.body,body);
+  }
+ }finally{publish.mock.restore();}
+ await database.prepare('INSERT OR REPLACE INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),1,text).run();
  const published=await applyPageRepair(owner,target,result);
  assert.notEqual(published.currentVersion,original);
  const old=(await kernelPool().query('SELECT body FROM document_text_pages WHERE version_id=$1 ORDER BY page_number',[original])).rows;
