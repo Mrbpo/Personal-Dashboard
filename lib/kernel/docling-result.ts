@@ -13,6 +13,11 @@ export type DoclingVisualLayout={status:'available'|'unavailable';regions:Doclin
  pageSizes:Array<{pageNumber:number;width:number;height:number}>;reason?:string;
  unavailablePictures?:Array<{pictureRef:string;provenance:unknown[]}>;
  resultReferences?:Array<{resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[]}>};
+/** Native parser output only. Raw fields and strings remain unchanged; this is
+ * not original quotation evidence or a canonical fact. */
+export type DoclingNativeTable = {reference:string;pageNumbers:number[];raw:Record<string,unknown>;
+  cellTexts:Array<{cellIndex:number;text:string}>;captions:Array<{reference:string;raw:Record<string,unknown>}>;
+  result?:{resultBlobSha256:string;derivedInputSha256:string;optionsHash:string;copyIndices:number[]}};
 type Json = Record<string, unknown>;
 
 function object(value: unknown): Json | undefined {
@@ -26,7 +31,7 @@ function nodeContent(node: Json): string {
   return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
 }
 
-export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[];visualLayout:DoclingVisualLayout} {
+export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[];visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[]} {
   const response = object(result);
   if (response?.status !== 'success') throw new Error(`Docling conversion is incomplete (${response?.status || 'missing status'})`);
   if (list(response.errors).length) throw new Error('Docling reported conversion errors');
@@ -55,6 +60,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const visited = new Set<string>();
   const warnings: string[] = [];
   const formulaPageNumbers=new Set<number>();
+  const nativeTables:DoclingNativeTable[]=[];
   if(options.formulaEnriched === false) warnings.push('公式增强未启用；正文可检索，公式须核对原 PDF');
   const verifiedBlankPages = new Set(options.verifiedBlankPages || []);
   const regions:DoclingRegion[]=[];
@@ -128,7 +134,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     return collect(cell.ref, ancestors) || nodeContent(cell);
   }
 
-  function tableText(node: Json, ancestors: Set<string>): string {
+  function tableText(node: Json, ancestors: Set<string>,reference:string): string {
     const data = object(node.data);
     if (!data) throw new Error('Docling table has no structured data');
     const cells = list(data.table_cells).map(value => {
@@ -141,12 +147,15 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     }).sort((a, b) => (a.start_row_offset_idx as number) - (b.start_row_offset_idx as number) || (a.start_col_offset_idx as number) - (b.start_col_offset_idx as number));
     const rows = new Map<number, string[]>();
     const tablePages = new Set(provenance(node).map(location => location.page_no));
+    const cellTexts:DoclingNativeTable['cellTexts']=[];
     for (const cell of cells) {
       const row = cell.start_row_offset_idx as number;
       const values = rows.get(row) || [];
       const column = cell.start_col_offset_idx as number;
       while (values.length <= column) values.push('');
-      const content = cellText(cell, ancestors, tablePages).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+      const original=cellText(cell, ancestors, tablePages);
+      cellTexts.push({cellIndex:list(data.table_cells).indexOf(cell),text:original});
+      const content = original.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
       if (values[column] && content) throw new Error('Docling table has overlapping cell coordinates');
       values[column] = content;
       rows.set(row, values);
@@ -157,6 +166,10 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       return `| ${row.join(' | ')} |`;
     }).join('\n');
     if (!cells.length || !cells.some(cell => nodeContent(cell) || cell.ref)) throw new Error('Docling table contains no readable cells');
+    nativeTables.push({reference,pageNumbers:[...tablePages] as number[],raw:structuredClone(node),
+      cellTexts:cellTexts.sort((a,b)=>a.cellIndex-b.cellIndex),captions:list(node.captions).map(value=>{
+        const caption=resolve(value);return {reference:caption.ref,raw:structuredClone(caption.node)};
+      })});
     return content;
   }
 
@@ -166,7 +179,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (visited.has(ref)) return;
     visited.add(ref);
     const next = new Set([...ancestors, ref]);
-    if (ref.startsWith('#/tables/')) add(node, tableText(node, next));
+    if (ref.startsWith('#/tables/')) add(node, tableText(node, next,ref));
     else if (ref.startsWith('#/pictures/')) {
       // Captions/child text remain searchable; pixels cannot be treated as transcribed text.
       add(node, '');
@@ -222,7 +235,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const pageSizes=pageNumbers.flatMap(pageNumber=>{const size=object(object(manifest?.[String(pageNumber)])?.size);
     return size&&[size.width,size.height].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)?
       [{pageNumber,width:size.width as number,height:size.height as number}]:[];});
-  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],
+  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],nativeTables,
     visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',regions,pageSizes,
       ...(unavailablePictures.length?{unavailablePictures,reason:'Docling picture geometry unavailable; original text retained'}:
         pageSizes.length===pageNumbers.length?{}:{reason:'Docling page sizes unavailable'})}};

@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
-import type {DocumentEvidenceHit} from './document-evidence.ts';
+import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
@@ -16,6 +16,9 @@ type Image=AuthorImage|PdfVisualImageEvidence;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ /** Real current nodes read by Kernel solely to bind supplemental PNGs. Their
+  * bodies must never become text support or quotation units in this lane. */
+ imageAnchors?:DocumentSelectedNodeHit[];
  parents:{parentId:string;status:string;headingMetadata?:{text:string;originalSourceHash:string};sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
@@ -226,12 +229,12 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const quoteUnits=documentQuoteUnits(supports),bySupport=new Map(supports.map(support=>[support.id,support]));
  const quoteUnitManifest=quoteUnits.map(({text,...unit})=>({...unit,evidence:supportMetadata(bySupport.get(unit.supportId)!)}));
  const quoteUnitManifestSha256=sha(JSON.stringify(quoteUnitManifest));
- const warnings=[...new Set(context.anchors.flatMap(hit=>hit.parser_warnings??[]))];
+ const warnings=[...new Set([...context.anchors,...context.imageAnchors??[]].flatMap(hit=>hit.parser_warnings??[]))];
  const unavailableParents=context.parents.filter(parent=>parent.status!=='available').map(parent=>({
   parentId:parent.parentId,status:parent.status,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints}));
  const parentMetadata=context.parents.map(parent=>({parentId:parent.parentId,status:parent.status,
   headingMetadata:parent.headingMetadata??null,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints}));
- const documentMetadata=[...new Map(context.anchors.map(hit=>[hit.document_id,{documentId:hit.document_id,
+ const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,sourceContentIsUntrusted:true};

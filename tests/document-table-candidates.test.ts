@@ -1,0 +1,129 @@
+import {test,after} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {readFile,writeFile,rename} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {PDFDocument} from 'pdf-lib';
+import {digest,saveBlob} from '../lib/library.ts';
+import {decodeDerivedDoclingResult} from '../lib/kernel/docling-batches.ts';
+import {prepareNativeTableArtifact,nativeTableSearchStrings,prepareNativeTableCandidates} from '../lib/kernel/document-table-candidates.ts';
+import {kernel} from '../lib/kernel/service.ts';
+import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
+import {prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
+
+let externalCalls=0;globalThis.fetch=async()=>{externalCalls++;throw new Error('Native tables prohibit external calls');};
+after(async()=>{try{assert.equal(externalCalls,0);}finally{if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();}});
+
+/** Synthetic plumbing fixture, not a measured Docling transcription. */
+function syntheticTable(){
+ const cell=(text:string,r:number,c:number,extra:Record<string,unknown>={})=>({text,start_row_offset_idx:r,
+  end_row_offset_idx:r+1,start_col_offset_idx:c,end_col_offset_idx:c+1,row_span:1,col_span:1,...extra});
+ const cells=[cell(' measure | raw\nunits ',0,0,{column_header:true,col_span:2,end_col_offset_idx:2}),
+  cell('Count',1,0,{row_header:true}),cell(' 007 ',1,1),cell('',2,0),cell('3.0%',2,1)];
+ return {status:'success',document:{json_content:{pages:{1:{page_no:1}},
+  body:{children:[{$ref:'#/tables/0'}]},tables:[{self_ref:'#/tables/0',prov:[{page_no:1}],
+   captions:[{$ref:'#/texts/0'}],data:{num_rows:3,num_cols:2,table_cells:cells}}],
+  texts:[{text:'Table 1. Printed caption.',prov:[{page_no:1}]}]}}};
+}
+function decodedFixture(){
+ const raw=syntheticTable(),decoded=decodeDerivedDoclingResult(raw,{start:5,end:5,totalPages:7,copyIndices:[4]},
+  {verifiedBlankPages:[],formulaEnriched:false});
+ const table=decoded.nativeTables[0];table.result={resultBlobSha256:'a'.repeat(64),derivedInputSha256:'b'.repeat(64),
+  optionsHash:'c'.repeat(64),copyIndices:[4]};
+ return {raw,decoded,table};
+}
+async function realFixture(){
+ const dir=resolve('tests/fixtures/native-table-mit-class5');
+ const [raw,pdf,png,provenance]=await Promise.all(['result.json','source-page.pdf','source-page.png','provenance.json'].map(name=>readFile(resolve(dir,name))));
+ const metadata=JSON.parse(provenance.toString('utf8'));
+ assert.equal(digest(raw),metadata.rawResultSha256);assert.equal(digest(pdf),metadata.sourcePdfSha256);assert.equal(digest(png),metadata.sourcePngSha256);
+ return {raw:JSON.parse(raw.toString('utf8')),pdf,png,metadata};
+}
+
+test('native synthetic grid preserves raw cells, explicit spans, blanks and original page mapping without changing page text',()=>{
+ const {raw,decoded,table}=decodedFixture();
+ assert.equal(decoded.pages[0].pageNumber,5);assert.deepEqual(table.pageNumbers,[5]);
+ assert.deepEqual(table.raw,raw.document.json_content.tables[0]);
+ assert.equal(table.cellTexts[0].text,' measure | raw\nunits ');
+ assert.equal(table.cellTexts[2].text,' 007 ');assert.equal(table.cellTexts[3].text,'');
+ assert.equal(decoded.pages[0].text,'|  measure \\| raw units  |  |\n| Count |  007  |\n|  | 3.0% |\n\nTable 1. Printed caption.');
+ const artifact=prepareNativeTableArtifact(table);
+ assert.equal(artifact.status,'available');assert.deepEqual(artifact.reasons,[]);
+ assert.equal(nativeTableSearchStrings(artifact),' measure | raw\nunits \nCount\n 007 \n\n3.0%\nTable 1. Printed caption.');
+ assert.notEqual(artifact.native.raw,table.raw);
+ assert.equal(artifact.artifactSha256,prepareNativeTableArtifact(table).artifactSha256);
+});
+
+test('unsupported grid metadata stays unavailable without rejecting otherwise readable source text or inferring cells',()=>{
+ const {table}=decodedFixture();
+ const bad=structuredClone(table),data=bad.raw.data as {table_cells:Record<string,unknown>[]};
+ delete data.table_cells[0].col_span;delete data.table_cells[0].end_col_offset_idx;
+ const artifact=prepareNativeTableArtifact(bad);
+ assert.equal(artifact.status,'unavailable');assert.ok(artifact.reasons.includes('unsupported-cell-structure'));
+ assert.equal(nativeTableSearchStrings(artifact),'');
+ const missing=structuredClone(table);delete missing.result;
+ assert.ok(prepareNativeTableArtifact(missing).reasons.includes('raw-result-identity-unavailable'));
+ assert.notEqual(artifact.artifactSha256,prepareNativeTableArtifact(table).artifactSha256);
+});
+
+test('saved real MIT native table keeps all raw fields and its upstream original-page mapping without correcting typography',async()=>{
+ const f=await realFixture(),decoded=decodeDerivedDoclingResult(f.raw,{start:2,end:2,totalPages:2,copyIndices:[1]},
+  {verifiedBlankPages:[],formulaEnriched:false});
+ assert.equal((await PDFDocument.load(f.pdf)).getPageCount(),1);
+ assert.deepEqual(decoded.nativeTables[0].raw,f.raw.document.json_content.tables[0]);
+ assert.deepEqual(decoded.nativeTables[0].pageNumbers,[2]);assert.equal(decoded.pages[0].pageNumber,2);
+ const cells=f.raw.document.json_content.tables[0].data.table_cells;
+ assert.equal(cells.length,12);assert.deepEqual(decoded.nativeTables[0].cellTexts,cells.map((cell:{text:string},index:number)=>({cellIndex:index,text:cell.text})));
+ assert.equal(decoded.nativeTables[0].cellTexts[8].text,"Gaussian 'Pillbox'");
+});
+
+test('isolated saved-real native projection recalls true page PNG only; foreign/stale sources and invalid assets cannot support an answer',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ const {preparePdfVisualEvidence}=await import('../lib/kernel/pdf-visual-evidence.ts');
+ await migrateKernel();const pool=kernelPool(),tag=randomUUID(),owner='native-table-'+tag,id='native-table-doc-'+tag;
+ const fixture=await realFixture(),original=fixture.pdf,sourceHash=await saveBlob(original),optionsHash=digest(JSON.stringify(fixture.metadata.conversion));
+ const inputRaw=fixture.raw,decoded=decodeDerivedDoclingResult(inputRaw,{start:1,end:1,totalPages:1,copyIndices:[0]},
+  {verifiedBlankPages:[],formulaEnriched:false});
+ const wrapper={identity:{owner,documentId:id,sourceHash,totalPages:1,optionsHash,inputHash:sourceHash,copyIndices:[0]},result:inputRaw};
+ const rawSha=await saveBlob(Buffer.from(JSON.stringify(wrapper)));
+ const table=decoded.nativeTables[0];table.result={resultBlobSha256:rawSha,derivedInputSha256:sourceHash,optionsHash,copyIndices:[0]};
+ const nativeTables=await prepareNativeTableCandidates({owner,documentId:id,sourceHash,tables:[table]});
+ assert.equal(nativeTables.artifacts[0].status,'available');
+ const png=fixture.png;
+ const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:original,
+  layout:{status:'unavailable',regions:[],pageSizes:[],reason:'Saved real page PNG supplied by offline fixture'}},async()=>png);
+ const doc={id,ownerId:owner,courseId:'',name:'Saved MIT class5 table '+tag,hash:sourceHash,mime:'application/pdf',origin:'public-fixture',originKey:id};
+ const pages=decoded.pages;
+ await kernel.ingestParsedDocument(doc,pages,{parserVersion:'saved-real-native',pdfVisuals:visuals,nativeTables});
+ const hits=await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox');assert.equal(hits.length,1);
+ assert.equal('body' in hits[0],false);assert.equal('cellTexts' in hits[0],false);
+ const row=(await pool.query('SELECT * FROM document_table_candidates WHERE id=$1',[hits[0].id])).rows[0];
+ assert.equal(row.raw_result_sha256,rawSha);assert.equal(row.artifact.native.raw.data.table_cells[8].text,"Gaussian 'Pillbox'");
+ assert.equal((await kernel.parsedDocument(owner,id))[0].body,pages[0].text);
+ assert.equal((await pool.query('SELECT count(*) n FROM evidence WHERE source_version_id=$1',[hits[0].source.sourceVersionId])).rows[0].n,'1');
+ const evidence=await kernel.readNativeTableCandidateEvidence(owner,hits);
+ assert.equal(evidence.imageAnchors[0].evidence_id,hits[0].anchorEvidenceId);assert.equal(evidence.images[0].kind,'pdf-page');
+ const prepared=prepareDocumentAnswer('What does the table report?',{anchors:[],parents:[],...evidence,sourceContentIsUntrusted:true});
+ assert.deepEqual(prepared.quoteUnits,[]);assert.equal(prepared.supports.length,1);assert.equal(prepared.supports[0].kind,'image');
+ assert.equal(JSON.stringify(prepared.input).includes("Gaussian 'Pillbox'"),false);
+ assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox'),[]);
+ await assert.rejects(kernel.readNativeTableCandidateEvidence('foreign-owner',hits));
+ await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,[{...hits[0],source:{...hits[0].source,courseId:'foreign-course'}}]));
+ const path=resolve(process.env.LIBRARY_DIR||'./data/library',evidence.images[0].sha256),bytes=await readFile(path);
+ try{await writeFile(path,'corrupt original PNG');await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits),/checksum/);}
+ finally{await writeFile(path,bytes);}
+ const moved=path+'.native-test-'+tag;
+ try{await rename(path,moved);await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits),/missing/);}
+ finally{await rename(moved,path);}
+ await pool.query('UPDATE document_table_candidates SET asset_sha256=$2 WHERE id=$1',[hits[0].id,'f'.repeat(64)]);
+ await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits));
+ await pool.query('UPDATE document_table_candidates SET asset_sha256=$2 WHERE id=$1',[hits[0].id,hits[0].assetSha256]);
+ await pool.query('UPDATE document_texts SET hidden=true WHERE id=$1',[id]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),[]);
+ await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits));
+ await pool.query('UPDATE document_texts SET hidden=false WHERE id=$1',[id]);
+ await kernel.ingestParsedDocument(doc,[{...pages[0],text:'New current version.'}],{parserVersion:'saved-real-native-v2',pdfVisuals:visuals});
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),[]);
+ await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits));
+ assert.ok((await kernel.nativeTableBlobHashes()).includes(rawSha));
+});

@@ -159,6 +159,7 @@ export async function collectUnusedBlobs(now=Date.now()){
   if(!process.env.KERNEL_DATABASE_URL)throw new Error('Kernel reference configuration unavailable');
   for(const hash of await doclingStageBlobHashes())used.add(hash);
   for(const hash of await kernel.documentImageBlobHashes())used.add(hash);
+  for(const hash of await kernel.nativeTableBlobHashes())used.add(hash);
  }catch{
   // Incomplete authoritative references must never authorize asset deletion.
   console.warn('Library collection skipped: Kernel asset references unavailable');

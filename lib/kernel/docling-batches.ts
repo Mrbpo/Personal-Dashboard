@@ -45,6 +45,7 @@ export function decodeDerivedDoclingResult(result:unknown,mapping:{start:number;
     formulaPageNumbers:decoded.formulaPageNumbers.map(original),
     visualLayout:{...decoded.visualLayout,pageSizes:decoded.visualLayout.pageSizes.map(page=>({...page,pageNumber:original(page.pageNumber)})),
       regions:decoded.visualLayout.regions.map(region=>({...region,pageNumber:original(region.pageNumber),copyIndices:[...mapping.copyIndices]}))},
+    nativeTables:decoded.nativeTables.map(table=>({...table,pageNumbers:table.pageNumbers.map(original)})),
     warnings:decoded.warnings.map(warning=>warning.replace(/第 (\d+) 页/g,(_,local)=>`第 ${original(Number(local))} 页`))};
 }
 
@@ -115,7 +116,7 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
   persist:(progress:DoclingProgress)=>Promise<void>}):Promise<DecodedDocling>{
   const progress=input.progress?validateDoclingProgress(input.progress,input.identity):createDoclingProgress(input.identity);
   await input.persist(progress);
-  const pages:DecodedDocling['pages']=[],warnings=new Set<string>(),formulaPages=new Set<number>();
+  const pages:DecodedDocling['pages']=[],nativeTables:DecodedDocling['nativeTables']=[],warnings=new Set<string>(),formulaPages=new Set<number>();
   const visualLayout:DecodedDocling['visualLayout']={status:'available',regions:[],pageSizes:[]};
   for(const batch of progress.batches){
     const prepared=await input.prepare(batch.start,batch.end);
@@ -147,7 +148,7 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
       if(blank){
         decoded={pages:Array.from({length:batch.end-batch.start+1},(_,i)=>({pageNumber:batch.start+i,
           locator:`第 ${batch.start+i} 页`,text:''})),totalPages:input.identity.totalPages,
-          warnings:[`第 ${batch.start}–${batch.end} 页已核验原始 PDF 无页面内容，保留为空白页`],formulaPageNumbers:[],
+          warnings:[`第 ${batch.start}–${batch.end} 页已核验原始 PDF 无页面内容，保留为空白页`],formulaPageNumbers:[],nativeTables:[],
           visualLayout:{status:'unavailable',regions:[],pageSizes:[],reason:'Blank range had no layout conversion'}};
         await input.persist(progress);
       }else{
@@ -161,6 +162,8 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
         await input.persist(progress);
       }
     }
+    if(decoded.nativeTables.length&&batch.resultHash)nativeTables.push(...decoded.nativeTables.map(table=>({...table,result:{
+      resultBlobSha256:batch.resultHash!,derivedInputSha256:prepared.inputHash,optionsHash:input.identity.optionsHash,copyIndices:[...prepared.copyIndices]}})));
     pages.push(...decoded.pages);decoded.warnings.forEach(w=>warnings.add(w));decoded.formulaPageNumbers.forEach(p=>formulaPages.add(p));
     if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
     visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
@@ -172,5 +175,5 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
   }
   if(pages.length!==input.identity.totalPages||pages.some((page,i)=>page.pageNumber!==i+1)||!pages.some(page=>page.text.trim()))
     throw new Error('Document transcription is incomplete');
-  return {pages,totalPages:input.identity.totalPages,warnings:[...warnings],formulaPageNumbers:[...formulaPages],visualLayout};
+  return {pages,totalPages:input.identity.totalPages,warnings:[...warnings],formulaPageNumbers:[...formulaPages],visualLayout,nativeTables};
 }

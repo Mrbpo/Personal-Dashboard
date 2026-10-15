@@ -33,7 +33,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
   return streams.every(stream=>stream===undefined||(stream instanceof PDFStream&&
    (stream.getContentsSize()===0||(!stream.dict.has(PDFName.of('Filter'))&&!stream.getContentsString().trim()))))?[index+1]:[];
  });
- const pages:Array<{pageNumber:number;locator:string;text:string}>=[],warnings:string[]=[];
+ const pages:Array<{pageNumber:number;locator:string;text:string}>=[],warnings:string[]=[],nativeTables:ReturnType<typeof decodeDerivedDoclingResult>['nativeTables']=[];
  const visualLayout:DoclingVisualLayout={status:'available',regions:[],pageSizes:[],resultReferences:[]};
  for(const batch of progress.batches){
   const copyIndices=Array.from({length:batch.end-batch.start+1},(_,i)=>batch.start+i-1);
@@ -59,6 +59,8 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
    throw new Error('Cached replay result source, options or range identity mismatch');
   // This CLI only replays raw Docling text, never reruns or downgrades AI formula pages.
   const decoded=decodeDerivedDoclingResult(saved.result,{...expected},{verifiedBlankPages:blank,formulaEnriched:false});
+  nativeTables.push(...decoded.nativeTables.map(table=>({...table,result:{resultBlobSha256:batch.resultHash!,
+   derivedInputSha256:batch.inputHash!,optionsHash:identity.optionsHash,copyIndices:[...copyIndices]}})));
   pages.push(...decoded.pages);warnings.push(...decoded.warnings);
   if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
   visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
@@ -69,7 +71,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
  }
  if(pages.length!==count||pages.some((page,i)=>page.pageNumber!==i+1)||!pages.some(page=>page.text.trim()))
   throw new Error('Cached replay complete document coverage missing');
- return {pages,warnings:normalizedWarnings(warnings),progress,visualLayout};
+ return {pages,warnings:normalizedWarnings(warnings),progress,visualLayout,nativeTables};
 }
 
 export async function auditCachedDoclingReplay(owner:string,documentId:string):Promise<CachedDoclingAudit>{

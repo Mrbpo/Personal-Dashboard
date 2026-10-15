@@ -1,0 +1,25 @@
+{
+  "purpose": "Saved native Docling table plumbing fixture; not whole-document fidelity or retrieval acceptance",
+  "publicSourceUrl": "https://ocw.mit.edu/courses/8-02t-electricity-and-magnetism-spring-2005/",
+  "upstreamFile": "summary_w02d2.pdf",
+  "upstreamPdfSha256": "aef94153ed5d9b79e3cc2620746ab7c0f78249385e68c488f957bfd9c23ddf44",
+  "upstreamPhysicalPage": 2,
+  "upstreamCopyIndices": [1],
+  "isolatedSourcePhysicalPage": 1,
+  "sourcePdfSha256": "b2b902d436c0916b563299e18be269ea525b4b6b14c72f23b2fd6fc1f1d5ef67",
+  "sourcePngSha256": "7f9c62f97dfae9e8e71e48f09eaace98bd5396594a639e3b20d0f2ede2897454",
+  "rawResultSha256": "054f05481b1737ea91d4bf82f5082ee78c4d1002fa2a2b4e608a3f8cb9a1d558",
+  "conversion": {
+    "from_formats":["pdf"],"to_formats":["json"],"pipeline":"standard","pdf_backend":"docling_parse","page_range":[1,1],
+    "do_ocr":false,"do_table_structure":true,"do_formula_enrichment":false,"do_code_enrichment":false,
+    "do_picture_classification":false,"do_picture_description":false,"image_export_mode":"placeholder",
+    "abort_on_error":true,"document_timeout":70
+  },
+  "observedGrid": {"rows":4,"columns":3,"cells":12},
+  "knownLimitations": [
+    "Native Gaussian 'Pillbox' uses ASCII single quotes where the source prints double quotation marks; raw output is preserved without correction.",
+    "Whole-page prose/formula fidelity, complex merged/blank cells and corpus-wide generalization are not certified by this fixture."
+  ],
+  "providerRequests": 0,
+  "paidUSD": 0
+}
