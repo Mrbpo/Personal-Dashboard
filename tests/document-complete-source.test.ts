@@ -62,11 +62,11 @@ test('whole source covers every original node and real caption image beyond14; r
 });
 
 test('complete source refuses overflow, missing or ambiguous originals without returning clipped context',pg,async()=>{
- const tooMany=await fixture({bodies:Array(257).fill('Original.'),captions:0});
+ const tooMany=await fixture({bodies:Array(COMPLETE_DOCUMENT_SOURCE_LIMITS.nodes+1).fill('Original.'),captions:0});
  const over=await kernel.readCompleteDocumentSource(tooMany.owner,tooMany.source);
  assert.equal(over.status,'unavailable');if(over.status!=='unavailable')throw new Error('Expected node bound');
  assert.equal(over.reason,'source-size-limit');assert.equal(over.manifest.returnedNodeCount,0);assert.equal('context' in over,false);
- const manyImages=await fixture({bodies:['Original.'],captions:25,images:false});
+ const manyImages=await fixture({bodies:['Original.'],captions:COMPLETE_DOCUMENT_SOURCE_LIMITS.images+1,images:false});
  const count=await kernel.readCompleteDocumentSource(manyImages.owner,manyImages.source);
  assert.equal(count.status,'unavailable');if(count.status==='unavailable')assert.equal(count.reason,'image-count-limit');
  const missing=await fixture({bodies:['Original.'],captions:1,images:false});
@@ -77,6 +77,50 @@ test('complete source refuses overflow, missing or ambiguous originals without r
   originalReference,provenance:{sourceUrl:'https://example.edu/original.tgz',revision:'v1'},bytes:png});
  const ambiguous=await kernel.readCompleteDocumentSource(missing.owner,missing.source);
  assert.equal(ambiguous.status,'unavailable');if(ambiguous.status==='unavailable')assert.equal(ambiguous.reason,'image-ambiguous');
+});
+
+test('generic complete-source capacity retains boundary text and every original PNG without clipping',pg,async()=>{
+ const text=await fixture({bodies:Array(512).fill('é'.repeat(256)),captions:0});
+ const complete=await kernel.readCompleteDocumentSource(text.owner,text.source);
+ assert.equal(complete.status,'available');if(complete.status!=='available')throw new Error('Expected full boundary text');
+ assert.equal(complete.manifest.sourceNodeCount,512);assert.equal(complete.manifest.returnedNodeCount,512);
+ assert.equal(complete.manifest.sourceBodyCodepoints,131072);assert.equal(complete.manifest.sourceBodyUtf8Bytes,262144);
+ assert.deepEqual(complete.context.anchors.map(n=>n.body),text.pages.map(p=>p.text));
+ const pictures=await fixture({bodies:['Original image source.'],captions:64});
+ const allImages=await kernel.readCompleteDocumentSource(pictures.owner,pictures.source);
+ assert.equal(allImages.status,'available');if(allImages.status!=='available')throw new Error('Expected all64 original images');
+ assert.equal(allImages.context.images.length,64);assert.equal(allImages.manifest.images.length,64);
+ assert.deepEqual(allImages.context.images.map(image=>image.captionEvidenceId),pictures.nodes.slice(1).map(n=>n.evidenceId));
+ assert.ok(allImages.context.images.every(image=>hash(image.bytes)===hash(png)));
+ assert.equal(allImages.context.accounting.imageBytes,64*png.length);
+ assert.equal(allImages.manifest.limits.imageInputTokens,65536);assert.equal(allImages.manifest.limits.requestInputTokens,200000);
+ assert.equal(allImages.manifest.limits.framingTokens,16384);
+});
+
+test('generic complete-source capacity still rejects text, image byte and raw patch overflow before returning context',pg,async()=>{
+ const points=await fixture({bodies:['x'.repeat(131073)],captions:0});
+ const bytes=await fixture({bodies:['€'.repeat(87381)+'é'],captions:0});
+ for(const item of [points,bytes]){
+  const result=await kernel.readCompleteDocumentSource(item.owner,item.source);
+  assert.equal(result.status,'unavailable');if(result.status!=='unavailable')throw new Error('Expected resource refusal');
+  assert.equal(result.reason,'source-size-limit');assert.equal(result.manifest.returnedNodeCount,0);assert.equal('context' in result,false);
+ }
+ const image=await fixture({bodies:['Original image source.'],captions:1}),pool=kernelPool();
+ for(const [reason,override] of [
+  ['image-byte-limit',{byte_length:32*1024*1024+1}],
+  ['image-input-limit',{width:8192,height:8192}],
+ ] as const){
+  // Simulate oversized PG attachment metadata: the reader must refuse before
+  // materializing the blob, rather than clipping it or relaxing its SHA checks.
+  const oversized=new Proxy(pool,{get(target,key){if(key!=='query')return Reflect.get(target,key);return async(...args:Parameters<Pool['query']>)=>{
+   const result=await (target.query as (...values:unknown[])=>Promise<{rows:Record<string,unknown>[]}>).apply(target,args);
+   return typeof args[0]==='string'&&args[0].includes('SELECT id,caption_evidence_id')
+    ?{...result,rows:result.rows.map(row=>({...row,...override}))}:result;
+  };}}) as Pool;
+  const result=await readCompleteDocumentSource(oversized,image.owner,image.source);
+  assert.equal(result.status,'unavailable');if(result.status!=='unavailable')throw new Error('Expected image resource refusal');
+  assert.equal(result.reason,reason);assert.equal(result.manifest.returnedNodeCount,0);assert.equal('context' in result,false);
+ }
 });
 
 test('all original bodies remain complete when parent expansion is unavailable; required caption blobs remain mandatory',pg,async()=>{
@@ -101,6 +145,13 @@ test('actual full request serialization is bounded before any answer reservation
  let attempts=0;const result=await kernel.answerSelectedStudySource(item.owner,'Explain the original source.',item.source,{beforeAttempt:async()=>{attempts++;}});
  assert.equal(result.status,'unavailable');if(result.status==='unavailable')assert.equal(result.reason,'request-input-limit');
  assert.equal(attempts,0);
+ const enumOverflow=await fixture({bodies:[Array(1000).fill('Original source paragraph.').join('\n\n')],captions:0});
+ const schema=await kernel.answerSelectedStudySource(enumOverflow.owner,'Explain the original source.',enumOverflow.source,{beforeAttempt:async()=>{attempts++;}});
+ assert.equal(schema.status,'unavailable');if(schema.status==='unavailable'){
+  assert.equal(schema.reason,'request-input-limit');assert.equal(schema.manifest.requestSchemaLimit,'enum-count');
+  assert.equal(schema.manifest.returnedNodeCount,0);
+ }
+ assert.equal(attempts,0,'complete schema enum overflow must still refuse before any reservation');
  await assert.rejects(kernel.answerSelectedStudySource(item.owner,'Explain.',item.source,{model:'gpt-6-astra'}),/fixed mini/);
  await assert.rejects(kernel.answerSelectedStudySource(item.owner,'Explain.',item.source,{reasoningEffort:'high'}),/fixed mini/);
 });
