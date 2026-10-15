@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {prepareDocumentAnswer,validateGroundedDocumentAnswer,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswer,validateGroundedDocumentAnswer,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
 import {after} from 'node:test';
@@ -22,6 +22,22 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,i
  source_hash:source.sourceHash,source_version_id:source.sourceVersionId,body,locator:'section:0:paragraph:0',page_number:1,
  evidence_id:'evidence',parser_version:'native-unverified',score:1,evidence_body:'full-page',parser_warnings:['Formula fidelity unverified.']} ]};}
 const answer={status:'answered',message:'',claims:[{text:'The study uses two samples.',citations:[{id:'e0',quote:'uses two samples.'}]}]};
+
+test('insufficient evidence returns only a neutral status while preserving strict output shapes',()=>{
+ const prepared=prepareDocumentAnswer('What is the outcome?',context());
+ const raw={status:'insufficient-evidence',message:'The paper never mentions any samples or outcomes.',claims:[]};
+ const validated=validateGroundedDocumentAnswer(raw,prepared.supports);
+ assert.equal(validated.message,'I cannot provide a sufficiently supported answer.');
+ assert.equal(validated.status,'insufficient-evidence');assert.deepEqual(validated.claims,[]);
+ assert.equal(raw.message,'The paper never mentions any samples or outcomes.','raw provider data remains unchanged');
+ for(const changed of [{...raw,message:''},{...raw,message:'  '},{...raw,message:null},
+  {...raw,message:'x'.repeat(3001)},{...raw,claims:answer.claims},
+  {...answer,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE},
+  {...answer,status:'conflicting-evidence',message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE},
+  {...answer,claims:[{text:'A result.',citations:[{id:'e0',quote:'a conclusive result'}]}]}])
+  assert.throws(()=>validateGroundedDocumentAnswer(changed,prepared.supports));
+ assert.deepEqual(validateGroundedDocumentAnswer(answer,prepared.supports),answer);
+});
 
 test('one statement may cite distinct actual quotes from the same evidence without duplicating a citation',()=>{
  const prepared=prepareDocumentAnswer('What was measured and how certain is the result?',context());
@@ -48,7 +64,7 @@ test('answers require supplied evidence and reject invented quotes and unreferen
   {...answer,message:'Unreferenced additional facts.'},
   {...answer,extra:'unexpected'}])assert.throws(()=>validateGroundedDocumentAnswer(changed,prepared.supports));
  const declined={status:'insufficient-evidence',message:'No outcome is supplied.',claims:[]};
- assert.deepEqual(validateGroundedDocumentAnswer(declined,prepared.supports),declined);
+ assert.deepEqual(validateGroundedDocumentAnswer(declined,prepared.supports),{...declined,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE});
  assert.throws(()=>validateGroundedDocumentAnswer({...declined,claims:answer.claims},prepared.supports));
  assert.throws(()=>validateGroundedDocumentAnswer({...answer,status:'conflicting-evidence'},prepared.supports));
 });
