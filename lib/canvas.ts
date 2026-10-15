@@ -253,6 +253,11 @@ export async function getCourseSources(courseId: string): Promise<{ sources: Can
       if (!seen.has(source.id)) { seen.add(source.id); sources.push(source); }
     }
   }
+  // The already fetched course metadata is the source of this zone, never UI or machine settings.
+  for (const source of sources) {
+    source.sourceTimezone = typeof courseDetail.time_zone === 'string' ? courseDetail.time_zone : null;
+    source.sourceTimezoneUnavailable = !source.sourceTimezone?.trim();
+  }
   return { sources, assignments, complete };
 }
 
