@@ -1,6 +1,6 @@
 import {database as db} from './database.ts';
 import {getDocument,indexDocument} from './library.ts';
-import {PDF_PARSER_VERSION} from './document-parser.ts';
+import {PDF_PARSER_VERSION,pdfFormulaPageNeedsRecovery} from './document-parser.ts';
 import {DOCLING_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
 import {kernelPool} from './kernel/db.ts';
 import {kernel} from './kernel/service.ts';
@@ -34,13 +34,18 @@ export async function getPdfFormulaReparseStatus(owner:string,id:string):Promise
  const versions=(await db.prepare("SELECT parser,COUNT(*) count FROM library_parse_pages WHERE document_id=? AND parser IN ('pdf-page-v2',?) GROUP BY parser").bind(id,PDF_PARSER_VERSION).all<{parser:string;count:number}>()).results;
  const hasOld=versions.some(row=>row.parser==='pdf-page-v2'&&row.count>0);
  const hasCurrent=versions.some(row=>row.parser===PDF_PARSER_VERSION&&row.count>0);
- if(!hasOld)return {status:'unavailable',message:''};
+ if(!hasOld&&!hasCurrent)return {status:'unavailable',message:''};
  const job=await db.prepare('SELECT status,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;payload:string}>();
  const requested=job?.payload?JSON.parse(job.payload).forcePdfFormulaReparse===true:false;
  if(requested&&job?.status==='queued')return {status:'queued',message:'已加入识别队列，原文字会保留'};
  if(requested&&job?.status==='running')return {status:'running',message:'正在逐页识别公式，原文字会保留'};
  if(requested&&job?.status==='failed')return {status:'failed',message:'公式识别失败，可重试；原文字仍可查看'};
- if(hasCurrent&&document.status==='ready')return {status:'complete',message:'公式识别已完成'};
+ if(hasCurrent&&document.status==='ready'){
+  const pages=(await db.prepare('SELECT page,body FROM library_parse_pages WHERE document_id=? AND parser=?').bind(id,PDF_PARSER_VERSION).all<{page:number;body:string}>()).results;
+  for(const page of pages)if(await pdfFormulaPageNeedsRecovery(id,document.hash,page.page+1,page.body))
+   return {status:'idle',message:'正文与原告警已保存；部分公式未完整识别，可手动重试并核对原 PDF'};
+  return {status:'complete',message:'公式补充步骤已完成；机器公式仍须核对原 PDF，历史告警保留'};
+ }
  if(job&&(job.status==='queued'||job.status==='running'))return {status:'busy',message:'这份资料正在解析，请完成后再试'};
  return {status:'idle',message:'可为这份 PDF 单独重新识别公式'};
 }
