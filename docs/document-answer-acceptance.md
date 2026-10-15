@@ -41,7 +41,7 @@
 
 默认使用 `gpt-5-mini`、low reasoning、4000 输出 token 和 30 秒期限，沿用实际月度账本与 200 次每日规则。没有结果缓存或自动付费重试。
 
-隔离开发作用域通过已审核的 `withDocumentRerankRunPolicy` 环境校验复用精确开发数据库、SQLite 账本和管理员进程标记，并要求请求记录回调。本轮可用 `gpt-6-astra`、high reasoning、16384 输出 token、120 秒期限；实际计费通过 `paidOpenAI`，保留账本，不使用 bypass。每题的持久化请求和成功检查点由验收运行器管理，不能把回调存在当成已经持久化。
+隔离开发作用域通过已审核的 `withDocumentRerankRunPolicy` 环境校验复用精确开发数据库、SQLite 账本和管理员进程标记，并要求请求记录回调。开发默认使用 `gpt-5-mini`、low reasoning、4000 输出 token、30 秒期限；先冻结小批范围及 hard cap，复用已成功的阶段与缓存。旧 Astra 高档运行仅保留为历史证据；高档模型只用于有具体理由且范围明确的少数难题，不能默认整批使用或自动升级。实际计费通过 `paidOpenAI`，保留账本，不使用 bypass。每题的持久化请求和成功检查点由验收运行器管理，不能把回调存在当成已经持久化。
 
 原始图表在 Astra 中使用 `detail: original`，mini 使用 `high`。[官方图像输入说明](https://developers.openai.com/api/docs/guides/images-vision)。模型身份、reasoning、输出上限、prompt/引用协议版本、原文单元清单 SHA 和完整输入指纹共同构成请求身份。返回的 `model` 记录 provider 的实际模型字段，`requestedModel` 记录请求模型；Astra 开发结果必须与实际 provider 模型一致，否则拒绝发布。开发模型通过不证明其他生产模型也通过。
 
