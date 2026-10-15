@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {paidOpenAI} from '../ai-budget.ts';
+import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
 
@@ -28,7 +28,8 @@ export type DocumentUnitSelection={claimIndex:number;citationIndex:number;select
 export type DocumentCitationRepair={claimIndex:number;citationIndex:number;originalSupportId:string;resolvedSupportId:string;
  originalEvidence:Omit<Support,'text'|'image'>;resolvedEvidence:Omit<Support,'text'|'image'>;
  quoteSha256:string;reason:'unique-exact-text-match'};
-export type DocumentAnswerPolicy={scope?:'development';model?:'gpt-5-mini'|'gpt-6-astra';
+export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
+export type DocumentAnswerPolicy={scope?:'development';model?:DocumentAnswerModel;
  dailyLimit?:number;reasoningEffort?:'low'|'high';maxOutputTokens?:number;timeoutMs?:number;
  beforeAttempt?:(identity:string)=>Promise<void>};
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
@@ -227,7 +228,7 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,input,warnings,unavailableParents,fingerprint:sha(JSON.stringify(input))};
 }
 
-export type DocumentAnswerRequestSettings={model:'gpt-5-mini'|'gpt-6-astra';reasoningEffort:'low'|'high';maxOutputTokens:number};
+export type DocumentAnswerRequestSettings={model:DocumentAnswerModel;reasoningEffort:'low'|'high';maxOutputTokens:number};
 export class DocumentAnswerRequestLimitError extends Error{
  readonly code:'enum-count'|'enum-string';
  constructor(code:'enum-count'|'enum-string'){
@@ -240,7 +241,7 @@ export class DocumentAnswerRequestLimitError extends Error{
  * model calls or policy authorization occur here; prepare via the Kernel first. */
 export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDocumentAnswer>,settings:DocumentAnswerRequestSettings){
  const {model,reasoningEffort:effort,maxOutputTokens:maxOutput}=settings;
- if(!['gpt-5-mini','gpt-6-astra'].includes(model)||!['low','high'].includes(effort)||
+ if(!['gpt-5-mini','gpt-5.4-mini','gpt-6-astra'].includes(model)||!['low','high'].includes(effort)||
   !Number.isInteger(maxOutput)||maxOutput<1||maxOutput>32768)throw new Error('Invalid document answer request settings');
  const ids=[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
   ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
@@ -286,18 +287,24 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    required:['status','message','claims']}}}};
 }
 
-/** Read-only synthesis. No extraction, candidate or canonical state is written.
- * The same Kernel callback revalidates all sources before returning an answer. */
-export async function synthesizeDocumentAnswer(question:string,readContext:()=>Promise<DocumentAnswerContext>,policy:DocumentAnswerPolicy={}){
+/** Reuse the existing trusted development guard before any source or model work. */
+export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  const model=policy.model??'gpt-5-mini',dailyLimit=policy.dailyLimit??200,
   effort=policy.reasoningEffort??'low',maxOutput=policy.maxOutputTokens??4000,timeout=policy.timeoutMs??30000;
- if(!['gpt-5-mini','gpt-6-astra'].includes(model)||!['low','high'].includes(effort)||
+ if(!['gpt-5-mini','gpt-5.4-mini','gpt-6-astra'].includes(model)||!['low','high'].includes(effort)||
   !Number.isInteger(dailyLimit)||dailyLimit<1||dailyLimit>1000||!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>32768||
   !Number.isInteger(timeout)||timeout<1000||timeout>180000)throw new Error('Invalid internal document answer policy');
  if(policy.scope==='development'){
   await withDocumentRerankRunPolicy({scope:'development',dailyLimit,maxAttempts:1,beforeAttempt:policy.beforeAttempt},async()=>{});
  }else if(policy.scope!==undefined||model!=='gpt-5-mini'||dailyLimit>200||effort!=='low'||maxOutput!==4000||timeout!==30000)
   throw new Error('Extended answer settings require the isolated development process');
+ return {model,dailyLimit,effort,maxOutput,timeout};
+}
+
+/** Read-only synthesis. No extraction, candidate or canonical state is written.
+ * The same Kernel callback revalidates all sources before returning an answer. */
+export async function synthesizeDocumentAnswer(question:string,readContext:()=>Promise<DocumentAnswerContext>,policy:DocumentAnswerPolicy={}){
+ const {model,dailyLimit,effort,maxOutput,timeout}=await documentAnswerSettings(policy);
  const prepared=prepareDocumentAnswer(question,await readContext());
  const receipt={referencePolicyVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnitManifest:prepared.quoteUnitManifest,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
@@ -318,7 +325,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  const payload=await response.json();
  if(payload.status!=='completed'||payload.error)throw new Error('Document answer response is incomplete');
  const actualModel=typeof payload.model==='string'&&payload.model.trim()?payload.model:null;
- if(model==='gpt-6-astra'&&actualModel!==model)throw new Error('Document answer provider returned a different or unverified model');
+ if((model==='gpt-6-astra'&&actualModel!==model)||(model==='gpt-5.4-mini'&&!isGpt54MiniProviderModel(actualModel)))
+  throw new Error('Document answer provider returned a different or unverified model');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content??[]).map((item:{text?:string})=>item.text??'').join('');
  const {answer,providerSelections,selectedUnits}=resolveDocumentAnswerSelections(JSON.parse(raw??''),prepared.supports);
  if(prepareDocumentAnswer(question,await readContext()).fingerprint!==prepared.fingerprint)

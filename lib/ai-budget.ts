@@ -2,9 +2,14 @@ import { database as db } from './database.ts';
 import { serviceValue } from './service-vault.ts';
 const baseRates: Record<string,{input:number;output:number;context:number}> = {
   'gpt-5-mini': {input:0.25,output:2,context:400000},
+  'gpt-5.4-mini': {input:0.75,output:4.5,context:400000},
   'gpt-6-astra': {input:10,output:50,context:1050000},
   'text-embedding-3-small': {input:0.02,output:0,context:8192},
 };
+/** Explicit aliases/snapshots from the official model page, never a prefix match. */
+export function isGpt54MiniProviderModel(model:unknown):boolean{
+  return model==='gpt-5.4-mini'||model==='gpt-5.4-mini-2026-03-17';
+}
 function configuredRate(model:string){
   const extra=JSON.parse(serviceValue('AI_MODEL_RATES') || '{}');
   const rate=extra[model] || baseRates[model];
@@ -76,6 +81,9 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
   const p=await response.clone().json().catch(()=>null);
   if(response.ok && p?.usage) {
+    // An unverified model must not be settled at the requested mini rate.
+    // Preserve its reservation for reconciliation; the answer layer rejects it.
+    if(body.model==='gpt-5.4-mini'&&!isGpt54MiniProviderModel(p.model))return response;
     const input=Number(p.usage.input_tokens ?? p.usage.prompt_tokens),output=Number(p.usage.output_tokens ?? 0);
     if(Number.isFinite(input)&&input>=0&&Number.isFinite(output)&&output>=0){
       let charged=(input*rate.input+output*rate.output)/1e6+toolMax;
