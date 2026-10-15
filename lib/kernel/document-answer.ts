@@ -310,7 +310,7 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    'An unavailable parent or missing figure is not evidence.'},
    {role:'user',content:[{type:'input_text',text:JSON.stringify(prepared.input)},...prepared.supports.flatMap(support=>support.image?[
     {type:'input_text',text:`Actual image evidence ${support.id}`},
-    {type:'input_image',detail:model==='gpt-6-astra'?'original':'high',image_url:`data:image/png;base64,${Buffer.from(support.image.bytes).toString('base64')}`}]:[])]}],
+    {type:'input_image',detail:model==='gpt-6-astra'||model==='gpt-5.4-mini'?'original':'high',image_url:`data:image/png;base64,${Buffer.from(support.image.bytes).toString('base64')}`}]:[])]}],
   text:{format:{type:'json_schema',name:'grounded_document_answer_units',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},message:{type:'string'},
     claims:{type:'array',items:{type:'object',additionalProperties:false,properties:{text:{type:'string'},citations:{type:'array',items:{
