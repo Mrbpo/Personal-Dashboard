@@ -26,7 +26,7 @@ export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentP
  sourceContentIsUntrusted:true};
 /** A separate whole-source reader; these limits do not change ranked readers. */
 export const COMPLETE_DOCUMENT_SOURCE_LIMITS=Object.freeze({nodes:512,bodyCodepoints:131072,bodyUtf8Bytes:262144,
- images:64,imageBytes:32*1024*1024,imageInputTokens:65536,requestInputTokens:200000,framingTokens:16384});
+ images:64,imageBytes:32*1024*1024,imageInputTokens:65536,requestInputTokens:300000,framingTokens:16384});
 export type CompleteDocumentSourceReason='source-size-limit'|'structure-unavailable'|
  'image-count-limit'|'image-byte-limit'|'image-input-limit'|'image-unavailable'|'image-ambiguous'|'request-input-limit';
 export type CompleteDocumentSourceManifest={method:'complete-current-source';nodeOrder:'original-source';complete:boolean;

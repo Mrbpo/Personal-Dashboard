@@ -9,7 +9,7 @@ import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {DocumentContextError,readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS} from '../lib/kernel/document-context.ts';
 import {DocumentNodeSelectionError} from '../lib/kernel/document-nodes.ts';
 import {DocumentEvidenceChangedError} from '../lib/kernel/document-evidence.ts';
-import {prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
+import {buildDocumentAnswerRequest,prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
 const hash=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQWQAAAAASUVORK5CYII=','base64');
 const pg={skip:!process.env.KERNEL_DATABASE_URL};
@@ -18,6 +18,14 @@ let unexpectedCalls=0;const forbid=async()=>{unexpectedCalls++;throw new Error('
 globalThis.fetch=forbid;
 after(async()=>{try{assert.equal(unexpectedCalls,0);}finally{if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();}});
 const changed=(error:unknown)=>error instanceof DocumentEvidenceChangedError||error instanceof DocumentContextError&&error.code==='DOCUMENT_CONTEXT_CHANGED';
+test('complete request input bound leaves room for the maximum output within the configured mini context',()=>{
+ // The input bound already includes image bounds and 16,384 framing tokens.
+ const maximumOutputTokens=32768,configuredMiniContext=400000;
+ assert.equal(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens,300000);
+ assert.equal(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens+maximumOutputTokens,332768);
+ assert.ok(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens+maximumOutputTokens<configuredMiniContext);
+ assert.equal(configuredMiniContext-COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens-maximumOutputTokens,67232);
+});
 async function fixture(options:{bodies?:string[];captions?:number;captionBody?:string;images?:boolean;separateParents?:boolean;nestedParents?:boolean}={}){
  await migrateKernel();const tag=randomUUID(),owner='complete-owner-'+tag,id='complete-doc-'+tag,title='Complete original source '+tag;
  const prose=options.bodies??Array.from({length:20},(_,index)=>`Complete baseline observation ${index}.`),captions=options.captions??2;
@@ -58,7 +66,7 @@ test('whole source covers every original node and real caption image beyond14; r
  assert.ok(result.context.anchors.every(h=>!('score' in h)&&h.retrieval_mode==='reader-selection'));
  assert.deepEqual(await kernel.searchDocumentText(item.owner,'baseline',options),before);
  await assert.rejects(kernel.readDocumentNodes(item.owner,item.source,item.nodes.slice(0,15).map(n=>n.evidenceId)),DocumentNodeSelectionError);
- assert.equal(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens,200000);
+ assert.equal(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens,300000);
 });
 
 test('complete source refuses overflow, missing or ambiguous originals without returning clipped context',pg,async()=>{
@@ -93,7 +101,7 @@ test('generic complete-source capacity retains boundary text and every original 
  assert.deepEqual(allImages.context.images.map(image=>image.captionEvidenceId),pictures.nodes.slice(1).map(n=>n.evidenceId));
  assert.ok(allImages.context.images.every(image=>hash(image.bytes)===hash(png)));
  assert.equal(allImages.context.accounting.imageBytes,64*png.length);
- assert.equal(allImages.manifest.limits.imageInputTokens,65536);assert.equal(allImages.manifest.limits.requestInputTokens,200000);
+ assert.equal(allImages.manifest.limits.imageInputTokens,65536);assert.equal(allImages.manifest.limits.requestInputTokens,300000);
  assert.equal(allImages.manifest.limits.framingTokens,16384);
 });
 
@@ -139,11 +147,23 @@ test('all original bodies remain complete when parent expansion is unavailable; 
 });
 
 test('actual full request serialization is bounded before any answer reservation; upgrades are rejected',pg,async()=>{
- const prose=('"\\'.repeat(100)+' end. ').repeat(13);
+ const question='Explain the original source.',stop=new Error('Stop before any answer reservation');let attempts=0;
+ const lowerProse=('"\\'.repeat(100)+' end. ').repeat(10);
+ const lower=await fixture({bodies:Array(24).fill(lowerProse),captions:0,separateParents:true});
+ const complete=await kernel.readCompleteDocumentSource(lower.owner,lower.source);
+ assert.equal(complete.status,'available');if(complete.status!=='available')throw new Error('Expected complete synthetic source');
+ const request=buildDocumentAnswerRequest(prepareDocumentAnswer(question,complete.context),{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:4000});
+ const inputUpper=Buffer.byteLength(JSON.stringify(request))+complete.manifest.imageInputTokenUpper+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens;
+ assert.ok(inputUpper>200000&&inputUpper<=300000,'complete escaped JSON in the newly admitted range must remain intact');
+ await assert.rejects(kernel.answerSelectedStudySource(lower.owner,question,lower.source,{beforeAttempt:async()=>{attempts++;throw stop;}}),error=>error===stop);
+ assert.equal(attempts,1,'the complete request must reach the callback before reservation without any model request');
+ attempts=0;
+ const prose=('"\\'.repeat(100)+' end. ').repeat(20);
  const item=await fixture({bodies:Array(24).fill(prose),captions:0,separateParents:true});
  assert.equal((await kernel.readCompleteDocumentSource(item.owner,item.source)).status,'available');
- let attempts=0;const result=await kernel.answerSelectedStudySource(item.owner,'Explain the original source.',item.source,{beforeAttempt:async()=>{attempts++;}});
+ const result=await kernel.answerSelectedStudySource(item.owner,question,item.source,{beforeAttempt:async()=>{attempts++;}});
  assert.equal(result.status,'unavailable');if(result.status==='unavailable')assert.equal(result.reason,'request-input-limit');
+ if(result.status==='unavailable')assert.ok(result.manifest.request!.inputTokenUpper>300000);
  assert.equal(attempts,0);
  // Each601-codepoint emoji body is1202 UTF16 units and yields two quote units.
  // These512 original nodes fit source capacity but yield600 IDs/15600 enum chars.
