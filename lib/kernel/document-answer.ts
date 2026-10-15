@@ -40,7 +40,7 @@ function supportFor(context:DocumentAnswerContext):Support[]{
  if(context.sourceContentIsUntrusted!==true)throw new Error('Document answer requires a verified Kernel context');
  const supports:Support[]=[],seen=new Map<string,Support>();
  const addText=(node:Omit<Support,'id'|'kind'|'sha256'>)=>{
-  if(!node.documentId||!node.documentVersionId||!node.sourceVersionId||!node.sourceHash||!node.evidenceId||!node.text?.trim())
+  if(!node.documentId||!node.documentVersionId||!node.sourceVersionId||!node.sourceHash||!node.evidenceId||typeof node.text!=='string')
    throw new Error('Document answer evidence is incomplete');
   const identity=JSON.stringify([node.documentId,node.sourceVersionId,node.sourceHash,node.evidenceId]);
   const previous=seen.get(identity);
@@ -305,7 +305,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   evidence:prepared.supports.map(({image,text,...support})=>support),
   textEvidenceCount:prepared.supports.filter(support=>support.kind==='text').length,
   imageEvidenceCount:prepared.supports.filter(support=>support.kind==='image').length};
- if(!prepared.supports.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
+ if(!prepared.quoteUnits.some(unit=>unit.selectable)&&!prepared.supports.some(support=>support.kind==='image'))return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
   citationRepairs:[] as DocumentCitationRepair[],providerSelections:null,selectedUnits:[] as DocumentUnitSelection[],
   model:null,providerRequestSha256:null,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
  const request=buildDocumentAnswerRequest(prepared,{model,reasoningEffort:effort,maxOutputTokens:maxOutput});
