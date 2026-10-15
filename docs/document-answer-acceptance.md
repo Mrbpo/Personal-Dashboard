@@ -21,6 +21,8 @@
 
 `source-quote-units-v1` 将完整已提供文字连续分片，单片不超过 1200 个 UTF-16 code units，优先自然边界且不切断有效 surrogate pair。按原顺序拼接得到逐字原文，不摘要、截断或丢弃；纯空白片也保留，但因严格验证禁止空白引文而不能被选择。输入 `evidence` 仅保留来源身份，正文只在 `quoteUnits` 出现一次。稳定编号绑定协议、正文 SHA、原始证据/定位及确切起止偏移，不依赖临时 eN 标签。
 
+单元编号为 `q:` 加身份 SHA 的前 24 个 hex 字符；来源、正文和引文的完整 SHA 仍保留在审计清单中，编号重复或碰撞会明确失败。请求 builder 在任何 beforeAttempt/预算预留前检查：全 schema 的 enum 不超过 1000 项（含 status 的 3 项）；引用 enum 超过 250 项时，总字符串长度不超过 15000 字符。这遵循 [OpenAI 官方 Structured Outputs 限制](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)。超限拒绝整个请求，不截掉单元或放宽引用规则。
+
 模型的 citation 仅为 `{id: 已提供的可选单元编号或真实图片编号}`，不允许自写 `quote`。服务端恢复公共回答并执行原严格验证；未知编号、重复选择、非法形状、缺少引用，以及将同一来源的不同单元冒充两个冲突来源均失败。保留原始 `providerSelections`；`selectedUnits` 分别记录选择位置、来源身份、偏移和恢复引文 SHA。`quoteUnitManifest` 记录全部文字单元的无正文清单与来源身份，含不可选空白片，并返回清单 SHA。
 
 新提示词版本为 `grounded-document-answer-v4`，`quoteUnitProtocolVersion` 和清单 SHA 与完整输入指纹一同绑定请求身份；新返回的 `referencePolicyVersion` 也明确标识原文单元协议。旧 literal 协议标识仍保留给历史解析器。现有模型、请求次数和预算规则不变，没有额外生成、付费修复循环或隐藏回退。分片元数据会增加少量输入开销。

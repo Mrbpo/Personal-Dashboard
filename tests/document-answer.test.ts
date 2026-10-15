@@ -42,6 +42,7 @@ test('source quote units losslessly reconstruct Unicode evidence and strictly re
  assert.equal(offset,original.length);assert.deepEqual(prepareDocumentAnswer('What is supplied?',c).quoteUnits,units);
  assert.deepEqual(documentQuoteUnits(prepared.supports.map(s=>s.kind==='text'?{...s,id:'e99'}:s)).map(u=>u.id),units.map(u=>u.id));
  assert.deepEqual(documentQuoteUnits(prepared.supports.map(s=>Object.fromEntries(Object.entries(s).reverse()) as typeof s)).map(u=>u.id),units.map(u=>u.id));
+ assert.throws(()=>documentQuoteUnits([...prepared.supports,prepared.supports[0]]),/Duplicate or colliding/);
  assert.ok(prepared.input.evidence.every(item=>!Object.hasOwn(item,'text')),'no duplicate full text in model input');
  assert.equal(prepared.input.quoteUnits.map(unit=>unit.text).join(''),original);
  assert.equal(prepared.quoteUnitManifestSha256,hash(JSON.stringify(prepared.quoteUnitManifest)));
@@ -52,6 +53,14 @@ test('source quote units losslessly reconstruct Unicode evidence and strictly re
  assert.equal(user.content.filter(item=>item.type==='input_image').length,1);
  assert.equal(JSON.parse(user.content[0].text!).quoteUnits.map((unit:{text:string})=>unit.text).join(''),original);
  assert.throws(()=>buildDocumentAnswerRequest(prepared,{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:0}));
+ const manyNodes=(count:number)=>{const many=context();many.anchors=Array.from({length:count},(_,n)=>({...many.anchors[0],
+  id:`pg:version:${n+1}`,page_number:n+1,evidence_id:`schema-evidence-${n}`,locator:`node:${n}`,body:`Original node ${n}.`}));
+  return prepareDocumentAnswer('What is supplied?',many);};
+ const settings={model:'gpt-5-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:4000};
+ const many=buildDocumentAnswerRequest(manyNodes(256),settings),enumIds=many.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum;
+ assert.equal(enumIds.length,256);assert.ok(enumIds.every(id=>id.length===26));assert.ok(enumIds.join('').length<=15000);
+ assert.throws(()=>buildDocumentAnswerRequest(manyNodes(578),settings),/enum string limit/);
+ assert.throws(()=>buildDocumentAnswerRequest(manyNodes(998),settings),/enum count limit/);
  const selected={status:'answered',message:'',claims:[{text:'A source-backed statement.',citations:[{id:selectable[0].id},{id:'i0'}]}]},raw=JSON.stringify(selected);
  const result=resolveDocumentAnswerSelections(selected,prepared.supports);
  assert.deepEqual(result.answer.claims[0].citations,[{id:'e0',quote:selectable[0].text},{id:'i0',quote:''}]);
