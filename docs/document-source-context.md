@@ -68,6 +68,36 @@ anchor count, parent count, context-node/codepoint count and image count/bytes.
 Expanding context is not an increase in the ranked search result count and is
 not by itself proof of answer correctness or document transcription fidelity.
 
+## Complete selected-source capacity
+
+`readCompleteDocumentSource` is separate from ranked search and its 14-anchor
+limit. It returns every original node and required caption image, or an explicit
+`unavailable` result with zero returned context. It never clips, splits, drops
+images, or substitutes a partial ranked answer.
+
+The generic preliminary limits are **512 nodes, 131,072 Unicode codepoints,
+262,144 body UTF-8 bytes, 64 original PNGs and 32 MiB aggregate image bytes**.
+Counts and image metadata are checked before the image buffers are loaded, then
+verified again against the actual original bytes. Local reads inspect PNG headers
+and bytes; they do not decode pixels. The unchanged conservative raw-patch gate
+of 65,536 image-input tokens also bounds aggregate pixel area to less than
+33.6 million pixels (about 128 MiB at four bytes per pixel). This is a resource
+bound calculation, not a measured process-memory guarantee; base64/JSON and
+runtime allocations remain additional memory.
+
+The final request gate still uses the **complete non-image provider JSON**,
+including the strict schema enum, plus image patch upper bounds and 16,384
+framing tokens, with a total of at most **200,000 input tokens**. The existing
+schema enum limits and mini low/4,000 output/30-second policy remain unchanged.
+Passing preliminary limits does not guarantee passing these final gates.
+The [official image input requirements](https://developers.openai.com/api/docs/guides/images-vision)
+also apply; this app's limits are independently smaller.
+
+These generic capacities were adjusted after static public-material preparation,
+before reading cohort C Gold or running its inference. They contain no document
+or query whitelist. All future full-cohort acceptance must freeze the same final
+method; the earlier A and C structure-coverage difference remains explicit.
+
 ## Scope of verification
 
 `tests/document-context.test.ts` uses isolated PostgreSQL fixtures with external
