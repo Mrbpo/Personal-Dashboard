@@ -4,6 +4,7 @@ import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v3';
+export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
 export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;body:string;bodySha256:string};
@@ -19,6 +20,9 @@ type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:
 type Citation={id:string;quote:string};
 type Claim={text:string;citations:Citation[]};
 export type GroundedDocumentAnswer={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Claim[]};
+export type DocumentCitationRepair={claimIndex:number;citationIndex:number;originalSupportId:string;resolvedSupportId:string;
+ originalEvidence:Omit<Support,'text'|'image'>;resolvedEvidence:Omit<Support,'text'|'image'>;
+ quoteSha256:string;reason:'unique-exact-text-match'};
 export type DocumentAnswerPolicy={scope?:'development';model?:'gpt-5-mini'|'gpt-6-astra';
  dailyLimit?:number;reasoningEffort?:'low'|'high';maxOutputTokens?:number;timeoutMs?:number;
  beforeAttempt?:(identity:string)=>Promise<void>};
@@ -78,7 +82,7 @@ function supportFor(context:DocumentAnswerContext):Support[]{
  return supports;
 }
 
-export function validateGroundedDocumentAnswer(value:unknown,supports:readonly Pick<Support,'id'|'kind'|'text'>[]):GroundedDocumentAnswer{
+function answerShape(value:unknown):GroundedDocumentAnswer{
  const invalid=()=>{throw new Error('Invalid or ungrounded document answer');};
  if(!exactKeys(value,['status','message','claims']))return invalid();
  const answer=value as GroundedDocumentAnswer;
@@ -86,17 +90,28 @@ export function validateGroundedDocumentAnswer(value:unknown,supports:readonly P
   typeof answer.message!=='string'||answer.message.length>3000||!Array.isArray(answer.claims)||answer.claims.length>30)return invalid();
  if(answer.status==='insufficient-evidence'){
   if(answer.claims.length||!answer.message.trim())return invalid();
-  return {...answer,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE};
+  return answer;
  }
  if(!answer.claims.length||answer.message!=='')return invalid();
- const byId=new Map(supports.map(support=>[support.id,support])),used=new Set<string>();
  for(const claim of answer.claims){
   if(!exactKeys(claim,['text','citations'])||typeof claim.text!=='string'||!claim.text.trim()||claim.text.length>3000||
    !Array.isArray(claim.citations)||!claim.citations.length||claim.citations.length>20)return invalid();
-  const claimCitations=new Set<string>();
   for(const citation of claim.citations){
    if(!exactKeys(citation,['id','quote'])||typeof citation.id!=='string'||typeof citation.quote!=='string'||
     citation.quote.length>1200)return invalid();
+  }
+ }
+ return answer;
+}
+
+export function validateGroundedDocumentAnswer(value:unknown,supports:readonly Pick<Support,'id'|'kind'|'text'>[]):GroundedDocumentAnswer{
+ const invalid=()=>{throw new Error('Invalid or ungrounded document answer');};
+ const answer=answerShape(value);
+ if(answer.status==='insufficient-evidence')return {...answer,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE};
+ const byId=new Map(supports.map(support=>[support.id,support])),used=new Set<string>();
+ for(const claim of answer.claims){
+  const claimCitations=new Set<string>();
+  for(const citation of claim.citations){
    const citationKey=JSON.stringify([citation.id,whitespace(citation.quote)]);
    if(claimCitations.has(citationKey))return invalid();
    const support=byId.get(citation.id);if(!support)return invalid();
@@ -107,6 +122,27 @@ export function validateGroundedDocumentAnswer(value:unknown,supports:readonly P
  }
  if(answer.status==='conflicting-evidence'&&(answer.claims.length<2||used.size<2))return invalid();
  return answer;
+}
+
+/** Resolve only a uniquely located verbatim text quote, never its wording or claim.
+ * The original provider object is retained; every resulting citation still passes
+ * the complete strict validator, including duplicates and conflict requirements. */
+export function resolveGroundedDocumentAnswerReferences(value:unknown,supports:readonly Support[]){
+ const original=answerShape(value),byId=new Map(supports.map(support=>[support.id,support]));
+ const citationRepairs:DocumentCitationRepair[]=[];
+ const metadata=({text,image,...support}:Support)=>support;
+ const proposed={...original,claims:original.claims.map((claim,claimIndex)=>({...claim,
+  citations:claim.citations.map((citation,citationIndex)=>{
+   const current=byId.get(citation.id),quote=whitespace(citation.quote);
+   if(!current||current.kind!=='text'||!quote||whitespace(current.text??'').includes(quote))return {...citation};
+   const matches=supports.filter(support=>support.kind==='text'&&whitespace(support.text??'').includes(quote));
+   if(matches.length!==1)return {...citation};
+   const resolved=matches[0];
+   citationRepairs.push({claimIndex,citationIndex,originalSupportId:current.id,resolvedSupportId:resolved.id,
+    originalEvidence:metadata(current),resolvedEvidence:metadata(resolved),quoteSha256:sha(quote),reason:'unique-exact-text-match'});
+   return {...citation,id:resolved.id};
+  })}))};
+ return {answer:validateGroundedDocumentAnswer(proposed,supports),citationRepairs};
 }
 
 export function prepareDocumentAnswer(question:string,context:DocumentAnswerContext){
@@ -138,13 +174,15 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  }else if(policy.scope!==undefined||model!=='gpt-5-mini'||dailyLimit>200||effort!=='low'||maxOutput!==4000||timeout!==30000)
   throw new Error('Extended answer settings require the isolated development process');
  const prepared=prepareDocumentAnswer(question,await readContext());
- const receipt={warnings:prepared.warnings,unavailableParents:prepared.unavailableParents,inputFingerprint:prepared.fingerprint,
+ const receipt={referencePolicyVersion:DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION,
+  warnings:prepared.warnings,unavailableParents:prepared.unavailableParents,inputFingerprint:prepared.fingerprint,
   evidence:prepared.supports.map(({image,text,...support})=>support),
   textEvidenceCount:prepared.supports.filter(support=>support.kind==='text').length,
   imageEvidenceCount:prepared.supports.filter(support=>support.kind==='image').length};
  if(!prepared.supports.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
-  model:null,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
- const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,fingerprint:prepared.fingerprint}));
+  citationRepairs:[] as DocumentCitationRepair[],model:null,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
+ const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,
+  referencePolicyVersion:DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION,fingerprint:prepared.fingerprint}));
  await policy.beforeAttempt?.(identity);
  const ids=prepared.supports.map(support=>support.id);
  const response=await paidOpenAI('responses',{model,store:false,reasoning:{effort},max_output_tokens:maxOutput,
@@ -179,8 +217,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  const actualModel=typeof payload.model==='string'&&payload.model.trim()?payload.model:null;
  if(model==='gpt-6-astra'&&actualModel!==model)throw new Error('Document answer provider returned a different or unverified model');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content??[]).map((item:{text?:string})=>item.text??'').join('');
- const answer=validateGroundedDocumentAnswer(JSON.parse(raw??''),prepared.supports);
+ const {answer,citationRepairs}=resolveGroundedDocumentAnswerReferences(JSON.parse(raw??''),prepared.supports);
  if(prepareDocumentAnswer(question,await readContext()).fingerprint!==prepared.fingerprint)
   throw new Error('Document evidence changed during answer generation');
- return {answer,model:actualModel,requestedModel:model,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt};
+ return {answer,citationRepairs,model:actualModel,requestedModel:model,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt};
 }

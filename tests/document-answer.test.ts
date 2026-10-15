@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {prepareDocumentAnswer,validateGroundedDocumentAnswer,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswer,validateGroundedDocumentAnswer,resolveGroundedDocumentAnswerReferences,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
 import {after} from 'node:test';
@@ -22,6 +22,36 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,i
  source_hash:source.sourceHash,source_version_id:source.sourceVersionId,body,locator:'section:0:paragraph:0',page_number:1,
  evidence_id:'evidence',parser_version:'native-unverified',score:1,evidence_body:'full-page',parser_warnings:['Formula fidelity unverified.']} ]};}
 const answer={status:'answered',message:'',claims:[{text:'The study uses two samples.',citations:[{id:'e0',quote:'uses two samples.'}]}]};
+
+test('unique existing text reference repair preserves raw data and strict final rejection boundaries',()=>{
+ const c=context();c.anchors.push({...c.anchors[0],id:'pg:version:2',page_number:2,evidence_id:'second-evidence',
+  locator:'section:1:paragraph:0',body:'A uniquely supported result.'});
+ const prepared=prepareDocumentAnswer('What result is supplied?',c),supports=[...prepared.supports,
+  {...prepared.supports[0],id:'i0',kind:'image' as const,text:undefined}];
+ const quote='uniquely  supported\nresult.',raw={status:'answered',message:'',claims:[{
+  text:'The source reports this result.',citations:[{id:'e0',quote}]}]},before=JSON.stringify(raw);
+ assert.throws(()=>validateGroundedDocumentAnswer(raw,supports));
+ const result=resolveGroundedDocumentAnswerReferences(raw,supports);
+ assert.deepEqual(result.answer,{...raw,claims:[{...raw.claims[0],citations:[{id:'e1',quote}]}]});
+ assert.equal(JSON.stringify(raw),before,'never mutate the original provider object');
+ assert.equal(result.citationRepairs.length,1);const repair=result.citationRepairs[0];
+ assert.deepEqual([repair.claimIndex,repair.citationIndex,repair.originalSupportId,repair.resolvedSupportId],[0,0,'e0','e1']);
+ assert.equal(repair.originalEvidence.evidenceId,'evidence');assert.equal(repair.resolvedEvidence.evidenceId,'second-evidence');
+ assert.equal(repair.resolvedEvidence.sourceVersionId,source.sourceVersionId);assert.equal(repair.reason,'unique-exact-text-match');
+ assert.equal(repair.quoteSha256,hash('uniquely supported result.'));
+ assert.deepEqual(validateGroundedDocumentAnswer(result.answer,supports),result.answer);
+ const changed=(id:string,quote:string)=>({...raw,claims:[{...raw.claims[0],citations:[{id,quote}]}]});
+ for(const invalid of [changed('outside',quote),changed('i0',quote),changed('e0',''),
+  changed('e0','a uniquely supported result.'),changed('e0','"uniquely supported result."'),
+  {...raw,extra:true},{...raw,claims:[{...raw.claims[0],citations:[{id:'e0',quote,extra:true}]}]},
+  {...raw,claims:[{...raw.claims[0],citations:[{id:'e0',quote},{id:'e1',quote}]}]},
+  {...raw,status:'conflicting-evidence',claims:[raw.claims[0],{text:'Another claim.',citations:[{id:'e1',quote}]}]}])
+  assert.throws(()=>resolveGroundedDocumentAnswerReferences(invalid,supports));
+ assert.throws(()=>resolveGroundedDocumentAnswerReferences(raw,[...supports,{...prepared.supports[1],id:'e2'}]),
+  'multiple exact text matches are ambiguous');
+ assert.deepEqual(resolveGroundedDocumentAnswerReferences(answer,supports).citationRepairs,[]);
+ assert.equal(JSON.stringify(raw),before);
+});
 
 test('insufficient evidence returns only a neutral status while preserving strict output shapes',()=>{
  const prepared=prepareDocumentAnswer('What is the outcome?',context());
