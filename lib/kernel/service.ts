@@ -7,9 +7,10 @@ import { documentSearchText, splitDocumentText, searchDocumentText, type Documen
 import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,type DocumentAnswerPolicy} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
- type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput} from './document-context.ts';
+ readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
+ type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
 import type {IngestionJob} from './jobs.ts';
@@ -924,6 +925,58 @@ export class KernelService {
 
   readDocumentNodes(owner:string,expectedSource:DocumentContextSource,evidenceIds:string[]){
     return readDocumentNodes(kernelPool(),owner,expectedSource,evidenceIds);
+  }
+
+  readCompleteDocumentSource(owner:string,expectedSource:DocumentContextSource){
+    return readCompleteDocumentSource(kernelPool(),owner,expectedSource);
+  }
+
+  /** Explicit selected-source route. Complete refers to source coverage, never
+   * semantic correctness or a relevance ranking. No paid planner or fallback. */
+  async answerSelectedStudySource(owner:string,question:string,expectedSource:DocumentContextSource,policy:DocumentAnswerPolicy={}){
+    if((policy.model??'gpt-5-mini')!=='gpt-5-mini'||(policy.reasoningEffort??'low')!=='low'||
+      (policy.maxOutputTokens??4000)!==4000||(policy.timeoutMs??30000)!==30000)
+      throw new Error('Complete selected-source answers require the fixed mini low/4000/30s policy');
+    const source={...expectedSource},initial=await this.readCompleteDocumentSource(owner,source);
+    if(initial.status==='unavailable')return initial;
+    const limits=COMPLETE_DOCUMENT_SOURCE_LIMITS,settings={model:'gpt-5-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:4000};
+    let latest=initial;
+    const requestManifest=():CompleteDocumentSourceManifest=>{
+      const prepared=prepareDocumentAnswer(question,latest.context);
+      let body:ReturnType<typeof buildDocumentAnswerRequest>;
+      try{body=buildDocumentAnswerRequest(prepared,settings);}
+      catch(error){
+        if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
+        const {manifestSha256:_previous,...manifest}=latest.manifest;
+        const value={...manifest,complete:false,reason:'request-input-limit' as const,returnedNodeCount:0,requestSchemaLimit:error.code};
+        return {...value,manifestSha256:createHash('sha256').update(JSON.stringify(value)).digest('hex')};
+      }
+      // Preserve developer text, schemas/enums and image structure. Base64 is
+      // image transport, not text tokens; original dimensions bound its cost.
+      const nonImageBody=JSON.stringify(body,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')
+        ?'data:image/png;base64,':value);
+      const nonImageBodyUtf8Bytes=Buffer.byteLength(nonImageBody),inputTokenUpper=nonImageBodyUtf8Bytes+latest.manifest.imageInputTokenUpper+limits.framingTokens;
+      const fits=Number.isSafeInteger(inputTokenUpper)&&inputTokenUpper<=limits.requestInputTokens;
+      const {manifestSha256:_previous,...manifest}=latest.manifest;
+      const value={...manifest,complete:fits,reason:fits?null:'request-input-limit' as const,returnedNodeCount:fits?manifest.sourceNodeCount:0,
+        request:{nonImageBodyUtf8Bytes,imageInputTokenUpper:manifest.imageInputTokenUpper,inputTokenUpper,
+          nonImageBodySha256:createHash('sha256').update(nonImageBody).digest('hex')}};
+      return {...value,manifestSha256:createHash('sha256').update(JSON.stringify(value)).digest('hex')};
+    };
+    const ready=requestManifest();
+    if(!ready.complete)return {status:'unavailable' as const,reason:'request-input-limit' as const,manifest:ready};
+    const result=await synthesizeDocumentAnswer(question,async()=>{
+      const current=await this.readCompleteDocumentSource(owner,source);
+      if(current.status!=='available'||current.manifest.manifestSha256!==initial.manifest.manifestSha256)
+        throw new DocumentContextError('DOCUMENT_CONTEXT_CHANGED','Complete selected source changed before or during answer generation');
+      latest=current;return current.context;
+    },{...policy,...settings,timeoutMs:30000,beforeAttempt:async identity=>{
+      const checked=requestManifest();
+      if(!checked.complete||checked.manifestSha256!==ready.manifestSha256)
+        throw new DocumentContextError('DOCUMENT_CONTEXT_CHANGED','Complete request changed before model reservation');
+      await policy.beforeAttempt?.(identity);
+    }});
+    return {status:'available' as const,manifest:ready,result};
   }
 
   /** Non-structured study content only; canonical business facts use their own
