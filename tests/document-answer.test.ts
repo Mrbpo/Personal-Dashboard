@@ -107,6 +107,8 @@ test('source quote units losslessly reconstruct Unicode evidence and strictly re
  assert.equal(prepared.input.quoteUnits.map(unit=>unit.text).join(''),original);
  assert.equal(prepared.quoteUnitManifestSha256,hash(JSON.stringify(prepared.quoteUnitManifest)));
  const request=buildDocumentAnswerRequest(prepared,{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:4000});
+ assert.deepEqual(Object.keys(request.text.format.schema.properties.claims.items.properties),['citations','text']);
+ assert.deepEqual(request.text.format.schema.properties.claims.items.required,['citations','text']);
  assert.deepEqual(request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,
   [...selectable.map(unit=>unit.id),'i0']);
  const user=request.input.find(item=>item.role==='user')!;assert.ok(Array.isArray(user.content));
@@ -123,6 +125,9 @@ test('source quote units losslessly reconstruct Unicode evidence and strictly re
  assert.throws(()=>buildDocumentAnswerRequest(manyNodes(998),settings),/enum count limit/);
  const selected={status:'answered',message:'',claims:[{text:'A source-backed statement.',citations:[{id:selectable[0].id},{id:'i0'}]}]},raw=JSON.stringify(selected);
  const result=resolveDocumentAnswerSelections(selected,prepared.supports);
+ const citationsFirst={...selected,claims:selected.claims.map(({text,citations})=>({citations,text}))};
+ assert.deepEqual(resolveDocumentAnswerSelections(citationsFirst,prepared.supports).answer,result.answer,
+  'claim key order changes generation order, never strict source restoration');
  assert.deepEqual(result.answer.claims[0].citations,[{id:'e0',quote:selectable[0].text},{id:'i0',quote:''}]);
  assert.deepEqual(result.providerSelections,selected);assert.equal(JSON.stringify(selected),raw);
  assert.deepEqual(validateGroundedDocumentAnswer(result.answer,prepared.supports),result.answer);
@@ -291,7 +296,7 @@ test('synthesis revalidates current sources, rejects incomplete output and makes
   const result=await synthesizeDocumentAnswer('How many samples?',async()=>{reads++;return context();},
    {beforeAttempt:async()=>{attempts++;}});
   assert.equal(result.answer.status,'answered');assert.equal(result.model,'gpt-5-mini');
-  assert.equal(result.promptVersion,'grounded-document-answer-v5');
+  assert.equal(result.promptVersion,'grounded-document-answer-v6-citations-first');
   assert.equal(result.providerRequestSha256,requestHash);assert.equal(result.selectedUnits.length,1);
   assert.equal(reads,2);assert.equal(attempts,1);assert.equal(calls,1);
   reads=0;

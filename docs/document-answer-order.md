@@ -1,0 +1,11 @@
+# Citations before claim text: unproven candidate
+
+Issue [#124](https://github.com/Mrbpo/Personal-Dashboard/issues/124) changes only the grounded answer schema's claim property and required-list order to `citations`, then `text`. The request identity is `grounded-document-answer-v6-citations-first`; the quote-unit protocol and source restoration remain unchanged. The prompt, fields, models, limits and policies are unchanged. Historical requests remain historical.
+
+[OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs#key-ordering) documents schema key ordering as output ordering. This motivates testing evidence selection before claim generation, without guaranteeing entailment or completeness. [ReClaim](https://aclanthology.org/2025.findings-naacl.55/) and its [author repository](https://github.com/pdxthree/ReClaim) motivate reference-claim interleaving; this schema-only candidate does not reproduce their trained method or inherit their reported results.
+
+The PR must remain a draft until the coordinator reviews a real controlled comparison. Calibration uses exposed A50 indices 0, 2, 11, 29 and 40, with five current text-first baselines and five citations-first candidates. Each pair must use the same complete current Kernel source, original PNG pixels, question and mini54 low/4000/30s policy. The sole wire difference is claim schema property/required ordering. Prior high-detail responses cannot stand in for the current baseline.
+
+The operational runner and input manifests stay in ignored `data/`, not application code. A separate development SQLite ledger, read-only frozen source schema and file store, durable attempts/raw responses, per-call bound and total $3.50 cap are required. It must stop on unknown pending fees, source changes or malformed results; no retry, schema migration, Gold, old answer or manual verdict is allowed in requests. Normal operation's $5 monthly budget is unchanged. Preflight does not authorize execution.
+
+CI and structural restoration tests cannot show semantic improvement. Keep original results, judge original evidence separately, measure harm to correct controls and useful supported answers, and do not count refusals or deleted content as successes. Do not merge on structural checks alone. No UI or deployment is included.

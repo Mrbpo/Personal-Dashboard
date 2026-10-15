@@ -4,7 +4,7 @@ import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 
-export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
+export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v6-citations-first';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
 export const DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION='source-quote-units-v1';
 export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
@@ -313,8 +313,8 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
     {type:'input_image',detail:model==='gpt-6-astra'||model==='gpt-5.4-mini'?'original':'high',image_url:`data:image/png;base64,${Buffer.from(support.image.bytes).toString('base64')}`}]:[])]}],
   text:{format:{type:'json_schema',name:'grounded_document_answer_units',strict:true,schema:{type:'object',additionalProperties:false,
    properties:{status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},message:{type:'string'},
-    claims:{type:'array',items:{type:'object',additionalProperties:false,properties:{text:{type:'string'},citations:{type:'array',items:{
-     type:'object',additionalProperties:false,properties:{id:{type:'string',enum:ids}},required:['id']}}},required:['text','citations']}}},
+    claims:{type:'array',items:{type:'object',additionalProperties:false,properties:{citations:{type:'array',items:{
+     type:'object',additionalProperties:false,properties:{id:{type:'string',enum:ids}},required:['id']}},text:{type:'string'}},required:['citations','text']}}},
    required:['status','message','claims']}}}};
 }
 
