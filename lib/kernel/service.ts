@@ -9,6 +9,7 @@ import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvide
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
+import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -1064,6 +1065,24 @@ export class KernelService {
       const current=await this.readCompleteDocumentSource(owner,source);
       if(current.status!=='available'||current.manifest.manifestSha256!==initial.manifest.manifestSha256)
         throw new DocumentContextError('DOCUMENT_CONTEXT_CHANGED','Complete citation-audit source changed');
+      return current.context;
+    },original,policy);
+    return {status:'available' as const,manifest:initial.manifest,result};
+  }
+
+  /** Explicit isolated development experiment; never called by normal answers.
+   * Original claims and source reads stay bound throughout the three-call cap. */
+  async reviseSelectedStudySourceCitation(owner:string,question:string,expectedSource:DocumentContextSource,
+    binding:DocumentCitationRevisionBinding,policy:DocumentCitationRevisionPolicy){
+    await assertDocumentCitationRevisionPolicy(policy);
+    const source={...expectedSource},original=structuredClone(binding),initial=await this.readCompleteDocumentSource(owner,source);
+    if(initial.status==='unavailable')return initial;
+    let first=true;
+    const result=await reviseDocumentCitationClaim(question,async()=>{
+      if(first){first=false;return initial.context;}
+      const current=await this.readCompleteDocumentSource(owner,source);
+      if(current.status!=='available'||current.manifest.manifestSha256!==initial.manifest.manifestSha256)
+        throw new DocumentContextError('DOCUMENT_CONTEXT_CHANGED','Complete citation-revision source changed');
       return current.context;
     },original,policy);
     return {status:'available' as const,manifest:initial.manifest,result};
