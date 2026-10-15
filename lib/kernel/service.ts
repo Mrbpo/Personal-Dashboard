@@ -9,6 +9,7 @@ import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvide
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
+import {auditCompleteDocumentAnswer,assertCompleteAnswerAuditPolicy,type CompleteAnswerAuditBinding,type CompleteAnswerAuditPolicy} from './document-citation-audit.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -1067,6 +1068,15 @@ export class KernelService {
       return current.context;
     },original,policy);
     return {status:'available' as const,manifest:initial.manifest,result};
+  }
+
+  /** Explicit development-only whole-answer diagnostics; never an answer repair
+   * or canonical write. Complete current source reads stay within Kernel. */
+  async auditSelectedStudySourceAnswer(owner:string,question:string,expectedSource:DocumentContextSource,
+    binding:CompleteAnswerAuditBinding,policy:CompleteAnswerAuditPolicy){
+    await assertCompleteAnswerAuditPolicy(policy);
+    const source={...expectedSource};
+    return auditCompleteDocumentAnswer(question,()=>this.readCompleteDocumentSource(owner,source),binding,policy);
   }
 
   /** Non-structured study content only; canonical business facts use their own

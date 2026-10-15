@@ -9,7 +9,9 @@ import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
 import {prepareDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceRead} from '../lib/kernel/document-context.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,validateDocumentCitationAudit,
- type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
+ prepareCompleteAnswerAudit,buildCompleteAnswerAuditRequest,validateCompleteAnswerAudit,
+ type CompleteAnswerAuditBinding,type CompleteAnswerAuditDiagnostics,
+ type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationAuditResponse,type DocumentCitationAuditDiagnostics} from '../lib/kernel/document-citation-audit.ts';
 
 const postgresUrl=process.env.KERNEL_DATABASE_URL;
 process.env.DATABASE_URL=':memory:';
@@ -33,6 +35,14 @@ function binding(c=context()):DocumentCitationAuditBinding{
   providerSelections:{status:'answered',message:'',claims:[{text:'Two samples are compared.',
    citations:[{id:prepared.quoteUnits[0].id},{id:'i0'}]}]}};
 }
+function wholeBinding(c=context()):CompleteAnswerAuditBinding{
+ const {claimIndex:_claim,...value}=binding(c);return value;
+}
+function wholeDiagnostics():CompleteAnswerAuditDiagnostics{
+ const {claimId:_claim,...local}=diagnostics();return {localSupport:{c0:local},
+  coverage:{status:'complete',reason:'No question-relevant omission observed in this fixture.',omissions:[]},
+  scopeAndConflicts:{requested:'sample count',answered:'sample count',alignment:'aligned',reason:'Same requested object.',sourceIds:[],conflicts:[]}};
+}
 function complete(c=context()):CompleteDocumentSourceRead{return {status:'available',context:{...c,parents:[],
  images:c.images.map(image=>'anchorEvidenceId' in image?image:({...image,originalReference:'source.png',provenance:{sourceUrl:'https://example.edu/source.png',revision:'fixture'}})),accounting:{
  anchorCount:1,parentCount:0,contextNodeCount:1,contextBodyCodepoints:body.length,imageCount:1,imageBytes:bytes.length}},manifest:{
@@ -41,10 +51,10 @@ function complete(c=context()):CompleteDocumentSourceRead{return {status:'availa
  parserWarnings:[],document:{name:'Original study',origin:'fixture',originKey:'audit',parserVersion:'fixture-v1'},hierarchy:[],
  nodes:[],images:[{attachmentId:'image',captionEvidenceId:'image-evidence',sha256:hash(bytes),byteLength:bytes.length,width:1,height:1}],
  imageInputTokenUpper:3,limits:COMPLETE_DOCUMENT_SOURCE_LIMITS,manifestSha256:hash('audit-manifest')}};}
-const diagnostics=()=>({claimId:'c0',judgment:'supported',reason:'The cited text establishes the sample count.',
+const diagnostics=():DocumentCitationAuditDiagnostics=>({claimId:'c0',judgment:'supported',reason:'The cited text establishes the sample count.',
  citationFindings:{r0:{judgment:'supports',reason:'It says two samples.'},r1:{judgment:'unclear',reason:'No count is visible.'}},
  objectUnitScope:{claim:'two samples',evidence:'two samples',alignment:'same'}});
-const response=(value=diagnostics())=>({status:'completed',model:'gpt-5.4-mini-2026-03-17',
+const response=(value:unknown=diagnostics())=>({status:'completed',model:'gpt-5.4-mini-2026-03-17',
  usage:{input_tokens:100,output_tokens:50},output_text:JSON.stringify(value)});
 async function development<T>(work:()=>Promise<T>){
  const names=['DATABASE_URL','KERNEL_DATABASE_URL','KERNEL_ADMIN_DEVELOPMENT_RUN'] as const;
@@ -150,6 +160,102 @@ test('raw failures are persisted once, source changes fail, and ambiguous timeou
  });}finally{globalThis.fetch=originalFetch;}
 });
 
+test('whole-answer input retains uncited source and original refusal; diagnostics require exact claim/reference keys and real source IDs',()=>{
+ const c=context();c.anchors.push({...c.anchors[0],id:'pg:version:2',page_number:2,evidence_id:'uncited-evidence',
+  locator:'original:2',body:'A separate cohort is evaluated at a different processing stage.'});
+ const original=wholeBinding(c),snapshot=JSON.stringify(original),read=complete(c);
+ assert.equal(read.status,'available');if(read.status!=='available')throw Error('Expected fixture');
+ const packet=prepareCompleteAnswerAudit(question,c,original,read.manifest),request=buildCompleteAnswerAuditRequest(packet);
+ const content=request.input[1].content;assert.ok(Array.isArray(content));const input=JSON.parse(content[0].text!);
+ assert.equal(input.quoteUnits.length,2);assert.match(input.quoteUnits[1].text,/separate cohort/);
+ assert.deepEqual(Object.keys(input.selectedCitations),['c0']);assert.deepEqual(Object.keys(input.selectedCitations.c0),['r0','r1']);
+ assert.equal(input.selectedCitations.c0.r0.selectionId,packet.prepared.quoteUnits[0].id);
+ assert.equal(input.originalAnswer.claims[0].citations[0].quote,body);assert.deepEqual(input.completeSource,read.manifest);
+ assert.equal(request.max_output_tokens,4000);assert.equal(request.model,'gpt-5.4-mini');assert.deepEqual(request.reasoning,{effort:'low'});
+ const image=content.find(item=>item.type==='input_image');assert.ok(image&&'image_url'in image);
+ assert.equal(image.image_url,'data:image/png;base64,'+bytes.toString('base64'));assert.equal(image.detail,'original');
+ const value=wholeDiagnostics(),other=packet.prepared.quoteUnits[1].id;
+ value.coverage={status:'partial',reason:'The separate cohort is not covered.',omissions:[{subject:'separate cohort',sourceIds:[other]}]};
+ value.scopeAndConflicts.alignment='narrower';value.scopeAndConflicts.sourceIds=[other];
+ value.scopeAndConflicts.conflicts=[{sourceIds:[packet.prepared.quoteUnits[0].id,other],comparability:'different-context',reason:'Distinct processing stages.'}];
+ assert.deepEqual(validateCompleteAnswerAudit(value,packet),value);
+ for(const change of [
+  {...value,localSupport:{}},{...value,localSupport:{...value.localSupport,c1:value.localSupport.c0}},
+  {...value,localSupport:{c0:{...value.localSupport.c0,citationFindings:{r0:diagnostics().citationFindings.r0}}}},
+  {...value,localSupport:{c0:{...value.localSupport.c0,citationFindings:{...value.localSupport.c0.citationFindings,[other]:diagnostics().citationFindings.r0}}}},
+  {...value,coverage:{...value.coverage,omissions:[{subject:'unknown',sourceIds:['foreign']}] }},
+  {...value,coverage:{...value.coverage,omissions:[{subject:'nonselectable support',sourceIds:['e0']}] }},
+  {...value,coverage:{...value.coverage,omissions:[{subject:'unsupplied image',sourceIds:['i99']}] }},
+  {...value,scopeAndConflicts:{...value.scopeAndConflicts,alignment:'narrower',sourceIds:[]}},
+  {...value,scopeAndConflicts:{...value.scopeAndConflicts,alignment:'different',sourceIds:[]}},
+  {...value,scopeAndConflicts:{...value.scopeAndConflicts,conflicts:[{sourceIds:[other],comparability:'same-target',reason:'one side only'}]}}
+ ])assert.throws(()=>validateCompleteAnswerAudit(change,packet));
+ const refusal={...original,providerSelections:{status:'insufficient-evidence' as const,message:'Original refusal remains unchanged.',claims:[]}};
+ const empty=prepareCompleteAnswerAudit(question,c,refusal,read.manifest),emptyValue={...value,localSupport:{}};
+ assert.equal(empty.input.originalAnswer.message,refusal.providerSelections.message);
+ assert.deepEqual(empty.input.originalAnswer.claims,[]);assert.deepEqual(validateCompleteAnswerAudit(emptyValue,empty).coverage,value.coverage);
+ assert.throws(()=>prepareCompleteAnswerAudit(question,c,{...original,quote:'caller-provided'} as CompleteAnswerAuditBinding,read.manifest));
+ const maximum={...packet,selectedCitations:Object.fromEntries(Array.from({length:30},(_,n)=>[`c${n}`,
+  Object.fromEntries(Array.from({length:20},(_,r)=>[`r${r}`,packet.selectedCitations.c0.r0]))]))};
+ let enumValues=0;JSON.stringify(buildCompleteAnswerAuditRequest(maximum).text.format.schema,(key,v)=>{
+  if(key==='enum')enumValues+=v.length;return v;
+ });assert.ok(enumValues<1000,'shared citation schema does not repeat the source allowlist or 600 finding enums');
+ assert.equal(JSON.stringify(original),snapshot);
+});
+
+test('whole-answer Kernel audit rejects overflow before reservation, retains failing raw and stops without paid retries',async()=>{
+ await database.prepare('SELECT count(*) n FROM ai_ledger').first();
+ const kernel=new KernelService(),raw:DocumentCitationAuditResponse[]=[],originalFetch=globalThis.fetch;
+ let c=context(),changed=false,reads=0,calls=0,attempts=0;
+ kernel.readCompleteDocumentSource=async(owner,expected)=>{
+  assert.equal(owner,'owner');assert.deepEqual(expected,source);reads++;const value=complete(c);
+  if(changed)value.manifest.manifestSha256=hash('changed-source');return value;
+ };
+ const good=()=>({...response(),output_text:JSON.stringify(wholeDiagnostics())});
+ globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+  assert.equal(request.max_output_tokens,4000);return Response.json(good());};
+ const rows=()=>database.prepare('SELECT count(*) n FROM ai_ledger').first<{n:number}>();
+ try{
+  await assert.rejects(kernel.auditSelectedStudySourceAnswer('owner',question,source,wholeBinding(),policy(raw)),/isolated administrator/);
+  assert.equal(reads,0);assert.equal(calls,0);
+  await development(async()=>{
+   for(const invalid of [{...policy(raw),beforeAttempt:undefined},{...policy(raw),recordResponse:undefined},{...policy(raw),model:'gpt-6-astra'}])
+    await assert.rejects(kernel.auditSelectedStudySourceAnswer('owner',question,source,wholeBinding(),invalid as DocumentCitationAuditPolicy));
+   assert.equal(reads,0);
+   const original=wholeBinding(),result=await kernel.auditSelectedStudySourceAnswer('owner',question,source,original,
+    policy(raw,async()=>{attempts++;}));
+   assert.equal(result.status,'available');if(result.status!=='available')throw Error('Expected diagnostics');
+   assert.equal(calls,1);assert.equal(attempts,1);assert.equal(reads,3);
+   assert.deepEqual(result.result.diagnostics,wholeDiagnostics());assert.deepEqual(result.result.providerSelections,original.providerSelections);
+   assert.equal(result.result.requestIdentity,raw[0].requestIdentity);assert.equal(result.result.rawResponseSha256,hash(raw[0].rawBody));
+   assert.equal(result.manifest.request?.inputTokenUpper,result.manifest.request!.nonImageBodyUtf8Bytes+3+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens);
+   await assert.rejects(kernel.auditSelectedStudySourceAnswer('owner',question,source,wholeBinding(),policy(raw,async()=>{changed=true;})),/source changed/);
+   assert.equal(calls,1);changed=false;
+   c=context();c.anchors[0].body='\\'.repeat(COMPLETE_DOCUMENT_SOURCE_LIMITS.bodyCodepoints);
+   const wide=wholeBinding(c);wide.providerSelections.claims=Array.from({length:30},()=>structuredClone(wide.providerSelections.claims[0]));
+   const before=await rows(),overflow=await kernel.auditSelectedStudySourceAnswer('owner',question,source,wide,policy(raw,async()=>{attempts++;}));
+   assert.equal(overflow.status,'unavailable');assert.equal(overflow.manifest.reason,'request-input-limit');
+   assert.ok(overflow.manifest.request!.inputTokenUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens);
+   assert.deepEqual(await rows(),before);assert.equal(attempts,1);assert.equal(calls,1,'no request, truncation or reservation for overflow');c=context();
+   const invalid=wholeDiagnostics();invalid.coverage.omissions=[{subject:'outside source',sourceIds:['foreign']}];invalid.coverage.status='partial';
+   const variants=[{value:{...good(),output_text:JSON.stringify(invalid)},error:/diagnostics/},
+    {value:{...good(),model:'gpt-5-mini'},error:/unverified/},{value:{...good(),usage:undefined},error:/usage is unknown/}];
+   for(const variant of variants){globalThis.fetch=async()=>{calls++;return Response.json(variant.value);};
+    const beforeRaw=raw.length;await assert.rejects(kernel.auditSelectedStudySourceAnswer('owner',question,source,wholeBinding(),policy(raw)),variant.error);
+    assert.equal(raw.length,beforeRaw+1);assert.equal(raw.at(-1)?.rawSha256,hash(raw.at(-1)!.rawBody));
+   }
+   globalThis.fetch=async()=>{calls++;changed=true;return Response.json(good());};
+   await assert.rejects(kernel.auditSelectedStudySourceAnswer('owner',question,source,wholeBinding(),policy(raw)),/source changed/);
+   assert.equal(raw.length,5,'post-provider source failure retains raw');changed=false;
+   globalThis.fetch=async()=>{calls++;throw new DOMException('Timed out','TimeoutError');};
+   await assert.rejects(kernel.auditSelectedStudySourceAnswer('owner',question,source,wholeBinding(),policy(raw)),/Timed out/);
+   assert.equal(calls,6);assert.equal(raw.length,5);
+   const latest=await database.prepare('SELECT status,charged FROM ai_ledger ORDER BY rowid DESC LIMIT 1').first<{status:string;charged:number|null}>();
+   assert.equal(latest?.status,'reserved');assert.equal(latest?.charged,null);
+  });
+ }finally{globalThis.fetch=originalFetch;}
+});
+
 test('actual PostgreSQL owner/current-source reads restore text and PNG and reject a source hidden during audit',
  {skip:!postgresUrl},async()=>{
  await migrateKernel();const kernel=new KernelService(),tag=randomUUID(),owner='citation-owner-'+tag,id='citation-doc-'+tag,title='Citation fixture '+tag;
@@ -168,6 +274,11 @@ test('actual PostgreSQL owner/current-source reads restore text and PNG and reje
  const originalFetch=globalThis.fetch;let calls=0,hide=false;
  globalThis.fetch=async(_url,init)=>{
   calls++;const request=JSON.parse(String(init?.body)),content=request.input[1].content,input=JSON.parse(content[0].text);
+  if(request.text.format.name==='complete_answer_diagnostics_v1'){
+   assert.equal(input.quoteUnits.length,2);assert.equal(input.originalAnswer.claims[0].citations[0].quote,body);
+   assert.equal(input.selectedCitations.c0.r1.selectionId,'i0');
+   return Response.json({...response(),output_text:JSON.stringify(wholeDiagnostics())});
+  }
   assert.deepEqual(input.references,[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]);
   assert.equal(content.find((item:{type:string})=>item.type==='input_image').image_url,'data:image/png;base64,'+bytes.toString('base64'));
   if(hide)await kernel.hideParsedDocument(owner,id);return Response.json(response());
@@ -176,8 +287,12 @@ test('actual PostgreSQL owner/current-source reads restore text and PNG and reje
   await assert.rejects(kernel.auditSelectedStudySourceClaim('different-owner',question,expected,original,policy(raw)));
   assert.equal(calls,0);
   const result=await kernel.auditSelectedStudySourceClaim(owner,question,expected,original,policy(raw));assert.equal(result.status,'available');
-  assert.equal(calls,1);hide=true;
+  assert.equal(calls,1);
+  const whole=await kernel.auditSelectedStudySourceAnswer(owner,question,expected,wholeBinding(current.context),policy(raw));
+  assert.equal(whole.status,'available');assert.equal(calls,2);
+  await assert.rejects(kernel.auditSelectedStudySourceAnswer('different-owner',question,expected,wholeBinding(current.context),policy(raw)));
+  assert.equal(calls,2);hide=true;
   await assert.rejects(kernel.auditSelectedStudySourceClaim(owner,question,expected,original,policy(raw)),/current|source changed/);
-  assert.equal(calls,2);assert.equal(raw.length,2,'raw retained even after a real source was hidden');
+  assert.equal(calls,3);assert.equal(raw.length,3,'raw retained even after a real source was hidden');
  });}finally{globalThis.fetch=originalFetch;}
 });
