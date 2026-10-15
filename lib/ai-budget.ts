@@ -62,7 +62,7 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   // Reserve against a conservative estimate of this request, not the model's
   // entire context window. Successful calls are settled with provider usage;
   // ambiguous timeouts retain this bounded reservation.
-  const inputBytes=Buffer.byteLength(JSON.stringify(body.input??body));
+  const inputBytes=Buffer.byteLength(JSON.stringify(policy?.kind==='document-answer'?body:body.input??body));
   const astra=body.model==='gpt-6-astra';
   // Astra's UTF-8 byte bound includes schema/request overhead. Reserve all
   // input at the highest possible cache-write rate; cached reads settle lower.

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
-import {prepareDocumentAnswer,validateGroundedDocumentAnswer,resolveGroundedDocumentAnswerReferences,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswer,validateGroundedDocumentAnswer,resolveGroundedDocumentAnswerReferences,documentQuoteUnits,
+ resolveDocumentAnswerSelections,buildDocumentAnswerRequest,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
 import {after} from 'node:test';
@@ -22,6 +23,86 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,i
  source_hash:source.sourceHash,source_version_id:source.sourceVersionId,body,locator:'section:0:paragraph:0',page_number:1,
  evidence_id:'evidence',parser_version:'native-unverified',score:1,evidence_body:'full-page',parser_warnings:['Formula fidelity unverified.']} ]};}
 const answer={status:'answered',message:'',claims:[{text:'The study uses two samples.',citations:[{id:'e0',quote:'uses two samples.'}]}]};
+
+test('source quote units losslessly reconstruct Unicode evidence and strictly resolve only supplied selections',()=>{
+ const c=context(),original='a'.repeat(1199)+'😀\r\n\r\n'+('𠮷 clause. '.repeat(180))+' '.repeat(2500)+' end.';
+ c.anchors[0].body=original;
+ const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j2i8AAAAASUVORK5CYII=','base64'),imageHash=hash(bytes);
+ c.images=[{attachmentId:'unit-image',assetId:imageHash,captionEvidenceId:'caption',sha256:imageHash,byteLength:bytes.length,
+  width:1,height:1,mime:'image/png',bytes,source}];
+ const prepared=prepareDocumentAnswer('What is supplied?',c),units=prepared.quoteUnits,selectable=units.filter(unit=>unit.selectable);
+ assert.equal(units.map(unit=>unit.text).join(''),original);assert.ok(units.some(unit=>!unit.selectable),'blank runs are retained');
+ let offset=0;
+ for(const unit of units){
+  assert.equal(unit.startUtf16,offset);assert.ok(unit.endUtf16>offset);assert.ok(unit.text.length<=1200);
+  assert.equal(unit.text,original.slice(unit.startUtf16,unit.endUtf16));assert.equal(unit.quoteSha256,hash(unit.text));
+  const left=original.charCodeAt(unit.endUtf16-1),right=original.charCodeAt(unit.endUtf16);
+  assert.ok(!(left>=0xd800&&left<=0xdbff&&right>=0xdc00&&right<=0xdfff),'never split a surrogate pair');offset=unit.endUtf16;
+ }
+ assert.equal(offset,original.length);assert.deepEqual(prepareDocumentAnswer('What is supplied?',c).quoteUnits,units);
+ assert.deepEqual(documentQuoteUnits(prepared.supports.map(s=>s.kind==='text'?{...s,id:'e99'}:s)).map(u=>u.id),units.map(u=>u.id));
+ assert.deepEqual(documentQuoteUnits(prepared.supports.map(s=>Object.fromEntries(Object.entries(s).reverse()) as typeof s)).map(u=>u.id),units.map(u=>u.id));
+ assert.throws(()=>documentQuoteUnits([...prepared.supports,prepared.supports[0]]),/Duplicate or colliding/);
+ assert.ok(prepared.input.evidence.every(item=>!Object.hasOwn(item,'text')),'no duplicate full text in model input');
+ assert.equal(prepared.input.quoteUnits.map(unit=>unit.text).join(''),original);
+ assert.equal(prepared.quoteUnitManifestSha256,hash(JSON.stringify(prepared.quoteUnitManifest)));
+ const request=buildDocumentAnswerRequest(prepared,{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:4000});
+ assert.deepEqual(request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,
+  [...selectable.map(unit=>unit.id),'i0']);
+ const user=request.input.find(item=>item.role==='user')!;assert.ok(Array.isArray(user.content));
+ assert.equal(user.content.filter(item=>item.type==='input_image').length,1);
+ assert.equal(JSON.parse(user.content[0].text!).quoteUnits.map((unit:{text:string})=>unit.text).join(''),original);
+ assert.throws(()=>buildDocumentAnswerRequest(prepared,{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:0}));
+ const manyNodes=(count:number)=>{const many=context();many.anchors=Array.from({length:count},(_,n)=>({...many.anchors[0],
+  id:`pg:version:${n+1}`,page_number:n+1,evidence_id:`schema-evidence-${n}`,locator:`node:${n}`,body:`Original node ${n}.`}));
+  return prepareDocumentAnswer('What is supplied?',many);};
+ const settings={model:'gpt-5-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:4000};
+ const many=buildDocumentAnswerRequest(manyNodes(256),settings),enumIds=many.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum;
+ assert.equal(enumIds.length,256);assert.ok(enumIds.every(id=>id.length===26));assert.ok(enumIds.join('').length<=15000);
+ assert.throws(()=>buildDocumentAnswerRequest(manyNodes(578),settings),/enum string limit/);
+ assert.throws(()=>buildDocumentAnswerRequest(manyNodes(998),settings),/enum count limit/);
+ const selected={status:'answered',message:'',claims:[{text:'A source-backed statement.',citations:[{id:selectable[0].id},{id:'i0'}]}]},raw=JSON.stringify(selected);
+ const result=resolveDocumentAnswerSelections(selected,prepared.supports);
+ assert.deepEqual(result.answer.claims[0].citations,[{id:'e0',quote:selectable[0].text},{id:'i0',quote:''}]);
+ assert.deepEqual(result.providerSelections,selected);assert.equal(JSON.stringify(selected),raw);
+ assert.deepEqual(validateGroundedDocumentAnswer(result.answer,prepared.supports),result.answer);
+ assert.equal(result.selectedUnits[0].evidence.evidenceId,'evidence');assert.equal(result.selectedUnits[0].startUtf16,selectable[0].startUtf16);
+ assert.equal(result.selectedUnits[0].endUtf16,selectable[0].endUtf16);assert.equal(result.selectedUnits[0].quoteSha256,hash(selectable[0].text));
+ assert.equal(result.selectedUnits[1].kind,'image');assert.equal(result.selectedUnits[1].startUtf16,null);
+ const citations=(...ids:string[])=>({...selected,claims:[{...selected.claims[0],citations:ids.map(id=>({id}))}]});
+ for(const invalid of [citations('outside'),citations('e0'),citations(units.find(unit=>!unit.selectable)!.id),
+  citations(selectable[0].id,selectable[0].id),citations('i0','i0'),citations(),
+  {...selected,extra:true},{...selected,claims:[{...selected.claims[0],citations:[{id:selectable[0].id,quote:'authored text'}]}]},
+  {...selected,status:'conflicting-evidence',claims:[{text:'First.',citations:[{id:selectable[0].id}]},
+   {text:'Second.',citations:[{id:selectable[1].id}]}]}])
+  assert.throws(()=>resolveDocumentAnswerSelections(invalid,prepared.supports));
+ c.anchors[0].body+=' Changed.';const changed=prepareDocumentAnswer('What is supplied?',c);
+ assert.notEqual(changed.fingerprint,prepared.fingerprint);assert.notEqual(changed.quoteUnitManifestSha256,prepared.quoteUnitManifestSha256);
+ assert.throws(()=>resolveDocumentAnswerSelections(selected,changed.supports),'old selections cannot bind to changed original text');
+ c.images[0].bytes=Buffer.from('a caption is not pixels');assert.throws(()=>prepareDocumentAnswer('What?',c),/checksum/);
+});
+
+test('document answer reservation includes a large citation schema before any provider request',async()=>{
+ const {paidOpenAI}=await import('../lib/ai-budget.ts');
+ const savedBudget=process.env.AI_MONTHLY_BUDGET,savedRates=process.env.AI_MODEL_RATES,originalFetch=globalThis.fetch;
+ let calls=0;
+ try{
+  process.env.AI_MONTHLY_BUDGET='0.002';
+  process.env.AI_MODEL_RATES=JSON.stringify({'gpt-5-mini':{input:1,output:0,context:400000}});
+  const request={model:'gpt-5-mini',input:[{role:'user',content:'x'}],max_output_tokens:10,
+   text:{format:{type:'json_schema',schema:{type:'string',enum:Array.from({length:300},(_,n)=>'q:'+hash(String(n)))}}}};
+  globalThis.fetch=async()=>{calls++;return Response.json({usage:{input_tokens:0,output_tokens:0}});};
+  await assert.rejects(paidOpenAI('responses',request,undefined,{kind:'document-answer',dailyLimit:200}),
+   error=>error instanceof Error&&error.name==='AiBudgetDeferredError');
+  assert.equal(calls,0,'schema-heavy answer is blocked before fetch, despite tiny input');
+  await paidOpenAI('responses',request,undefined,{kind:'other-kind-control',dailyLimit:200});
+  assert.equal(calls,1,'other kinds retain their existing input accounting; fetch is only a local stub');
+ }finally{
+  globalThis.fetch=originalFetch;
+  if(savedBudget===undefined)delete process.env.AI_MONTHLY_BUDGET;else process.env.AI_MONTHLY_BUDGET=savedBudget;
+  if(savedRates===undefined)delete process.env.AI_MODEL_RATES;else process.env.AI_MODEL_RATES=savedRates;
+ }
+});
 
 test('unique existing text reference repair preserves raw data and strict final rejection boundaries',()=>{
  const c=context();c.anchors.push({...c.anchors[0],id:'pg:version:2',page_number:2,evidence_id:'second-evidence',
@@ -135,19 +216,22 @@ test('answer fingerprints preserve version, parsing warnings and unavailable con
 });
 
 test('synthesis revalidates current sources, rejects incomplete output and makes no paid repair request',async()=>{
- const original=globalThis.fetch;let calls=0,reads=0,attempts=0;
+ const original=globalThis.fetch;let calls=0,reads=0,attempts=0,requestHash='';
  globalThis.fetch=async(_url,init)=>{
-  calls++;const request=JSON.parse(String(init?.body));
+  calls++;const request=JSON.parse(String(init?.body));requestHash=hash(String(init?.body));
   assert.equal(request.model,'gpt-5-mini');assert.equal(request.store,false);
   assert.equal(request.reasoning.effort,'low');assert.equal(request.max_output_tokens,4000);
   assert.match(request.input[0].content,/untrusted data/);
   assert.match(request.input[0].content,/canonical Kernel facts/);
-  return Response.json({status:'completed',model:'gpt-5-mini',output_text:JSON.stringify(answer),usage:{input_tokens:100,output_tokens:100}});
+  const input=JSON.parse(request.input[1].content[0].text),unit=input.quoteUnits.find((item:{text:string})=>item.text.includes('uses two samples.'));
+  return Response.json({status:'completed',model:'gpt-5-mini',output_text:JSON.stringify({...answer,
+   claims:[{text:answer.claims[0].text,citations:[{id:unit.id}]}]}),usage:{input_tokens:100,output_tokens:100}});
  };
  try{
   const result=await synthesizeDocumentAnswer('How many samples?',async()=>{reads++;return context();},
    {beforeAttempt:async()=>{attempts++;}});
   assert.equal(result.answer.status,'answered');assert.equal(result.model,'gpt-5-mini');
+  assert.equal(result.providerRequestSha256,requestHash);assert.equal(result.selectedUnits.length,1);
   assert.equal(reads,2);assert.equal(attempts,1);assert.equal(calls,1);
   reads=0;
   await assert.rejects(synthesizeDocumentAnswer('How many samples?',async()=>{
@@ -196,11 +280,11 @@ test('Kernel study answers use actual PG parent/image evidence and refuse source
  const original=globalThis.fetch;let calls=0,hide=false;
  globalThis.fetch=async(_url,init)=>{
   calls++;const request=JSON.parse(String(init?.body)),content=request.input[1].content,
-   input=JSON.parse(content[0].text),support=input.evidence.find((item:{text?:string})=>item.text?.includes('uses two samples.'));
-  assert.ok(support);assert.equal(content.filter((item:{type:string})=>item.type==='input_image').length,1);
+   input=JSON.parse(content[0].text),unit=input.quoteUnits.find((item:{text:string})=>item.text.includes('uses two samples.'));
+  assert.ok(unit);assert.equal(content.filter((item:{type:string})=>item.type==='input_image').length,1);
   if(hide)await kernel.hideParsedDocument(owner,id);
   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:100},output_text:JSON.stringify({
-   status:'answered',message:'',claims:[{text:'The experiment uses two samples.',citations:[{id:support.id,quote:'uses two samples.'}]}]})});
+   status:'answered',message:'',claims:[{text:'The experiment uses two samples.',citations:[{id:unit.id}]}]})});
  };
  try{
   const options={sourceHint:{selectedDocumentTitle:title},semantic:false,aiRerank:false,includeParents:true,includeImages:true};
