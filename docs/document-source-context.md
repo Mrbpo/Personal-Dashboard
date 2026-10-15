@@ -87,7 +87,12 @@ runtime allocations remain additional memory.
 
 The final request gate still uses the **complete non-image provider JSON**,
 including the strict schema enum, plus image patch upper bounds and 16,384
-framing tokens, with a total of at most **200,000 input tokens**. The existing
+framing tokens, with a total of at most **300,000 input tokens**. Framing is already
+included in this bound. With the current configured mini context of 400,000 and
+even the general answer builder's maximum 32,768 output tokens, the total is
+332,768, leaving 67,232 tokens of headroom. The selected-source route still fixes
+output to 4,000. This follows the existing context assumption, not a new model
+capability or image-billing certification. The existing
 schema enum limits and mini low/4,000 output/30-second policy remain unchanged.
 Passing preliminary limits does not guarantee passing these final gates.
 The [official image input requirements](https://developers.openai.com/api/docs/guides/images-vision)
@@ -97,6 +102,13 @@ These generic capacities were adjusted after static public-material preparation,
 before reading cohort C Gold or running its inference. They contain no document
 or query whitelist. All future full-cohort acceptance must freeze the same final
 method; the earlier A and C structure-coverage difference remains explicit.
+
+The later B/C 100 metadata-only pass remains recorded as 95 locally constructible
+requests, four request-input refusals and one separate empty-node preparation
+error under the old 200,000 gate. Its highest calculated input bound 235,505 is
+below 300,000, but this arithmetic is not a rerun or an answer-quality result.
+No source, image or schema limit is relaxed; oversized full requests still return
+`unavailable` before reservation rather than being clipped.
 
 ## Scope of verification
 
