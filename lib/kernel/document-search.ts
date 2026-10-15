@@ -43,6 +43,15 @@ export function documentSearchText(value:string):string {
   return `${text} ${cjkTokens.join(' ')} ${atoms.join(' ')}`.trim();
 }
 
+/** Share the existing lexical query policy with supplemental candidate lanes. */
+export function documentSearchTerms(query:string):{normalized:string;words:string[]}{
+  const normalized=documentSearchText(query).slice(0,4000);
+  const formulaQuery=/[\\^_=∫∑√]/u.test(query);
+  const words=[...new Set(normalized.split(' ').filter(word=>word.length>=(formulaQuery?1:2)&&
+    (formulaQuery||!queryStopWords.has(word))))].slice(0,40);
+  return {normalized,words};
+}
+
 export function splitDocumentText(text:string):string[] {
   const out:string[]=[];
   for(let start=0;start<text.length;start+=1400){out.push(text.slice(start,start+1600));if(start+1600>=text.length)break;}
@@ -193,10 +202,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Returned evidence differs from the current selected source',current);
     return hits.map(hit=>({...hit,retrieval_scope:'selected-title-scoped' as const}));
   }
-  const normalized=documentSearchText(query).slice(0,4000);
-  const formulaQuery=/[\\^_=∫∑√]/u.test(query);
-  const words=[...new Set(normalized.split(' ').filter(word=>word.length>=(formulaQuery?1:2)&&
-    (formulaQuery||!queryStopWords.has(word))))].slice(0,40);
+  const {normalized,words}=documentSearchTerms(query);
   if(!words.length)return [];
   const limit=Math.max(1,Math.min(240,options.limit||30));
   const aiRerank=Boolean((options.aiRerank??(process.env.KERNEL_DOCUMENT_RERANK==='true'))&&!options.strict);

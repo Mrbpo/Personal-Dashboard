@@ -4,7 +4,7 @@ import {readBlob} from '../library.ts';
 import type {DoclingNativeTable} from './docling-result.ts';
 import {decodeDoclingResult} from './docling-result.ts';
 import type {DocumentContextSource} from './document-context.ts';
-import {documentSearchText} from './document-search.ts';
+import {documentSearchText,documentSearchTerms} from './document-search.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import {DocumentEvidenceChangedError,type DocumentSelectedNodeHit} from './document-evidence.ts';
@@ -128,7 +128,7 @@ export async function commitNativeTableCandidates(db:Queryable,value:PreparedNat
  source={...source};pageEvidenceIds=[...pageEvidenceIds];
  assertPreparedNativeTableCandidates(value,value.owner,source.documentId,source.sourceHash);
  if(!value.artifacts.length)return {tables:0,available:0,unavailable:0,artifactSha256:value.sha256};
- const current=(await db.query(`SELECT d.id FROM document_texts d
+ const current=(await db.query<{course_id:string}>(`SELECT coalesce(d.course_id,'') course_id FROM document_texts d
   JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
   WHERE d.owner_id=$1 AND d.id=$2 AND d.current_version_id=$3 AND v.source_version_id=$4 AND d.source_hash=$5
@@ -137,6 +137,10 @@ export async function commitNativeTableCandidates(db:Queryable,value:PreparedNat
    AND NOT n.hidden AND(n.created_at>d.created_at OR(n.created_at=d.created_at AND n.id>d.id))) FOR UPDATE OF d`,
  [value.owner,source.documentId,source.currentVersionId,source.sourceVersionId,source.sourceHash,source.courseId??null])).rows;
  if(current.length!==1)throw new DocumentEvidenceChangedError();
+ // courseId is optional on the public source identity. Hash the checked DB
+ // representation so omitted and explicit empty/course values resolve alike.
+ source={documentId:source.documentId,currentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,
+  sourceHash:source.sourceHash,courseId:current[0].course_id};
  const row=(await db.query<{manifest:VisualManifest;manifest_sha256:string}>(
   `SELECT manifest,manifest_sha256 FROM document_pdf_visual_manifests WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3`,
   [source.currentVersionId,source.sourceVersionId,source.sourceHash])).rows[0];
@@ -205,7 +209,7 @@ function candidate(row:CandidateRow):DerivedTableCandidate{
 /** FTS uses the same current corpus scope, without changing protected text ranks.
  * At most two distinct page anchors supplement a normal answer. */
 export async function searchNativeTableCandidates(pool:Pool,owner:string,query:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}):Promise<DerivedTableCandidate[]>{
- const normalized=documentSearchText(query).slice(0,4000),words=[...new Set(normalized.split(' ').filter(word=>word.length>1))].slice(0,40);
+ const {normalized,words}=documentSearchTerms(query);
  if(!words.length)return [];
  const args:unknown[]=[owner,scope.strict?normalized:words.map(word=>`"${word}"`).join(' OR ')];
  const course=scope.courseId?`AND d.course_id=$${args.push(scope.courseId)}`:'';

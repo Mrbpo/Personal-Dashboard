@@ -6,10 +6,11 @@ import {resolve} from 'node:path';
 import {PDFDocument} from 'pdf-lib';
 import {digest,saveBlob} from '../lib/library.ts';
 import {decodeDerivedDoclingResult} from '../lib/kernel/docling-batches.ts';
-import {prepareNativeTableArtifact,nativeTableSearchStrings,prepareNativeTableCandidates} from '../lib/kernel/document-table-candidates.ts';
+import {prepareNativeTableArtifact,nativeTableSearchStrings,prepareNativeTableCandidates,commitNativeTableCandidates} from '../lib/kernel/document-table-candidates.ts';
 import {kernel} from '../lib/kernel/service.ts';
-import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
+import {kernelPool,migrateKernel,kernelTransaction} from '../lib/kernel/db.ts';
 import {prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
+import {documentSearchTerms} from '../lib/kernel/document-search.ts';
 import type {DocumentSelectedNodeHit} from '../lib/kernel/document-evidence.ts';
 import type {PdfVisualImageEvidence} from '../lib/kernel/pdf-visual-evidence.ts';
 
@@ -52,6 +53,7 @@ test('native synthetic grid preserves raw cells, explicit spans, blanks and orig
  const artifact=prepareNativeTableArtifact(table);
  assert.equal(artifact.status,'available');assert.deepEqual(artifact.reasons,[]);
  assert.equal(nativeTableSearchStrings(artifact),' measure | raw\nunits \nCount\n 007 \n\n3.0%\nTable 1. Printed caption.');
+ assert.deepEqual(documentSearchTerms('What is the Gaussian surface of the sphere?').words,['gaussian','surface','sphere']);
  assert.notEqual(artifact.native.raw,table.raw);
  assert.equal(artifact.artifactSha256,prepareNativeTableArtifact(table).artifactSha256);
 });
@@ -124,6 +126,13 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  const pages=decoded.pages;
  await kernel.ingestParsedDocument(doc,pages,{parserVersion:'saved-real-native',pdfVisuals:visuals,nativeTables});
  const hits=await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox');assert.equal(hits.length,1);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'what is the of'),[]);
+ const {courseId:_course,...omittedCourse}=hits[0].source;
+ await kernelTransaction(client=>commitNativeTableCandidates(client,nativeTables,omittedCourse,[hits[0].anchorEvidenceId]));
+ assert.equal((await pool.query('SELECT count(*) n FROM document_table_candidates WHERE version_id=$1',[hits[0].source.currentVersionId])).rows[0].n,'1');
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),hits);
+ await assert.rejects(kernelTransaction(client=>commitNativeTableCandidates(client,nativeTables,
+  {...omittedCourse,courseId:'foreign-course'},[hits[0].anchorEvidenceId])));
  assert.equal('body' in hits[0],false);assert.equal('cellTexts' in hits[0],false);
  const row=(await pool.query('SELECT * FROM document_table_candidates WHERE id=$1',[hits[0].id])).rows[0];
  assert.equal(row.raw_result_sha256,rawSha);assert.equal(row.artifact.native.raw.data.table_cells[8].text,"Gaussian 'Pillbox'");
