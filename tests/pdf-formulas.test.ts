@@ -39,7 +39,7 @@ test('LaTeX formulae supplement rather than replace original searchable text',()
  assert.match(text,/\\\[E=mc\^\{2\}\\\]/u);
  assert.match(text,/\\\[\\frac\{a\}\{b\}\\\]/u);
  assert.equal(appendPdfLatex(original,[],false),original+'\n\n[本页公式识别不完整，请核对原 PDF]');
- assert.equal(appendPdfLatex(original,['\u0000'],true),original);
+ assert.match(appendPdfLatex(original,['\u0000'],true),/本页公式识别不完整/u);
 });
 
 test('PDF page parsing keeps page locator and asks vision to produce LaTeX',async()=>{

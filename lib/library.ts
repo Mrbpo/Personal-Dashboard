@@ -104,7 +104,7 @@ export async function indexDocument(owner:string,id:string,forcePdfFormulaRepars
     if(detectedMime!==d.mime){d.mime=detectedMime;await db.prepare('UPDATE library_documents SET mime=? WHERE id=? AND owner_id=?').bind(d.mime,id,owner).run();}
     const expectedCurrentVersion=d.mime==='application/pdf'?await kernel.documentIngestionHead(owner,d.id,d.hash):undefined;
     if(d.mime.startsWith('text/')) pages=[{locator:'正文',text:bytes.toString('utf8')}];
-    else if(d.mime==='application/pdf')pages=await parsePdfPages(id,bytes);
+    else if(d.mime==='application/pdf')pages=await parsePdfPages(id,bytes,forcePdfFormulaReparse);
     else {
       if(d.mime==='application/vnd.openxmlformats-officedocument.wordprocessingml.document'){
         const text=await extractDocxText(bytes);
