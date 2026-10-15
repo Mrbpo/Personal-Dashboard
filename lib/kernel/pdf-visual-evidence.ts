@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {mkdir,readFile,writeFile,stat,utimes,rename,unlink} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,stat,utimes,rename,unlink,readdir} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {resolve} from 'node:path';
 import {PDFDocument} from 'pdf-lib';
@@ -214,8 +214,24 @@ export async function readPdfVisualEvidence(db:Queryable,owner:string,source:Doc
 /** Include historical, hidden, raw-result and render parents for reconstructible blobs. */
 export async function pdfVisualBlobHashes(db:Queryable):Promise<string[]>{
  const rows=(await db.query<{manifest:{content:ContentManifest}}>('SELECT manifest FROM document_pdf_visual_manifests')).rows;
- return [...new Set(rows.flatMap(({manifest})=>[manifest.content.rawPdfSha256,...(manifest.content.layout.resultReferences||[]).flatMap(reference=>
+ const hashes=rows.flatMap(({manifest})=>[manifest.content.rawPdfSha256,...(manifest.content.layout.resultReferences||[]).flatMap(reference=>
   [reference.resultBlobSha256,reference.derivedInputSha256]),...manifest.content.layout.regions.flatMap(region=>
   [region.resultBlobSha256,region.derivedInputSha256].filter(isSha)),...manifest.content.assets.flatMap(asset=>
-  [asset.sha256,asset.provenance.pageRenderSha256,asset.provenance.region?.resultBlobSha256,asset.provenance.region?.derivedInputSha256].filter(isSha))]))];
+  [asset.sha256,asset.provenance.pageRenderSha256,asset.provenance.region?.resultBlobSha256,asset.provenance.region?.derivedInputSha256].filter(isSha))]);
+ // Interrupted render caches are derived drafts, never authority. Protect their
+ // immutable blobs only while their source identity belongs to a known document
+ // or persistent ingestion job, including failed jobs that can be resumed.
+ const sources=(await db.query<{owner:string;id:string;source_hash:string|null}>(`SELECT owner_id owner,id,source_hash FROM document_texts
+ UNION SELECT payload->>'owner' owner,payload->>'id' id,payload->>'sourceHash' source_hash FROM ingestion_jobs WHERE kind='docling_document'`)).rows;
+ const files=await readdir(root()).catch(error=>{if((error as NodeJS.ErrnoException).code==='ENOENT')return [];throw error;});
+ for(const name of files.filter(name=>/^\.pdf-visual-[a-f0-9]{64}\.json$/.test(name))){
+  const cache=JSON.parse(await readFile(resolve(root(),name),'utf8'));
+  if(name!==`.pdf-visual-${sha(pdfVisualCanonical(cache.identity))}.json`||!Array.isArray(cache.completed))throw new PdfVisualEvidenceError('invalid','PDF visual draft identity differs; collection must stop');
+  if(!sources.some(source=>source.owner===cache.identity.owner&&source.id===cache.identity.documentId&&
+    (source.source_hash===null||source.source_hash===cache.identity.sourceHash)))continue;
+  for(const assets of cache.completed){if(!Array.isArray(assets))throw new PdfVisualEvidenceError('invalid','PDF visual draft is malformed');
+   for(const asset of assets){if(!isSha(asset.sha256)||asset.provenance?.rawPdfSha256!==cache.identity.sourceHash)
+    throw new PdfVisualEvidenceError('invalid','PDF visual draft source differs');hashes.push(asset.sha256,asset.provenance.pageRenderSha256);}}
+ }
+ return [...new Set(hashes.filter(isSha))];
 }

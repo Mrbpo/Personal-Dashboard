@@ -6,7 +6,8 @@ import {resolve} from 'node:path';
 import {PDFDocument} from 'pdf-lib';
 import sharp from 'sharp';
 import {decodeDoclingResult} from '../lib/kernel/docling-result.ts';
-import {decodeDerivedDoclingResult,storeDoclingResult} from '../lib/kernel/docling-batches.ts';
+import {decodeDerivedDoclingResult,storeDoclingResult,createDoclingProgress} from '../lib/kernel/docling-batches.ts';
+import {decodeCachedDoclingReplay,auditCachedDoclingReplay,applyCachedDoclingReplay} from '../lib/kernel/docling-cache-replay.ts';
 import {preparePdfVisualEvidence,readPdfVisualEvidence,PdfVisualEvidenceError,PDF_VISUAL_READ_LIMITS} from '../lib/kernel/pdf-visual-evidence.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
@@ -105,4 +106,35 @@ test('one PG scenario: atomic publication/replay, real multi-region page anchors
  assert.equal((await pool.query('SELECT version_id FROM document_pdf_visual_manifests WHERE source_hash=$1',[item.sourceHash])).rows.length,2);
  const retained=await kernel.documentImageBlobHashes();assert.ok(retained.includes(item.resultHash));
  assert.ok(item.prepared.content.assets.every(asset=>retained.includes(asset.sha256)));
+ // A ready PDF with identical cached text still needs a controlled visual-only
+ // publication. Preserve text, warnings and extraction provenance; do not force
+ // a new conversion or manufacture a text-quality warning to make it eligible.
+ const cachedId=item.id+'-cached',original=await PDFDocument.load(item.bytes),derived=await PDFDocument.create();
+ derived.setCreationDate(new Date(0));derived.setModificationDate(new Date(0));derived.setProducer('Study Kernel Docling derived-v1');derived.setCreator('Study Kernel');
+ for(const page of await derived.copyPages(original,[0]))derived.addPage(page);
+ const identity={owner:item.owner,documentId:cachedId,sourceHash:item.sourceHash,optionsHash:hash('cached-layout-fixture'),totalPages:1};
+ const progress=createDoclingProgress(identity);progress.batches[0].inputHash=hash(await derived.save());progress.batches[0].copyIndices=[0];
+ progress.batches[0].resultHash=await storeDoclingResult({identity:{...identity,start:1,end:1,inputHash:progress.batches[0].inputHash,copyIndices:[0]},result:item.raw});
+ await writeFile(resolve(process.env.LIBRARY_DIR||'./data/library',item.sourceHash),item.bytes);
+ const decoded=await decodeCachedDoclingReplay(item.bytes,identity,progress),cachedDoc={...document,id:cachedId,name:cachedId,originKey:cachedId};
+ await kernel.ingestParsedDocument(cachedDoc,decoded.pages,{parserVersion:'docling-v2-text-search',extractionMethod:'docling-text',warnings:decoded.warnings,batchProvenance:progress});
+ const selected=await kernel.resolveDocumentSource(item.owner,{selectedDocumentTitle:cachedId});if(selected.status!=='resolved')throw new Error('cached source');
+ const before=await kernel.readCompleteDocumentSource(item.owner,selected.document);assert.equal(before.status,'unavailable');
+ if(before.status!=='unavailable')throw new Error('missing visuals accepted');assert.equal(before.reason,'image-unavailable');
+ const audit=await auditCachedDoclingReplay(item.owner,cachedId);assert.deepEqual(audit.changedPages,[]);assert.equal(audit.visualOnly,true);
+ assert.equal(audit.visualEvidence.status,'missing');assert.equal(audit.decision,'eligible');assert.deepEqual(audit.warnings,[...new Set(decoded.warnings)].sort());
+ await applyCachedDoclingReplay(audit,audit.expectedCurrentVersion,async()=>null);
+ const incomplete=await auditCachedDoclingReplay(item.owner,cachedId);assert.equal(incomplete.visualEvidence.status,'render-incomplete');
+ assert.equal(incomplete.decision,'eligible');assert.equal(incomplete.visualOnly,true);assert.deepEqual(incomplete.warnings,audit.warnings);
+ const incompleteSource=await kernel.resolveDocumentSource(item.owner,{selectedDocumentTitle:cachedId});
+ if(incompleteSource.status!=='resolved')throw new Error('incomplete source');
+ assert.equal((await kernel.readCompleteDocumentSource(item.owner,incompleteSource.document)).status,'unavailable');
+ await applyCachedDoclingReplay(incomplete,incomplete.expectedCurrentVersion,async()=>item.image);
+ const after=await kernel.resolveDocumentSource(item.owner,{selectedDocumentTitle:cachedId});if(after.status!=='resolved')throw new Error('visual replay source');
+ assert.equal((await kernel.readCompleteDocumentSource(item.owner,after.document)).status,'available');
+ const stored=(await pool.query<{body:string;parser_version:string;warnings:string[];method:string}>(`SELECT p.body,v.parser_version,v.warnings,e.parsed_value->>'extractionMethod' method
+  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id JOIN evidence e ON e.id=p.evidence_id WHERE d.id=$1`,[cachedId])).rows[0];
+ assert.equal(stored.body,decoded.pages[0].text);assert.equal(stored.parser_version,'docling-v2-text-search');assert.equal(stored.method,'docling-text');assert.deepEqual(stored.warnings,audit.warnings);
+ const again=await auditCachedDoclingReplay(item.owner,cachedId);assert.equal(again.visualEvidence.status,'matching');assert.equal(again.decision,'unchanged');
+ assert.equal((await applyCachedDoclingReplay(again,again.expectedCurrentVersion,async()=>{throw new Error('unchanged replay must not render');})).action,'unchanged');
 });

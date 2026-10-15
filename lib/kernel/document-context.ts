@@ -59,14 +59,14 @@ const isSha=(value:string)=>/^[a-f0-9]{64}$/.test(value);
 const bounded=(value:unknown,max=4000):value is string=>typeof value==='string'&&value.length>0&&value.length<=max;
 
 type SourceRow={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId:string;
- rawSourceHash:string;name:string;origin:string;originKey:string;parserVersion:string};
+ rawSourceHash:string;name:string;origin:string;originKey:string;parserVersion:string;mime:string};
 type PageRow={page_number:number;evidence_id:string;locator:string;body:string};
 async function currentSource(db:Queryable,owner:string,source:DocumentContextSource,lock=false):Promise<SourceRow>{
  if(!bounded(owner)||!source||![source.documentId,source.currentVersionId,source.sourceVersionId,source.sourceHash].every(value=>bounded(value)))
   invalid('Complete expected source identity is required');
  const result=await db.query<SourceRow>(`SELECT d.id "documentId",d.current_version_id "currentVersionId",
  v.source_version_id "sourceVersionId",d.source_hash "sourceHash",coalesce(d.course_id,'') "courseId",
- s.raw_sha256 "rawSourceHash",d.name,d.origin,d.origin_key "originKey",v.parser_version "parserVersion"
+ s.raw_sha256 "rawSourceHash",d.name,d.origin,d.origin_key "originKey",v.parser_version "parserVersion",s.raw_value->>'mime' mime
  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
  JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
  WHERE d.owner_id=$1 AND d.id=$2 AND d.current_version_id=$3 AND v.source_version_id=$4 AND d.source_hash=$5
@@ -270,9 +270,10 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
   const captions=[...parents.values()].flatMap(parent=>parent.nodes).filter(node=>node.documentId===data.current.documentId&&node.kind==='caption').map(node=>node.evidenceId);
   if(captions.length)images.push(...await readDocumentImages(db,owner,identity(data.current),[...new Set(captions)]));
   const pageAnchors=data.nodes.filter(node=>node.kind==='page'&&anchors.some(anchor=>anchor.evidence_id===node.evidenceId)).map(node=>node.evidenceId);
-  if(pageAnchors.length){const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors);
+  if(pageAnchors.length&&data.current.mime==='application/pdf')try{const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors);
    if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
-   images.push(...visuals.images);}
+   images.push(...visuals.images);
+  }catch(error){if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();throw error;}
  }
  for(const data of loaded.values())await currentSource(db,owner,identity(data.current));
  const packets=[...parents.values()];return {anchors,parents:packets,images,accounting:{anchorCount:anchors.length,parentCount:packets.length,
@@ -304,6 +305,9 @@ export async function readCompleteDocumentSource(pool:Pool,owner:string,expected
  if(!manifest.sourceNodeCount||![manifest.sourceBodyCodepoints,manifest.sourceBodyUtf8Bytes].every(Number.isSafeInteger)||
   manifest.sourceNodeCount>limits.nodes||manifest.sourceBodyCodepoints>limits.bodyCodepoints||manifest.sourceBodyUtf8Bytes>limits.bodyUtf8Bytes)
   return unavailable('source-size-limit');
+ if(current.mime==='application/pdf'&&!(await pool.query(`SELECT version_id FROM document_pdf_visual_manifests
+  WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3`,[source.currentVersionId,source.sourceVersionId,source.sourceHash])).rows.length)
+  return unavailable('image-unavailable');
  let data:Awaited<ReturnType<typeof structuredSource>>;
  try{data=await structuredSource(pool,owner,source);}
  catch(error){if(error instanceof DocumentContextError&&error.code==='DOCUMENT_STRUCTURE_UNAVAILABLE')return unavailable('structure-unavailable');throw error;}
@@ -319,10 +323,12 @@ export async function readCompleteDocumentSource(pool:Pool,owner:string,expected
   FROM document_image_attachments WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3 AND caption_evidence_id=ANY($4::text[])`,
  [current.currentVersionId,current.sourceVersionId,current.sourceHash,captions.map(n=>n.evidenceId)])).rows;
  let pdfImages:PdfVisualImageEvidence[]=[];
- try{const visual=await readPdfVisualEvidence(pool,owner,source);pdfImages=visual.images;
+ if(current.mime==='application/pdf')try{const visual=await readPdfVisualEvidence(pool,owner,source);pdfImages=visual.images;
+  if(!visual.registered)return unavailable('image-unavailable');
   if(visual.registered&&visual.renderStatus!=='available')return unavailable('image-unavailable');
   if(visual.registered)manifest.pdfVisuals={manifestSha256:visual.manifestSha256,layoutStatus:visual.layoutStatus};
  }catch(error){if(error instanceof PdfVisualEvidenceError){
+   if(error.code==='source-changed')changed();
    if(error.code==='count-limit')return unavailable('image-count-limit');
    if(error.code==='byte-limit')return unavailable('image-byte-limit');
    if(error.code==='input-limit')return unavailable('image-input-limit');
