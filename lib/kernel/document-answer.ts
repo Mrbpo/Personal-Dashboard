@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
-import type {DocumentEvidenceHit} from './document-evidence.ts';
+import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
@@ -16,6 +16,9 @@ type Image=AuthorImage|PdfVisualImageEvidence;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ /** Real current nodes read by Kernel solely to bind supplemental PNGs. Their
+  * bodies must never become text support or quotation units in this lane. */
+ imageAnchors?:DocumentSelectedNodeHit[];
  parents:{parentId:string;status:string;headingMetadata?:{text:string;originalSourceHash:string};sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
@@ -74,6 +77,22 @@ function supportFor(context:DocumentAnswerContext):Support[]{
     evidenceId:node.evidenceId,locator:node.locator,text:node.body});
   }
  }
+ const imageOnly:DocumentSelectedNodeHit[]=[];
+ if((context.imageAnchors?.length??0)>2)throw new Error('Supplemental image anchor limit exceeded');
+ for(const hit of context.imageAnchors??[]){
+  const version=/^pg:(.+):([0-9]+)$/.exec(hit.id);
+  if(hit.evidence_body!=='full-page'||hit.reader_selection!=='evidence-node-ids'||!version||
+   Number(version[2])!==hit.page_number||!hit.document_id||!hit.source_version_id||!hit.source_hash||!hit.evidence_id||typeof hit.body!=='string')
+   throw new Error('Supplemental image has no genuine current node anchor');
+  const identity=JSON.stringify([hit.document_id,hit.source_version_id,hit.source_hash,hit.evidence_id]),original=seen.get(identity);
+  if(original){
+   if(original.documentVersionId!==version[1]||original.text!==hit.body||original.locator!==hit.locator)
+    throw new Error('Conflicting supplemental image anchor');
+   continue; // An existing protected text path retains its original support.
+  }
+  if(imageOnly.some(node=>node.evidence_id===hit.evidence_id))throw new Error('Duplicate supplemental image anchor');
+  imageOnly.push(hit); // Identity proof only: never addText(hit.body).
+ }
  const imageIds=new Set<string>();
  for(const image of context.images){
   const bytes=Buffer.from(image.bytes);
@@ -86,8 +105,10 @@ function supportFor(context:DocumentAnswerContext):Support[]{
    throw new Error('Document answer image is missing, ambiguous or has an invalid checksum');
   if(pdf&&(!['pdf-page','pdf-region'].includes(image.kind)||image.rawPdfSha256!==image.source.sourceHash||
    !/^[a-f0-9]{64}$/.test(image.manifestSha256)||!Number.isInteger(image.physicalPage)||image.physicalPage<1||
-   !supports.some(support=>support.kind==='text'&&support.evidenceId===anchor&&support.documentId===image.source.documentId&&
-     support.documentVersionId===image.source.currentVersionId&&support.sourceVersionId===image.source.sourceVersionId&&support.sourceHash===image.source.sourceHash)))
+   !(supports.some(support=>support.kind==='text'&&support.evidenceId===anchor&&support.documentId===image.source.documentId&&
+     support.documentVersionId===image.source.currentVersionId&&support.sourceVersionId===image.source.sourceVersionId&&support.sourceHash===image.source.sourceHash)||
+    imageOnly.some(node=>node.evidence_id===anchor&&node.document_id===image.source.documentId&&node.page_number===image.physicalPage&&
+     node.id===`pg:${image.source.currentVersionId}:${image.physicalPage}`&&node.source_version_id===image.source.sourceVersionId&&node.source_hash===image.source.sourceHash))))
    throw new Error('PDF image has no genuine current page evidence anchor');
   imageIds.add(image.attachmentId);
   supports.push({id:`i${imageIds.size-1}`,kind:'image',documentId:image.source.documentId,documentVersionId:image.source.currentVersionId,
@@ -226,12 +247,12 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const quoteUnits=documentQuoteUnits(supports),bySupport=new Map(supports.map(support=>[support.id,support]));
  const quoteUnitManifest=quoteUnits.map(({text,...unit})=>({...unit,evidence:supportMetadata(bySupport.get(unit.supportId)!)}));
  const quoteUnitManifestSha256=sha(JSON.stringify(quoteUnitManifest));
- const warnings=[...new Set(context.anchors.flatMap(hit=>hit.parser_warnings??[]))];
+ const warnings=[...new Set([...context.anchors,...context.imageAnchors??[]].flatMap(hit=>hit.parser_warnings??[]))];
  const unavailableParents=context.parents.filter(parent=>parent.status!=='available').map(parent=>({
   parentId:parent.parentId,status:parent.status,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints}));
  const parentMetadata=context.parents.map(parent=>({parentId:parent.parentId,status:parent.status,
   headingMetadata:parent.headingMetadata??null,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints}));
- const documentMetadata=[...new Map(context.anchors.map(hit=>[hit.document_id,{documentId:hit.document_id,
+ const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,sourceContentIsUntrusted:true};

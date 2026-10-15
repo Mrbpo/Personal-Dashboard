@@ -3,8 +3,9 @@ import {digest,readBlob} from '../library.ts';
 import {kernelPool} from './db.ts';
 import {kernel} from './service.ts';
 import {validateDoclingProgress,decodeDerivedDoclingResult,type DoclingIdentity,type DoclingProgress} from './docling-batches.ts';
-import type {DoclingVisualLayout} from './docling-result.ts';
+import type {DoclingVisualLayout,DoclingNativeTable} from './docling-result.ts';
 import {preparePdfVisualEvidence,pdfVisualCanonical} from './pdf-visual-evidence.ts';
+import {prepareNativeTableCandidates} from './document-table-candidates.ts';
 
 export const CACHED_DOCLING_REPLAY_VERSION='docling-cached-replay-v1';
 const rawMethods=new Set(['docling-text','docling-original-text-fallback','cached-docling-redecode']);
@@ -15,7 +16,7 @@ type Provenance={pageNumber:number;extractionMethod:string;parserVersion:string;
  basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}};
 export type CachedDoclingAudit={schema:1;owner:string;documentId:string;sourceHash:string;expectedCurrentVersion:string;
  decision:'eligible'|'unchanged';pageCount:number;changedPages:number[];warnings:string[];pages:Array<{pageNumber:number;locator:string;text:string}>;
- pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;visualLayout:DoclingVisualLayout;
+ pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[];
  visualEvidence:{status:'missing'|'matching'|'layout-changed'|'render-incomplete';manifestSha256:string|null;contentSha256:string|null;layoutSha256:string};visualOnly:boolean;reviewHash:string};
 const normalizedWarnings=(warnings:string[])=>[...new Set(warnings.map(w=>w.trim()).filter(Boolean))].sort();
 
@@ -33,7 +34,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
   return streams.every(stream=>stream===undefined||(stream instanceof PDFStream&&
    (stream.getContentsSize()===0||(!stream.dict.has(PDFName.of('Filter'))&&!stream.getContentsString().trim()))))?[index+1]:[];
  });
- const pages:Array<{pageNumber:number;locator:string;text:string}>=[],warnings:string[]=[];
+ const pages:Array<{pageNumber:number;locator:string;text:string}>=[],warnings:string[]=[],nativeTables:ReturnType<typeof decodeDerivedDoclingResult>['nativeTables']=[];
  const visualLayout:DoclingVisualLayout={status:'available',regions:[],pageSizes:[],resultReferences:[]};
  for(const batch of progress.batches){
   const copyIndices=Array.from({length:batch.end-batch.start+1},(_,i)=>batch.start+i-1);
@@ -59,6 +60,8 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
    throw new Error('Cached replay result source, options or range identity mismatch');
   // This CLI only replays raw Docling text, never reruns or downgrades AI formula pages.
   const decoded=decodeDerivedDoclingResult(saved.result,{...expected},{verifiedBlankPages:blank,formulaEnriched:false});
+  nativeTables.push(...decoded.nativeTables.map(table=>({...table,result:{resultBlobSha256:batch.resultHash!,
+   derivedInputSha256:batch.inputHash!,optionsHash:identity.optionsHash,copyIndices:[...copyIndices]}})));
   pages.push(...decoded.pages);warnings.push(...decoded.warnings);
   if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
   visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
@@ -69,7 +72,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
  }
  if(pages.length!==count||pages.some((page,i)=>page.pageNumber!==i+1)||!pages.some(page=>page.text.trim()))
   throw new Error('Cached replay complete document coverage missing');
- return {pages,warnings:normalizedWarnings(warnings),progress,visualLayout};
+ return {pages,warnings:normalizedWarnings(warnings),progress,visualLayout,nativeTables};
 }
 
 export async function auditCachedDoclingReplay(owner:string,documentId:string):Promise<CachedDoclingAudit>{
@@ -118,7 +121,7 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
    sourceVersionId:document.source_version_id,evidenceId:page.evidence_id}}));
  const audit={schema:1 as const,owner,documentId,sourceHash:document.source_hash,expectedCurrentVersion:document.current_version_id,
   decision:decision as CachedDoclingAudit['decision'],pageCount:document.page_count,changedPages,warnings,
-  pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress,visualLayout:decoded.visualLayout,
+  pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress,visualLayout:decoded.visualLayout,nativeTables:decoded.nativeTables,
   visualEvidence:{status:visualStatus,manifestSha256:visualRow?.manifest_sha256??null,contentSha256:visualRow?.content_sha256??null,layoutSha256},visualOnly:!textChanged&&visualStatus!=='matching'};
  return {...audit,reviewHash:digest(JSON.stringify(audit))};
 }
@@ -133,6 +136,7 @@ export async function applyCachedDoclingReplay(reviewed:CachedDoclingAudit,expec
  const d=current.document;
  const pdfVisuals=await preparePdfVisualEvidence({owner:d.owner_id,documentId:d.id,sourceHash:d.source_hash,
   pdfBytes:await readBlob(d.source_hash),layout:current.visualLayout},renderer);
+ const nativeTables=await prepareNativeTableCandidates({owner:d.owner_id,documentId:d.id,sourceHash:d.source_hash,tables:current.nativeTables});
  if(current.visualOnly&&pdfVisuals.contentSha256===current.visualEvidence.contentSha256){
   const unchanged=(await kernelPool().query(`SELECT d.id FROM document_texts d
    JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
@@ -148,7 +152,7 @@ export async function applyCachedDoclingReplay(reviewed:CachedDoclingAudit,expec
   mime:'application/pdf',origin:d.origin,originKey:d.origin_key,createdAt:d.created_at.toISOString()},current.pages,
   {parserVersion:current.visualOnly?d.parser_version:CACHED_DOCLING_REPLAY_VERSION,
    extractionMethod:current.visualOnly?String(d.raw_value.extractionMethod||d.parser_version):'mixed-cached-docling-redecode',expectedPages:current.pageCount,
-   expectedCurrentVersion,warnings:current.warnings,pageProvenance:current.pageProvenance,batchProvenance:current.batchProvenance,pdfVisuals});
+   expectedCurrentVersion,warnings:current.warnings,pageProvenance:current.pageProvenance,batchProvenance:current.batchProvenance,pdfVisuals,nativeTables});
  return {action:'published',currentVersion:(await kernelPool().query<{current_version_id:string}>(
   'SELECT current_version_id FROM document_texts WHERE id=$1 AND owner_id=$2',[d.id,d.owner_id])).rows[0].current_version_id};
 }

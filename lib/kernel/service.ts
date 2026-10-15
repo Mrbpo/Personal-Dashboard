@@ -17,6 +17,9 @@ import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} fro
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
+import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
+ searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
+ type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
 
 type Json = Record<string, unknown>;
 type CandidateInput = {
@@ -790,8 +793,8 @@ export class KernelService {
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
-        ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
-        pdfVisuals?:PreparedPdfVisualEvidence}={}) {
+      ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
+      nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -812,6 +815,7 @@ export class KernelService {
       }
       const expectedCurrentVersion=options.expectedCurrentVersion!==undefined?options.expectedCurrentVersion:
         options.pdfVisuals?await this.documentIngestionHead(owner,document.id,document.hash):undefined;
+    if(options.nativeTables)assertPreparedNativeTableCandidates(options.nativeTables,owner,document.id,document.hash);
     if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
       throw new Error('Document quality warnings are invalid');
     const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
@@ -904,6 +908,11 @@ export class KernelService {
         await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,parserVersion:'pdf-physical-pages-v1',parents:[],
           nodes:pages.map((page,index)=>({evidenceId:pageEvidenceIds[index],locator:page.locator,ordinal:index,kind:'page',bodySha256:createHash('sha256').update(page.text).digest('hex')}))});
       }
+      // Bind only after the same-version real PDF manifest has been published.
+      if(options.nativeTables){
+        await commitNativeTableCandidates(client,options.nativeTables,{documentId:document.id,currentVersionId:parsedVersion,
+          sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''},pageEvidenceIds);
+      }
       if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
         await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
@@ -951,6 +960,36 @@ export class KernelService {
 
   readPdfVisualEvidence(owner:string,source:DocumentContextSource,pageEvidenceIds?:string[]){
     return readPdfVisualEvidence(kernelPool(),owner,source,pageEvidenceIds);
+  }
+
+  nativeTableBlobHashes(){return nativeTableBlobHashes(kernelPool());}
+
+  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}){
+    return searchNativeTableCandidates(kernelPool(),owner,question,scope);
+  }
+
+  readNativeTableCandidateEvidence(owner:string,candidates:DerivedTableCandidate[]){
+    return readNativeTableCandidateEvidence(kernelPool(),owner,candidates);
+  }
+
+  /** Explicit, bounded current-source rebuild from saved native results only.
+   * No conversion, embeddings, model, queue, or original-text replacement. */
+  async rebuildNativeTableCandidates(owner:string,source:DocumentContextSource){
+    source={...source};
+    const before=await this.readDocumentSourcePages(owner,source);
+    if(before.nodes.length>32)throw new Error('Native table reconstruction is limited to 32 source pages per call');
+    const saved=(await kernelPool().query<{raw_value:Record<string,unknown>}>(
+      'SELECT raw_value FROM source_item_versions WHERE id=$1',[source.sourceVersionId])).rows[0];
+    const progress=saved?.raw_value.batchProvenance as import('./docling-batches.ts').DoclingProgress|undefined;
+    if(!progress?.identity||progress.identity.owner!==owner||progress.identity.documentId!==source.documentId||
+      progress.identity.sourceHash!==source.sourceHash)throw new Error('Saved native Docling provenance is unavailable');
+    const {readBlob}=await import('../library.ts'),{decodeCachedDoclingReplay}=await import('./docling-cache-replay.ts');
+    const decoded=await decodeCachedDoclingReplay(await readBlob(source.sourceHash),progress.identity,progress);
+    const value=await prepareNativeTableCandidates({owner,documentId:source.documentId,sourceHash:source.sourceHash,tables:decoded.nativeTables});
+    return kernelTransaction(async client=>{
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`document:${source.documentId}`]);
+      return commitNativeTableCandidates(client,value,source,before.nodes.map(node=>node.evidenceId));
+    });
   }
 
   readDocumentNodes(owner:string,expectedSource:DocumentContextSource,evidenceIds:string[]){
@@ -1041,17 +1080,32 @@ export class KernelService {
     const anchors=await this.searchDocumentText(owner,question,{...searchOptions,limit,evidenceBody:'full-page'});
     if(anchors.some(hit=>hit.retrieval_mode==='keyword-fallback'||hit.degraded_reason))
       throw new Error('Study answer retrieval was degraded; no answer was generated');
+    const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
+      {courseId:searchOptions.courseId})):undefined;
+    const tableCandidates=includeImages?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
+      documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
     return synthesizeDocumentAnswer(question,async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
         const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
           {courseId:searchOptions.courseId}));
         if(current.some(hit=>hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||
-          hit.source_version_id!==selected.sourceVersionId||hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`))
+          hit.source_version_id!==selected.sourceVersionId||hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`)||
+          tableCandidates.some(item=>item.source.documentId!==selected.documentId||item.source.currentVersionId!==selected.currentVersionId||
+            item.source.sourceVersionId!==selected.sourceVersionId||item.source.sourceHash!==selected.sourceHash))
           throw new DocumentEvidenceChangedError();
       }
-      if(includeParents)return this.readDocumentParents(owner,current,{includeImages});
-      return {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
+      const context=includeParents?await this.readDocumentParents(owner,current,{includeImages}):
+        {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
+      if(!tableCandidates.length)return context;
+      const supplemental=await this.readNativeTableCandidateEvidence(owner,tableCandidates);
+      const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
+      const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
+      if(images.length>COMPLETE_DOCUMENT_SOURCE_LIMITS.images||images.reduce((sum,image)=>sum+image.byteLength,0)>COMPLETE_DOCUMENT_SOURCE_LIMITS.imageBytes||
+        images.reduce((sum,image)=>sum+2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1,0)>COMPLETE_DOCUMENT_SOURCE_LIMITS.imageInputTokens)
+        throw new DocumentContextError('DOCUMENT_IMAGE_UNAVAILABLE','Supplemental table images exceed the current answer limit');
+      return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
+        images};
     },policy);
   }
 
