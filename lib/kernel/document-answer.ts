@@ -3,6 +3,7 @@ import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
+import type {DocumentImageSelection} from './document-image-budget.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -16,6 +17,7 @@ type Image=AuthorImage|PdfVisualImageEvidence;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ imageSelection?:DocumentImageSelection;
  /** Real current nodes read by Kernel solely to bind supplemental PNGs. Their
   * bodies must never become text support or quotation units in this lane. */
  imageAnchors?:DocumentSelectedNodeHit[];
@@ -255,7 +257,8 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
-  quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,sourceContentIsUntrusted:true};
+  quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,
+  ...(context.imageSelection?{imageSelection:context.imageSelection}:{}),sourceContentIsUntrusted:true};
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,input,warnings,unavailableParents,fingerprint:sha(JSON.stringify(input))};
 }
 
@@ -340,6 +343,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  const receipt={referencePolicyVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnitManifest:prepared.quoteUnitManifest,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   warnings:prepared.warnings,unavailableParents:prepared.unavailableParents,inputFingerprint:prepared.fingerprint,
+  ...(prepared.input.imageSelection?{imageSelection:prepared.input.imageSelection}:{}),
   evidence:prepared.supports.map(({image,text,...support})=>support),
   textEvidenceCount:prepared.supports.filter(support=>support.kind==='text').length,
   imageEvidenceCount:prepared.supports.filter(support=>support.kind==='image').length};

@@ -5,6 +5,7 @@ import type {Pool,PoolClient} from 'pg';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {readPdfVisualEvidence,PdfVisualEvidenceError,type PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
+import {createDocumentImageBudget,type DocumentImageBudget,type DocumentImageSelection} from './document-image-budget.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -23,6 +24,7 @@ export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
  headingMetadata?:{text:string;originalSourceHash:string};status:'available'|'unavailable-size-exceeds-8192';
  sourceNodeCount:number;sourceBodyCodepoints:number;nodeManifest:Array<{evidenceId:string;locator:string;bodySha256:string}>;nodes:DocumentEvidenceNode[]};
 export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:Array<DocumentImageEvidence|PdfVisualImageEvidence>;
+ imageSelection?:DocumentImageSelection;
  accounting:{anchorCount:number;parentCount:number;contextNodeCount:number;contextBodyCodepoints:number;imageCount:number;imageBytes:number};
  sourceContentIsUntrusted:true};
 /** A separate whole-source reader; these limits do not change ranked readers. */
@@ -233,7 +235,8 @@ export async function readDocumentImages(db:Queryable,owner:string,source:Docume
  }
  await currentSource(db,owner,identity(current));return images;
 }
-export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={}):Promise<DocumentContextRead>{
+export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},
+ imageBudget?:DocumentImageBudget):Promise<DocumentContextRead>{
  if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>key!=='includeImages')
   ||(options.includeImages!==undefined&&typeof options.includeImages!=='boolean'))invalid('At most 14 original ranked anchors are allowed');
  const loaded=new Map<string,Awaited<ReturnType<typeof structuredSource>>>(),parents=new Map<string,DocumentParentContext>();
@@ -265,18 +268,22 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
    status:points<=8192?'available':'unavailable-size-exceeds-8192',sourceNodeCount:nodes.length,sourceBodyCodepoints:points,
    nodeManifest:nodes.map(node=>({evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256})),nodes:points<=8192?nodes:[]});
  }
- const images:Array<DocumentImageEvidence|PdfVisualImageEvidence>=[];
- if(options.includeImages)for(const data of loaded.values()){
-  const captions=[...parents.values()].flatMap(parent=>parent.nodes).filter(node=>node.documentId===data.current.documentId&&node.kind==='caption').map(node=>node.evidenceId);
-  if(captions.length)images.push(...await readDocumentImages(db,owner,identity(data.current),[...new Set(captions)]));
-  const pageAnchors=data.nodes.filter(node=>node.kind==='page'&&anchors.some(anchor=>anchor.evidence_id===node.evidenceId)).map(node=>node.evidenceId);
-  if(pageAnchors.length&&data.current.mime==='application/pdf')try{const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors);
+ const images:Array<DocumentImageEvidence|PdfVisualImageEvidence>=[],budget=options.includeImages?(imageBudget??createDocumentImageBudget()):undefined;
+ if(budget)for(const [index,anchor] of anchors.entries()){
+  const data=loaded.get(anchor.document_id)!,rank=index+1;
+  const captions=[...parents.values()].filter(parent=>parent.firstAnchorRank===rank).flatMap(parent=>parent.nodes)
+   .filter(node=>node.kind==='caption').map(node=>node.evidenceId);
+  for(const caption of new Set(captions))for(const image of await readDocumentImages(db,owner,identity(data.current),[caption]))
+   if(budget.include(image,rank)&&!images.some(value=>value.attachmentId===image.attachmentId))images.push(image);
+  const pageAnchors=data.nodes.filter(node=>node.kind==='page'&&anchor.evidence_id===node.evidenceId).map(node=>node.evidenceId);
+  if(pageAnchors.length&&data.current.mime==='application/pdf')try{const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors,
+   undefined,{selection:{budget,anchorRank:rank}});
    if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
-   images.push(...visuals.images);
+   for(const image of visuals.images)if(!images.some(value=>value.attachmentId===image.attachmentId))images.push(image);
   }catch(error){if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();throw error;}
  }
  for(const data of loaded.values())await currentSource(db,owner,identity(data.current));
- const packets=[...parents.values()];return {anchors,parents:packets,images,accounting:{anchorCount:anchors.length,parentCount:packets.length,
+ const packets=[...parents.values()];return {anchors,parents:packets,images,...(budget?{imageSelection:budget.snapshot()}:{}),accounting:{anchorCount:anchors.length,parentCount:packets.length,
   contextNodeCount:packets.reduce((sum,parent)=>sum+parent.nodes.length,0),contextBodyCodepoints:packets.reduce((sum,parent)=>sum+parent.nodes.reduce((n,node)=>n+Array.from(node.body).length,0),0),
   imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)},sourceContentIsUntrusted:true};
 }

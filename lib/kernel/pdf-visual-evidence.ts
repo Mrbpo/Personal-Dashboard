@@ -8,6 +8,7 @@ import type {Pool,PoolClient} from 'pg';
 import {localPdfPageImage} from '../local-ocr.ts';
 import type {DoclingVisualLayout} from './docling-result.ts';
 import type {DocumentContextSource} from './document-context.ts';
+import {DOCUMENT_IMAGE_LIMITS,type DocumentImageBudget} from './document-image-budget.ts';
 
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 export const pdfVisualCanonical=(value:unknown):string=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)
@@ -15,7 +16,7 @@ export const pdfVisualCanonical=(value:unknown):string=>JSON.stringify(value,(_k
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR||'./data/library');
 const isSha=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 export const PDF_VISUAL_STORAGE_LIMITS=Object.freeze({pages:500,assets:1500,bytes:256*1024*1024});
-export const PDF_VISUAL_READ_LIMITS=Object.freeze({images:64,bytes:32*1024*1024,imageInputTokens:65536});
+export const PDF_VISUAL_READ_LIMITS=DOCUMENT_IMAGE_LIMITS;
 export class PdfVisualEvidenceError extends Error{
  readonly code:'source-changed'|'unavailable'|'count-limit'|'byte-limit'|'input-limit'|'invalid';
  constructor(code:PdfVisualEvidenceError['code'],message:string){super(message);this.code=code;this.name='PdfVisualEvidenceError';}
@@ -173,7 +174,8 @@ async function current(db:Queryable,owner:string,source:DocumentContextSource){
 }
 /** Multiple real regions may share one real page; never invent caption nodes. */
 export async function readPdfVisualEvidence(db:Queryable,owner:string,source:DocumentContextSource,pageEvidenceIds?:string[],
- limits:{images:number;bytes:number;imageInputTokens:number}=PDF_VISUAL_READ_LIMITS){
+ limits:{images:number;bytes:number;imageInputTokens:number}=PDF_VISUAL_READ_LIMITS,
+ options:{selection?:{budget:DocumentImageBudget;anchorRank:number};pageAssetsOnly?:boolean}={}){
  await current(db,owner,source);
  if(![limits.images,limits.bytes,limits.imageInputTokens].every(n=>Number.isSafeInteger(n)&&n>0)||limits.images>PDF_VISUAL_READ_LIMITS.images||
   limits.bytes>PDF_VISUAL_READ_LIMITS.bytes||limits.imageInputTokens>PDF_VISUAL_READ_LIMITS.imageInputTokens)throw new PdfVisualEvidenceError('invalid','Invalid bounded PDF visual read');
@@ -196,20 +198,22 @@ export async function readPdfVisualEvidence(db:Queryable,owner:string,source:Doc
   const binding=bindings[index];if(binding.index!==index||binding.anchorEvidenceId!==pages[asset.physicalPage-1]?.evidence_id||
    !['pdf-page','pdf-region'].includes(asset.kind)||!isSha(asset.sha256)||asset.provenance.rawPdfSha256!==source.sourceHash||
    ![asset.width,asset.height,asset.byteLength].every(n=>Number.isSafeInteger(n)&&n>0))throw new PdfVisualEvidenceError('invalid','PDF image binding differs');
-  return !pageEvidenceIds||pageEvidenceIds.includes(binding.anchorEvidenceId)?[{asset,binding}]:[];});
- if(selected.length>limits.images)throw new PdfVisualEvidenceError('count-limit','PDF image count exceeds limit; none silently dropped');
- if(selected.reduce((sum,{asset})=>sum+asset.byteLength,0)>limits.bytes)throw new PdfVisualEvidenceError('byte-limit','PDF images exceed byte limit');
- if(selected.reduce((sum,{asset})=>sum+2*Math.ceil(asset.width/32)*Math.ceil(asset.height/32)+1,0)>limits.imageInputTokens)
+  return (!pageEvidenceIds||pageEvidenceIds.includes(binding.anchorEvidenceId))&&(!options.pageAssetsOnly||asset.kind==='pdf-page')?[{asset,binding}]:[];});
+ if(!options.selection&&selected.length>limits.images)throw new PdfVisualEvidenceError('count-limit','PDF image count exceeds limit; none silently dropped');
+ if(!options.selection&&selected.reduce((sum,{asset})=>sum+asset.byteLength,0)>limits.bytes)throw new PdfVisualEvidenceError('byte-limit','PDF images exceed byte limit');
+ if(!options.selection&&selected.reduce((sum,{asset})=>sum+2*Math.ceil(asset.width/32)*Math.ceil(asset.height/32)+1,0)>limits.imageInputTokens)
   throw new PdfVisualEvidenceError('input-limit','PDF images exceed input bound');
- const images:PdfVisualImageEvidence[]=[];
+ const images:PdfVisualImageEvidence[]=[],omittedImages:Array<Omit<PdfVisualImageEvidence,'bytes'>>=[];
  for(const {asset,binding} of selected){
   const bytes=await readFile(resolve(root(),asset.sha256)).catch(()=>{throw new PdfVisualEvidenceError('unavailable','Original PDF image blob missing');});
   if(bytes.length!==asset.byteLength||sha(bytes)!==asset.sha256)throw new PdfVisualEvidenceError('invalid','PDF image blob checksum differs');
   const metadata=await sharp(bytes).metadata();if(metadata.format!=='png'||metadata.width!==asset.width||metadata.height!==asset.height)throw new PdfVisualEvidenceError('invalid','PDF image dimensions differ');
-  images.push({...asset,attachmentId:sha(pdfVisualCanonical([source,row.manifest_sha256,binding.index])),assetId:asset.sha256,anchorEvidenceId:binding.anchorEvidenceId,
-   rawPdfSha256:source.sourceHash,manifestSha256:row.manifest_sha256,source:{...source},mime:'image/png',bytes});
+  const image:PdfVisualImageEvidence={...asset,attachmentId:sha(pdfVisualCanonical([source,row.manifest_sha256,binding.index])),assetId:asset.sha256,anchorEvidenceId:binding.anchorEvidenceId,
+   rawPdfSha256:source.sourceHash,manifestSha256:row.manifest_sha256,source:{...source},mime:'image/png',bytes};
+  if(!options.selection||options.selection.budget.include(image,options.selection.anchorRank))images.push(image);
+  else {const {bytes:discarded,...metadata}=image;void discarded;omittedImages.push(metadata);}
  }
- await current(db,owner,source);return {registered:true,renderStatus:content.renderStatus,layoutStatus:content.layoutStatus,layout:content.layout,images,manifestSha256:row.manifest_sha256};
+ await current(db,owner,source);return {registered:true,renderStatus:content.renderStatus,layoutStatus:content.layoutStatus,layout:content.layout,images,omittedImages,manifestSha256:row.manifest_sha256};
 }
 /** Include historical, hidden, raw-result and render parents for reconstructible blobs. */
 export async function pdfVisualBlobHashes(db:Queryable):Promise<string[]>{

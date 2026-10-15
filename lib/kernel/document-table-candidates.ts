@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import type {DocumentImageBudget} from './document-image-budget.ts';
 import type {Pool,PoolClient} from 'pg';
 import {readBlob} from '../library.ts';
 import type {DoclingNativeTable} from './docling-result.ts';
@@ -225,7 +226,8 @@ export async function searchNativeTableCandidates(pool:Pool,owner:string,query:s
 
 /** Cached candidate identities are rechecked before AND after rereading actual
  * PNGs. An unavailable image is an error, never permission to answer from OCR. */
-export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,requested:DerivedTableCandidate[]){
+export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,requested:DerivedTableCandidate[],
+ selection?:{budget:DocumentImageBudget;firstAnchorRank:number}){
  const expected=structuredClone(requested);
  if(expected.length>NATIVE_TABLE_LIMITS.supplementalPages||new Set(expected.map(value=>value.id)).size!==expected.length)
   throw new Error('Invalid bounded native table selections');
@@ -237,19 +239,18 @@ export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,re
  };
  await verify();const imageAnchors:DocumentSelectedNodeHit[]=[],images:PdfVisualImageEvidence[]=[];
  const {readPdfVisualEvidence,PDF_VISUAL_READ_LIMITS}=await import('./pdf-visual-evidence.ts');
- const groups=new Map<string,DerivedTableCandidate[]>();
- for(const item of expected){const key=canonical(item.source);groups.set(key,[...(groups.get(key)||[]),item]);}
- for(const items of groups.values()){
-  const source=items[0].source,ids=[...new Set(items.map(item=>item.anchorEvidenceId))];
-  const nodes=await readDocumentNodes(pool,owner,source,ids),visuals=await readPdfVisualEvidence(pool,owner,source,ids);
-  for(const item of items){
+ for(const [index,item] of expected.entries()){
+  const source=item.source,ids=[item.anchorEvidenceId];
+  const nodes=await readDocumentNodes(pool,owner,source,ids),visuals=await readPdfVisualEvidence(pool,owner,source,ids,undefined,
+   {pageAssetsOnly:true,...(selection?{selection:{budget:selection.budget,anchorRank:selection.firstAnchorRank+index}}:{})});
    const node=nodes.find(node=>node.evidence_id===item.anchorEvidenceId&&node.page_number===item.pageNumber);
-   const png=visuals.images.find(image=>image.kind==='pdf-page'&&image.anchorEvidenceId===item.anchorEvidenceId&&
-    image.physicalPage===item.pageNumber&&image.sha256===item.assetSha256&&image.manifestSha256===item.manifestSha256);
-   if(!node||!png)throw new Error('Native table original page image is unavailable');
+   const matches=(image:Omit<PdfVisualImageEvidence,'bytes'>)=>image.kind==='pdf-page'&&image.anchorEvidenceId===item.anchorEvidenceId&&
+    image.physicalPage===item.pageNumber&&image.sha256===item.assetSha256&&image.manifestSha256===item.manifestSha256;
+   const png=visuals.images.find(matches),omitted=visuals.omittedImages?.find(matches);
+   if(!node||(!png&&!omitted))throw new Error('Native table original page image is unavailable');
+   if(!png)continue;
    if(!imageAnchors.some(value=>value.evidence_id===node.evidence_id))imageAnchors.push(node);
    if(!images.some(value=>value.attachmentId===png.attachmentId))images.push(png);
-  }
  }
  if(images.reduce((sum,image)=>sum+image.byteLength,0)>PDF_VISUAL_READ_LIMITS.bytes||
   images.reduce((sum,image)=>sum+2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1,0)>PDF_VISUAL_READ_LIMITS.imageInputTokens)
