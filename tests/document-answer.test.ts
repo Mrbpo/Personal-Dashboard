@@ -7,6 +7,7 @@ import {prepareDocumentAnswer,validateGroundedDocumentAnswer,resolveGroundedDocu
  resolveDocumentAnswerSelections,buildDocumentAnswerRequest,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
+import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceRead} from '../lib/kernel/document-context.ts';
 import {after} from 'node:test';
 
 process.env.DATABASE_URL=':memory:';
@@ -23,6 +24,65 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,i
  source_hash:source.sourceHash,source_version_id:source.sourceVersionId,body,locator:'section:0:paragraph:0',page_number:1,
  evidence_id:'evidence',parser_version:'native-unverified',score:1,evidence_body:'full-page',parser_warnings:['Formula fidelity unverified.']} ]};}
 const answer={status:'answered',message:'',claims:[{text:'The study uses two samples.',citations:[{id:'e0',quote:'uses two samples.'}]}]};
+
+test('blank original nodes retain evidence order and checksums but cannot support a claim',()=>{
+ const c=context(),bodies=[' \t\n','',body];
+ c.anchors=bodies.map((text,index)=>({...c.anchors[0],id:`pg:version:${index+1}`,page_number:index+1,
+  evidence_id:`original-${index}`,locator:`original:${index}`,body:text}));
+ c.parents=[{parentId:'original-section',status:'available',sourceNodeCount:3,
+  sourceBodyCodepoints:bodies.reduce((sum,text)=>sum+Array.from(text).length,0),nodes:c.anchors.map(hit=>({
+   documentId:hit.document_id,documentVersionId:'version',sourceVersionId:hit.source_version_id,sourceHash:hit.source_hash,
+   evidenceId:hit.evidence_id,locator:hit.locator,body:hit.body,bodySha256:hash(hit.body)}))}];
+ const prepared=prepareDocumentAnswer('How many samples?',c);
+ assert.deepEqual(prepared.supports.map(s=>[s.id,s.text,s.sha256]),bodies.map((text,index)=>[`e${index}`,text,hash(text)]));
+ assert.deepEqual(prepared.input.evidence.map(e=>e.evidenceId),['original-0','original-1','original-2']);
+ const blank=prepared.quoteUnits.find(unit=>unit.supportId==='e0')!,valid=prepared.quoteUnits.find(unit=>unit.supportId==='e2')!;
+ assert.equal(blank.text,bodies[0]);assert.equal(blank.selectable,false);assert.equal(valid.selectable,true);
+ assert.equal(prepared.quoteUnitManifest.find(unit=>unit.id===blank.id)!.evidence.evidenceId,'original-0');
+ assert.equal(prepared.input.evidence[1].sha256,hash(''),'empty body retains its original evidence identity');
+ const request=buildDocumentAnswerRequest(prepared,{model:'gpt-5-mini',reasoningEffort:'low',maxOutputTokens:4000});
+ assert.deepEqual(request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,[valid.id]);
+ const selection=(id:string)=>({...answer,claims:[{text:'Two samples.',citations:[{id}]}]});
+ const resolved=resolveDocumentAnswerSelections(selection(valid.id),prepared.supports);
+ assert.equal(resolved.answer.claims[0].citations[0].id,'e2');assert.equal(resolved.selectedUnits[0].evidence.evidenceId,'original-2');
+ for(const id of [blank.id,'e0','e1'])assert.throws(()=>resolveDocumentAnswerSelections(selection(id),prepared.supports));
+ assert.throws(()=>validateGroundedDocumentAnswer({...answer,claims:[{text:'Unsupported.',citations:[{id:'e0',quote:' \t\n'}]}]},prepared.supports));
+ c.parents[0].nodes[0].bodySha256=hash('different');assert.throws(()=>prepareDocumentAnswer('What?',c),/checksum/);
+});
+
+test('empty and whitespace-only sources return neutral insufficient evidence without reserving or fetching',async()=>{
+ const original=globalThis.fetch;let calls=0,attempts=0;
+ globalThis.fetch=async()=>{calls++;throw new Error('Blank-only evidence must not call a provider');};
+ try{for(const text of ['', ' \t\n']){
+  const c=context();c.anchors[0].body=text;
+  const result=await synthesizeDocumentAnswer('What is supported?',async()=>c,{beforeAttempt:async()=>{attempts++;}});
+  assert.deepEqual(result.answer,{status:'insufficient-evidence',message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]});
+  assert.equal(result.textEvidenceCount,1);assert.equal(result.evidence[0].sha256,hash(text));
+  assert.equal(result.model,null);assert.equal(result.providerRequestSha256,null);assert.equal(result.providerSelections,null);
+  if(text)assert.equal(result.quoteUnitManifest[0].selectable,false);
+ }}finally{globalThis.fetch=original;}
+ assert.equal(calls,0);assert.equal(attempts,0);
+});
+
+test('complete-source blank-only route preserves its source manifest and neutral result before request construction',async()=>{
+ const c=context();c.anchors[0].body=' \t\n';let reads=0,attempts=0;
+ const complete:CompleteDocumentSourceRead={status:'available',context:{...c,parents:[],images:[],accounting:{anchorCount:1,parentCount:0,contextNodeCount:0,contextBodyCodepoints:0,imageCount:0,imageBytes:0}},
+  manifest:{method:'complete-current-source',nodeOrder:'original-source',complete:true,reason:null,source,sourceNodeCount:1,returnedNodeCount:1,
+   sourceBodyCodepoints:3,sourceBodyUtf8Bytes:3,orderedTextSha256:hash(c.anchors[0].body),structureManifestSha256:hash('structure'),
+   parserWarnings:[],document:{name:'Original source',origin:'source',originKey:'source-key',parserVersion:'native-unverified'},hierarchy:[],
+   nodes:[{...source,documentVersionId:source.currentVersionId,evidenceId:'evidence',locator:c.anchors[0].locator,ordinal:0,kind:'paragraph',bodySha256:hash(c.anchors[0].body)}],
+   images:[],imageInputTokenUpper:0,limits:COMPLETE_DOCUMENT_SOURCE_LIMITS,manifestSha256:hash('blank-complete-manifest')}};
+ const original=kernel.readCompleteDocumentSource,fetch=globalThis.fetch;
+ kernel.readCompleteDocumentSource=async()=>{reads++;return complete;};
+ globalThis.fetch=async()=>{throw new Error('Blank-only complete source must not call a provider');};
+ try{
+  const result=await kernel.answerSelectedStudySource('owner','What is supported?',source,{beforeAttempt:async()=>{attempts++;}});
+  assert.equal(result.status,'available');if(result.status!=='available')throw new Error('Expected complete source');
+  assert.deepEqual(result.manifest,complete.manifest);assert.equal(result.result.answer.status,'insufficient-evidence');
+  assert.equal(result.result.answer.message,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE);assert.equal(result.result.evidence.length,1);
+  assert.equal(reads,2,'synthesis still rechecks the complete current source');assert.equal(attempts,0);
+ }finally{kernel.readCompleteDocumentSource=original;globalThis.fetch=fetch;}
+});
 
 test('source quote units losslessly reconstruct Unicode evidence and strictly resolve only supplied selections',()=>{
  const c=context(),original='a'.repeat(1199)+'😀\r\n\r\n'+('𠮷 clause. '.repeat(180))+' '.repeat(2500)+' end.';

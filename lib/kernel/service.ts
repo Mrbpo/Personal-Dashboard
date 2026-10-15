@@ -943,6 +943,7 @@ export class KernelService {
     let latest=initial;
     const requestManifest=():CompleteDocumentSourceManifest=>{
       const prepared=prepareDocumentAnswer(question,latest.context);
+      if(!prepared.quoteUnits.some(unit=>unit.selectable)&&!prepared.supports.some(support=>support.kind==='image'))return latest.manifest;
       let body:ReturnType<typeof buildDocumentAnswerRequest>;
       try{body=buildDocumentAnswerRequest(prepared,settings);}
       catch(error){
