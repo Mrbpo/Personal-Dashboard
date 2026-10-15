@@ -60,7 +60,7 @@ test('reviewed cache publication retains evidence history, rejects stale CAS and
   warnings:['Existing caution'],batchProvenance:f.progress});
  const reviewed=await auditCachedDoclingReplay(f.identity.owner,f.identity.documentId);
  assert.equal(reviewed.decision,'eligible');assert.deepEqual(reviewed.changedPages,[1]);
- const published=await applyCachedDoclingReplay(reviewed,reviewed.expectedCurrentVersion);
+ const published=await applyCachedDoclingReplay(reviewed,reviewed.expectedCurrentVersion,async()=>null);
  assert.equal(published.action,'published');assert.notEqual(published.currentVersion,reviewed.expectedCurrentVersion);
  const pages=await kernel.parsedDocument(f.identity.owner,f.identity.documentId);
  assert.match(pages[0].body,/q = original_symbol/);assert.equal(pages[1].body,'');assert.ok(pages[0].warnings.includes('Existing caution'));
@@ -73,7 +73,11 @@ test('reviewed cache publication retains evidence history, rejects stale CAS and
  assert.equal(evidence[0].raw_uri,`library://${doc.hash}`);
  await assert.rejects(applyCachedDoclingReplay(reviewed,reviewed.expectedCurrentVersion),/changed after audit/);
  const repeated=await auditCachedDoclingReplay(f.identity.owner,f.identity.documentId);
- assert.equal(repeated.decision,'unchanged');assert.equal((await applyCachedDoclingReplay(repeated,published.currentVersion)).action,'unchanged');
+ // A missing renderer remains eligible for visual recovery, while another
+ // unavailable attempt with identical staged content must not publish a version.
+ assert.equal(repeated.decision,'eligible');assert.deepEqual(repeated.changedPages,[]);
+ assert.equal(repeated.visualOnly,true);assert.equal(repeated.visualEvidence.status,'render-incomplete');
+ assert.equal((await applyCachedDoclingReplay(repeated,published.currentVersion,async()=>null)).action,'unchanged');
  assert.equal(Number((await pool.query('SELECT count(*) n FROM document_text_versions WHERE document_id=$1',[doc.id])).rows[0].n),2);
  const invalid=await auditCachedDoclingReplay(f.identity.owner,f.identity.documentId);
  await kernel.ingestParsedDocument(doc,oldPages,{parserVersion:'fresh-normal-parse',extractionMethod:'docling-text',batchProvenance:f.progress});
