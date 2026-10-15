@@ -3,7 +3,8 @@ import {paidOpenAI} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
 
-export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v2';
+export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v3';
+export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;body:string;bodySha256:string};
 type Image={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:string;byteLength:number;
@@ -85,7 +86,7 @@ export function validateGroundedDocumentAnswer(value:unknown,supports:readonly P
   typeof answer.message!=='string'||answer.message.length>3000||!Array.isArray(answer.claims)||answer.claims.length>30)return invalid();
  if(answer.status==='insufficient-evidence'){
   if(answer.claims.length||!answer.message.trim())return invalid();
-  return answer;
+  return {...answer,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE};
  }
  if(!answer.claims.length||answer.message!=='')return invalid();
  const byId=new Map(supports.map(support=>[support.id,support])),used=new Set<string>();
@@ -141,7 +142,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   evidence:prepared.supports.map(({image,text,...support})=>support),
   textEvidenceCount:prepared.supports.filter(support=>support.kind==='text').length,
   imageEvidenceCount:prepared.supports.filter(support=>support.kind==='image').length};
- if(!prepared.supports.length)return {answer:{status:'insufficient-evidence' as const,message:'No readable evidence was retrieved.',claims:[]},
+ if(!prepared.supports.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
   model:null,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
  const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,fingerprint:prepared.fingerprint}));
  await policy.beforeAttempt?.(identity);
@@ -159,7 +160,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    'Preserve equations, qualifications and disagreement; do not invent facts from general knowledge. '+
    'This is study-content synthesis. Current deadlines, exam dates, course relationships and task status require canonical Kernel facts; '+
    'do not establish those business states from document evidence and decline if the question requires them. '+
-   'For insufficient evidence, return insufficient-evidence with no claims and a short explanation. '+
+   `For insufficient evidence, return insufficient-evidence with no claims and message exactly: ${DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE} `+
+   'This neutral status must not assert that particular information is absent or make other factual explanations. '+
    'For actual contradictory evidence, return conflicting-evidence and at least two separately supported claims. '+
    'For answered or conflicting-evidence, message must be empty. Parser warnings describe source limitations, not certainty. '+
    'An unavailable parent or missing figure is not evidence.'},
