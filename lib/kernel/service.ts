@@ -14,6 +14,8 @@ import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readD
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
+import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
+ type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
 
 type Json = Record<string, unknown>;
@@ -788,7 +790,8 @@ export class KernelService {
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
-      ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number}={}) {
+        ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
+        pdfVisuals?:PreparedPdfVisualEvidence}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -803,6 +806,12 @@ export class KernelService {
       page.pageNumber!==index+1||!page.extractionMethod||!page.parserVersion||!page.basedOn?.versionId||!page.basedOn.sourceVersionId||!page.basedOn.evidenceId)))
       throw new Error('Document page repair provenance is incomplete');
     const parser=options.parserVersion||'docling-v1',owner=document.ownerId||'local-owner';
+      if(options.pdfVisuals){
+        if(document.mime!=='application/pdf')throw new Error('PDF visual evidence requires a PDF source');
+        assertPreparedPdfVisualEvidence(options.pdfVisuals,owner,document.id,document.hash,expected);
+      }
+      const expectedCurrentVersion=options.expectedCurrentVersion!==undefined?options.expectedCurrentVersion:
+        options.pdfVisuals?await this.documentIngestionHead(owner,document.id,document.hash):undefined;
     if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
       throw new Error('Document quality warnings are invalid');
     const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
@@ -811,6 +820,7 @@ export class KernelService {
     // same. Normalize stable metadata; acquisition times and remote task IDs
     // intentionally remain outside identity so a replay stays idempotent.
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
         pageNumber:page.pageNumber,extractionMethod:page.extractionMethod,parserVersion:page.parserVersion,
         ...(page.model?{model:page.model}:{}),basedOn:{versionId:page.basedOn.versionId,
@@ -831,14 +841,14 @@ export class KernelService {
           (job.payload.sourceHash!==undefined&&job.payload.sourceHash!==document.hash))throw new Error('PDF ingestion lease or source identity lost');
       }
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`document:${document.id}`]);
-      if(options.expectedCurrentVersion!==undefined){
+      if(expectedCurrentVersion!==undefined){
         const head=(await client.query<{current_version_id:string|null;owner_id:string;source_hash:string;hidden:boolean}>(
           'SELECT current_version_id,owner_id,source_hash,hidden FROM document_texts WHERE id=$1 FOR UPDATE',[document.id])).rows[0];
         const identityMatches=!head||(!head.hidden&&head.owner_id===owner&&head.source_hash===document.hash);
-        if(!identityMatches||(options.expectedCurrentVersion===null?Boolean(head?.current_version_id):!head||head.current_version_id!==options.expectedCurrentVersion))
+        if(!identityMatches||(expectedCurrentVersion===null?Boolean(head?.current_version_id):!head||head.current_version_id!==expectedCurrentVersion))
           throw new Error('Document changed during page repair; previous current version preserved');
         if(options.pageProvenance){
-          if(!head||typeof options.expectedCurrentVersion!=='string')throw new Error('Document page repair requires an existing current-version guard');
+          if(!head||typeof expectedCurrentVersion!=='string')throw new Error('Document page repair requires an existing current-version guard');
           const previous=(await client.query<{page_number:number;evidence_id:string;source_version_id:string}>(
             `SELECT p.page_number,p.evidence_id,v.source_version_id FROM document_text_versions v
              JOIN document_text_pages p ON p.version_id=v.id WHERE v.id=$1 AND v.document_id=$2`,[head.current_version_id,document.id])).rows;
@@ -852,6 +862,7 @@ export class KernelService {
         contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
           originKey:document.originKey,parser,extractionMethod,warnings,
           ...(options.batchProvenance?{batchProvenance:options.batchProvenance}:{}),
+          ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
           ...(options.recording?{recording:options.recording}:{}),
           ...(options.pageProvenance?{pageProvenance:options.pageProvenance}:{}),
           pages:pages.map(page=>({locator:page.locator,pageNumber:page.pageNumber,length:page.text.length}))},
@@ -865,9 +876,10 @@ export class KernelService {
       await client.query(`INSERT INTO document_text_versions(id,document_id,source_version_id,parser_version,text_hash,page_count,warnings)
         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
         [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(warnings)]);
-      let position=0;
+      let position=0;const pageEvidenceIds:string[]=[];
       for(const [index,page] of pages.entries()){
         const evidenceId=stableId(version,`page:${index}`);
+        pageEvidenceIds.push(evidenceId);
         await client.query(
           `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,original_excerpt,
             parsed_value,confidence,locator) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO NOTHING`,
@@ -886,6 +898,12 @@ export class KernelService {
         }
       }
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
+      if(options.pdfVisuals){
+        const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
+        await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
+        await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,parserVersion:'pdf-physical-pages-v1',parents:[],
+          nodes:pages.map((page,index)=>({evidenceId:pageEvidenceIds[index],locator:page.locator,ordinal:index,kind:'page',bodySha256:createHash('sha256').update(page.text).digest('hex')}))});
+      }
       if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
         await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
@@ -893,6 +911,13 @@ export class KernelService {
 
   resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
     return resolveDocumentSource(kernelPool(),owner,hint,options);
+  }
+
+  async documentIngestionHead(owner:string,documentId:string,sourceHash:string){
+    const row=(await kernelPool().query<{current_version_id:string|null;owner_id:string;source_hash:string;hidden:boolean}>(
+      'SELECT current_version_id,owner_id,source_hash,hidden FROM document_texts WHERE id=$1',[documentId])).rows[0];
+    if(row&&(row.owner_id!==owner||row.source_hash!==sourceHash||row.hidden))throw new Error('Document ingestion owner/source is not current');
+    return row?.current_version_id??null;
   }
 
   registerDocumentStructure(owner:string,source:DocumentContextSource,input:DocumentStructureInput){
@@ -921,7 +946,11 @@ export class KernelService {
   }
 
   documentImageBlobHashes(){
-    return documentImageBlobHashes(kernelPool());
+    return Promise.all([documentImageBlobHashes(kernelPool()),pdfVisualBlobHashes(kernelPool())]).then(parts=>[...new Set(parts.flat())]);
+  }
+
+  readPdfVisualEvidence(owner:string,source:DocumentContextSource,pageEvidenceIds?:string[]){
+    return readPdfVisualEvidence(kernelPool(),owner,source,pageEvidenceIds);
   }
 
   readDocumentNodes(owner:string,expectedSource:DocumentContextSource,evidenceIds:string[]){

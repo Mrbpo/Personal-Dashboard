@@ -34,7 +34,7 @@ function binding(c=context()):DocumentCitationAuditBinding{
    citations:[{id:prepared.quoteUnits[0].id},{id:'i0'}]}]}};
 }
 function complete(c=context()):CompleteDocumentSourceRead{return {status:'available',context:{...c,parents:[],
- images:c.images.map(image=>({...image,originalReference:'source.png',provenance:{sourceUrl:'https://example.edu/source.png',revision:'fixture'}})),accounting:{
+ images:c.images.map(image=>'anchorEvidenceId' in image?image:({...image,originalReference:'source.png',provenance:{sourceUrl:'https://example.edu/source.png',revision:'fixture'}})),accounting:{
  anchorCount:1,parentCount:0,contextNodeCount:1,contextBodyCodepoints:body.length,imageCount:1,imageBytes:bytes.length}},manifest:{
  method:'complete-current-source',nodeOrder:'original-source',complete:true,reason:null,source,sourceNodeCount:1,returnedNodeCount:1,
  sourceBodyCodepoints:body.length,sourceBodyUtf8Bytes:Buffer.byteLength(body),orderedTextSha256:hash(body),structureManifestSha256:hash('structure'),

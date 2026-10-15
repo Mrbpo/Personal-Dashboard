@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
+import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -9,14 +10,16 @@ export const DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION='source-quote-units-v1';
 export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;body:string;bodySha256:string};
-type Image={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:string;byteLength:number;
+type AuthorImage={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:string;byteLength:number;
  width:number;height:number;mime:'image/png';bytes:Uint8Array;source:{documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string}};
+type Image=AuthorImage|PdfVisualImageEvidence;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
  parents:{parentId:string;status:string;headingMetadata?:{text:string;originalSourceHash:string};sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
+ visual?:{kind:'pdf-page'|'pdf-region';physicalPage:number;rawPdfSha256:string;manifestSha256:string};
  evidenceId:string;locator:string;sha256:string;text?:string;image?:Image};
 type Citation={id:string;quote:string};
 type Claim={text:string;citations:Citation[]};
@@ -74,16 +77,23 @@ function supportFor(context:DocumentAnswerContext):Support[]{
  const imageIds=new Set<string>();
  for(const image of context.images){
   const bytes=Buffer.from(image.bytes);
+  const pdf='anchorEvidenceId' in image,anchor=pdf?image.anchorEvidenceId:image.captionEvidenceId;
   if(!image.attachmentId||imageIds.has(image.attachmentId)||image.mime!=='image/png'||
    image.assetId!==image.sha256||bytes.length!==image.byteLength||sha(bytes)!==image.sha256||bytes.length<24||
    !bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||bytes.toString('ascii',12,16)!=='IHDR'||
    bytes.readUInt32BE(16)!==image.width||bytes.readUInt32BE(20)!==image.height||image.width<1||image.height<1||
-   !image.captionEvidenceId||!image.source.documentId||!image.source.currentVersionId||!image.source.sourceVersionId||!image.source.sourceHash)
+   !anchor||!image.source.documentId||!image.source.currentVersionId||!image.source.sourceVersionId||!image.source.sourceHash)
    throw new Error('Document answer image is missing, ambiguous or has an invalid checksum');
+  if(pdf&&(!['pdf-page','pdf-region'].includes(image.kind)||image.rawPdfSha256!==image.source.sourceHash||
+   !/^[a-f0-9]{64}$/.test(image.manifestSha256)||!Number.isInteger(image.physicalPage)||image.physicalPage<1||
+   !supports.some(support=>support.kind==='text'&&support.evidenceId===anchor&&support.documentId===image.source.documentId&&
+     support.documentVersionId===image.source.currentVersionId&&support.sourceVersionId===image.source.sourceVersionId&&support.sourceHash===image.source.sourceHash)))
+   throw new Error('PDF image has no genuine current page evidence anchor');
   imageIds.add(image.attachmentId);
   supports.push({id:`i${imageIds.size-1}`,kind:'image',documentId:image.source.documentId,documentVersionId:image.source.currentVersionId,
    sourceVersionId:image.source.sourceVersionId,sourceHash:image.source.sourceHash,
-   evidenceId:image.captionEvidenceId,locator:`attachment:${image.attachmentId}`,sha256:image.sha256,image});
+   evidenceId:anchor,locator:pdf?`pdf:page:${image.physicalPage}:attachment:${image.attachmentId}`:`attachment:${image.attachmentId}`,sha256:image.sha256,image,
+   ...(pdf?{visual:{kind:image.kind,physicalPage:image.physicalPage,rawPdfSha256:image.rawPdfSha256,manifestSha256:image.manifestSha256}}:{})});
  }
  return supports;
 }

@@ -89,7 +89,11 @@ test('captions are kept once and unreferenced text, broken refs and cycles fail 
   doc.texts.push(item('Figure 1: Regression model'));
   doc.pictures = [{prov: [{page_no: 1}], captions: [ref('texts/1')]}];
   doc.body.children.push(ref('pictures/0'), ref('texts/1'));
-  assert.equal(decodeDoclingResult(image).pages[0].text, 'Readable introduction\n\nFigure 1: Regression model');
+  const decoded=decodeDoclingResult(image);
+  assert.equal(decoded.pages[0].text, 'Readable introduction\n\nFigure 1: Regression model');
+  assert.equal(decoded.visualLayout.status,'unavailable');
+  assert.match(decoded.visualLayout.reason||'',/geometry unavailable/);
+  assert.deepEqual(decoded.visualLayout.unavailablePictures?.[0].provenance,[{page_no:1}]);
   const orphan = result();
   orphan.document.json_content.texts.push(item('Lost content'));
   assert.throws(() => decodeDoclingResult(orphan), /unreferenced/);

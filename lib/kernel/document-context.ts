@@ -4,6 +4,7 @@ import {resolve} from 'node:path';
 import type {Pool,PoolClient} from 'pg';
 import type {DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
+import {readPdfVisualEvidence,PdfVisualEvidenceError,type PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -21,7 +22,7 @@ export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
  source:DocumentContextSource;manifestSha256:string;firstAnchorRank:number;anchorRanks:number[];
  headingMetadata?:{text:string;originalSourceHash:string};status:'available'|'unavailable-size-exceeds-8192';
  sourceNodeCount:number;sourceBodyCodepoints:number;nodeManifest:Array<{evidenceId:string;locator:string;bodySha256:string}>;nodes:DocumentEvidenceNode[]};
-export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:DocumentImageEvidence[];
+export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:Array<DocumentImageEvidence|PdfVisualImageEvidence>;
  accounting:{anchorCount:number;parentCount:number;contextNodeCount:number;contextBodyCodepoints:number;imageCount:number;imageBytes:number};
  sourceContentIsUntrusted:true};
 /** A separate whole-source reader; these limits do not change ranked readers. */
@@ -34,7 +35,9 @@ export type CompleteDocumentSourceManifest={method:'complete-current-source';nod
  sourceBodyCodepoints:number;sourceBodyUtf8Bytes:number;orderedTextSha256:string|null;structureManifestSha256:string|null;
  parserWarnings:string[];document:{name:string;origin:string;originKey:string;parserVersion:string};
  hierarchy:DocumentStructureInput['parents'];nodes:Array<Omit<DocumentEvidenceNode,'body'>>;
- images:Array<{attachmentId:string;captionEvidenceId:string;sha256:string;byteLength:number;width:number;height:number}>;
+ images:Array<{attachmentId:string;captionEvidenceId?:string;anchorEvidenceId?:string;kind?:'pdf-page'|'pdf-region';physicalPage?:number;manifestSha256?:string;
+  sha256:string;byteLength:number;width:number;height:number}>;
+ pdfVisuals?:{manifestSha256:string|null;layoutStatus:'available'|'unavailable'};
  request?:{nonImageBodyUtf8Bytes:number;imageInputTokenUpper:number;inputTokenUpper:number;nonImageBodySha256:string};
  requestSchemaLimit?:'enum-count'|'enum-string';
  imageInputTokenUpper:number;limits:typeof COMPLETE_DOCUMENT_SOURCE_LIMITS;manifestSha256:string};
@@ -56,14 +59,14 @@ const isSha=(value:string)=>/^[a-f0-9]{64}$/.test(value);
 const bounded=(value:unknown,max=4000):value is string=>typeof value==='string'&&value.length>0&&value.length<=max;
 
 type SourceRow={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId:string;
- rawSourceHash:string;name:string;origin:string;originKey:string;parserVersion:string};
+ rawSourceHash:string;name:string;origin:string;originKey:string;parserVersion:string;mime:string};
 type PageRow={page_number:number;evidence_id:string;locator:string;body:string};
 async function currentSource(db:Queryable,owner:string,source:DocumentContextSource,lock=false):Promise<SourceRow>{
  if(!bounded(owner)||!source||![source.documentId,source.currentVersionId,source.sourceVersionId,source.sourceHash].every(value=>bounded(value)))
   invalid('Complete expected source identity is required');
  const result=await db.query<SourceRow>(`SELECT d.id "documentId",d.current_version_id "currentVersionId",
  v.source_version_id "sourceVersionId",d.source_hash "sourceHash",coalesce(d.course_id,'') "courseId",
- s.raw_sha256 "rawSourceHash",d.name,d.origin,d.origin_key "originKey",v.parser_version "parserVersion"
+ s.raw_sha256 "rawSourceHash",d.name,d.origin,d.origin_key "originKey",v.parser_version "parserVersion",s.raw_value->>'mime' mime
  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
  JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
  WHERE d.owner_id=$1 AND d.id=$2 AND d.current_version_id=$3 AND v.source_version_id=$4 AND d.source_hash=$5
@@ -262,10 +265,15 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
    status:points<=8192?'available':'unavailable-size-exceeds-8192',sourceNodeCount:nodes.length,sourceBodyCodepoints:points,
    nodeManifest:nodes.map(node=>({evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256})),nodes:points<=8192?nodes:[]});
  }
- const images:DocumentImageEvidence[]=[];
+ const images:Array<DocumentImageEvidence|PdfVisualImageEvidence>=[];
  if(options.includeImages)for(const data of loaded.values()){
   const captions=[...parents.values()].flatMap(parent=>parent.nodes).filter(node=>node.documentId===data.current.documentId&&node.kind==='caption').map(node=>node.evidenceId);
   if(captions.length)images.push(...await readDocumentImages(db,owner,identity(data.current),[...new Set(captions)]));
+  const pageAnchors=data.nodes.filter(node=>node.kind==='page'&&anchors.some(anchor=>anchor.evidence_id===node.evidenceId)).map(node=>node.evidenceId);
+  if(pageAnchors.length&&data.current.mime==='application/pdf')try{const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors);
+   if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
+   images.push(...visuals.images);
+  }catch(error){if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();throw error;}
  }
  for(const data of loaded.values())await currentSource(db,owner,identity(data.current));
  const packets=[...parents.values()];return {anchors,parents:packets,images,accounting:{anchorCount:anchors.length,parentCount:packets.length,
@@ -297,6 +305,9 @@ export async function readCompleteDocumentSource(pool:Pool,owner:string,expected
  if(!manifest.sourceNodeCount||![manifest.sourceBodyCodepoints,manifest.sourceBodyUtf8Bytes].every(Number.isSafeInteger)||
   manifest.sourceNodeCount>limits.nodes||manifest.sourceBodyCodepoints>limits.bodyCodepoints||manifest.sourceBodyUtf8Bytes>limits.bodyUtf8Bytes)
   return unavailable('source-size-limit');
+ if(current.mime==='application/pdf'&&!(await pool.query(`SELECT version_id FROM document_pdf_visual_manifests
+  WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3`,[source.currentVersionId,source.sourceVersionId,source.sourceHash])).rows.length)
+  return unavailable('image-unavailable');
  let data:Awaited<ReturnType<typeof structuredSource>>;
  try{data=await structuredSource(pool,owner,source);}
  catch(error){if(error instanceof DocumentContextError&&error.code==='DOCUMENT_STRUCTURE_UNAVAILABLE')return unavailable('structure-unavailable');throw error;}
@@ -311,14 +322,27 @@ export async function readCompleteDocumentSource(pool:Pool,owner:string,expected
  const imageRows=(await pool.query<ImageRow>(`SELECT id,caption_evidence_id,asset_sha256,byte_length,width,height,mime,original_reference,provenance
   FROM document_image_attachments WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3 AND caption_evidence_id=ANY($4::text[])`,
  [current.currentVersionId,current.sourceVersionId,current.sourceHash,captions.map(n=>n.evidenceId)])).rows;
+ let pdfImages:PdfVisualImageEvidence[]=[];
+ if(current.mime==='application/pdf')try{const visual=await readPdfVisualEvidence(pool,owner,source);pdfImages=visual.images;
+  if(!visual.registered)return unavailable('image-unavailable');
+  if(visual.registered&&visual.renderStatus!=='available')return unavailable('image-unavailable');
+  if(visual.registered)manifest.pdfVisuals={manifestSha256:visual.manifestSha256,layoutStatus:visual.layoutStatus};
+ }catch(error){if(error instanceof PdfVisualEvidenceError){
+   if(error.code==='source-changed')changed();
+   if(error.code==='count-limit')return unavailable('image-count-limit');
+   if(error.code==='byte-limit')return unavailable('image-byte-limit');
+   if(error.code==='input-limit')return unavailable('image-input-limit');
+   if(error.code==='unavailable')return unavailable('image-unavailable');
+  }throw error;}
+ if(imageRows.length+pdfImages.length>limits.images)return unavailable('image-count-limit');
  for(const caption of captions){const count=imageRows.filter(row=>row.caption_evidence_id===caption.evidenceId).length;
   if(!count)return unavailable('image-unavailable');if(count!==1)return unavailable('image-ambiguous');}
- if(imageRows.reduce((sum,row)=>sum+Number(row.byte_length),0)>limits.imageBytes)return unavailable('image-byte-limit');
+ if(imageRows.reduce((sum,row)=>sum+Number(row.byte_length),0)+pdfImages.reduce((sum,image)=>sum+image.byteLength,0)>limits.imageBytes)return unavailable('image-byte-limit');
  const imageTokens=(width:number,height:number)=>Math.ceil(width/32)*Math.ceil(height/32)*2+1;
  if(imageRows.some(row=>row.mime!=='image/png'||![row.width,row.height,row.byte_length].every(n=>Number.isSafeInteger(n)&&n>0)))changed();
- manifest.imageInputTokenUpper=imageRows.reduce((sum,row)=>sum+imageTokens(row.width,row.height),0);
+ manifest.imageInputTokenUpper=imageRows.reduce((sum,row)=>sum+imageTokens(row.width,row.height),0)+pdfImages.reduce((sum,image)=>sum+imageTokens(image.width,image.height),0);
  if(manifest.imageInputTokenUpper>limits.imageInputTokens)return unavailable('image-input-limit');
- const anchors:DocumentEvidenceHit[]=[],parents=new Map<string,DocumentParentContext>(),images=new Map<string,DocumentImageEvidence>();
+ const anchors:DocumentEvidenceHit[]=[],parents=new Map<string,DocumentParentContext>(),images=new Map<string,DocumentImageEvidence|PdfVisualImageEvidence>();
  for(let offset=0;offset<data.nodes.length;offset+=14){
   const selected=await readDocumentNodes(pool,owner,source,data.nodes.slice(offset,offset+14).map(n=>n.evidenceId));
   const packet=await readDocumentParents(pool,owner,selected);anchors.push(...packet.anchors);
@@ -351,14 +375,17 @@ export async function readCompleteDocumentSource(pool:Pool,owner:string,expected
   if(error.code==='DOCUMENT_IMAGE_UNAVAILABLE')return unavailable('image-unavailable');
   if(error.code==='DOCUMENT_IMAGE_AMBIGUOUS')return unavailable('image-ambiguous');
  }throw error;}
+ for(const image of pdfImages)images.set(image.attachmentId,image);
  const actualImages=[...images.values()];
  if(anchors.length!==data.nodes.length||anchors.some((hit,index)=>hit.evidence_id!==data.nodes[index].evidenceId||hit.body!==data.nodes[index].body)||
-  actualImages.length!==captions.length)changed();
+  actualImages.length!==captions.length+pdfImages.length)changed();
  // Check actual verified bytes/dimensions again, not only PG's size metadata.
  if(actualImages.reduce((sum,image)=>sum+image.byteLength,0)>limits.imageBytes)return unavailable('image-byte-limit');
  manifest.imageInputTokenUpper=actualImages.reduce((sum,image)=>sum+imageTokens(image.width,image.height),0);
  if(manifest.imageInputTokenUpper>limits.imageInputTokens)return unavailable('image-input-limit');
- manifest.images=actualImages.map(({attachmentId,captionEvidenceId,sha256,byteLength,width,height})=>({attachmentId,captionEvidenceId,sha256,byteLength,width,height}));
+ manifest.images=actualImages.map(image=>({attachmentId:image.attachmentId,sha256:image.sha256,byteLength:image.byteLength,width:image.width,height:image.height,
+  ...('anchorEvidenceId' in image?{kind:image.kind,anchorEvidenceId:image.anchorEvidenceId,physicalPage:image.physicalPage,manifestSha256:image.manifestSha256}:
+    {captionEvidenceId:image.captionEvidenceId})}));
  manifest.parserWarnings=[...new Set(anchors.flatMap(hit=>hit.parser_warnings??[]))];
  await currentSource(pool,owner,source);
  const context:DocumentContextRead={anchors,parents:completeParents,images:actualImages,sourceContentIsUntrusted:true,

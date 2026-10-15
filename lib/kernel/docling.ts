@@ -4,7 +4,8 @@ import { digest, getDocument, readBlob, splitText } from '../library.ts';
 import { kernel } from './service.ts';
 import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION } from './docling-result.ts';
 import {rememberDoclingTask,doclingJobPayload,rememberDoclingProgress} from './jobs.ts';
-import {convertDoclingBatches,requestDoclingResult,type DoclingProgress} from './docling-batches.ts';
+import {convertDoclingBatches,requestDoclingResult,storeDoclingResult,type DoclingProgress} from './docling-batches.ts';
+import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
 import {enrichParsedPdfFormulae,transcribePdfVisualPages} from '../document-parser.ts';
 import {localPdfTextPages} from '../local-ocr.ts';
 
@@ -32,6 +33,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   if(document.mime!=='application/pdf')return;
   const bytes=await readBlob(document.hash);
   if(digest(bytes)!==document.hash)throw new Error('Original PDF checksum mismatch');
+  const expectedCurrentVersion=process.env.KERNEL_DATABASE_URL?await kernel.documentIngestionHead(owner,id,document.hash):undefined;
   const payload=job?await doclingJobPayload(job.id,job.leaseToken):undefined;
   if(payload&&(payload.owner!==owner||payload.id!==id||
     (payload.sourceHash!==undefined&&payload.sourceHash!==document.hash)))throw new Error('PDF ingestion source identity mismatch');
@@ -94,9 +96,11 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     async taskId=>{if(job)await rememberDoclingTask(job.id,job.leaseToken,taskId);});
   const decoded=result?decodeDoclingResult(result,originalPages,{verifiedBlankPages,formulaEnriched:localFormula}):
     visual?{pages:await transcribePdfVisualPages(id,bytes),totalPages:originalPages,
-      warnings:['AI 视觉转写；数学、手写及图表请核对原 PDF'],formulaPageNumbers:[]}:
+      warnings:['AI 视觉转写；数学、手写及图表请核对原 PDF'],formulaPageNumbers:[],
+      visualLayout:{status:'unavailable' as const,regions:[],pageSizes:[],reason:'Visual transcription has no Docling layout'}}:
     nativeComplete?{pages:native!.map((text,index)=>({text,pageNumber:index+1,locator:`第 ${index+1} 页`})),
-      totalPages:originalPages,warnings:formulaEnriched?[]:['公式增强未启用；正文可检索，公式须核对原 PDF'],formulaPageNumbers:[]}:
+      totalPages:originalPages,warnings:formulaEnriched?[]:['公式增强未启用；正文可检索，公式须核对原 PDF'],formulaPageNumbers:[],
+      visualLayout:{status:'unavailable' as const,regions:[],pageSizes:[],reason:'Native text path has no Docling layout'}}:
     await convertDoclingBatches({identity:{owner,documentId:id,sourceHash:document.hash,totalPages:originalPages,
       optionsHash:digest(JSON.stringify({transport:'docling-derived-v1',endpoint,parser:formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION,
         doOcr:true,doTableStructure:true,localFormula,formulaBackend,formulaPreset,scanBackend}))},
@@ -117,9 +121,18 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   const current=await getDocument(owner,id);
   if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');
   if(digest(await readBlob(current.hash))!==document.hash)throw new Error('Original PDF checksum changed during conversion');
+  if(result){
+    const copyIndices=Array.from({length:originalPages},(_,index)=>index);
+    const resultBlobSha256=await storeDoclingResult({identity:{owner,documentId:id,sourceHash:document.hash,totalPages:originalPages,
+      inputHash:document.hash,copyIndices},result});
+    decoded.visualLayout.regions=decoded.visualLayout.regions.map(region=>({...region,resultBlobSha256,
+      derivedInputSha256:document.hash,copyIndices}));
+    decoded.visualLayout.resultReferences=[{resultBlobSha256,derivedInputSha256:document.hash,copyIndices}];
+  }
+  const pdfVisuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash:document.hash,pdfBytes:bytes,layout:decoded.visualLayout});
   await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,
     hash:document.hash,mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
-    {parserVersion,expectedPages:totalPages,warnings,
+    {parserVersion,expectedPages:totalPages,warnings,pdfVisuals,expectedCurrentVersion,
       ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,
       batchProvenance:currentProgress?{schema:currentProgress.schema,identity:currentProgress.identity,
         batchSize:currentProgress.batchSize,batches:currentProgress.batches}:undefined,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?

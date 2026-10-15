@@ -5,6 +5,14 @@ export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
 }
 export type DoclingPage = { locator: string; text: string; pageNumber: number };
+export type DoclingRegion={pictureRef:string;pageNumber:number;derivedPageNumber:number;
+ pageSize:{width:number;height:number};bbox:{l:number;t:number;r:number;b:number;coord_origin:'BOTTOMLEFT'|'TOPLEFT'};
+ textReferences:Array<{ref:string;parentRef:string|null;text:string;provenance:unknown[]}>;
+ resultBlobSha256?:string;derivedInputSha256?:string;copyIndices?:number[]};
+export type DoclingVisualLayout={status:'available'|'unavailable';regions:DoclingRegion[];
+ pageSizes:Array<{pageNumber:number;width:number;height:number}>;reason?:string;
+ unavailablePictures?:Array<{pictureRef:string;provenance:unknown[]}>;
+ resultReferences?:Array<{resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[]}>};
 type Json = Record<string, unknown>;
 
 function object(value: unknown): Json | undefined {
@@ -18,7 +26,7 @@ function nodeContent(node: Json): string {
   return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
 }
 
-export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[]} {
+export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[];visualLayout:DoclingVisualLayout} {
   const response = object(result);
   if (response?.status !== 'success') throw new Error(`Docling conversion is incomplete (${response?.status || 'missing status'})`);
   if (list(response.errors).length) throw new Error('Docling reported conversion errors');
@@ -49,6 +57,8 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const formulaPageNumbers=new Set<number>();
   if(options.formulaEnriched === false) warnings.push('公式增强未启用；正文可检索，公式须核对原 PDF');
   const verifiedBlankPages = new Set(options.verifiedBlankPages || []);
+  const regions:DoclingRegion[]=[];
+  const unavailablePictures:NonNullable<DoclingVisualLayout['unavailablePictures']>=[];
 
   function resolve(reference: unknown): {ref: string; node: Json} {
     const ref = object(reference)?.$ref;
@@ -161,6 +171,22 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       // Captions/child text remain searchable; pixels cannot be treated as transcribed text.
       add(node, '');
       warnings.push(`第 ${provenance(node)[0].page_no} 页含图片；仅索引已识别文字和图注`);
+      for(const location of provenance(node)){
+        const pageNumber=location.page_no as number,size=object(object(manifest?.[String(pageNumber)])?.size),box=object(location.bbox);
+        // Older valid text caches can lack optional region geometry. Keep their
+        // text/page provenance, preserve raw prov, and make visual incompleteness explicit.
+        if(!size||!box){unavailablePictures.push({pictureRef:ref,provenance:structuredClone(provenance(node))});continue;}
+        if(![size.width,size.height].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)||
+          ![box.l,box.t,box.r,box.b].every(n=>typeof n==='number'&&Number.isFinite(n))||
+          !['BOTTOMLEFT','TOPLEFT'].includes(String(box.coord_origin)))throw new Error('Docling picture has invalid region geometry');
+        const {l,t,r,b}=box as {l:number;t:number;r:number;b:number},width=size.width as number,height=size.height as number;
+        const top=box.coord_origin==='BOTTOMLEFT'?height-t:t,bottom=box.coord_origin==='BOTTOMLEFT'?height-b:b;
+        if(l<0||r>width||l>=r||top<0||bottom>height||top>=bottom)throw new Error('Docling picture bbox exceeds its actual page');
+        regions.push({pictureRef:ref,pageNumber,derivedPageNumber:pageNumber,pageSize:{width,height},
+          bbox:{l,t,r,b,coord_origin:box.coord_origin as 'BOTTOMLEFT'|'TOPLEFT'},
+          textReferences:list(document!.texts).flatMap((value,index)=>{const child=object(value);
+            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:nodeContent(child),provenance:list(child.prov)}]:[];})});
+      }
     } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
       const content = nodeContent(node);
       const originalFallback = !text(node.text) && Boolean(text(node.orig));
@@ -193,5 +219,11 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     return {pageNumber, locator: `第 ${pageNumber} 页`, text: content};
   });
   if (!pages.some(page => page.text)&&!options.pageRange) throw new Error('Docling returned no readable text');
-  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers]};
+  const pageSizes=pageNumbers.flatMap(pageNumber=>{const size=object(object(manifest?.[String(pageNumber)])?.size);
+    return size&&[size.width,size.height].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)?
+      [{pageNumber,width:size.width as number,height:size.height as number}]:[];});
+  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],
+    visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',regions,pageSizes,
+      ...(unavailablePictures.length?{unavailablePictures,reason:'Docling picture geometry unavailable; original text retained'}:
+        pageSizes.length===pageNumbers.length?{}:{reason:'Docling page sizes unavailable'})}};
 }
