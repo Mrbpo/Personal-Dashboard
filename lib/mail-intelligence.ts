@@ -11,7 +11,7 @@ import {z} from 'zod';
 import {kernel} from './kernel/service.ts';
 
 export const MAIL_ANALYSIS_VERSION=2;
-export const MAIL_PROMPT_VERSION='mail-intelligence-v3';
+export const MAIL_PROMPT_VERSION='mail-intelligence-v4';
 export const MAIL_CATEGORIES=['学习','服务','账单','订阅','垃圾','其他'] as const;
 export type MailCategory=(typeof MAIL_CATEGORIES)[number];
 type SignalInput={category:MailCategory;actionRequired:boolean;deadlineText:string;reason:string;priority?:number};

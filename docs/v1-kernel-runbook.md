@@ -42,6 +42,8 @@ A mail deadline's optional `sourceTimezone` is only a proposed extraction value.
 
 This change does not address floating calendar events, change event models, or add a tenant model.
 
+The mail extraction prompt/schema uses `mail-intelligence-v4`. Its version participates in the analysis input hash and receipt; v2/v3 results cannot be returned as v4 analyses. After an explicitly approved deployment, existing bounded outdated-mail maintenance can queue older analyses under its normal budget. This change does not start a full reanalysis or backfill.
+
 ## Delivery evidence
 
 Report four independent states: code complete (commit and PR), tests passed (CI run and restore exercise), services deployed (actual container IDs and health output), and production switched (live kernel reads/writes, final parity checks and release status). If credentials, server capacity, approval or restore verification are missing, label the affected state **blocked** and name the missing item. Do not infer deployment from this runbook or Compose files.
