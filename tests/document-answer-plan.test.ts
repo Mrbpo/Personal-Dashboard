@@ -5,7 +5,8 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {database} from '../lib/database.ts';
 import {KernelService} from '../lib/kernel/service.ts';
-import {prepareDocumentAnswer,buildDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,planRetrievedStudyAnswer,
  type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
@@ -23,7 +24,7 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
  id:`pg:v${n}:1`,document_id:`study${n}`,course_id:'',name:`Synthetic study ${n}`,origin:'fixture',origin_key:`source${n}`,
  source_hash:`sha${n}`,source_version_id:`s${n}`,body:`Study ${n} assigns labels to its original samples.`,locator:'abstract',page_number:1,
  evidence_id:`evidence${n}`,parser_version:'fixture',score:1,evidence_body:'full-page'})),images:[{
- attachmentId:'image',assetId:sha(image),captionEvidenceId:'evidence0',sha256:sha(image),byteLength:image.length,width:1,height:1,
+ attachmentId:'image',assetId:sha(image),captionEvidenceId:'unread-caption-evidence',sha256:sha(image),byteLength:image.length,width:1,height:1,
  mime:'image/png',bytes:image,source:{documentId:'study0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}}]};}
 const unknown={subject:null,attribute:null,unit:null,population:null,stage:null,configuration:null,time:null};
 function plan():StudyAnswerPlan{
@@ -292,7 +293,7 @@ test('short chain uses plan/generation/final local only, retains >6 raw claims a
 
 test('explicit complete user title scopes supplements only, freezes source identity and rejects unresolved or changed sources',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,
-  query=`For "${title}", where did its labels come from?`,c=freezeStudyQuestionContract(query,{requirements:plan().requirements},'a'.repeat(64)),
+  query=`For "${title}", where did its labels come from?`,c=freezeStudyQuestionContract(query,{requirements:[{...plan().requirements[0],requestedScope:{...unknown,subject:title}}]},'a'.repeat(64)),
   p=contractPlan(ctx),selected={scope:'selected-title-scoped' as const,selectedDocumentTitle:title,status:'resolved' as const,
    document:{documentId:'study0',title,currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}};
  p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
@@ -308,6 +309,9 @@ test('explicit complete user title scopes supplements only, freezes source ident
   if(!('receipt' in result)||!result.receipt)throw Error('Expected composite receipt');
   assert.equal(result.receipt.initialRetrievalScope,'whole-library-query');assert.equal(result.receipt.supplemental[0].retrievalScope,'selected-title-scoped');
   assert.deepEqual(result.receipt.supplemental[0].sourceSelection,selected);
+  assert.equal(result.receipt.supplemental[0].query,c.requirements[0].aspect);assert.ok(result.receipt.supplemental[0].originalQuery?.includes(title));
+  assert.equal(result.receipt.supplemental[0].focusPolicy,'resolved-exact-title-scope-value-v1');
+  const globalQueries=studySupplementQueries(query,c,result.plan.binding);assert.ok(globalQueries[0].query.includes(title));assert.equal(globalQueries[0].originalQuery,undefined);
   const before=calls,readCount=reads.length;
   await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:'Absent title'}},policy),/original question/);
   assert.equal(reads.length,readCount);assert.equal(calls,before);
@@ -322,4 +326,48 @@ test('explicit complete user title scopes supplements only, freezes source ident
    {...changed.policy,recordState:async()=>{}}),/no longer current|changed/);
   assert.equal(calls,1);assert.equal(changed.raw.length,1);
  });}finally{globalThis.fetch=savedFetch;}
+});
+
+test('visual units keep exact caption members with their original image; legacy q-only answers and outside evidence stay separate',()=>{
+ const ctx=context(),caption='Table 1: Results for the original study.',poison='UNSELECTED_VISUAL_CAPTION_POISON',
+  outside=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+ ctx.anchors[0].body=caption;ctx.anchors[1].body=poison;ctx.images[0]={...ctx.images[0],captionEvidenceId:'evidence0'};
+ ctx.images.push({...ctx.images[0],attachmentId:'outside',captionEvidenceId:'evidence1',assetId:sha(outside),sha256:sha(outside),bytes:outside,byteLength:outside.length,
+  source:{documentId:'study1',currentVersionId:'v1',sourceVersionId:'s1',sourceHash:'sha1'}});
+ const legacy=prepareDocumentAnswer(question,ctx),prepared=prepareDocumentAnswer(question,ctx,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY),old=legacy.quoteUnits[0],member=prepared.quoteUnits[0],
+  body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000}),content=body.input[1].content as {type:string;text?:string;image_url?:string}[];
+ assert.deepEqual({...member,selectable:true},old);assert.equal(member.selectable,false);assert.equal(prepared.input.unitPolicy,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
+ assert.notEqual(prepared.fingerprint,legacy.fingerprint);assert.notEqual(prepared.quoteUnitManifestSha256,legacy.quoteUnitManifestSha256);
+ assert.deepEqual(prepared.supports.find(s=>s.id==='i0')!.captionMembers,[member]);
+ assert.equal(prepared.visualUnitManifest?.[0].sha256,sha(image));assert.deepEqual(prepared.visualUnitManifest?.[0].captionMembers,[member]);
+ assert.deepEqual(body.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,['i0','i1']);
+ const at=content.findIndex(part=>part.text?.startsWith('Actual visual unit i0:'));
+ assert.ok(content[at].text!.includes(caption));assert.equal(content[at+1].image_url,'data:image/png;base64,'+image.toString('base64'));
+ const selections=(id:string)=>({status:'answered',message:'',claims:[{text:'Original table results.',citations:[{id}]}]});
+ const historical=resolveDocumentAnswerSelections(selections(old.id),legacy.supports);
+ assert.equal(historical.selectedUnits[0].kind,'text');assert.equal(historical.selectedUnits[0].evidence.captionMembers,undefined);
+ assert.throws(()=>resolveDocumentAnswerSelections(selections(old.id),prepared.supports),/ungrounded/);
+ const restored=resolveDocumentAnswerSelections(selections('i0'),prepared.supports);
+ assert.deepEqual(restored.selectedUnits[0].evidence.captionMembers,[member]);
+ const binding={inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,providerSelections:restored.providerSelections,claimIndex:0,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY} as const,
+  local=prepareDocumentCitationAudit(question,ctx,binding),request=buildDocumentCitationAuditRequest(local.packet),wire=JSON.stringify(request);
+ assert.equal(local.binding.unitPolicy,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);assert.ok(wire.includes(caption));assert.ok(wire.includes(image.toString('base64')));
+ assert.ok(!wire.includes(poison));assert.ok(!wire.includes(outside.toString('base64')));assert.equal(local.packet.references.length,1);
+ const {unitPolicy:_policy,...noPolicy}=binding;assert.throws(()=>prepareDocumentCitationAudit(question,ctx,noPolicy),/context changed/);
+ const changed=structuredClone(ctx);changed.anchors[0].body+=' changed';assert.throws(()=>prepareDocumentCitationAudit(question,changed,binding),/context changed/);
+ for(const key of ['documentId','currentVersionId','sourceVersionId','sourceHash'] as const){const foreign=structuredClone(ctx);foreign.images[0].source[key]+='-other';
+  const unpaired=prepareDocumentAnswer(question,foreign,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
+  assert.equal(unpaired.supports.find(s=>s.id==='i0')!.captionMembers,undefined);assert.equal(unpaired.quoteUnits[0].selectable,true);}
+ for(const incomplete of [({...ctx,images:ctx.images.slice(1)}),({...ctx,anchors:ctx.anchors.slice(1)}),({...ctx,images:[...ctx.images,{...ctx.images[0],attachmentId:'ambiguous'}]})]){
+  const unpaired=prepareDocumentAnswer(question,incomplete,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
+  assert.ok(!unpaired.supports.some(s=>s.captionMembers?.some(m=>m.text===caption)));}
+ const pdf=structuredClone(ctx);pdf.anchors[0].source_hash='a'.repeat(64);pdf.images[0]={...pdf.images[0],anchorEvidenceId:'evidence0',kind:'pdf-page',physicalPage:1,
+  rawPdfSha256:'a'.repeat(64),manifestSha256:'b'.repeat(64),source:{...pdf.images[0].source,sourceHash:'a'.repeat(64)}};
+ assert.equal(prepareDocumentAnswer(question,pdf,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY).supports.find(s=>s.id==='i0')!.captionMembers,undefined);
+ const c=contract(),initial=prepareContractStudyPlan(question,ctx,c),p=contractPlan(ctx);p.clusters=[{...p.clusters[0],sourceIds:[old.id]}];p.sourceSubscopes=[];
+ const saved=bindContractStudyPlan(initial,p,sha(JSON.stringify(buildContractStudyPlanRequest(initial))),'b'.repeat(64)),combined=preparePlannedStudyGeneration(question,ctx,[],c,saved,[]),
+  generation=buildPlannedStudyGenerationRequest(combined);
+ assert.equal(combined.receipt.unitPolicy,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);assert.ok(!combined.receipt.selectedSourceIds.includes(old.id));
+ assert.ok(!generation.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum.includes(old.id));
+ assert.ok(JSON.stringify(generation).includes(old.id),'Original caption ID is retained as a member and old advisory-plan provenance.');
 });

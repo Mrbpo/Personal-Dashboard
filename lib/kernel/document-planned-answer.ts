@@ -1,14 +1,15 @@
 import {createHash} from 'node:crypto';
-import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
+import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v2';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v3';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
-export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'question-contract';query:string};
+export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'question-contract';query:string;
+ originalQuery?:string;focusPolicy?:'resolved-exact-title-scope-value-v1'};
 export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt&{claimIndex?:number}>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:StudyAnswerPlanAttempt['phase'];claimIndex?:number}>)=>Promise<void>;
@@ -26,15 +27,18 @@ export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPo
 
 /** One lexical batch, not a retry. Contract words fill unused slots even when
  * the fallible source plan asserts sufficient; no expected document IDs enter. */
-export function studySupplementQueries(question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding):StudySupplementQuery[]{
+export function studySupplementQueries(question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,resolvedSource?:SupplementalSource):StudySupplementQuery[]{
  validateStudyQuestionContract(question,contract);const out:StudySupplementQuery[]=[],used=new Set([question.normalize('NFKC').replace(/\s+/gu,' ').trim().toLowerCase()]);
- const add=(requirementId:string,origin:StudySupplementQuery['origin'],query:string)=>{
-  const normalized=query.normalize('NFKC').replace(/\s+/gu,' ').trim();
+ const add=(requirementId:string,origin:StudySupplementQuery['origin'],query:string,focused=query)=>{
+  const normalized=focused.normalize('NFKC').replace(/\s+/gu,' ').trim();
   if(out.length<2&&normalized&&!used.has(normalized.toLowerCase())){if(Array.from(normalized).length>4000)throw Error('Complete supplemental query exceeds limit');
-   used.add(normalized.toLowerCase());out.push({requirementId,origin,query:normalized});}
+   used.add(normalized.toLowerCase());out.push({requirementId,origin,query:normalized,
+    ...(resolvedSource?{originalQuery:query,focusPolicy:'resolved-exact-title-scope-value-v1' as const}:{})});}
  };
  for(const gap of binding.plan.missing)if(gap.supplementQuery)add(gap.requirementId,'plan-missing',gap.supplementQuery);
- for(const r of contract.requirements)add(r.id,'question-contract',[r.aspect,...Object.values(r.requestedScope).filter(v=>v!==null)].join(' '));
+ for(const r of contract.requirements){const values=Object.values(r.requestedScope).filter(v=>v!==null);
+  add(r.id,'question-contract',[r.aspect,...values].join(' '),[r.aspect,...values.filter(v=>!resolvedSource||
+   v.normalize('NFKC')!==resolvedSource.selectedDocumentTitle.normalize('NFKC'))].join(' '));}
  return out;
 }
 function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContext[]){
@@ -61,7 +65,7 @@ function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContex
  * original image order is retained. The extension is not a new model plan. */
 export function preparePlannedStudyGeneration(question:string,initial:DocumentAnswerContext,extras:DocumentAnswerContext[],contract:StudyQuestionContract,
  binding:StudyContractPlanBinding,queries:StudySupplementQuery[],supplementalSource?:SupplementalSource){
- const original=restoreContractStudyPlan(question,initial,contract,binding),context=mergeContexts(initial,extras),prepared=prepareDocumentAnswer(question,context);
+ const original=restoreContractStudyPlan(question,initial,contract,binding),context=mergeContexts(initial,extras),prepared=prepareDocumentAnswer(question,context,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
  if(queries.length!==extras.length)throw Error('Supplemental query/context mismatch');
  if(supplementalSource&&extras.some(c=>c.anchors.some(h=>h.document_id!==supplementalSource.document.documentId||
   h.source_hash!==supplementalSource.document.sourceHash||h.source_version_id!==supplementalSource.document.sourceVersionId||
@@ -72,11 +76,11 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
  const originalImages=original.prepared.supports.filter(s=>s.kind==='image');
  if(originalImages.some(s=>!prepared.supports.some(p=>p.id===s.id&&p.kind==='image'&&p.sha256===s.sha256&&p.documentId===s.documentId&&
   p.documentVersionId===s.documentVersionId&&p.sourceVersionId===s.sourceVersionId&&p.sourceHash===s.sourceHash)))throw Error('Original image identity/order changed');
- const selected=new Set(binding.plan.clusters.flatMap(c=>c.sourceIds));
- for(const unit of original.prepared.quoteUnits)if(unit.selectable)selected.add(unit.id);
+ const selected=new Set<string>(); // The old plan cannot reselect caption-only members of a new visual unit.
+ for(const unit of original.prepared.quoteUnits)if(byUnit.get(unit.id)?.selectable)selected.add(unit.id);
  for(const image of originalImages)selected.add(image.id);
  for(const extra of extras){const actual=prepareDocumentAnswer(question,extra);
-  for(const unit of actual.quoteUnits)if(unit.selectable)selected.add(unit.id);
+  for(const unit of actual.quoteUnits)if(byUnit.get(unit.id)?.selectable)selected.add(unit.id);
   for(const image of actual.supports.filter(s=>s.kind==='image')){const mapped=prepared.supports.find(s=>s.kind==='image'&&s.image!.attachmentId===image.image!.attachmentId&&s.sha256===image.sha256);if(mapped)selected.add(mapped.id);}
  }
  const quoteUnits=prepared.quoteUnits.filter(u=>u.selectable&&selected.has(u.id)),supportIds=new Set(quoteUnits.map(u=>u.supportId)),
@@ -86,7 +90,7 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
   retrievalScope:supplementalSource?.scope??'whole-library-query',sourceSelection:supplementalSource??null,
   selections:c.anchors.map((h,rank)=>({rank:rank+1,id:h.id,documentId:h.document_id,sourceVersionId:h.source_version_id,sourceHash:h.source_hash,evidenceId:h.evidence_id,bodySha256:sha(h.body)})),
   imageSelection:c.imageSelection??null}));
- const receipt={version:PLANNED_STUDY_ANSWER_VERSION,contractSha256:contract.contractSha256,originalPlanSha256:binding.planSha256,
+ const receipt={version:PLANNED_STUDY_ANSWER_VERSION,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,contractSha256:contract.contractSha256,originalPlanSha256:binding.planSha256,
   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256,
   originalInputFingerprint:binding.inputFingerprint,inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,
@@ -115,7 +119,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract),plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
  await policy.recordState({event:'plan',result:plan});
  if(plan.completion==='capacity-exceeded')return {status:'capacity-exceeded',plan,wholeAnswerVerified:false};
- const queries=studySupplementQueries(question,checked,plan.binding),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
+ const queries=studySupplementQueries(question,checked,plan.binding,supplementalSource),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
  for(const q of queries)readers.push(await readSupplement(q.query));
  const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource);};
  const packet=await read();await policy.recordState({event:'supplement',receipt:packet.receipt});
@@ -131,7 +135,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  if(restored.providerSelections.claims.some(c=>c.citations.some(ref=>!allowed.has(ref.id))))throw Error('Answer used an unselected source');
  const audits=[];
  for(let claimIndex=0;claimIndex<restored.providerSelections.claims.length;claimIndex++){
-  const binding={inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,providerSelections:restored.providerSelections,claimIndex},
+  const binding={inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,providerSelections:restored.providerSelections,claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY} as const,
    local=prepareDocumentCitationAudit(question,packet.context,binding),request=buildDocumentCitationAuditRequest(local.packet),
    images=local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[]),bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:images}},1000),
    p=journal(policy,'claim-audit',claimIndex),requestSha=digest(request);
