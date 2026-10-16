@@ -47,27 +47,30 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
    const declared=[...encoding[1].matchAll(/dup\s+(\d+)\s+\/([A-Za-z0-9_.]+)\s+put/g)];
    const targets=declared.filter(m=>Object.hasOwn(glyphUnicode,m[2]));
    if(!targets.length)continue;
+   const cmap=lookup(original,font.get(PDFName.of('ToUnicode'))),cmapBytes=cmap===undefined?undefined:decode(cmap);
+   if(!cmapBytes||cmapBytes.length>65536)encodingReview('missing/bounded ToUnicode');
+   const cmapText=cmapBytes!.toString('latin1');
+   const pairs=[...cmapText.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)].flatMap(block=>{
+    const matches=[...block[2].matchAll(/<([0-9a-f]+)>\s*<([0-9a-f]+)>/gi)];
+    if(matches.length!==Number(block[1]))encodingReview('bfchar count mismatch');return matches;});
+   const corrections=targets.flatMap(target=>{
+    const code=Number(target[1]),glyphName=target[2] as keyof typeof glyphUnicode;
+    const current=pairs.filter(m=>parseInt(m[1],16)===code);
+    if(current.length!==1)encodingReview('nonunique source CMap code');
+    const value=current[0][2].toUpperCase();
+    return glyphUnicode[glyphName].accepted.includes(value)?[]:[{code,glyphName,current:current[0],value}];
+   });
+   if(!corrections.length)continue; // Legal aliases require no rewrite proof.
    if(encoding[1].replace(/dup\s+\d+\s+\/[A-Za-z0-9_.]+\s+put/g,'').trim()||font.has(PDFName.of('Encoding')))
     encodingReview('overridden or unsupported Encoding');
    if(declared.some(m=>!Number.isSafeInteger(Number(m[1]))||Number(m[1])<0||Number(m[1])>255)||
     new Set(declared.map(m=>Number(m[1]))).size!==declared.length)encodingReview('duplicate or invalid character code');
    if(new Set(targets.map(m=>m[2])).size!==targets.length)encodingReview('nonunique glyph code');
-   const cmap=lookup(original,font.get(PDFName.of('ToUnicode'))),cmapBytes=cmap===undefined?undefined:decode(cmap);
-   if(!cmapBytes||cmapBytes.length>65536)encodingReview('missing/bounded ToUnicode');
-   const cmapText=cmapBytes!.toString('latin1');if(/beginbfrange/.test(cmapText))encodingReview('unsupported CMap ranges');
-   const pairs=[...cmapText.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)].flatMap(block=>{
-    const matches=[...block[2].matchAll(/<([0-9a-f]+)>\s*<([0-9a-f]+)>/gi)];
-    if(matches.length!==Number(block[1]))encodingReview('bfchar count mismatch');return matches;});
+   if(/beginbfrange/.test(cmapText))encodingReview('unsupported CMap ranges');
    let after=cmapText;
-   for(const target of targets){
-    const code=Number(target[1]),glyphName=target[2] as keyof typeof glyphUnicode;
-    if(code>255)encodingReview('non-single-byte Type1 code');
-    const current=pairs.filter(m=>parseInt(m[1],16)===code);
-    if(current.length!==1)encodingReview('nonunique source CMap code');
-    const value=current[0][2].toUpperCase();
+   for(const {code,glyphName,current,value} of corrections){
     if(pairs.filter(m=>m[2].toUpperCase()===value).length!==1)encodingReview('nonunique inverse CMap value');
-    if(glyphUnicode[glyphName].accepted.includes(value))continue;
-    const literal=current[0][0];if(after.indexOf(literal)!==after.lastIndexOf(literal))encodingReview('nonunique CMap bytes');
+    const literal=current[0];if(after.indexOf(literal)!==after.lastIndexOf(literal))encodingReview('nonunique CMap bytes');
     after=after.replace(literal,literal.replace(/<[0-9a-f]+>$/i,`<${glyphUnicode[glyphName].hex}>`));
     plans.push({index,key:key.toString(),patch:{pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file.data),code,glyphName,
      unicodeSource:glyphUnicode[glyphName].source,beforeCmapHex:cmapBytes!.toString('hex'),afterCmapHex:'',beforeCmapHash:digest(cmapBytes!),afterCmapHash:''}});

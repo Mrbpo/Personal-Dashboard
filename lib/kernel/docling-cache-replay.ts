@@ -28,6 +28,16 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
  const pdf=await PDFDocument.load(original,{updateMetadata:false}),count=pdf.getPageCount();
  if(count!==identity.totalPages||count<1||count>500)throw new Error('Cached replay original page count mismatch');
  const progress=validateDoclingProgress(value,identity);
+ let parserPdf=pdf;
+ if(identity.sourceEncodingReceiptHash){
+  const receipt=await load(identity.sourceEncodingReceiptHash);
+  if(digest(receipt)!==identity.sourceEncodingReceiptHash)throw new Error('Cached replay source encoding receipt checksum mismatch');
+  const {prepareSourceFontInput}=await import('./docling.ts');
+  const prepared=await prepareSourceFontInput(original);
+  if(!prepared.proof||digest(JSON.stringify({kind:prepared.proof.version,proof:prepared.proof}))!==identity.sourceEncodingReceiptHash||
+   digest(prepared.bytes)!==prepared.proof.inputHash)throw new Error('Cached replay source encoding proof or input mismatch');
+  parserPdf=await PDFDocument.load(prepared.bytes,{updateMetadata:false});
+ }
  const blank=pdf.getPages().flatMap((page,index)=>{
   if(page.node.Annots()?.size())return [];
   const contents=page.node.Contents(),streams=contents instanceof PDFArray?contents.asArray().map(ref=>pdf.context.lookup(ref)):[contents];
@@ -40,7 +50,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
   const copyIndices=Array.from({length:batch.end-batch.start+1},(_,i)=>batch.start+i-1);
   const derived=await PDFDocument.create();derived.setCreationDate(new Date(0));derived.setModificationDate(new Date(0));
   derived.setProducer('Study Kernel Docling derived-v1');derived.setCreator('Study Kernel');
-  for(const page of await derived.copyPages(pdf,copyIndices))derived.addPage(page);
+  for(const page of await derived.copyPages(parserPdf,copyIndices))derived.addPage(page);
   const input=await derived.save();
   if(!batch.inputHash||batch.inputHash!==digest(input)||JSON.stringify(batch.copyIndices)!==JSON.stringify(copyIndices)||
    (await PDFDocument.load(input,{updateMetadata:false})).getPageCount()!==copyIndices.length)
@@ -62,7 +72,8 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
   const decoded=decodeDerivedDoclingResult(saved.result,{...expected},{verifiedBlankPages:blank,formulaEnriched:false});
   nativeTables.push(...decoded.nativeTables.map(table=>({...table,result:{resultBlobSha256:batch.resultHash!,
    derivedInputSha256:batch.inputHash!,optionsHash:identity.optionsHash,copyIndices:[...copyIndices]}})));
-  pages.push(...decoded.pages);warnings.push(...decoded.warnings);
+  pages.push(...decoded.pages.map(page=>identity.sourceEncodingReceiptHash?{...page,text:page.text.normalize('NFC')}:page));
+  warnings.push(...decoded.warnings);
   if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
   visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
   visualLayout.regions.push(...decoded.visualLayout.regions.map(region=>({...region,resultBlobSha256:batch.resultHash,
@@ -97,7 +108,8 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
   throw new Error('Cached replay requires complete raw Docling pages; enhanced/native/manual pages are protected');
  const stored=document.raw_value.batchProvenance as DoclingProgress|undefined;
  if(!stored?.identity)throw new Error('Cached replay has no saved derived batch provenance');
- const identity={owner,documentId,sourceHash:document.source_hash,totalPages:document.page_count,optionsHash:stored.identity.optionsHash};
+ const identity={owner,documentId,sourceHash:document.source_hash,totalPages:document.page_count,optionsHash:stored.identity.optionsHash,
+  ...(stored.identity.sourceEncodingReceiptHash!==undefined?{sourceEncodingReceiptHash:stored.identity.sourceEncodingReceiptHash}:{})};
  const decoded=await decodeCachedDoclingReplay(await readBlob(document.source_hash),identity,stored);
  const changedPages=old.filter((page,i)=>page.body!==decoded.pages[i].text).map(page=>page.page_number);
  const candidateWarnings=normalizedWarnings([...document.warnings,...decoded.warnings]);

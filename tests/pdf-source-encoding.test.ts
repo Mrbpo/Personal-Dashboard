@@ -10,7 +10,7 @@ process.env.DATABASE_URL=':memory:';process.env.LIBRARY_DIR=directory;
 after(()=>rmSync(directory,{recursive:true,force:true}));
 const name=(value:string)=>PDFName.of(value);
 // Synthetic object-level fixture only: no renderer, real glyph-outline or OCR claim.
-async function fixture(options:{ambiguous?:boolean;override?:boolean;alreadyCorrect?:boolean|'02B9';duplicateCode?:boolean}={}){
+async function fixture(options:{ambiguous?:boolean;override?:boolean;alreadyCorrect?:boolean|'02B9';duplicateCode?:boolean;acceptedAlias?:boolean}={}){
  const pdf=await PDFDocument.create(),page=pdf.addPage([612,792]),context=pdf.context;
  const font=(encoding:string,pairs:string,baseFont:string)=>{
   const program=Buffer.from(`%!PS-AdobeFont-1.0\n/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n${encoding}\nreadonly def\ncurrentfile eexec\n`);
@@ -19,8 +19,9 @@ async function fixture(options:{ambiguous?:boolean;override?:boolean;alreadyCorr
   const cmap=Buffer.from(`begincmap\n${pairs.split('\n').length} beginbfchar\n${pairs}\nendbfchar\nendcmap`);
   return context.obj({Type:'Font',Subtype:'Type1',BaseFont:baseFont,FontDescriptor:descriptor,ToUnicode:context.register(context.flateStream(cmap))});
  };
- const source=font(`dup 42 /prime put\ndup 54 /negationslash put${options.duplicateCode?'\ndup 042 /other put':''}`,
-  `<2A> <${options.alreadyCorrect==='02B9'?'02B9':options.alreadyCorrect?'2032':'0030'}>\n<36> <${options.alreadyCorrect?'0338':'0036'}>${options.ambiguous?'\n<2B> <0030>':''}`,'ArbitraryNameNotCMSY');
+ const prime=options.alreadyCorrect==='02B9'?'02B9':options.alreadyCorrect?'2032':'0030';
+ const source=font(`dup 42 /prime put\ndup 54 /negationslash put${options.duplicateCode?'\ndup 042 /other put':''}${options.acceptedAlias?'\ndup 43 /prime put':''}`,
+  `<2A> <${prime}>\n<36> <${options.alreadyCorrect?'0338':'0036'}>${options.ambiguous?'\n<2B> <0030>':''}${options.acceptedAlias?`\n<2B> <${prime}>`:''}`,'ArbitraryNameNotCMSY');
  if(options.override)source.set(name('Encoding'),name('StandardEncoding'));
  const zero=font('dup 48 /zero put\ndup 61 /equal put','<30> <0030>\n<3D> <003D>','AnotherArbitraryName');
  page.node.set(name('Resources'),context.obj({Font:{P:context.register(source),Z:context.register(zero)}}));
@@ -50,6 +51,10 @@ test('already correct input is byte-for-byte no-op; empty pages are also no-op',
  assert.equal(result.bytes,input);assert.equal(result.proof,undefined);
  const modifierPrime=await fixture({alreadyCorrect:'02B9'}),accepted=await prepareSourceFontInput(modifierPrime);
  assert.equal(accepted.bytes,modifierPrime);assert.equal(accepted.proof,undefined);
+ for(const alreadyCorrect of [true,'02B9'] as const){
+  const aliases=await fixture({alreadyCorrect,acceptedAlias:true}),noop=await prepareSourceFontInput(aliases);
+  assert.equal(noop.bytes,aliases);assert.equal(noop.proof,undefined);
+ }
  const pdf=await PDFDocument.create();pdf.addPage();const blank=await pdf.save();
  assert.equal((await prepareSourceFontInput(blank)).bytes,blank);
  const large=await PDFDocument.create(),page=large.addPage(),context=large.context;
@@ -72,11 +77,33 @@ test('proof/input identity is stable and old or mismatched progress cannot be re
  const {digest}=await import('../lib/library.ts');
  const input=await fixture(),one=await prepareSourceFontInput(input),two=await prepareSourceFontInput(input);
  assert.equal(digest(one.bytes),digest(two.bytes));assert.equal(digest(JSON.stringify(one.proof)),digest(JSON.stringify(two.proof)));
- const identity={owner:'owner',documentId:'doc',sourceHash:digest(input),totalPages:1,optionsHash:'a'.repeat(64),sourceEncodingReceiptHash:digest(JSON.stringify(one.proof))};
+ const receipt=Buffer.from(JSON.stringify({kind:one.proof!.version,proof:one.proof}));
+ const identity={owner:'owner',documentId:'doc',sourceHash:digest(input),totalPages:1,optionsHash:'a'.repeat(64),sourceEncodingReceiptHash:digest(receipt)};
  const progress=createDoclingProgress(identity);assert.deepEqual(validateDoclingProgress(progress,identity),progress);
  const {sourceEncodingReceiptHash:_,...old}=identity;
  assert.throws(()=>validateDoclingProgress(progress,old),/identity/);
  assert.throws(()=>validateDoclingProgress(createDoclingProgress(old),identity),/identity/);
  assert.throws(()=>validateDoclingProgress(progress,{...identity,sourceEncodingReceiptHash:'b'.repeat(64)}),/identity/);
  assert.throws(()=>validateDoclingProgress(progress,{...identity,optionsHash:'c'.repeat(64)}),/identity/);
+ // Rebuild the same actual parser input before accepting cached Docling output.
+ const {decodeCachedDoclingReplay}=await import('../lib/kernel/docling-cache-replay.ts');
+ const parserPdf=await PDFDocument.load(one.bytes,{updateMetadata:false}),derived=await PDFDocument.create();
+ derived.setCreationDate(new Date(0));derived.setModificationDate(new Date(0));
+ derived.setProducer('Study Kernel Docling derived-v1');derived.setCreator('Study Kernel');
+ for(const page of await derived.copyPages(parserPdf,[0]))derived.addPage(page);
+ const batch=progress.batches[0];batch.inputHash=digest(await derived.save());batch.copyIndices=[0];
+ const text='prime ′; equality =\u0338; zeros 0000000000000';
+ const raw=Buffer.from(JSON.stringify({identity:{...identity,start:1,end:1,inputHash:batch.inputHash,copyIndices:[0]},
+  result:{status:'success',document:{json_content:{pages:{1:{page_no:1}},body:{children:[{$ref:'#/texts/0'}]},
+   texts:[{label:'text',text,orig:text,prov:[{page_no:1}]}]}}}}));
+ batch.resultHash=digest(raw);const blobs=new Map([[identity.sourceEncodingReceiptHash,receipt],[batch.resultHash,raw]]);
+ const load=async(hash:string)=>{assert.ok(blobs.has(hash));return blobs.get(hash)!;};
+ const replay=await decodeCachedDoclingReplay(input,identity,progress,load);
+ assert.equal(replay.pages[0].text,text.normalize('NFC'));assert.equal(replay.progress.identity.sourceEncodingReceiptHash,identity.sourceEncodingReceiptHash);
+ await assert.rejects(decodeCachedDoclingReplay(input,identity,progress,async hash=>hash===identity.sourceEncodingReceiptHash?Buffer.from('corrupt'):load(hash)),/receipt checksum/);
+ const forged=Buffer.from(JSON.stringify({kind:one.proof!.version,proof:{...one.proof,inputHash:'0'.repeat(64)}}));
+ const forgedIdentity={...identity,sourceEncodingReceiptHash:digest(forged)},forgedProgress={...progress,identity:forgedIdentity};
+ await assert.rejects(decodeCachedDoclingReplay(input,forgedIdentity,forgedProgress,async()=>forged),/proof or input mismatch/);
+ const wrongBatch=structuredClone(progress);wrongBatch.batches[0].inputHash=digest(input);
+ await assert.rejects(decodeCachedDoclingReplay(input,identity,wrongBatch,load),/derived input identity mismatch/);
 });
