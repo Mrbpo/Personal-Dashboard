@@ -8,6 +8,9 @@ import {KernelService} from '../lib/kernel/service.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,planRetrievedStudyAnswer,
  type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
+import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
+ buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
+ validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
 
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='dummy-plan-never-sent';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'study-plan-empty-'+randomUUID());
@@ -121,4 +124,101 @@ test('Kernel plan forbids oracle filters and fixes lexical method; default answe
   usage:{input_tokens:100,output_tokens:100},output_text:JSON.stringify({status:'answered',message:'',claims:[{text:'Synthetic sample labeling.',citations:[{id:prepared.quoteUnits[0].id}]}]})});};
  await kernel.answerStudyContent('owner',question,options);assert.deepEqual(actual,expected);assert.deepEqual(calls[1],{owner:'owner',query:question,options});
  }finally{globalThis.fetch=savedFetch;}
+});
+
+const contract=()=>freezeStudyQuestionContract(question,{requirements:plan().requirements},'a'.repeat(64));
+function contractPlan(ctx=context()):ContractStudyPlan{
+ const units=prepareStudyAnswerPlan(question,ctx).prepared.quoteUnits;
+ return {...plan(),clusters:[{id:'c0',requirementIds:['r0'],sourceIds:[units[0].id,'i0'],groundedScope:{...unknown},status:'sufficient'},
+  {id:'c1',requirementIds:['r0'],sourceIds:[units[1].id],groundedScope:{...unknown},status:'needs-evidence'}],conflicts:[],
+  sourceSubscopes:[{requirementId:'r0',scope:{...unknown,subject:'Second study'},sourceIds:[units[1].id],clusterIds:['c1'],status:'missing',reason:'Label provenance not established.'}]};
+}
+const rawContractPlan=(p:ContractStudyPlan)=>{const {requirements:_r,...raw}=p;return raw;};
+function clusterFixture(ctx=context()){
+ const c=contract(),prepared=prepareContractStudyPlan(question,ctx,c),p=contractPlan(ctx),body=buildContractStudyPlanRequest(prepared),
+  binding=bindContractStudyPlan(prepared,p,sha(JSON.stringify(body)),'b'.repeat(64));
+ return {c,prepared,p,binding,packet:prepareStudyClusterCheck(question,ctx,c,binding,'c0')};
+}
+function clusterResult(ids:string[]){return {scopeSupport:{support:'supported',sourceIds:ids,reason:'Selected references jointly ground the proposed scope.'},
+ requirementFindings:{r0:{support:'supported',responsiveness:'answers',sourceIds:ids,reason:'The selected references jointly establish the requested relation.'}},gaps:[] as {requirementId:string;reason:string}[]};}
+
+test('question-only contract fixes original requirements; source discoveries remain fallible sub-scopes under their original ID',()=>{
+ const c=contract(),body=buildStudyQuestionContractRequest(question),content=body.input[1].content as {type:string;text:string}[];
+ assert.deepEqual(JSON.parse(content[0].text),{question});assert.equal(content.length,1);
+ assert.equal(c.providerRequestSha256,sha(JSON.stringify(body)));assert.equal(c.fallible,true);
+ assert.deepEqual(validateStudyQuestionContract(question,JSON.parse(JSON.stringify(c))),c);
+ assert.throws(()=>validateStudyQuestionContract(question+' different',c),/changed/);
+ const changed=structuredClone(c);changed.requirements[0].aspect='Invented requirement';assert.throws(()=>validateStudyQuestionContract(question,changed),/changed/);
+ const packet=prepareContractStudyPlan(question,context(),c),req=buildContractStudyPlanRequest(packet),p=contractPlan();
+ assert.deepEqual(p.requirements,c.requirements);assert.equal(Object.hasOwn(req.text.format.schema.properties,'requirements'),false);
+ assert.deepEqual(validateContractStudyPlan(rawContractPlan(p),c,packet.input.allowedSourceIds),p);
+ assert.throws(()=>validateContractStudyPlan(p,c,packet.input.allowedSourceIds),/cannot rewrite/);
+ const foreign=rawContractPlan(structuredClone(p));foreign.sourceSubscopes[0].requirementId='r1';
+ assert.throws(()=>validateContractStudyPlan(foreign,c,packet.input.allowedSourceIds),/sub-scope/);
+ const falseReady=rawContractPlan(structuredClone(p));falseReady.sourceSubscopes[0].status='covered';
+ assert.throws(()=>validateContractStudyPlan(falseReady,c,packet.input.allowedSourceIds),/coverage/);
+ assert.throws(()=>bindContractStudyPlan(packet,p,'f'.repeat(64),'b'.repeat(64)),/request\/raw identities differ/);
+});
+
+test('single-cluster actual wire excludes outside text and complete outside PNG; support, responsiveness and global coverage stay separate',()=>{
+ const ctx=context(),poison='OUTSIDE_CLUSTER_UNCITED_PROVENANCE_POISON';ctx.anchors[1].body=poison;
+ const outside=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+ ctx.images.push({...ctx.images[0],attachmentId:'outside-image',assetId:sha(outside),sha256:sha(outside),bytes:outside,byteLength:outside.length});
+ const f=clusterFixture(ctx),body=buildStudyClusterCheckRequest(f.packet),wire=JSON.stringify(body),local=JSON.parse((body.input[1].content as {text:string}[])[0].text);
+ assert.ok(!wire.includes(poison));assert.ok(!wire.includes(outside.toString('base64')));assert.ok(wire.includes(image.toString('base64')));
+ assert.ok(!wire.includes('study1'));assert.ok(!wire.includes(f.binding.planSha256));assert.ok(!Object.hasOwn(local,'documentMetadata'));
+ assert.deepEqual(local.references.map((r:{sourceId:string})=>r.sourceId),f.p.clusters[0].sourceIds);
+ assert.equal(f.packet.binding.originalPlanSha256,f.binding.planSha256);assert.equal(f.packet.binding.contractSha256,f.c.contractSha256);
+ const ids=f.p.clusters[0].sourceIds,good=validateStudyClusterCheck(clusterResult(ids),f.packet);
+ assert.equal(good.localReady,true);assert.equal(good.wholeAnswerVerified,false);assert.equal(good.fullSourceCoverage,'unassessed');assert.equal(good.conflictExhaustiveness,'unassessed');
+ const partial=clusterResult(ids);partial.requirementFindings.r0.support='partial';partial.requirementFindings.r0.responsiveness='background-only';
+ assert.throws(()=>validateStudyClusterCheck(partial,f.packet),/Invalid/);partial.gaps=[{requirementId:'r0',reason:'Background is not label provenance.'}];
+ assert.equal(validateStudyClusterCheck(partial,f.packet).localReady,false);
+ const unsupported=clusterResult(ids);unsupported.scopeSupport.support='unsupported';assert.equal(validateStudyClusterCheck(unsupported,f.packet).localReady,false);
+ const foreign=clusterResult(['i1']);assert.throws(()=>validateStudyClusterCheck(foreign,f.packet),/Invalid/);
+ const changed=structuredClone(f.binding);changed.plan.requirements[0].aspect='Changed';assert.throws(()=>prepareStudyClusterCheck(question,ctx,f.c,changed,'c0'),/binding changed/);
+ const wrongRequest=structuredClone(f.binding);wrongRequest.providerRequestSha256='f'.repeat(64);
+ assert.throws(()=>prepareStudyClusterCheck(question,ctx,f.c,wrongRequest,'c0'),/binding changed/);
+ const imageOnly=context(),sourceHash='c'.repeat(64);imageOnly.anchors[1].parser_warnings=['outside-version-warning'];
+ const {score:_score,...node}=imageOnly.anchors[0];imageOnly.imageAnchors=[{...node,id:'pg:iv:1',document_id:'image-only',source_hash:sourceHash,
+  source_version_id:'image-version',evidence_id:'image-evidence',body:'UNSELECTED_IMAGE_ANCHOR_BODY',parser_warnings:['selected-image-only-warning'],
+  reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'}];
+ imageOnly.images[0]={kind:'pdf-page',attachmentId:'selected-image',assetId:sha(image),anchorEvidenceId:'image-evidence',physicalPage:1,
+  rawPdfSha256:sourceHash,manifestSha256:'d'.repeat(64),sha256:sha(image),byteLength:image.length,width:1,height:1,mime:'image/png',bytes:image,
+  provenance:{rawPdfSha256:sourceHash,pageRenderSha256:sha(image),pageSizePoints:{width:1,height:1},rotation:0,
+   rendererPolicy:'synthetic-fixture',sourcePageCropBox:{x:0,y:0,width:1,height:1}},
+  source:{documentId:'image-only',currentVersionId:'iv',sourceVersionId:'image-version',sourceHash}};
+ const selected=clusterFixture(imageOnly),selectedWire=JSON.stringify(buildStudyClusterCheckRequest(selected.packet));
+ assert.deepEqual(selected.packet.warnings,['selected-image-only-warning']);assert.ok(selectedWire.includes('selected-image-only-warning'));
+ assert.ok(!selectedWire.includes('outside-version-warning'));assert.ok(!selectedWire.includes('UNSELECTED_IMAGE_ANCHOR_BODY'));
+});
+
+test('explicit phases journal raw independently, retain missing/capacity, and reject source changes before any mock paid request',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch;let calls=0;
+ try{await development(async()=>{
+  const j=journal();globalThis.fetch=async(_url,init)=>{calls++;const body=JSON.parse(String(init?.body));assert.deepEqual(JSON.parse(body.input[1].content[0].text),{question});return response({requirements:plan().requirements});};
+  const q=await createStudyQuestionContract(question,j.policy);assert.equal(q.questionOnly,true);assert.equal(q.semanticVerified,false);assert.equal(j.attempts[0].phase,'question-contract');
+  assert.equal(q.contract.rawResponseSha256,j.raw[0].rawSha256);assert.equal(j.raw.length,1);
+  const c=q.contract,p=contractPlan(),planned=journal();globalThis.fetch=async()=>{calls++;return response(rawContractPlan(p));};
+  const mapped=await planContractStudyAnswer(question,async()=>context(),c,planned.policy);
+  assert.equal(mapped.completion,'needs-evidence');assert.deepEqual(mapped.plan.requirements,c.requirements);assert.equal(planned.attempts[0].phase,'contract-plan');
+  const capacity=structuredClone(p);capacity.sourceSubscopes=[];capacity.clusters=Array.from({length:7},(_,n)=>({...p.clusters[0],id:`c${n}`}));
+  globalThis.fetch=async()=>{calls++;return response(rawContractPlan(capacity));};const large=await planContractStudyAnswer(question,async()=>context(),c,journal().policy);
+  assert.equal(large.completion,'capacity-exceeded');assert.equal(large.plan.clusters.length,7);
+  const local=journal();globalThis.fetch=async()=>{calls++;return response(clusterResult(p.clusters[0].sourceIds));};
+  const checked=await verifyStudyAnswerCluster(question,async()=>context(),c,mapped.binding,'c0',local.policy);
+  assert.equal(local.attempts[0].phase,'cluster-check');assert.equal(checked.localReady,true);assert.equal(checked.semanticVerified,false);
+  const before=calls,stale=journal();let reads=0;
+  await assert.rejects(()=>verifyStudyAnswerCluster(question,async()=>{const ctx=context();if(++reads>1)ctx.anchors[1].body+=' Source changed.';return ctx;},c,mapped.binding,'c0',stale.policy),/binding changed|source changed/);
+  assert.equal(stale.attempts.length,1);assert.equal(calls,before);
+  const oversized=context();oversized.anchors[0].body='x'.repeat(310000);const bound=journal();
+  await assert.rejects(()=>planContractStudyAnswer(question,async()=>oversized,c,bound.policy),/input limit/);assert.equal(bound.attempts.length,0);assert.equal(calls,before);
+  const raw=journal();globalThis.fetch=async()=>{calls++;return response({invalid:'Retain original raw, do not repair.'});};
+  await assert.rejects(()=>verifyStudyAnswerCluster(question,async()=>context(),c,mapped.binding,'c0',raw.policy),/Invalid/);
+  assert.equal(raw.raw.length,1);assert.equal(raw.attempts.length,1);assert.equal(calls,before+1);
+  const kernel=new KernelService();let retrievals=0;
+  (kernel as unknown as {studyAnswerContextReader:()=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async()=>{retrievals++;return async()=>context();};
+  await assert.rejects(()=>kernel.planStudyAnswerWithContract('owner',question,c,{sourceHint:'oracle'} as never,journal().policy),/not document/);
+  assert.equal(retrievals,0);
+ });}finally{globalThis.fetch=savedFetch;}
 });

@@ -16,12 +16,13 @@ export type StudyAnswerPlan={requirements:{id:string;aspect:string;requestedScop
  conflicts:{leftClusterId:string;rightClusterId:string;comparability:'same-context'|'different-context'|'unresolved';
   leftSourceIds:string[];rightSourceIds:string[];reason:string}[];
  missing:{requirementId:string;reason:string;supplementQuery:string|null}[]};
-export type StudyAnswerPlanAttempt={phase:'plan';requestIdentity:string;providerRequestSha256:string;
+export type StudyAnswerPlanAttempt={phase:'plan'|'question-contract'|'contract-plan'|'cluster-check';requestIdentity:string;providerRequestSha256:string;
  inputTokenUpper:number;imageInputTokenUpper:number;nonImageBodyUtf8Bytes:number;maxOutputTokens:4000;
  reservationUSD:number;usageUpperUSD:number;fundingUpperUSD:number};
 export type StudyAnswerPlanPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt>)=>Promise<void>;
  recordResponse:(response:DocumentCitationAuditResponse)=>Promise<void>};
+export type StudyPlanningRequest={model:string;store:boolean;reasoning:{effort:string};max_output_tokens:number;input:unknown;text:unknown};
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 const exact=(value:unknown,keys:readonly string[])=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&
  Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
@@ -104,7 +105,7 @@ export function validateStudyAnswerPlan(value:unknown,allowedSourceIds:readonly 
  return result;
 }
 
-export function studyAnswerPlanRequestBudget(request:unknown,packet:ReturnType<typeof prepareStudyAnswerPlan>){
+export function studyAnswerPlanRequestBudget(request:unknown,packet:{prepared:{supports:readonly {image?:DocumentAnswerContext['images'][number]}[]}}){
  const images=createDocumentImageBudget();
  for(const [index,s] of packet.prepared.supports.entries())if(s.image&&!images.include(s.image,index+1))throw new Error('Plan image budget exceeded');
  const nonImageBody=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?
@@ -128,6 +129,29 @@ export async function assertStudyAnswerPlanPolicy(policy:StudyAnswerPlanPolicy){
   maxOutputTokens:4000,timeoutMs:30000,beforeAttempt:async()=>{}});assertBilling();
 }
 
+/** Shared single-request boundary for explicit development planning phases.
+ * Callers still own durable attempt/raw journals and per-batch authorization. */
+export async function executeStudyPlanningRequest(version:string,phase:StudyAnswerPlanAttempt['phase'],request:StudyPlanningRequest,
+ bindingSha256:string,budget:ReturnType<typeof studyAnswerPlanRequestBudget>,policy:StudyAnswerPlanPolicy,recheck:()=>Promise<void>){
+ await assertStudyAnswerPlanPolicy(policy);
+ if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!=='low'||request.max_output_tokens!==4000)
+  throw new Error('Planning phase settings must remain fixed');
+ const providerRequestSha256=sha(JSON.stringify(request)),requestIdentity=sha(JSON.stringify({version,providerRequestSha256,bindingSha256}));
+ await policy.beforeAttempt(Object.freeze({phase,requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();
+ const response=await paidOpenAI('responses',request,AbortSignal.timeout(30000),{kind:'document-answer',dailyLimit:policy.dailyLimit??200}),
+  rawBody=await response.text(),rawSha256=sha(rawBody);
+ await policy.recordResponse({requestIdentity,providerRequestSha256,httpStatus:response.status,rawBody,rawSha256});await recheck();
+ if(!response.ok)throw new Error(`Study planning failed (${response.status})`);
+ const payload=JSON.parse(rawBody);
+ if(payload?.status!=='completed'||payload.error||!isGpt54MiniProviderModel(payload.model))throw new Error('Study plan provider response is incomplete or unverified');
+ if(![payload.usage?.input_tokens,payload.usage?.output_tokens].every(n=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0)||
+  payload.usage.input_tokens>budget.inputTokenUpper||payload.usage.output_tokens>4000)throw new Error('Study plan usage is unknown or exceeds its bound');
+ const raw=payload.output_text||(payload.output??[]).filter((x:{type:string})=>x.type==='message')
+  .flatMap((x:{content?:{type:string;text:string}[]})=>x.content??[]).filter((x:{type:string})=>x.type==='output_text').map((x:{text:string})=>x.text).join('');
+ return {value:JSON.parse(raw) as unknown,providerRequestSha256,requestIdentity,rawResponseSha256:rawSha256,
+  requestedModel:request.model,model:payload.model,usage:payload.usage,budget};
+}
+
 /** One planning request only. No supplemental search, generation, audit or
  * repair is executed here; its output remains unverified until independent review. */
 export async function planRetrievedStudyAnswer(question:string,readContext:()=>Promise<DocumentAnswerContext>,policy:StudyAnswerPlanPolicy){
@@ -139,23 +163,11 @@ export async function planRetrievedStudyAnswer(question:string,readContext:()=>P
    flatTextContexts:packet.prepared.input.parentMetadata.filter(parent=>parent.structureProvenance).map(parent=>({parentId:parent.parentId,structureProvenance:parent.structureProvenance}))}:{}),
   imageSelection:packet.prepared.input.imageSelection??null,bindingSha256:packet.bindingSha256,semanticVerified:false,wholeAnswerVerified:false};
  if(!packet.input.allowedSourceIds.length)return {...receipt,status:'unavailable' as const,reason:'no-evidence',plan:null};
- const request=buildStudyAnswerPlanRequest(packet),providerRequestSha256=sha(JSON.stringify(request)),budget=studyAnswerPlanRequestBudget(request,packet),
-  requestIdentity=sha(JSON.stringify({version:STUDY_ANSWER_PLAN_VERSION,providerRequestSha256,bindingSha256:packet.bindingSha256}));
+ const request=buildStudyAnswerPlanRequest(packet),budget=studyAnswerPlanRequestBudget(request,packet);
  const recheck=async()=>{if(prepareStudyAnswerPlan(question,await readContext()).bindingSha256!==packet.bindingSha256)throw new Error('Retrieved study source changed during planning');};
- await policy.beforeAttempt(Object.freeze({phase:'plan',requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();
- const response=await paidOpenAI('responses',request,AbortSignal.timeout(30000),{kind:'document-answer',dailyLimit:policy.dailyLimit??200}),
-  rawBody=await response.text(),rawSha256=sha(rawBody);
- await policy.recordResponse({requestIdentity,providerRequestSha256,httpStatus:response.status,rawBody,rawSha256});await recheck();
- if(!response.ok)throw new Error(`Study planning failed (${response.status})`);
- const payload=JSON.parse(rawBody);
- if(payload?.status!=='completed'||payload.error||!isGpt54MiniProviderModel(payload.model))throw new Error('Study plan provider response is incomplete or unverified');
- if(![payload.usage?.input_tokens,payload.usage?.output_tokens].every(n=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0)||
-  payload.usage.input_tokens>budget.inputTokenUpper||payload.usage.output_tokens>4000)throw new Error('Study plan usage is unknown or exceeds its bound');
- const raw=payload.output_text||(payload.output??[]).filter((x:{type:string})=>x.type==='message')
-  .flatMap((x:{content?:{type:string;text:string}[]})=>x.content??[]).filter((x:{type:string})=>x.type==='output_text').map((x:{text:string})=>x.text).join('');
- const plan=validateStudyAnswerPlan(JSON.parse(raw),packet.input.allowedSourceIds),completion=plan.clusters.length>6?'capacity-exceeded':
+ const {value,...execution}=await executeStudyPlanningRequest(STUDY_ANSWER_PLAN_VERSION,'plan',request,packet.bindingSha256,budget,policy,recheck);
+ const plan=validateStudyAnswerPlan(value,packet.input.allowedSourceIds),completion=plan.clusters.length>6?'capacity-exceeded':
   packet.prepared.unavailableParents.length||(packet.prepared.input.imageSelection?.omitted.length??0)?'incomplete-context':
    plan.missing.length||plan.clusters.some(c=>c.status!=='sufficient')?'needs-evidence':'ready-for-review';
- return {...receipt,status:'planned' as const,completion,plan,providerRequestSha256,requestIdentity,rawResponseSha256:rawSha256,
-  requestedModel:request.model,model:payload.model,usage:payload.usage,budget};
+ return {...receipt,status:'planned' as const,completion,plan,...execution};
 }

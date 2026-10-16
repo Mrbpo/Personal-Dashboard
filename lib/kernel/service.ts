@@ -11,6 +11,8 @@ import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerReques
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
+import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,
+ type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -1147,6 +1149,30 @@ export class KernelService {
     const read=await this.studyAnswerContextReader(owner,question,{...options,limit:14,semantic:false,hybrid:false,aiRerank:false,
       relatedDocuments:true,includeParents:true,includeImages:true});
     return planRetrievedStudyAnswer(question,read,policy);
+  }
+
+  /** Explicit phases, never an automatic chain. The question-only contract is
+   * fallible and cannot certify coverage; the original plan entry stays intact. */
+  createStudyQuestionContract(question:string,policy:StudyAnswerPlanPolicy){
+    return createStudyQuestionContract(question,policy);
+  }
+
+  private async contractStudyContext(owner:string,question:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    await assertStudyAnswerPlanPolicy(policy);
+    if(!options||Object.keys(options).some(key=>key!=='courseId')||
+      (options.courseId!==undefined&&(typeof options.courseId!=='string'||!options.courseId.trim())))
+      throw new Error('Study planning allows only explicit user course context, not document/source filters');
+    return this.studyAnswerContextReader(owner,question,{...options,limit:14,semantic:false,hybrid:false,aiRerank:false,
+      relatedDocuments:true,includeParents:true,includeImages:true});
+  }
+
+  async planStudyAnswerWithContract(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    return planContractStudyAnswer(question,await this.contractStudyContext(owner,question,options,policy),contract,policy);
+  }
+
+  async verifyStudyAnswerPlanCluster(owner:string,question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,
+    clusterId:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    return verifyStudyAnswerCluster(question,await this.contractStudyContext(owner,question,options,policy),contract,binding,clusterId,policy);
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {
