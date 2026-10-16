@@ -167,6 +167,7 @@ export async function collectUnusedBlobs(now=Date.now()){
  try{
   if(!process.env.KERNEL_DATABASE_URL)throw new Error('Kernel reference configuration unavailable');
   for(const hash of await doclingStageBlobHashes())used.add(hash);
+  for(const hash of await kernel.publishedDocumentBlobHashes())used.add(hash);
   for(const hash of await kernel.documentImageBlobHashes())used.add(hash);
   for(const hash of await kernel.nativeTableBlobHashes())used.add(hash);
  }catch{

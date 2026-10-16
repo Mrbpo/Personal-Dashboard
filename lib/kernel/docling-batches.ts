@@ -1,6 +1,8 @@
 import {mkdir,writeFile,rename,unlink} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
+import type {Pool} from 'pg';
 import {digest,readBlob} from '../library.ts';
 import {decodeDoclingResult} from './docling-result.ts';
 
@@ -8,6 +10,97 @@ export type DoclingIdentity={owner:string;documentId:string;sourceHash:string;op
 export type DoclingBatch={start:number;end:number;taskId?:string;resultHash?:string;inputHash?:string;copyIndices?:number[]};
 export type DoclingProgress={schema:1;identity:DoclingIdentity;batchSize:number;batches:DoclingBatch[]};
 export type DecodedDocling=ReturnType<typeof decodeDoclingResult>;
+export type ParsingBlobReference={kind:string;sha256:string;byteLength:number};
+
+/** Only declared CAS references are followed. Embedded font/CMap hashes and
+ * incidental strings are proof contents, not additional stored blobs. */
+export async function parsingProvenanceBlobHashes(value:unknown,binding:{sourceHash:string;documentId:string;owner:string;totalPages:number},
+ load:(hash:string)=>Promise<Uint8Array>=readBlob):Promise<string[]>{
+ const hashes=new Set<string>(),objects=new Map<string,Promise<Record<string,unknown>>>();
+ const object=(v:unknown):Record<string,unknown>=>{if(!v||typeof v!=='object'||Array.isArray(v))throw Error('Invalid parsing provenance object');return v as Record<string,unknown>;};
+ const add=(v:unknown)=>{if(typeof v!=='string'||!/^[a-f0-9]{64}$/.test(v))throw Error('Invalid parsing blob reference');hashes.add(v);return v;};
+ const json=(hash:string,limit=16*1024*1024)=>{
+  if(!objects.has(hash))objects.set(hash,(async()=>{const bytes=await load(hash);
+   if(bytes.length>limit||digest(bytes)!==hash)throw Error('Parsing proof checksum or size mismatch');
+   return object(JSON.parse(Buffer.from(bytes).toString('utf8')));})());
+  return objects.get(hash)!;
+ };
+ const encoding=async(receipt:unknown,inputHash?:unknown,version?:unknown)=>{
+  const saved=await json(add(receipt)),proof=object(saved.proof);
+  if(!['source-type1-cmap-v1','source-font-reference-v1','source-font-reference-v2'].includes(String(proof.version))||saved.kind!==proof.version||
+   proof.sourceHash!==binding.sourceHash||(version!==undefined&&proof.version!==version)||
+   (inputHash!==undefined&&proof.inputHash!==inputHash)||typeof proof.inputHash!=='string'||!/^[a-f0-9]{64}$/.test(proof.inputHash)||
+   !Array.isArray(proof.copyIndices)||!proof.copyIndices.length||proof.copyIndices.length>500||
+   proof.copyIndices.some((n,i)=>!Number.isInteger(n)||Number(n)<0||Number(n)>=binding.totalPages||(i>0&&Number(n)<=Number((proof.copyIndices as unknown[])[i-1])))||
+   !Array.isArray(proof.patches)||!proof.patches.length||!Array.isArray(proof.preserved))
+   throw Error('Parsing source encoding proof differs from published source');
+  if(proof.version!=='source-type1-cmap-v1'&&proof.referenceDictionarySha256===undefined)throw Error('Parsing reference dictionary proof missing');
+  if(proof.referenceDictionarySha256!==undefined){
+   const dictionary=await json(add(proof.referenceDictionarySha256),2*1024*1024);
+   const {validateFontReferenceDictionary}=await import('./docling.ts');validateFontReferenceDictionary(dictionary);
+  }
+ };
+ if(value===undefined||value===null)return [];
+ const p=object(value);
+ if(p.blobReferences!==undefined){
+  if(!Array.isArray(p.blobReferences)||p.blobReferences.length>20000)throw Error('Invalid bounded parsing blob manifest');
+  const lengths=new Map<string,number>();
+  for(const value of p.blobReferences){const ref=object(value),hash=add(ref.sha256);
+   if(Object.keys(ref).some(k=>!['kind','sha256','byteLength'].includes(k))||typeof ref.kind!=='string'||! /^[a-z][a-z0-9-]{0,63}$/.test(ref.kind)||
+    !Number.isSafeInteger(ref.byteLength)||Number(ref.byteLength)<1||Number(ref.byteLength)>256*1024*1024||
+    (lengths.has(hash)&&lengths.get(hash)!==ref.byteLength))throw Error('Invalid typed parsing blob reference');
+   lengths.set(hash,Number(ref.byteLength));
+  }
+ }
+ if(p.schema!==undefined||p.identity!==undefined||p.batches!==undefined){
+  const identity=object(p.identity) as DoclingIdentity;
+  if(identity.sourceHash!==binding.sourceHash||identity.documentId!==binding.documentId||identity.owner!==binding.owner||identity.totalPages!==binding.totalPages||
+   !Number.isSafeInteger(identity.totalPages)||identity.totalPages<1||identity.totalPages>500||
+   typeof identity.optionsHash!=='string'||!/^[a-f0-9]{64}$/.test(identity.optionsHash))throw Error('Parsing progress source identity differs');
+  const progress=validateDoclingProgress(p,identity);
+  // Original-verified blank ranges intentionally have no result blob. Keep
+  // every declared result without inventing a dependency for a blank range.
+  for(const batch of progress.batches)if(batch.resultHash)add(batch.resultHash);
+  if(identity.sourceEncodingReceiptHash)await encoding(identity.sourceEncodingReceiptHash);
+ }
+ if(p.sourceEncoding!==undefined){
+  const source=object(p.sourceEncoding);
+  if(source.kind==='mixed-original-native-page-repair-v1'){
+   const saved=await json(add(p.receiptHash));
+   if(!isDeepStrictEqual(saved,source)||object(source.source).sourceHash!==binding.sourceHash||
+    object(source.source).documentId!==binding.documentId)throw Error('Published mixed parsing receipt identity differs');
+   const dictionary=await json(add(source.referenceDictionarySha256),2*1024*1024);
+   const {validateFontReferenceDictionary}=await import('./docling.ts');validateFontReferenceDictionary(dictionary);
+   add(source.nativeVersionReceiptSha256);
+   if(!Array.isArray(source.sourceEncoding)||!source.sourceEncoding.length||source.sourceEncoding.length>500)throw Error('Mixed parsing page references missing');
+   const pages=new Set<number>(),kinds=['native-before','native-after','native-before-receipt','native-after-receipt','source-font-proof-raw','source-font-proof','derived-native-input','native-projection-receipt'];
+   for(const v of source.sourceEncoding){const page=object(v);
+    if(!Number.isSafeInteger(page.physicalPage)||Number(page.physicalPage)<1||Number(page.physicalPage)>binding.totalPages||pages.has(Number(page.physicalPage))||
+     !Array.isArray(page.references)||page.references.length!==kinds.length)throw Error('Invalid mixed parsing page references');
+    pages.add(Number(page.physicalPage));const seen=new Set<string>();
+    for(const r of page.references){const ref=object(r);if(typeof ref.kind!=='string'||!kinds.includes(ref.kind)||seen.has(ref.kind))throw Error('Mixed parsing reference kind missing or duplicated');seen.add(ref.kind);add(ref.sha256);}
+   }
+  }else if(source.receiptHash!==undefined)await encoding(source.receiptHash,source.parserInputHash,source.version);
+  else if(p.blobReferences===undefined)throw Error('Unknown parsing source encoding lacks explicit blob references');
+ }
+ return [...hashes];
+}
+
+/** All published versions participate, including hidden documents and versions
+ * no longer reachable from a job or current_version_id. Original bytes need
+ * not be read to retain their authoritative source hash. */
+export async function publishedParsingBlobHashes(db:Pick<Pool,'query'>):Promise<string[]>{
+ const rows=(await db.query<{document_id:string;owner_id:string;page_count:number;source_hash:string;raw_value:Record<string,unknown>}>(
+  `SELECT DISTINCT d.id document_id,d.owner_id,v.page_count,s.raw_sha256 source_hash,s.raw_value
+   FROM document_text_versions v JOIN document_texts d ON d.id=v.document_id
+   LEFT JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id`)).rows;
+ const hashes=new Set<string>();
+ for(const row of rows){if(typeof row.source_hash!=='string'||!/^[a-f0-9]{64}$/.test(row.source_hash))throw Error('Published document source reference invalid');
+  if(!row.raw_value||typeof row.raw_value!=='object'||Array.isArray(row.raw_value))throw Error('Published document source metadata invalid');
+  hashes.add(row.source_hash);for(const hash of await parsingProvenanceBlobHashes(row.raw_value.batchProvenance,
+   {sourceHash:row.source_hash,documentId:row.document_id,owner:row.owner_id,totalPages:row.page_count}))hashes.add(hash);}
+ return [...hashes];
+}
 
 export function createDoclingProgress(identity:DoclingIdentity,batchSize=Number(process.env.DOCLING_BATCH_PAGES||1)):DoclingProgress{
   if(!Number.isInteger(batchSize)||batchSize<1||batchSize>4)throw new Error('DOCLING_BATCH_PAGES must be an integer from 1 to 4');
