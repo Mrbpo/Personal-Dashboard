@@ -53,3 +53,17 @@ export function requireResolvedDocumentSource(resolution:DocumentSourceResolutio
   'Selected document title is ambiguous in the current visible scope',resolution);
  return resolution.document;
 }
+
+/** A small metadata gate, not semantic intent detection. Exact complete titles
+ * of other current visible sources prevent an exclusive initial-source read.
+ * Two examples suffice to establish a cross-source question; no bodies load. */
+export async function mentionedOtherDocumentSources(pool:Pool,owner:string,question:string,selectedDocumentId:string){
+ return (await pool.query<Pick<ResolvedDocumentSource,'documentId'|'title'>>(`SELECT d.id "documentId",d.name title
+  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+  WHERE d.owner_id=$1 AND NOT d.hidden AND d.id<>$2 AND length(trim(d.name))>0
+   AND strpos($3,normalize(d.name,NFKC))>0
+   AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
+    AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
+    AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+  ORDER BY d.id LIMIT 2`,[owner,selectedDocumentId,question.normalize('NFKC')])).rows;
+}

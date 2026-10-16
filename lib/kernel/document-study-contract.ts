@@ -120,6 +120,7 @@ export async function planContractStudyAnswer(question:string,read:()=>Promise<D
  const completion=plan.clusters.length>6?'capacity-exceeded':packet.prepared.unavailableParents.length||(packet.prepared.input.imageSelection?.omitted.length??0)?'incomplete-context':
   plan.missing.length||plan.clusters.some(c=>c.status!=='sufficient')||plan.sourceSubscopes.some(s=>s.status!=='covered')?'needs-evidence':'ready-for-review';
  return {version:STUDY_CONTRACT_PLAN_VERSION,completion,contract:packet.contract,plan,binding,...execution,
+  ...(packet.prepared.input.completeSourceProof?{completeSourceProof:packet.prepared.input.completeSourceProof}:{}),
   parentMetadata:packet.prepared.input.parentMetadata,warnings:packet.prepared.warnings,imageSelection:packet.prepared.input.imageSelection??null,
   unavailableParents:packet.prepared.unavailableParents,semanticVerified:false,wholeAnswerVerified:false,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
 }

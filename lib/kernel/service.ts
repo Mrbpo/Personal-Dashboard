@@ -4,16 +4,16 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
-import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
-import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,
+import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
+import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareContractStudyPlan,buildContractStudyPlanRequest,
  type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
-import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
+import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -928,6 +928,10 @@ export class KernelService {
     return resolveDocumentSource(kernelPool(),owner,hint,options);
   }
 
+  mentionedOtherDocumentSources(owner:string,question:string,selectedDocumentId:string){
+    return mentionedOtherDocumentSources(kernelPool(),owner,question,selectedDocumentId);
+  }
+
   async documentIngestionHead(owner:string,documentId:string,sourceHash:string){
     const row=(await kernelPool().query<{current_version_id:string|null;owner_id:string;source_hash:string;hidden:boolean}>(
       'SELECT current_version_id,owner_id,source_hash,hidden FROM document_texts WHERE id=$1',[documentId])).rows[0];
@@ -1181,8 +1185,8 @@ export class KernelService {
     return verifyStudyAnswerCluster(question,await this.contractStudyContext(owner,question,options,policy),contract,binding,clusterId,policy);
   }
 
-  /** Initial library retrieval remains query-only. An explicit title appearing
-   * in the question may scope only the supplemental batch; it is not global recall. */
+  /** An exact user-selected title may license bounded complete-source initial
+   * evidence. It never removes any requirement from the original question. */
   private plannedStudyScope(question:string,options:{courseId?:string;sourceHint?:DocumentSourceHint}){
     const scope=structuredClone(options);
     if(!scope||typeof scope!=='object'||Array.isArray(scope)||Object.keys(scope).some(key=>!['courseId','sourceHint'].includes(key))||
@@ -1247,13 +1251,56 @@ export class KernelService {
     await assertPlannedStudyAnswerPolicy(policy);
     const selected=sourceHint?await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}):undefined;
     if(selected)requireResolvedDocumentSource(selected);
+    const recheckSelection=async()=>{
+      if(sourceHint&&JSON.stringify(await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}))!==JSON.stringify(selected))
+        throw new DocumentEvidenceChangedError();
+    };
+    let initialEvidence:Record<string,unknown>={strategy:'whole-library-query',reason:'no-explicit-selected-source',selectedSourceInputCoverage:'unassessed',questionCoverage:'unassessed'};
+    let crossSource=false;
+    if(selected?.status==='resolved'){
+      const others=await this.mentionedOtherDocumentSources(owner,question,selected.document.documentId);crossSource=others.length>0;
+      if(crossSource)initialEvidence={...initialEvidence,reason:'other-current-title-mentioned',selectedSource:selected,otherTitleExamples:others};
+      else{
+        // The reader checks small PG node/body/image metadata before loading
+        // original bytes. No ranked result cap or global image limit changes.
+        const complete=await this.readCompleteDocumentSource(owner,selected.document);
+        initialEvidence={...initialEvidence,reason:complete.status==='unavailable'?complete.reason:null,selectedSource:selected,manifest:complete.manifest};
+        if(complete.status==='available'){
+          const proof={policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:selected.selectedDocumentTitle,manifest:complete.manifest},
+            initial={...complete.context,completeSourceProof:proof};
+          try{
+            const packet=prepareContractStudyPlan(question,initial,contract);
+            studyAnswerPlanRequestBudget(buildContractStudyPlanRequest(packet),packet);
+          }catch(error){if(!isStudyRequestCapacityError(error))throw error;
+            initialEvidence={...initialEvidence,reason:'request-capacity',capacityReason:(error as Error).message};
+          }
+          if(initialEvidence.reason===null){
+            initialEvidence={...initialEvidence,strategy:'selected-complete-source',selectedSourceInputCoverage:'complete'};
+            await policy.recordState({event:'initial-source-evidence',...initialEvidence});
+            const read=async():Promise<DocumentAnswerContext>=>{
+              await recheckSelection();
+              if((await this.mentionedOtherDocumentSources(owner,question,selected.document.documentId)).length)throw new DocumentEvidenceChangedError();
+              const current=await this.readCompleteDocumentSource(owner,selected.document);
+              if(current.status!=='available'||current.manifest.manifestSha256!==complete.manifest.manifestSha256)throw new DocumentEvidenceChangedError();
+              return {...current.context,completeSourceProof:{...proof,manifest:current.manifest}};
+            };
+            try{return {...await answerPlannedStudyQuestion(question,read,async()=>{throw Error('Complete source does not execute supplemental queries');},contract,policy,selected),initialEvidence};}
+            catch(error){if(!isStudyRequestCapacityError(error))throw error;
+              const capacity={status:'capacity-exceeded' as const,initialEvidence,reason:(error as Error).message,wholeAnswerVerified:false as const};
+              await policy.recordState({event:'initial-source-capacity',...capacity});return capacity;
+            }
+          }
+        }
+      }
+    }
+    await policy.recordState({event:'initial-source-evidence',...initialEvidence});
     const readInitial=await this.contractStudyContext(owner,question,courseContext,{scope:policy.scope,dailyLimit:policy.dailyLimit,
       beforeAttempt:policy.beforeAttempt,recordResponse:raw=>policy.recordResponse({...raw,phase:'contract-plan'})});
     const read=async()=>{
-      const context=await readInitial();return selected?.status==='resolved'?this.resolvedTitleCaptionContext(owner,context,selected,policy):context;
+      await recheckSelection();const context=await readInitial();return selected?.status==='resolved'?this.resolvedTitleCaptionContext(owner,context,selected,policy):context;
     };
-    return answerPlannedStudyQuestion(question,read,async query=>{
-      const supplement=await this.studyAnswerContextReader(owner,query,{...courseContext,...(sourceHint?{sourceHint}:{}),limit:4,
+    return {...await answerPlannedStudyQuestion(question,read,async query=>{
+      const supplement=await this.studyAnswerContextReader(owner,query,{...courseContext,...(sourceHint&&!crossSource?{sourceHint}:{}),limit:4,
         semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},false);
       return async()=>{
         const context=await supplement();
@@ -1261,7 +1308,7 @@ export class KernelService {
           throw new DocumentEvidenceChangedError();
         return context;
       };
-    },contract,policy,selected?.status==='resolved'?selected:undefined);
+    },contract,policy,!crossSource&&selected?.status==='resolved'?selected:undefined),initialEvidence};
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {

@@ -35,10 +35,12 @@ const scope=(value:unknown):value is Scope=>exact(value,dimensions)&&dimensions.
 export function prepareStudyAnswerPlan(question:string,context:DocumentAnswerContext){
  const prepared=prepareDocumentAnswer(question,context),allowedSourceIds=[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
   ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
- const input={...prepared.input,method:STUDY_ANSWER_PLAN_METHOD,allowedSourceIds,
+ const method=context.completeSourceProof?{retrieval:'selected-complete-initial-v1',manifestSha256:context.completeSourceProof.manifest.manifestSha256,
+  scope:'selected-source-only',questionCoverage:'unassessed',supplementalQueriesExecuted:0}:STUDY_ANSWER_PLAN_METHOD;
+ const input={...prepared.input,method,allowedSourceIds,
   sourceIdNamespace:'Only selectable q: quote-unit IDs and actual iN images are sourceIds. eN/supportId are metadata only.'};
  return {prepared,input,bindingSha256:sha(JSON.stringify({version:STUDY_ANSWER_PLAN_VERSION,inputFingerprint:prepared.fingerprint,
-  method:STUDY_ANSWER_PLAN_METHOD,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256}))};
+  method,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256}))};
 }
 
 /** A plan is a fallible proposal, not canonical data or an answer verdict. */
