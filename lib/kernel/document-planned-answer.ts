@@ -138,6 +138,8 @@ function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlann
  const body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'medium',maxOutputTokens:4000});
  body.input[0].content+=' The complete original question, question-contract aspects and requested scope must all remain in force; the contract itself is fallible. '+
   'Answer every requested aspect and comparison family using all actual final quote units and images; planning provenance hashes are traceability metadata, not evidence of coverage. '+
+  'Match the granularity actually requested: a positive existence answer can be supported by one explicit witness with the same requested subject and relation; do not require an exhaustive inventory or exact quantities unless asked. '+
+  'Failure to retrieve such a witness does not establish a negative answer. '+
   'Keep every material action, its direction, negation, affected object and population qualifiers faithful to the cited source. '+
   'Preserve the source-stated counted object, unit, processing stage and qualifications in each quantity. Keep executed comparison settings, proposed methods, prior work and future work distinct. '+
   'Answer every requested parallel subject/configuration and preserve same-context genuine conflicts; do not substitute a subset for an explicit total. '+
