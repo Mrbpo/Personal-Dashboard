@@ -19,8 +19,11 @@ export type DocumentImageInput={captionEvidenceId:string;originalReference:strin
 export type DocumentImageEvidence={attachmentId:string;assetId:string;captionEvidenceId:string;source:DocumentContextSource;
  mime:'image/png';sha256:string;byteLength:number;width:number;height:number;originalReference:string;
  provenance:DocumentImageProvenance;bytes:Uint8Array};
+export type FlatTextStructureProvenance={method:'flat-persisted-text-v1';manifestSha256:string;
+ originalHierarchyVerified:false;originalFileCompletenessVerified:false};
 export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
  source:DocumentContextSource;manifestSha256:string;firstAnchorRank:number;anchorRanks:number[];
+ structureProvenance?:FlatTextStructureProvenance;
  headingMetadata?:{text:string;originalSourceHash:string};status:'available'|'unavailable-size-exceeds-8192';
  sourceNodeCount:number;sourceBodyCodepoints:number;nodeManifest:Array<{evidenceId:string;locator:string;bodySha256:string}>;nodes:DocumentEvidenceNode[]};
 export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:Array<DocumentImageEvidence|PdfVisualImageEvidence>;
@@ -61,14 +64,15 @@ const isSha=(value:string)=>/^[a-f0-9]{64}$/.test(value);
 const bounded=(value:unknown,max=4000):value is string=>typeof value==='string'&&value.length>0&&value.length<=max;
 
 type SourceRow={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId:string;
- rawSourceHash:string;name:string;origin:string;originKey:string;parserVersion:string;mime:string};
+ rawSourceHash:string;name:string;origin:string;originKey:string;parserVersion:string;mime:string;extractionMethod:string|null};
 type PageRow={page_number:number;evidence_id:string;locator:string;body:string};
 async function currentSource(db:Queryable,owner:string,source:DocumentContextSource,lock=false):Promise<SourceRow>{
  if(!bounded(owner)||!source||![source.documentId,source.currentVersionId,source.sourceVersionId,source.sourceHash].every(value=>bounded(value)))
   invalid('Complete expected source identity is required');
  const result=await db.query<SourceRow>(`SELECT d.id "documentId",d.current_version_id "currentVersionId",
  v.source_version_id "sourceVersionId",d.source_hash "sourceHash",coalesce(d.course_id,'') "courseId",
- s.raw_sha256 "rawSourceHash",d.name,d.origin,d.origin_key "originKey",v.parser_version "parserVersion",s.raw_value->>'mime' mime
+ s.raw_sha256 "rawSourceHash",d.name,d.origin,d.origin_key "originKey",v.parser_version "parserVersion",s.raw_value->>'mime' mime,
+ s.raw_value->>'extractionMethod' "extractionMethod"
  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
  JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
  WHERE d.owner_id=$1 AND d.id=$2 AND d.current_version_id=$3 AND v.source_version_id=$4 AND d.source_hash=$5
@@ -134,15 +138,26 @@ export async function registerDocumentStructure(db:Queryable,owner:string,source
  if(existing?.manifest_sha256!==sha)throw new DocumentContextError('DOCUMENT_STRUCTURE_CONFLICT','Current source structure is immutable');
  await currentSource(db,owner,identity(current));return {source:identity(current),manifestSha256:sha};
 }
-async function structuredSource(db:Queryable,owner:string,source:DocumentContextSource){
+async function structuredSource(db:Queryable,owner:string,source:DocumentContextSource,allowFlatPersistedText=false){
  const current=await currentSource(db,owner,source),pages=await sourcePages(db,current);
  const record=(await db.query<{manifest:DocumentStructureInput;manifest_sha256:string;raw_source_hash:string}>(`SELECT manifest,manifest_sha256,raw_source_hash
  FROM document_structures WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3`,
  [current.currentVersionId,current.sourceVersionId,current.sourceHash])).rows[0];
- if(!record)throw new DocumentContextError('DOCUMENT_STRUCTURE_UNAVAILABLE','Current source has no verified hierarchy');
- if(hash(canonical(record.manifest))!==record.manifest_sha256||record.raw_source_hash!==record.manifest.rawSourceHash)changed();
- try{validateStructure(record.manifest,current,pages);}catch{changed();}
- return {current,structure:record.manifest,manifestSha256:record.manifest_sha256,nodes:pages.map((page,index)=>evidenceNode(current,page,record.manifest.nodes[index]))};
+ const declaration=`${current.parserVersion} ${current.extractionMethod??''}`;
+ const flat=!record&&allowFlatPersistedText&&current.mime==='text/plain'&&
+  /(?:^|[^a-z])(?:text|plain|plaintext|json)(?:[^a-z]|$)/iu.test(declaration)&&
+  !/pdf|docling|ocr|vision|visual|formula|layout/iu.test(declaration);
+ if(!record&&!flat)throw new DocumentContextError('DOCUMENT_STRUCTURE_UNAVAILABLE','Current source has no verified hierarchy');
+ if(record&&(hash(canonical(record.manifest))!==record.manifest_sha256||record.raw_source_hash!==record.manifest.rawSourceHash))changed();
+ // A flat manifest describes only current persisted text nodes, never author
+ // sections, geometry or complete original-file extraction. It is not stored.
+ const structure:DocumentStructureInput=record?.manifest??{rawSourceHash:current.rawSourceHash,parserVersion:'flat-persisted-text-v1',parents:[],
+  nodes:pages.map((page,index)=>({evidenceId:page.evidence_id,locator:page.locator,ordinal:index,kind:'paragraph',bodySha256:hash(page.body)}))};
+ try{validateStructure(structure,current,pages);}catch{changed();}
+ const manifestSha256=record?.manifest_sha256??hash(canonical(structure));
+ const structureProvenance:FlatTextStructureProvenance|undefined=flat?{method:'flat-persisted-text-v1',manifestSha256,
+  originalHierarchyVerified:false,originalFileCompletenessVerified:false}:undefined;
+ return {current,structure,manifestSha256,structureProvenance,nodes:pages.map((page,index)=>evidenceNode(current,page,structure.nodes[index]))};
 }
 export async function readDocumentOutline(db:Queryable,owner:string,source:DocumentContextSource){
  const data=await structuredSource(db,owner,source);await currentSource(db,owner,identity(data.current));
@@ -250,7 +265,7 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
     [anchor.document_id,owner,anchor.source_version_id,anchor.source_hash])).rows[0]?.version_id;
    if(!version)changed();
    data=await structuredSource(db,owner,{documentId:anchor.document_id,currentVersionId:version,sourceVersionId:anchor.source_version_id,
-    sourceHash:anchor.source_hash,courseId:anchor.course_id});loaded.set(anchor.document_id,data);
+    sourceHash:anchor.source_hash,courseId:anchor.course_id},true);loaded.set(anchor.document_id,data);
   }
   const node=data.nodes.find(node=>node.evidenceId===anchor.evidence_id)??changed();
   if(node.sourceVersionId!==anchor.source_version_id||node.sourceHash!==anchor.source_hash||node.locator!==anchor.locator
@@ -264,6 +279,7 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
   const belongs=(candidate:DocumentEvidenceNode)=>{let next=candidate.parentId;while(next){if(next===parent?.id)return true;next=data!.structure.parents.find(row=>row.id===next)?.parentId;}return false;};
   const nodes=parent?data.nodes.filter(belongs):[node],points=nodes.reduce((sum,item)=>sum+Array.from(item.body).length,0);
   parents.set(key,{parentId:key,kind:parent?'section':'single-node',source:identity(data.current),manifestSha256:data.manifestSha256,
+   ...(data.structureProvenance?{structureProvenance:data.structureProvenance}:{}),
    firstAnchorRank:anchorIndex+1,anchorRanks:[anchorIndex+1],...(parent?{headingMetadata:{text:parent.heading,originalSourceHash:node.sourceHash}}:{}),
    status:points<=8192?'available':'unavailable-size-exceeds-8192',sourceNodeCount:nodes.length,sourceBodyCodepoints:points,
    nodeManifest:nodes.map(node=>({evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256})),nodes:points<=8192?nodes:[]});
