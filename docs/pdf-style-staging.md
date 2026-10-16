@@ -121,3 +121,45 @@ source identity, source-versus-math ambiguity, real box/size use, reversible
 wrappers, continuous style transitions and an unknown/generated gap. TypeScript
 checking passed. The pure tool is implemented; its final CI is reported on PR140.
 No candidate was applied, no service was deployed, and production was not switched.
+
+### Derived geometry sidecar
+
+`stagePdfCharacterGeometry(plan, stage, evidence)` is a pure companion to the
+existing character stage. It reuses its exact plan/stage/character validators,
+source/page/PNG/frame bindings and existing prose anchors. No application path
+invokes it automatically. It never rewrites the staged text, LaTeX, glyphs or
+style selections.
+
+An available existing Docling layout takes priority and is retained unchanged;
+its source tuple, manifest and page frame must match. Otherwise the explicit
+no-layout path preserves actual native rows/segments, original char indices,
+point and actual-PNG boxes, font-matrix observations and uniquely matched
+candidate UTF16 spans. Repeated/untrusted text keeps coordinates without a text
+association. Interleaved native order that crosses a spatial segment retains only
+that segment's actual ink indices and cannot acquire a text association. Adjacent
+rows with aligned multi-column starts may form an unlabeled
+grid. No author heading level, cell role or logical reading order is inferred.
+
+The first mathematical subset associates an existing `iint`/`oiint` expression
+with one Latin-letter lower field only when existing unique prose anchors bracket
+one observed native integral pair and exactly one smaller matching character is
+geometrically below it. Unknown custom-font glyphs remain unknown. This is not a
+formula AST, decoded closed-loop proof or rendered-math verification.
+
+All dimensions come from the bound frame and PNG metadata. If native coordinates
+refer to an original PDF but the authoritative document is a separately prepared
+page input, the original page-map JSON bytes must match the existing expected
+hash and agree on both PDF hashes/physical pages, actual PNG, dimensions and
+frame. Both identities and the map hash remain in the sidecar. Such a declared
+artifact mapping is **not** independent proof that two PDF byte streams have the
+same original content; `sourceProven=false` remains mandatory.
+
+The one exposed physics page has an actual `ai-visual-page-transcription` body
+and registered original PNG with `layoutStatus=unavailable`, so it uses this
+derived fallback. The unchanged v3.3 staged body retains its existing hash.
+Observed coordinates associate the three-position header, 3-by-2 reading list,
+four body-title size observations, two footer positions and three integral lower
+fields. Two integral expressions are centered displays; the third is inline.
+These are derived geometry observations, not a whole-page fidelity pass: author
+semantics, exact mathematical glyph rendering, upright `enc` and the two inherited
+dash differences remain unresolved. No old source, result or score is replaced.

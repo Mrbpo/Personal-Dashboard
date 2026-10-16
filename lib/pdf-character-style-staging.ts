@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {nativeHintCanonical} from './pdf-native-hints.ts';
 import {preparePdfStyleSelection,type PdfStyleInput} from './pdf-source-style-staging.ts';
 import {visualMathStructureIssue} from './pdf-visual-structure.ts';
+import type {DoclingVisualLayout} from './kernel/docling-result.ts';
 
 const policy='pdf-character-style-staging-v3.3';
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
@@ -264,3 +265,119 @@ export function stagePdfCharacterStyles(plan:PdfCharacterStylePlan,value:unknown
   warning:'Only owned positive wrappers; char decoding, style observations and alignment remain fallible. Upright scripts are not repaired.'};
 }
 export function validatePdfCharacterStyleStage(plan:PdfCharacterStylePlan,stage:Stage){if(!same(stage,stagePdfCharacterStyles(plan,stage.selection)))throw Error('Not the exact reversible character style stage');}
+
+export type PdfCharacterGeometryEvidence={existingLayout:{source:{rawPdfSha256:string;physicalPage:number;pngSha256:string};
+ manifestSha256:string|null;layout:DoclingVisualLayout|null};pageMapRawJson?:string};
+type GeometryCandidate={baselineStart:number;baselineEnd:number;startUtf16:number;endUtf16:number;text:string;sha256:string};
+type GeometryChar={record:Character;box:Box;scale:number;textEligible:boolean};
+
+/** Pure derived coordinates for the existing stage. No PDF/IO/model call, text
+ * replacement, author heading/table semantics or mathematical glyph decoding. */
+export function stagePdfCharacterGeometry(plan:PdfCharacterStylePlan,stage:Stage,evidence:PdfCharacterGeometryEvidence){
+ validatePdfCharacterStyleStage(plan,stage);const {sidecar,binding}=readCharacters(plan.input),h=plan.input.nativeHints.sidecar,
+  source=plan.input.baselineSource,frame=h.binding.frame!,width=h.coordinateSystem!.width,height=h.coordinateSystem!.height,
+  layout=structuredClone(evidence.existingLayout),nativeSource=h.binding;
+ if(!finite(width)||!finite(height)||width<=0||height<=0||!Number.isInteger(nativeSource.png.width)||!Number.isInteger(nativeSource.png.height)||
+  nativeSource.png.width<=0||nativeSource.png.height<=0||h.coordinateSystem!.origin!=='top-left'||h.coordinateSystem!.unit!=='point-at-zoom-1'||
+  h.coordinateSystem!.pngScaleX!==nativeSource.png.width/width||h.coordinateSystem!.pngScaleY!==nativeSource.png.height/height||
+  !same(frame.cropBox,{x:0,y:0,width,height}))throw Error('Geometry point/pixel frame differs');
+ if(!layout||layout.source?.rawPdfSha256!==source.rawPdfSha256||layout.source?.physicalPage!==source.physicalPage||layout.source?.pngSha256!==source.pngSha256||
+  layout.manifestSha256!==null&&!isSha(layout.manifestSha256))throw Error('Existing layout source binding differs');
+ let pageMapSha256:string|null=null;
+ if(nativeSource.sourcePdfSha256!==source.rawPdfSha256||nativeSource.physicalPage!==source.physicalPage){
+  const raw=evidence.pageMapRawJson;if(typeof raw!=='string'||Buffer.byteLength(raw)>1024*1024||!source.pageMap||sha(raw)!==source.pageMap.sha256)
+   throw Error('Cross-source geometry requires the original hash-bound page map');
+  const map=JSON.parse(raw),images=map.visual?.images;
+  if(map.source?.sourceHash!==source.rawPdfSha256||map.upstreamPdfSha256!==nativeSource.sourcePdfSha256||
+   map.upstreamPhysicalPage!==nativeSource.physicalPage||map.authorityPhysicalPage!==source.physicalPage||!Array.isArray(images)||
+   map.visual.manifestSha256!==layout.manifestSha256||map.visual.layoutStatus!==(layout.layout?.status??'unavailable'))throw Error('Declared source/input page mapping differs');
+  const actual=images.filter(i=>i.kind==='pdf-page'&&i.physicalPage===source.physicalPage&&i.sha256===source.pngSha256);
+  if(actual.length!==1||actual[0].width!==nativeSource.png.width||actual[0].height!==nativeSource.png.height||
+   actual[0].provenance?.rawPdfSha256!==source.rawPdfSha256||actual[0].provenance.pageRenderSha256!==source.pngSha256||
+   actual[0].provenance.rotation!==0||!same(actual[0].provenance.sourcePageCropBox,frame.cropBox)||
+   !same(actual[0].provenance.pageSizePoints,{width,height}))throw Error('Declared page-map PNG/frame differs');
+  pageMapSha256=sha(raw);
+ }
+ const sealGeometry=<T extends object>(value:T)=>{const result={policy:'pdf-character-geometry-staging-v1' as const,
+  binding:{stylePlanSha256:plan.planSha256,styleStageSha256:sha(nativeHintCanonical(stage)),baselineSha256:stage.baselineSha256,
+   candidateTextSha256:stage.derivedTextSha256,...binding,nativeSourcePdfSha256:nativeSource.sourcePdfSha256,nativePhysicalPage:nativeSource.physicalPage,
+   authorityPdfSha256:source.rawPdfSha256,authorityPhysicalPage:source.physicalPage,png:nativeSource.png,frame,pageMapSha256,
+   pageMapping:pageMapSha256?'declared-artifact-mapping-not-independent-PDF-proof':'same-source-page',existingLayoutManifestSha256:layout.manifestSha256},
+  ...value,sourceProven:false as const,alignmentVerification:'unverified' as const,requiresManualReview:true as const,notForApplyPageRepair:true as const,
+  textModified:false as const,authorHeadingLevels:null,authorTableSemantics:null};
+  const sealed={...result,geometrySha256:sha(nativeHintCanonical(result))};freeze(sealed);return sealed;};
+ if(layout.layout?.status==='available'){
+  if(!isSha(layout.manifestSha256))throw Error('Existing Docling layout requires its source manifest');
+  const page=layout.layout.pageSizes.filter(p=>p.pageNumber===source.physicalPage);
+  if(page.length!==1||page[0].width!==width||page[0].height!==height)throw Error('Existing Docling layout frame differs');
+  return sealGeometry({basis:'existing-docling-layout' as const,existingLayout:layout.layout,existingLayoutSha256:sha(nativeHintCanonical(layout.layout)),
+   lines:[],grids:[],mathLinks:[],unknown:['Existing parser layout is retained unchanged; no author roles or complete geometry are inferred.']});
+ }
+ if(layout.layout!==null&&layout.layout.status!=='unavailable')throw Error('Unknown existing layout state');
+ // Keep actual source boxes, including untrusted/undecoded glyph positions. Only
+ // conservative ordinary text may acquire a candidate-text association.
+ const chars:GeometryChar[]=sidecar.characters.flatMap(c=>{
+  const b=c.bbox,m=c.matrix;if(c.isGenerated!==false||!b||b.length!==4||!b.every(finite)||!m||m.length!==6||!m.every(finite)||
+   !c.origin||c.origin.length!==2||!c.origin.every(finite)||!finite(c.fontSize)||c.fontSize<=0)return [];
+  const box={left:b[0],top:height-b[3],width:b[2]-b[0],height:b[3]-b[1]},scale=c.fontSize*Math.hypot(m[2],m[3]);
+  if(!validBox(box)||scale<=0)return [];
+  return [{record:c,box,scale,textEligible:decoded(c)&&c.hasUnicodeMapError===false&&Boolean(c.fontInfo)&&!unsafeFont(c.fontInfo!.reportedName)&&
+   m[1]===0&&m[2]===0&&!/[\u0000-\u001f\u007f-\u009f]/u.test(c.unicode!)}];
+ });
+ const ink=(c:GeometryChar)=>c.record.unicode===null||Boolean(c.record.unicode.trim()),
+  geoBox=(cs:GeometryChar[])=>union(cs.map(c=>({record:c.record as DecodedCharacter,box:c.box,scale:c.scale}))),
+  pixels=(box:Box)=>({left:box.left*nativeSource.png.width/width,top:box.top*nativeSource.png.height/height,
+   width:box.width*nativeSource.png.width/width,height:box.height*nativeSource.png.height/height});
+ const rows=new Map<number,GeometryChar[]>();for(const c of chars){const key=Math.round((height-c.record.origin![1])*1000)/1000;
+  const row=rows.get(key)||[];row.push(c);rows.set(key,row);}
+ const rawLines=[...rows.entries()].sort(([a],[b])=>a-b).map(([baselineTop,cs])=>{
+  const groups:GeometryChar[][]=[];for(const c of cs.filter(ink).sort((a,b)=>a.box.left-b.box.left)){
+   const last=groups.at(-1);if(!last||c.box.left-Math.max(...last.map(p=>p.box.left+p.box.width))>.8*c.scale)groups.push([c]);else last.push(c);}
+  return {baselineTop,segments:groups.map(g=>{const low=Math.min(...g.map(c=>c.record.charIndex)),high=Math.max(...g.map(c=>c.record.charIndex)),
+   ranged=cs.filter(c=>c.record.charIndex>=low&&c.record.charIndex<=high),indices=new Set(g.map(c=>c.record.charIndex)),rangedInk=ranged.filter(ink),
+   consistent=rangedInk.length===g.length&&rangedInk.every(c=>indices.has(c.record.charIndex)),
+   members=(consistent?ranged:[...g]).sort((a,b)=>a.record.charIndex-b.record.charIndex);
+   return {members,box:geoBox(g),text:consistent&&members.every(c=>c.textEligible)?members.map(c=>c.record.unicode).join('').trim():null};})};
+ });
+ const inserted=new Set<number>();for(const i of stage.insertions)for(let n=i.start;n<i.end;n++)inserted.add(n);
+ const candidateOffsets:number[]=[];for(let i=0;i<stage.text.length;i++)if(!inserted.has(i))candidateOffsets.push(i);
+ const candidate=(start:number,end:number):GeometryCandidate=>{const a=candidateOffsets[start],b=candidateOffsets[end-1]+1,text=stage.text.slice(a,b);
+  return {baselineStart:start,baselineEnd:end,startUtf16:a,endUtf16:b,text,sha256:sha(text)};};
+ const prose=proseRanges(plan.input.baselineText),textLines=[...plan.input.baselineText.matchAll(/[^\r\n]+/gu)];
+ const segments=rawLines.flatMap(l=>l.segments),match=(text:string|null)=>{
+  if(!text||segments.filter(s=>s.text!==null&&canonicalText(s.text).value===canonicalText(text).value).length!==1)return null;
+  const lines=textLines.filter(m=>canonicalText(m[0].trim()).value===canonicalText(text).value);
+  if(lines.length===1){const start=lines[0].index!+lines[0][0].search(/\S/u);return candidate(start,start+lines[0][0].trim().length);}
+  const found=occurrences(plan.input.baselineText,text,prose);return found.length===1?candidate(found[0].start,found[0].end):null;
+ };
+ const lines=rawLines.map((l,lineIndex)=>({lineIndex,baselineTop:l.baselineTop,segments:l.segments.map(s=>({charIndices:s.members.map(c=>c.record.charIndex),
+  box:s.box,pngBox:pixels(s.box),candidate:match(s.text),fontObservations:[...new Set(s.members.map(c=>nativeHintCanonical({reportedName:c.record.fontInfo?.reportedName??null,
+   weight:c.record.fontWeight,matrixScalePt:c.scale})))].map(v=>JSON.parse(v) as {reportedName:string|null;weight:number|null;matrixScalePt:number}),
+  untrustedCharacterCount:s.members.filter(c=>!c.textEligible).length}))}));
+ const scales=chars.filter(c=>ink(c)&&c.textEligible).map(c=>c.scale),normalScale=scales.length?median(scales):null,grids:Array<{lineIndices:number[];columns:number}>=[];
+ if(normalScale){for(const line of lines.filter(l=>l.segments.length>=2&&l.segments.every(s=>s.candidate))){const previous=grids.at(-1),last=previous?lines[previous.lineIndices.at(-1)!]:null;
+   if(last&&last.segments.length===line.segments.length&&line.baselineTop-last.baselineTop>0&&line.baselineTop-last.baselineTop<2*normalScale&&
+    line.segments.every((s,i)=>Math.abs(s.box.left-last.segments[i].box.left)<.2*normalScale))previous!.lineIndices.push(line.lineIndex);
+   else grids.push({lineIndices:[line.lineIndex],columns:line.segments.length});}}
+ const mathLinks=[],math=mathRanges(plan.input.baselineText),endpoint=(a:Anchor,last:boolean)=>{const ids=a.charIndices.filter(i=>sidecar.characters[i].unicode?.trim());return last?ids.at(-1)!:ids[0];};
+ for(const range of math){const operators=[...range.body.matchAll(/\\(?:oiint|iint)\s*_\s*(?:\{([A-Za-z])\}|([A-Za-z]))/g)];if(operators.length!==1)continue;
+  const left=plan.anchors.filter(a=>a.baselineEnd<=range.start).sort((a,b)=>b.baselineEnd-a.baselineEnd),right=plan.anchors.filter(a=>a.baselineStart>=range.end).sort((a,b)=>a.baselineStart-b.baselineStart),l=left[0],r=right[0];
+  if(!l||!r||endpoint(l,true)>=endpoint(r,false)||left.some(a=>a.baselineEnd===l.baselineEnd&&endpoint(a,true)!==endpoint(l,true))||
+   right.some(a=>a.baselineStart===r.baselineStart&&endpoint(a,false)!==endpoint(r,false)))continue;
+  const interval=chars.filter(c=>c.record.charIndex>endpoint(l,true)&&c.record.charIndex<endpoint(r,false)),integrals=interval.filter(c=>c.record.unicode==='∫'&&c.record.hasUnicodeMapError===false);
+  if(integrals.length!==2||Math.abs(integrals[0].record.origin![1]-integrals[1].record.origin![1])>.05*integrals[0].scale)continue;
+  const operatorBox=geoBox(integrals),lower=operators[0][1]||operators[0][2],bottom=height-Math.min(...integrals.map(c=>c.record.origin![1])),
+   below=interval.filter(c=>c.textEligible&&c.record.unicode===lower&&c.scale<.6*median(integrals.map(i=>i.scale))&&
+    height-c.record.origin![1]>bottom&&height-c.record.origin![1]-bottom<2*median(integrals.map(i=>i.scale))&&
+    Math.abs(c.box.left+c.box.width/2-operatorBox.left-operatorBox.width/2)<median(integrals.map(i=>i.scale)));
+  if(below.length!==1)continue;
+  mathLinks.push({candidate:candidate(range.start,range.end),leftAnchorId:l.id,rightAnchorId:r.id,nativeCharInterval:[endpoint(l,true)+1,endpoint(r,false)],
+   operator:{charIndices:integrals.map(c=>c.record.charIndex),box:operatorBox,pngBox:pixels(operatorBox),identity:'native-decoded-integral-hint-unverified'},
+   lowerLimit:{charIndex:below[0].record.charIndex,existingText:lower,box:below[0].box,pngBox:pixels(below[0].box),matrixScalePt:below[0].scale,
+    baselineOffsetPt:height-below[0].record.origin![1]-bottom},glyphSemanticsVerified:false});
+ }
+ return sealGeometry({basis:'derived-native-geometry' as const,existingLayout:null,lines,grids:grids.filter(g=>g.lineIndices.length>=2),mathLinks,
+  metadataCoverage:{sourceCharacterRecords:sidecar.characters.length,locatedCharacterRecords:chars.length,untrustedTextRecords:chars.filter(c=>!c.textEligible).length},
+  unknown:['No author heading levels, table-cell roles or page reading order inferred.','Unknown/custom native glyphs retain geometry only; they never replace OCR or LaTeX.',
+   'Math subset: one iint/oiint with one Latin-letter lower field and one observed integral pair; no formula AST or rendered-glyph certification.']});
+}

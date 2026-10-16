@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {nativeHintCanonical} from '../lib/pdf-native-hints.ts';
 import {preparePdfCharacterStyles,buildPdfCharacterStyles,stagePdfCharacterStyles,validatePdfCharacterStyleStage,validatePdfCharacterStyleSelection,
- type PdfCharacterStyleInput} from '../lib/pdf-character-style-staging.ts';
+ stagePdfCharacterGeometry,type PdfCharacterStyleInput,type PdfCharacterGeometryEvidence} from '../lib/pdf-character-style-staging.ts';
 
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 type Run={text:string;left:number;top:number;style?:'bold'|'italic';small?:boolean;width?:number};
@@ -116,4 +116,64 @@ test('consecutive native word windows cross real style transitions but never an 
   characters[marker-1].isGenerated=true;});
  const rejected=preparePdfCharacterStyles(gap);
  assert.equal(rejected.allowedPairs.filter(p=>rejected.textSpans.find(t=>t.id===p.textSpanId)!.kind==='math-leaf').length,0,'a discontinuous source cannot move the prose boundary');
+});
+
+test('derived geometry preserves actual lines, unique UTF16 associations, grids, font sizes and a bounded integral lower relation',()=>{
+ const input=fixture('Header left\nHeader center\nHeader right\nRow one label    Row one value\nRow two label    Row two value\nBefore math relation\n\\[\\iint_T x\\]\nAfter math relation\nFooter left\nFooter right',[
+  {text:'Header left',left:0,top:0,style:'bold'},{text:'Header center',left:70,top:0,style:'bold'},{text:'Header right',left:140,top:0,style:'bold'},
+  {text:'Row one label',left:0,top:20},{text:'Row one value',left:100,top:20},{text:'Row two label',left:0,top:40},{text:'Row two value',left:100,top:40},
+  {text:'Before math relation',left:0,top:60},{text:'∫∫',left:60,top:85},{text:'T',left:61,top:100,small:true},{text:'After math relation',left:0,top:125},
+  {text:'Footer left',left:0,top:170},{text:'Footer right',left:140,top:170}]);
+ input.nativeHints.sidecar.binding.png.width=400;input.nativeHints.sidecar.binding.png.height=600;
+ input.nativeHints.sidecar.coordinateSystem!.pngScaleX=2;input.nativeHints.sidecar.coordinateSystem!.pngScaleY=3;
+ input.nativeHints.sidecarSha256=sha(nativeHintCanonical(input.nativeHints.sidecar));
+ const plan=preparePdfCharacterStyles(input),stage=stagePdfCharacterStyles(plan,{pairs:[]}),geometry=stagePdfCharacterGeometry(plan,stage,
+  {existingLayout:{source:input.baselineSource,manifestSha256:null,layout:null}});
+ if(!('lines' in geometry)||!('grids' in geometry)||!('mathLinks' in geometry))throw Error('Missing geometry');
+ assert.equal(geometry.basis,'derived-native-geometry');assert.equal(geometry.lines[0].segments.length,3);
+ const first=geometry.lines[0].segments[0];assert.equal(first.pngBox.width,first.box.width*2);assert.equal(first.pngBox.height,first.box.height*3);
+ assert.equal(first.candidate?.text,'Header left');assert.equal(first.fontObservations[0].matrixScalePt,12);
+ assert.equal(geometry.grids.length,1);assert.equal(geometry.grids[0].lineIndices.length,2);assert.equal(geometry.grids[0].columns,2);
+ assert.equal(geometry.mathLinks.length,1);assert.equal(geometry.mathLinks[0].lowerLimit.existingText,'T');assert.equal(geometry.mathLinks[0].lowerLimit.matrixScalePt,6);
+ assert.equal(geometry.authorHeadingLevels,null);assert.equal(geometry.authorTableSemantics,null);assert.equal(geometry.textModified,false);assert.equal(stage.text,input.baselineText);
+ assert.equal(geometry.sourceProven,false);assert.equal(geometry.notForApplyPageRepair,true);assert.equal(geometry.requiresManualReview,true);
+});
+
+test('geometry refuses ambiguous text, stale layout/source/frame and unbound cross-source maps, while preferring a bound existing layout',()=>{
+ const input=fixture('Repeated cell\nRepeated cell',[{text:'Repeated cell',left:0,top:0},{text:'Repeated cell',left:0,top:20}]),
+  plan=preparePdfCharacterStyles(input),stage=stagePdfCharacterStyles(plan,{pairs:[]}),evidence:PdfCharacterGeometryEvidence={existingLayout:{source:input.baselineSource,manifestSha256:null,layout:null}};
+ const geometry=stagePdfCharacterGeometry(plan,stage,evidence);if(!('lines' in geometry))throw Error('Missing geometry');
+ assert.ok(geometry.lines.every(l=>l.segments.every(s=>s.candidate===null)));
+ assert.throws(()=>stagePdfCharacterGeometry(plan,stage,{existingLayout:{...evidence.existingLayout,source:{...input.baselineSource,pngSha256:'e'.repeat(64)}}}),/binding/);
+ const native={status:'available' as const,regions:[],pageSizes:[{pageNumber:1,width:200,height:200}]},preferred=stagePdfCharacterGeometry(plan,stage,
+  {existingLayout:{...evidence.existingLayout,manifestSha256:'f'.repeat(64),layout:native}});
+ assert.equal(preferred.basis,'existing-docling-layout');assert.deepEqual(preferred.existingLayout,native);assert.deepEqual(preferred.lines,[]);
+ assert.throws(()=>stagePdfCharacterGeometry(plan,stage,{existingLayout:{...evidence.existingLayout,layout:native}}),/manifest/);
+ assert.throws(()=>stagePdfCharacterGeometry(plan,stage,{existingLayout:{...evidence.existingLayout,manifestSha256:'f'.repeat(64),layout:{...native,pageSizes:[{pageNumber:1,width:201,height:200}]}}}),/frame/);
+ const rotated=structuredClone(input);rotated.nativeHints.sidecar.binding.frame!.rotationDegrees=90;rotated.nativeHints.sidecarSha256=sha(nativeHintCanonical(rotated.nativeHints.sidecar));
+ assert.throws(()=>preparePdfCharacterStyles(rotated),/frame/);
+ const scaled=structuredClone(input);scaled.nativeHints.sidecar.coordinateSystem!.pngScaleX=2;scaled.nativeHints.sidecarSha256=sha(nativeHintCanonical(scaled.nativeHints.sidecar));
+ const sp=preparePdfCharacterStyles(scaled),ss=stagePdfCharacterStyles(sp,{pairs:[]});assert.throws(()=>stagePdfCharacterGeometry(sp,ss,evidence),/frame/);
+ const unknown=structuredClone(input);mutateCharacters(unknown,e=>{e.sidecar.characters[0].unicode=null;e.sidecar.characters[0].unicodeCodepoint=null;});
+ const up=preparePdfCharacterStyles(unknown),us=stagePdfCharacterStyles(up,{pairs:[]}),unmapped=stagePdfCharacterGeometry(up,us,evidence);
+ assert.ok(unmapped.lines.some(l=>l.segments.some(s=>s.untrustedCharacterCount>0&&s.candidate===null)));
+ const interleaved=fixture('Left column\nRight column',[{text:'Left column',left:0,top:0},{text:'Right column',left:100,top:0}]);
+ mutateCharacters(interleaved,e=>{const left=e.sidecar.characters.filter((c:any)=>c.bbox[0]<50),right=e.sidecar.characters.filter((c:any)=>c.bbox[0]>=50);
+  e.sidecar.characters=Array.from({length:Math.max(left.length,right.length)},(_,i)=>[left[i],right[i]]).flat().filter(Boolean).map((c:any,i)=>({...c,charIndex:i}));});
+ const ip=preparePdfCharacterStyles(interleaved),is=stagePdfCharacterStyles(ip,{pairs:[]}),ig=stagePdfCharacterGeometry(ip,is,evidence),
+  interleavedChars=JSON.parse(interleaved.characterSidecar.rawJson).sidecar.characters;
+ assert.equal(ig.lines[0].segments.length,2);
+ for(const segment of ig.lines[0].segments){assert.equal(segment.candidate,null,'interleaved source order cannot associate text across spatial columns');
+  assert.deepEqual(segment.charIndices,interleavedChars.filter((c:any)=>(c.bbox[0]<50)===(segment.box.left<50)&&c.unicode.trim()).map((c:any)=>c.charIndex));}
+ const cross=structuredClone(input);cross.baselineSource.rawPdfSha256='e'.repeat(64);
+ const map={source:{sourceHash:cross.baselineSource.rawPdfSha256},upstreamPdfSha256:input.baselineSource.rawPdfSha256,upstreamPhysicalPage:1,authorityPhysicalPage:1,
+  visual:{layoutStatus:'unavailable',manifestSha256:'f'.repeat(64),images:[{kind:'pdf-page',physicalPage:1,sha256:input.baselineSource.pngSha256,width:200,height:200,
+   provenance:{rawPdfSha256:cross.baselineSource.rawPdfSha256,pageRenderSha256:input.baselineSource.pngSha256,rotation:0,sourcePageCropBox:input.nativeHints.sidecar.binding.frame!.cropBox,pageSizePoints:{width:200,height:200}}}]}},
+  raw=JSON.stringify(map);cross.baselineSource.pageMap={reference:'stored-original-page-map',sha256:sha(raw)};
+ const cp=preparePdfCharacterStyles(cross),cs=stagePdfCharacterStyles(cp,{pairs:[]}),ce={existingLayout:{source:cross.baselineSource,manifestSha256:'f'.repeat(64),layout:null}};
+ assert.throws(()=>stagePdfCharacterGeometry(cp,cs,ce),/page map/);
+ assert.throws(()=>stagePdfCharacterGeometry(cp,cs,{...ce,pageMapRawJson:raw+' '}),/page map/);
+ const bound=stagePdfCharacterGeometry(cp,cs,{...ce,pageMapRawJson:raw});assert.equal(bound.binding.nativeSourcePdfSha256,input.baselineSource.rawPdfSha256);
+ assert.equal(bound.binding.authorityPdfSha256,cross.baselineSource.rawPdfSha256);assert.equal(bound.sourceProven,false);
+ assert.equal(bound.binding.pageMapping,'declared-artifact-mapping-not-independent-PDF-proof');
 });
