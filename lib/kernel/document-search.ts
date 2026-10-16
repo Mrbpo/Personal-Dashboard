@@ -49,6 +49,9 @@ export function documentSearchTerms(query:string):{normalized:string;words:strin
   const formulaQuery=/[\\^_=∫∑√]/u.test(query);
   const words=[...new Set(normalized.split(' ').filter(word=>word.length>=(formulaQuery?1:2)&&
     (formulaQuery||!queryStopWords.has(word))))].slice(0,40);
+  // A query made entirely of short variables/numbers must still reach search.
+  if(!words.length)words.push(...[...new Set(normalized.split(' ').filter(word=>
+    word.length===1&&!queryStopWords.has(word)))].slice(0,40));
   return {normalized,words};
 }
 
