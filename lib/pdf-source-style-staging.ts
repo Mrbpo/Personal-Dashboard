@@ -11,8 +11,9 @@ const greek:Record<string,string>=Object.fromEntries([
  ['μ','mu'],['ν','nu'],['ξ','xi'],['π','pi'],['ρ','rho'],['σ','sigma'],['τ','tau'],['υ','upsilon'],['φ','phi'],['χ','chi'],['ψ','psi'],['ω','omega'],
  ['Γ','Gamma'],['Δ','Delta'],['Θ','Theta'],['Λ','Lambda'],['Ξ','Xi'],['Π','Pi'],['Σ','Sigma'],['Υ','Upsilon'],['Φ','Phi'],['Ψ','Psi'],['Ω','Omega'],
  ].map(([value,name])=>[value,'\\'+name]));
-const atom=(value:string)=>/^[A-Za-z]$/.test(value)?value:greek[value]||Object.values(greek).find(command=>command===value)||null;
-const nativeAtom=(value:string)=>/^[A-Za-z]$/.test(value)?value:greek[value]||null;
+const greekValue=(value:string)=>Object.hasOwn(greek,value)?greek[value]:null;
+const atom=(value:string)=>/^[A-Za-z]$/.test(value)?value:greekValue(value)||Object.values(greek).find(command=>command===value)||null;
+const nativeAtom=(value:string)=>/^[A-Za-z]$/.test(value)?value:greekValue(value);
 const styleCommands=new Set(['\\mathbf','\\boldsymbol','\\mathit','\\mathrm','\\mathsf','\\mathtt','\\text','\\operatorname','\\tag']);
 const containers=new Map(['vec','hat','widehat','bar','overline','underline','tilde','widetilde','dot','ddot','overrightarrow','overleftarrow','sqrt']
  .map(name=>['\\'+name,1]));

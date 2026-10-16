@@ -71,8 +71,10 @@ test('unknown encoding/font, words, ambiguous math and existing styles are skipp
  assert.equal(stagePdfStyleSelection(plan,{pairs:[]}).text,input.baselineText);
  const bad=fixture();bad.nativeHints.sidecar.fonts![0].reportedFullName='Unknown-Type3-Symbol';
  assert.equal(preparePdfStyleSelection(reseal(bad)).nativeSpans.length,0);
- const word=fixture();word.nativeHints.sidecar.runs![0].observedSpans[0].text='unknown';word.nativeHints.sidecar.runs![0].text='unknown';
- assert.equal(preparePdfStyleSelection(reseal(word)).nativeSpans.some(span=>span.runIndex===0),false);
+ for(const text of ['unknown','constructor','toString']){
+  const word=fixture();word.nativeHints.sidecar.runs![0].observedSpans[0].text=text;word.nativeHints.sidecar.runs![0].text=text;
+  assert.equal(preparePdfStyleSelection(reseal(word)).nativeSpans.some(span=>span.runIndex===0),false,'ordinary words are not Greek atoms: '+text);
+ }
  const styled=preparePdfStyleSelection(fixture('\\(\\mathbf{u}+w\\)'));assert.equal(styled.textSpans.some(span=>span.text==='u'),false);
  const literal=fixture('\\(\\alpha\\)');literal.nativeHints.sidecar.runs![0].text='\\alpha';literal.nativeHints.sidecar.runs![0].observedSpans[0].text='\\alpha';
  assert.equal(preparePdfStyleSelection(reseal(literal)).nativeSpans.some(span=>span.atom==='\\alpha'),false,'printed literal TeX is not native Greek evidence');
