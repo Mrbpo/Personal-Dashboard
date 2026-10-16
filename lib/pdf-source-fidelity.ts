@@ -1,6 +1,12 @@
 import {createHash} from 'node:crypto';
 import {PDFDocument} from 'pdf-lib';
 
+/** Encoding evidence for a corrective parser input, never original quotation or full-page fidelity. */
+export type PdfSourceEncodingProof={version:'source-type1-cmap-v1';sourceHash:string;copyIndices:number[];inputHash:string;
+ patches:Array<{pageNumber:number;resourceKey:string;fontFileHash:string;code:number;glyphName:'prime'|'negationslash';
+  unicodeSource:string;beforeCmapHex:string;afterCmapHex:string;beforeCmapHash:string;afterCmapHash:string}>;
+ preserved:Array<{pageNumber:number;contentHashes:string[];fontFileHashes:string[];unmodifiedCmapHashes:string[]}>};
+
 export type SourceGlyph={symbol:string;font:string;bold:boolean|null;bbox:[number,number,number,number];subscript:string|null};
 export type SourceMathRegion={number:string;bbox:[number,number,number,number];glyphs:SourceGlyph[];
  // This proof covers only the vector bases and subscripts being changed.
