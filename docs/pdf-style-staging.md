@@ -10,4 +10,14 @@ Native positive bold/italic spans retain their actual full run boxes. Whitespace
 
 The receipt reuses derived staging fields (`rawRecognitionSha256`, `derivedTextSha256`, operations, `requiresManualReview`, `notForApplyPageRepair`) and always declares `sourceProven:false`/`alignmentVerification:unverified`. No glyph geometry or `vectorOrderVerified` is invented. Unsupported/empty selection leaves the old body unchanged. Matching IDs and passing invariants establish content preservation, not correct style placement, mathematical correctness or full-page fidelity. No automatic application is provided.
 
-This implementation performs no new paid call, PDF parsing, PostgreSQL write, calibration retry or hidden/Gold read. PR136's failed whole-page output is never used as a baseline, and old raw/scores stay untouched.
+The pure functions and focused tests perform no model call, PDF parsing, PostgreSQL write or hidden/Gold read. PR136's failed whole-page output is never used as a baseline, and old raw/scores stay untouched.
+
+## v2: bounded prose-anchor eligibility
+
+`pdf-source-style-staging-v2` retains complete native prose runs to derive double-sided anchors (4–8 normalized words, unique in the native run collection and baseline prose outside math). Actual source offsets/whole boxes, source/baseline text, match counts, interval boundaries and policy are included in the frozen plan, request data and stage receipt. Prose token comparison normalizes canonical Unicode/apostrophes and ignores punctuation/spacing; it never rewrites the old body.
+
+Whole-run geometry supplies partial-order hints, not proof of columns or logical reading order; run array index is never used as proof. Missing, overlapping or conflicting anchors decline correspondence. A same-atom math leaf must be unique inside the interval; competing native occurrences decline, and validation rejects cross-interval choices even if both IDs exist. Baseline script fields remain excluded. Native size below 0.8 of both anchor sizes is only a conservative script-like rejection, not semantic classification or glyph proof. Compound fragments retain real text offsets and original whole boxes.
+
+All three exposed-page v1 calibrations are retained separately: low/2000 was truncated; none/2000 was rejected; low/4000 produced a legal stage but failed original-image review. v2 has no new provider experiment and changes none of those outcomes. Unresolved reading order, ambiguous fragments, custom encodings and source position remain gaps; every stage stays manual-only and `sourceProven=false`.
+
+Character metadata is a possible later fallback, not enabled here. The existing Docling environment has pypdfium2/PDFium; [PDFium's native text API](https://pdfium.googlesource.com/pdfium/+/main/public/fpdf_text.h) provides character boxes/origins/font information, while [pypdfium2 documents](https://pypdfium2.readthedocs.io/en/stable/python_api.html) index translation and threading limits. Character boxes still would not certify mathematical semantics. No dependency, service or PDF parsing was added.
