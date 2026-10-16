@@ -115,6 +115,42 @@ test('the previous PDF text remains visible while the LaTeX parser reindexes',as
  assert.match(updated.pages[0]?.text||'',/\\\[E=mc\^\{2\}\\\]/u);
 });
 
+test('legacy PDF preview limits distinct pages, recognizes current Docling caches and preserves old pages only during unfinished work',async(t)=>{
+ process.env.DATABASE_URL=':memory:';
+ const backfill=process.env.PDF_FORMULA_BACKFILL;process.env.PDF_FORMULA_BACKFILL='true';
+ t.after(()=>{if(backfill===undefined)delete process.env.PDF_FORMULA_BACKFILL;else process.env.PDF_FORMULA_BACKFILL=backfill;});
+ const {database:db}=await import('../lib/database.ts'),{saveDocument,previewDocument}=await import('../lib/library.ts'),
+  {kernel}=await import('../lib/kernel/service.ts'),{DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION}=await import('../lib/kernel/docling-result.ts');
+ t.mock.method(kernel,'parsedDocument',async()=>[]); // Exercise only the SQLite historical-preview fallback.
+ const owner='preview-cache-owner',bytes=Buffer.from('%PDF-1.4 preview cache fixture'),
+  id=await saveDocument(owner,'','upload','long-cache.pdf','long-cache.pdf','application/pdf',bytes),
+  parsers=[DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,'docling-v2-search','docling-v2-text-search','pdf-page-v2'];
+ await db.batch(parsers.flatMap(parser=>Array.from({length:500},(_,page)=>
+  db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,parser,page,`${parser}: ${page+1}`))));
+ await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+ let preview=await previewDocument(owner,id);
+ assert.equal(preview.pages.length,500);assert.equal(preview.pages[499].page,500);
+ assert.equal(preview.pages[499].text,`${DOCLING_PARSER_VERSION}: 500`);
+ for(const parser of [DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,'docling-v2-text-search']){
+  const currentId=await saveDocument(owner,'','upload',parser,`${parser}.pdf`,'application/pdf',bytes);
+  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,0,?)').bind(currentId,parser,'Only cached page').run();
+  await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(currentId).run();
+  await previewDocument(owner,currentId);await previewDocument(owner,currentId);
+  const job=await db.prepare('SELECT 1 ok FROM background_jobs WHERE id=?').bind(`index:${currentId}`).first();
+  assert.equal(Boolean(job),parser==='docling-v2-text-search','Historical v2 is not current; either current v3 avoids requeue');
+ }
+ await db.prepare("UPDATE library_documents SET status='pending' WHERE id=?").bind(id).run();
+ preview=await previewDocument(owner,id);
+ assert.equal(preview.pages.length,500);assert.equal(preview.pages[499].text,'pdf-page-v2: 500');
+ await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+ for(const status of ['queued','running','failed','complete']){
+  await db.prepare('UPDATE background_jobs SET status=?,payload=? WHERE id=?').bind(status,JSON.stringify({owner,id,forcePdfFormulaReparse:true}),`index:${id}`).run();
+  preview=await previewDocument(owner,id);
+  assert.equal(preview.pages.length,500);
+  assert.equal(preview.pages[499].text,`${status==='complete'?DOCLING_PARSER_VERSION:'pdf-page-v2'}: 500`);
+ }
+});
+
 test('an incomplete legacy PDF retries even when historical backfill is disabled',async()=>{
  process.env.DATABASE_URL=':memory:';
  process.env.LOCAL_OCR='false';

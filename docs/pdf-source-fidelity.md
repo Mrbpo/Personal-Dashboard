@@ -33,3 +33,5 @@ node --experimental-strip-types scripts/audit-pdf-source-fidelity.ts --original 
 Docling 正文、表格引用和图片区域文字引用的 formula 节点共用该门；文本模式或旧 raw 缓存重读不能绕过。有完整 `orig` 时，增强字符不一致或无法核对都会保留完整原串并告警，不把它包装成已验证 LaTeX；失败的机器 `text` 仍在原始 Docling JSON。`formulaEnriched=false` 只影响 LaTeX 包装与增强状态告警，不关闭字符保护。没有 `orig` 的机器公式仍保留原来的未核验告警，不能声称来源已验证。相同字符流也不证明上下标、字体、运算优先级或数学语义正确；原抽取本身错误不会被本检查修好。
 
 公式和文本 parser 身份分别改为 `docling-v3-source-preserved-search`、`docling-v3-source-preserved-text-search`，使新的 options/cache 身份与旧结果区分。历史 PostgreSQL 版本和 raw 不回写；SQLite 旧 `docling-v2-search`／`docling-v2-text-search` 仍仅作历史预览候选，不冒认为新 parser。此改动不后台重跑 PDF、模型或整组验收。
+
+历史预览先按页选定一个缓存版本，再限制最多 1000 页，多个版本不挤掉后页。两个当前 Docling 版本均可阻止就绪文档因预览而重复排队；旧 v2 不算当前版本。未完成或显式重解析尚未结束时，仍保留原先 `pdf-page-v2` 预览优先级。

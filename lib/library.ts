@@ -57,14 +57,23 @@ export async function previewDocument(owner:string,id:string) {
       pages=persisted.map(page=>({page:page.page_number,locator:page.locator,text:page.body}));
       return {document,text,pages};
     }
-    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, ?, 'docling-v2-search', 'docling-v2-text-search', 'docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 WHEN parser=? THEN 1 WHEN parser='docling-v2-search' THEN 2 WHEN parser='docling-v2-text-search' THEN 3 WHEN parser='docling-v1' THEN 4 WHEN parser=? THEN 5 ELSE 6 END LIMIT 1000").bind(id,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
     const job=await db.prepare('SELECT status,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;payload:string}>();
     const explicitUnfinished=job&&['queued','running','failed'].includes(job.status)&&JSON.parse(job.payload).forcePdfFormulaReparse===true;
     const preserveOld=document.status!=='ready'||explicitUnfinished;
-    const best=new Map<number,{page:number;body:string;parser:string}>();
-    for(const item of parsed)if(!best.has(item.page)||(preserveOld&&item.parser==='pdf-page-v2'))best.set(item.page,item);
-    pages=[...best.values()].map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
-    const hasOld=parsed.some(item=>item.parser==='pdf-page-v2'),hasCurrent=parsed.some(item=>item.parser===PDF_PARSER_VERSION||item.parser==='docling-v1');
+    const parsed=(await db.prepare(`WITH ranked AS (
+      SELECT page,body,parser,ROW_NUMBER() OVER (PARTITION BY page ORDER BY CASE
+        WHEN ?=1 AND parser='pdf-page-v2' THEN -1 WHEN parser=? THEN 0 WHEN parser=? THEN 1
+        WHEN parser='docling-v2-search' THEN 2 WHEN parser='docling-v2-text-search' THEN 3
+        WHEN parser='docling-v1' THEN 4 WHEN parser=? THEN 5 ELSE 6 END) preference,
+        MAX(CASE WHEN parser='pdf-page-v2' THEN 1 ELSE 0 END) OVER () hasOld,
+        MAX(CASE WHEN parser IN (?,?,?,'docling-v1') THEN 1 ELSE 0 END) OVER () hasCurrent
+      FROM library_parse_pages WHERE document_id=? AND parser IN (?,?, 'docling-v2-search', 'docling-v2-text-search', 'docling-v1',?,'pdf-page-v2')
+    ) SELECT page,body,parser,hasOld,hasCurrent FROM ranked WHERE preference=1 ORDER BY page LIMIT 1000`)
+      .bind(preserveOld?1:0,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,
+        DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,id,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION)
+      .all<{page:number;body:string;parser:string;hasOld:number;hasCurrent:number}>()).results;
+    pages=parsed.map(item=>({page:item.page+1,locator:`第 ${item.page+1} 页`,text:item.body}));
+    const hasOld=Boolean(parsed[0]?.hasOld),hasCurrent=Boolean(parsed[0]?.hasCurrent);
     if(document.status!=='ready'||(!hasOld&&!hasCurrent)||(process.env.PDF_FORMULA_BACKFILL==='true'&&!hasCurrent))await enqueue('index',{owner,id},`index:${id}`,true);
   }
   else if(!document.mime.startsWith('image/')&&document.mime!=='application/pdf'){
