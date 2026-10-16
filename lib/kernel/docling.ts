@@ -18,7 +18,8 @@ const SOURCE_ENCODING_VERSION='source-type1-cmap-v1' as const;
 const glyphUnicode={prime:{hex:'2032',accepted:['2032','02B9'] as readonly string[],source:'https://github.com/mozilla/pdf.js/blob/master/src/core/glyphlist.js'},
  negationslash:{hex:'0338',accepted:['0338'] as readonly string[],source:'https://github.com/kohler/lcdf-typetools/blob/master/texglyphlist.txt'}} as const;
 const encodingReview=(reason:string):never=>{throw new Error(`Source font encoding needs review; original version retained: ${reason}`);};
-const referenceVersion='source-font-reference-v1' as const,hexSha=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
+const referenceVersion='source-font-reference-v1' as const,referenceCidVersion='source-font-reference-v2' as const,
+ hexSha=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
 const unicodeHex=(values:number[])=>Buffer.from(String.fromCodePoint(...values),'utf16le').swap16().toString('hex').toUpperCase();
 /** Administrator-generated, content-pinned asset; never inferred from a query or PDF name. */
 export function validateFontReferenceDictionary(value:unknown):PdfFontReferenceDictionary{
@@ -64,7 +65,8 @@ function referenceCmap(text:string){
 }
 
 /** @internal Pure server-side input preparation; no I/O, OCR, model, CAS or publication. */
-export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[],references?:PdfFontReferenceDictionary):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
+export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[],references?:PdfFontReferenceDictionary,
+ referencePolicy:typeof referenceVersion|typeof referenceCidVersion=referenceVersion):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
  if(references)validateFontReferenceDictionary(references);
  const referenceHash=references?digest(JSON.stringify(references)):undefined,referenceIndex=new Map(references?.entries.map(e=>[e[0],e])??[]);
  const sourceHash=digest(bytes),original=await PDFDocument.load(bytes,{updateMetadata:false});
@@ -74,6 +76,23 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
  const decode=(stream:unknown)=>{if(!(stream instanceof PDFRawStream))return encodingReview('expected embedded stream');
   return Buffer.from(decodePDFRawStream(stream).decode());};
  const lookup=(doc:PDFDocument,value:unknown)=>value===undefined?undefined:doc.context.lookup(value as never);
+ const descendants=(doc:PDFDocument,font:PDFDict):PDFDict[]=>{
+  const value=lookup(doc,font.get(PDFName.of('DescendantFonts')));if(value===undefined)return [];
+  if(!(value instanceof PDFArray))return encodingReview('invalid descendant fonts');return value.asArray().map(ref=>{
+   const child=lookup(doc,ref);return child instanceof PDFDict?child:encodingReview('invalid descendant font');});
+ };
+ const fontPrograms=(doc:PDFDocument,font:PDFDict,includeDescendants:boolean)=>[font,...(includeDescendants?descendants(doc,font):[])].flatMap(f=>{
+  const descriptor=lookup(doc,f.get(PDFName.of('FontDescriptor')));
+  return descriptor instanceof PDFDict?['FontFile','FontFile2','FontFile3'].flatMap(field=>{
+   const stream=lookup(doc,descriptor.get(PDFName.of(field)));return stream===undefined?[]:[digest(decode(stream))];}):[];
+ });
+ const descendantCmaps=(doc:PDFDocument,font:PDFDict)=>descendants(doc,font).map(child=>{
+  const value=lookup(doc,child.get(PDFName.of('ToUnicode')));return value===undefined?null:digest(decode(value));});
+ const cidMappings=(doc:PDFDocument,font:PDFDict)=>String(font.get(PDFName.of('Subtype')))!=='/Type0'?[]:
+  [font,...descendants(doc,font)].map(f=>digest(JSON.stringify(['Encoding','CIDToGIDMap'].map(field=>{
+   const value=lookup(doc,f.get(PDFName.of(field)));return value===undefined?null:value instanceof PDFName?value.toString():
+    value instanceof PDFRawStream?digest(decode(value)):encodingReview('unsupported CID mapping preservation');
+  }))));
  type Plan={index:number;key:string;patch:PdfSourceEncodingProof['patches'][number]};
  const plans:Plan[]=[],preserved:PdfSourceEncodingProof['preserved']=[];
  for(const index of indices){
@@ -81,6 +100,39 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   const fonts=lookup(original,page.node.Resources()?.get(PDFName.of('Font')));
   for(const [key,ref] of fonts instanceof PDFDict?fonts.entries():[]){
    const font=lookup(original,ref);if(!(font instanceof PDFDict))continue;
+   if(String(font.get(PDFName.of('Subtype')))==='/Type0'&&references&&referencePolicy===referenceCidVersion){
+    // This is a CID-to-GID proof, not the simple-TT raw-cmap rule. Repair only
+    // explicit replacement placeholders, never legitimate mapped Unicode.
+    try{
+     if(String(font.get(PDFName.of('Encoding')))!=='/Identity-H')continue;
+     const children=descendants(original,font);if(children.length!==1)continue;const child=children[0];
+     if(String(child.get(PDFName.of('Subtype')))!=='/CIDFontType2'||String(child.get(PDFName.of('CIDToGIDMap')))!=='/Identity')continue;
+     const descriptor=lookup(original,child.get(PDFName.of('FontDescriptor'))),fileStream=descriptor instanceof PDFDict?lookup(original,descriptor.get(PDFName.of('FontFile2'))):undefined,
+      cmap=lookup(original,font.get(PDFName.of('ToUnicode')));
+     if(!(fileStream instanceof PDFRawStream)||!(cmap instanceof PDFRawStream)||fileStream.getContentsSize()>2*1024*1024||cmap.getContentsSize()>65536)continue;
+     const file=decode(fileStream),before=decode(cmap);if(file.length>4*1024*1024||before.length>65536)continue;
+     const text=before.toString('latin1');if(!/1\s+begincodespacerange\s*<0000>\s*<FFFF>\s*endcodespacerange/i.test(text)||/\b(?:beginbfrange|usecmap)\b/.test(text)||
+      (text.match(/\bbegincodespacerange\b/g)||[]).length!==1||(text.match(/\bendcmap\b/g)||[]).length!==1)continue;
+     const blocks=[...text.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)],pairs=blocks.flatMap(b=>{
+      const values=[...b[2].matchAll(/<([\da-f]{4})>\s*<((?:[\da-f]{4}\s*)+)>/gi)];if(values.length!==Number(b[1]))throw Error('Unproven CID bfchar');return values;});
+     if(!pairs.length||new Set(pairs.map(p=>parseInt(p[1],16))).size!==pairs.length)continue;
+     const native=fontkit.create(file),changed:PdfSourceEncodingProof['patches']=[];let after=text;
+     for(const pair of pairs){
+      if(pair[2].replace(/\s/g,'').toUpperCase()!=='FFFD')continue;const code=parseInt(pair[1],16);if(code<1||code>=native.numGlyphs)continue;
+      const glyph=native.getGlyph(code),commands=(glyph.path as unknown as {commands:Array<{command:string;args:number[]}>}).commands.map(c=>({command:c.command,args:[...c.args]}));
+      if(!commands.length||commands.length>10000||commands.some(c=>c.args.some(n=>!Number.isFinite(n))))continue;
+      const pathSha256=digest(JSON.stringify({unitsPerEm:native.unitsPerEm,commands})),entry=referenceIndex.get(pathSha256);
+      if(!entry||(entry[1].match(/.{4}/g)||[]).some(hex=>hex==='FFFD')||entry[2].some(i=>references.fonts[references.mappings[i][0]].unitsPerEm!==native.unitsPerEm))continue;
+      const replacement=pair[0].replace(/<[\da-f\s]+>$/i,`<${entry[1]}>`);if(after.indexOf(pair[0])!==after.lastIndexOf(pair[0]))throw Error('Ambiguous CID mapping bytes');after=after.replace(pair[0],replacement);
+      changed.push({pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file),code,unicodeSource:`font-reference:${referenceHash}`,
+       beforeCmapHex:before.toString('hex'),afterCmapHex:'',beforeCmapHash:digest(before),afterCmapHash:'',
+       reference:{dictionarySha256:referenceHash!,pathSha256,glyphId:code,unitsPerEm:native.unitsPerEm,utf16Hex:entry[1],mappingIndices:[...entry[2]],
+        sourceMapping:{policy:'identity-h-cidfonttype2-explicit-identity-v1',encoding:'Identity-H',cidToGid:'Identity',codeBytes:2,cid:code,sourceUnicodeHex:'FFFD'}}});
+     }
+     for(const patch of changed){const value=Buffer.from(after,'latin1');patch.afterCmapHex=value.toString('hex');patch.afterCmapHash=digest(value);plans.push({index,key:key.toString(),patch});}
+    }catch{/* Unproven CID inputs keep their original mappings for review. */}
+    continue;
+   }
    if(String(font.get(PDFName.of('Subtype')))==='/TrueType'&&references){
     // PDF.js' symbolic/simple-TT branch uses raw codes for a single Mac cmap.
     // Encoding overrides, non-symbolic fonts and competing cmap choices are not guessed.
@@ -169,22 +221,22 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   }
  }
  if(!plans.length&&selected===undefined)return {bytes};
+ const includeDescendants=referencePolicy===referenceCidVersion&&plans.some(p=>p.patch.reference);
  // Only a real derivative needs full-object preservation hashing. Unrelated PDFs
  // keep their original bytes without decoding large content or TrueType programs.
  for(const index of indices){
   const page=original.getPage(index),contents=page.node.Contents();
   const streams=contents instanceof PDFArray?contents.asArray().map(r=>lookup(original,r)):[contents];
   const contentHashes=streams.filter(s=>s!==undefined).map(s=>digest(decode(s)));
-  const fonts=lookup(original,page.node.Resources()?.get(PDFName.of('Font'))),fontFileHashes:string[]=[],unmodifiedCmapHashes:string[]=[];
+  const fonts=lookup(original,page.node.Resources()?.get(PDFName.of('Font'))),fontFileHashes:string[]=[],unmodifiedCmapHashes:string[]=[],fontMappingHashes:string[]=[];
   for(const [key,ref] of fonts instanceof PDFDict?fonts.entries():[]){
    const font=lookup(original,ref);if(!(font instanceof PDFDict))continue;
-   const descriptor=lookup(original,font.get(PDFName.of('FontDescriptor')));
-   if(descriptor instanceof PDFDict)for(const field of ['FontFile','FontFile2','FontFile3']){
-    const stream=lookup(original,descriptor.get(PDFName.of(field)));if(stream!==undefined)fontFileHashes.push(digest(decode(stream)));}
+   fontFileHashes.push(...fontPrograms(original,font,includeDescendants));
+   if(includeDescendants){unmodifiedCmapHashes.push(...descendantCmaps(original,font).filter((h):h is string=>h!==null));fontMappingHashes.push(...cidMappings(original,font));}
    const cmap=lookup(original,font.get(PDFName.of('ToUnicode')));
    if(cmap!==undefined&&!plans.some(p=>p.index===index&&p.key===key.toString()))unmodifiedCmapHashes.push(digest(decode(cmap)));
   }
-  preserved.push({pageNumber:index+1,contentHashes,fontFileHashes,unmodifiedCmapHashes});
+  preserved.push({pageNumber:index+1,contentHashes,fontFileHashes,unmodifiedCmapHashes,...(includeDescendants?{fontMappingHashes}:{})});
  }
  const derived=await PDFDocument.create();derived.setCreationDate(new Date(0));derived.setModificationDate(new Date(0));
  derived.setProducer('Study Kernel source encoding input-v1');derived.setCreator('Study Kernel');
@@ -206,11 +258,9 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   for(const [key,ref] of beforeFonts instanceof PDFDict?beforeFonts.entries():[]){
    const before=lookup(original,ref),after=afterFonts instanceof PDFDict?lookup(derived,afterFonts.get(key)):undefined;
    if(!(before instanceof PDFDict)||!(after instanceof PDFDict))encodingReview('copied font unavailable');
-   const files=(doc:PDFDocument,font:PDFDict)=>{
-    const descriptor=lookup(doc,font.get(PDFName.of('FontDescriptor')));
-    return descriptor instanceof PDFDict?['FontFile','FontFile2','FontFile3'].flatMap(field=>{
-     const stream=lookup(doc,descriptor.get(PDFName.of(field)));return stream===undefined?[]:[digest(decode(stream))];}):[];};
-   if(JSON.stringify(files(original,before as PDFDict))!==JSON.stringify(files(derived,after as PDFDict)))encodingReview('FontFile changed');
+   if(JSON.stringify(fontPrograms(original,before as PDFDict,includeDescendants))!==JSON.stringify(fontPrograms(derived,after as PDFDict,includeDescendants)))encodingReview('FontFile changed');
+   if(includeDescendants&&(JSON.stringify(cidMappings(original,before as PDFDict))!==JSON.stringify(cidMappings(derived,after as PDFDict))||
+    JSON.stringify(descendantCmaps(original,before as PDFDict))!==JSON.stringify(descendantCmaps(derived,after as PDFDict))))encodingReview('descendant or CID mapping changed');
    const sourceMap=lookup(original,(before as PDFDict).get(PDFName.of('ToUnicode'))),newMap=lookup(derived,(after as PDFDict).get(PDFName.of('ToUnicode')));
    const patch=plans.find(p=>p.index===index&&p.key===key.toString());
    if(sourceMap!==undefined&&(newMap===undefined||digest(decode(newMap))!==(patch?.patch.afterCmapHash??digest(decode(sourceMap)))))
@@ -219,7 +269,7 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
  }
  const result=await derived.save();
  const referenceUsed=plans.some(p=>p.patch.reference);
- return {bytes:result,...(plans.length?{proof:{version:referenceUsed?referenceVersion:SOURCE_ENCODING_VERSION,sourceHash,copyIndices:indices,inputHash:digest(result),
+ return {bytes:result,...(plans.length?{proof:{version:referenceUsed?referencePolicy:SOURCE_ENCODING_VERSION,sourceHash,copyIndices:indices,inputHash:digest(result),
   ...(referenceUsed?{referenceDictionarySha256:referenceHash}:{}),patches:plans.map(p=>p.patch),preserved}}:{})};
 }
 
@@ -276,7 +326,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   const formulaPreset=process.env.DOCLING_FORMULA_PRESET||'codeformulav2';
   const headers:HeadersInit=process.env.DOCLING_API_KEY?{'X-Api-Key':process.env.DOCLING_API_KEY}:{};
   const endpoint=base.replace(/\/$/,'');
-  const references=await configuredFontReferences(),encoding=await prepareSourceFontInput(bytes,undefined,references);
+  const references=await configuredFontReferences(),encoding=await prepareSourceFontInput(bytes,undefined,references,referenceCidVersion);
   if(encoding.proof&&(savedResult||legacyTaskId))encodingReview('legacy full-result input has no corrected-input identity');
   if(encoding.proof?.referenceDictionarySha256&&(!references||await storeDoclingResult(references)!==encoding.proof.referenceDictionarySha256))
     throw Error('Font reference CAS identity mismatch');
@@ -347,7 +397,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   // remain unchanged; no formula, layout or whitespace inference is performed.
   if(sourceEncodingReceiptHash&&!visual)pages=pages.map(page=>({...page,text:page.text.normalize('NFC')}));
   const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceEncodingReceiptHash&&!visual?
-    encoding.proof?.referenceDictionarySha256?'-source-font-reference-v1':'-source-encoding-v1':'');
+    encoding.proof?.referenceDictionarySha256?`-${encoding.proof.version}`:'-source-encoding-v1':'');
   const current=await getDocument(owner,id);
   if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');
   if(digest(await readBlob(current.hash))!==document.hash)throw new Error('Original PDF checksum changed during conversion');

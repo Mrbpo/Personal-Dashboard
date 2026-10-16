@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {PDFDocument,PDFName,PDFDict,PDFRawStream,decodePDFRawStream} from 'pdf-lib';
+import {PDFDocument,PDFName,PDFDict,PDFArray,PDFRawStream,decodePDFRawStream} from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type {PdfFontReferenceDictionary} from '../lib/pdf-source-fidelity.ts';
 
@@ -76,6 +76,52 @@ async function referenceFixture(options:{flags?:number;encoding?:boolean;already
  page.node.set(name('Resources'),context.obj({Font:{T:context.register(f)}}));page.node.set(name('Contents'),context.register(context.flateStream(Buffer.from('BT /T 12 Tf (*)Tj (@)Tj (A)Tj ET'))));
  return {bytes:await pdf.save(),references,sourceCode,targetHex};
 }
+
+async function cidFixture(options:{encoding?:string;cidMap?:'absent'|'stream';mapped?:boolean;duplicate?:boolean;range?:boolean}={}){
+ const f=await referenceFixture(),program=readFileSync(new URL('../node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf',import.meta.url)),gid=f.references.mappings[0][1],code=gid.toString(16).padStart(4,'0').toUpperCase();
+ const pdf=await PDFDocument.create(),page=pdf.addPage(),context=pdf.context,file=context.register(context.flateStream(program)),descriptor=context.register(context.obj({Flags:4,FontFile2:file}));
+ const childMap='begincmap\n1 beginbfchar\n<0001> <002A>\nendbfchar\nendcmap',child=context.obj({Type:'Font',Subtype:'CIDFontType2',FontDescriptor:descriptor,ToUnicode:context.register(context.flateStream(Buffer.from(childMap)))});
+ if(options.cidMap!=='absent')child.set(name('CIDToGIDMap'),options.cidMap==='stream'?context.register(context.flateStream(Buffer.from([0,0,0,1]))):name('Identity'));
+ const text=`begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n${options.duplicate?4:3} beginbfchar\n<0001> <002A>\n<0002> <0041>\n<${code}> <${options.mapped?'002A':'FFFD'}>${options.duplicate?`\n<${code}> <FFFD>`:''}\nendbfchar\n${options.range?'1 beginbfrange\n<00F0> <00F0> <0041>\nendbfrange\n':''}endcmap`;
+ const parent=context.obj({Type:'Font',Subtype:'Type0',Encoding:options.encoding??'Identity-H',DescendantFonts:[context.register(child)],ToUnicode:context.register(context.flateStream(Buffer.from(text)))});
+ page.node.set(name('Resources'),context.obj({Font:{C:context.register(parent)}}));page.node.set(name('Contents'),context.register(context.flateStream(Buffer.from(`BT /C 12 Tf <0001${code}> Tj ET`))));
+ return {bytes:await pdf.save(),references:f.references,gid,code,program,childMap};
+}
+
+test('CID v2 replaces only the uniquely proven FFFD bfchar in place and preserves descendant programs and maps',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts'),{digest}=await import('../lib/library.ts');const f=await cidFixture();
+ const result=await prepareSourceFontInput(f.bytes,undefined,f.references,'source-font-reference-v2');assert.equal(result.proof!.version,'source-font-reference-v2');
+ assert.equal(result.proof!.patches.length,1);assert.equal(result.proof!.patches[0].code,f.gid);assert.equal(result.proof!.patches[0].reference!.sourceMapping.policy,'identity-h-cidfonttype2-explicit-identity-v1');
+ const changed=await cmap(result.bytes,'C');assert.equal((changed.match(new RegExp(`<${f.code}>`,'g'))||[]).length,1);assert.match(changed,new RegExp(`<${f.code}> <0040>`));
+ assert.match(changed,/<0001> <002A>/);assert.match(changed,/<0002> <0041>/);assert.ok(!changed.includes('FFFD'));assert.match(changed,/3 beginbfchar/);
+ assert.deepEqual(result.proof!.preserved[0].fontFileHashes,[digest(f.program)]);assert.deepEqual(result.proof!.preserved[0].unmodifiedCmapHashes,[digest(f.childMap)]);assert.equal(result.proof!.preserved[0].fontMappingHashes!.length,2);
+ const parsed=await PDFDocument.load(result.bytes),parent=parsed.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('C'),PDFDict),child=parent.lookup(name('DescendantFonts'),PDFArray).lookup(0,PDFDict),descriptor=child.lookup(name('FontDescriptor'),PDFDict),font=descriptor.lookup(name('FontFile2'));assert.ok(font instanceof PDFRawStream);
+ assert.equal(digest(decodePDFRawStream(font).decode()),digest(f.program));assert.equal(String(child.lookup(name('CIDToGIDMap'))),'/Identity');
+ const childMap=child.lookup(name('ToUnicode'));assert.ok(childMap instanceof PDFRawStream);assert.equal(Buffer.from(decodePDFRawStream(childMap).decode()).toString(),f.childMap);
+});
+test('CID recovery refuses non-Identity, valid mapped values and unproven duplicate or ranged CMaps',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ for(const options of [{encoding:'Identity-V'},{cidMap:'absent' as const},{cidMap:'stream' as const},{mapped:true},{duplicate:true},{range:true}]){
+  const f=await cidFixture(options),result=await prepareSourceFontInput(f.bytes,undefined,f.references,'source-font-reference-v2');assert.equal(result.bytes,f.bytes);assert.equal(result.proof,undefined);
+ }
+});
+test('mixed simple-TT and CID history replays v1 without new descendant fields or CID repairs; new v2 binds them',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts'),{digest}=await import('../lib/library.ts'),tt=await referenceFixture(),cid=await cidFixture(),source=await PDFDocument.create();
+ for(const bytes of [tt.bytes,cid.bytes])for(const page of await source.copyPages(await PDFDocument.load(bytes),[0]))source.addPage(page);const original=await source.save();
+ const legacy=await prepareSourceFontInput(original,undefined,tt.references,'source-font-reference-v1'),current=await prepareSourceFontInput(original,undefined,tt.references,'source-font-reference-v2');
+ assert.equal(legacy.proof!.patches.length,1);assert.equal(legacy.proof!.version,'source-font-reference-v1');assert.deepEqual(legacy.proof!.preserved[1].fontFileHashes,[]);assert.equal(legacy.proof!.preserved[1].fontMappingHashes,undefined);
+ const legacyPdf=await PDFDocument.load(legacy.bytes),legacyFont=legacyPdf.getPage(1).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('C'),PDFDict),legacyCmap=legacyFont.lookup(name('ToUnicode'));assert.ok(legacyCmap instanceof PDFRawStream);assert.match(Buffer.from(decodePDFRawStream(legacyCmap).decode()).toString(),/FFFD/);
+ assert.equal(current.proof!.patches.length,2);assert.equal(current.proof!.version,'source-font-reference-v2');assert.deepEqual(current.proof!.preserved[1].fontFileHashes,[digest(cid.program)]);
+ const {createDoclingProgress}=await import('../lib/kernel/docling-batches.ts'),{decodeCachedDoclingReplay}=await import('../lib/kernel/docling-cache-replay.ts');
+ for(const prepared of [legacy,current]){
+  const asset=Buffer.from(JSON.stringify(tt.references)),receipt=Buffer.from(JSON.stringify({kind:prepared.proof!.version,proof:prepared.proof})),identity={owner:'mixed-history',documentId:'mixed',sourceHash:digest(original),totalPages:2,optionsHash:'f'.repeat(64),sourceEncodingReceiptHash:digest(receipt)},progress=createDoclingProgress(identity,2),input=await PDFDocument.create();
+  input.setCreationDate(new Date(0));input.setModificationDate(new Date(0));input.setProducer('Study Kernel Docling derived-v1');input.setCreator('Study Kernel');
+  for(const page of await input.copyPages(await PDFDocument.load(prepared.bytes,{updateMetadata:false}),[0,1]))input.addPage(page);
+  const batch=progress.batches[0];batch.copyIndices=[0,1];batch.inputHash=digest(await input.save());
+  const raw=Buffer.from(JSON.stringify({identity:{...identity,start:1,end:2,inputHash:batch.inputHash,copyIndices:[0,1]},result:{status:'success',document:{json_content:{pages:{1:{page_no:1},2:{page_no:2}},body:{children:[{$ref:'#/texts/0'},{$ref:'#/texts/1'}]},texts:[{label:'text',text:'Synthetic simple TT',prov:[{page_no:1}]},{label:'text',text:'Synthetic CID',prov:[{page_no:2}]}]}}}}));
+  batch.resultHash=digest(raw);const blobs=new Map([[digest(asset),asset],[digest(receipt),receipt],[digest(raw),raw]]),replayed=await decodeCachedDoclingReplay(original,identity,progress,async h=>{assert.ok(blobs.has(h));return blobs.get(h)!;});assert.equal(replayed.pages.length,2);
+ }
+});
 
 test('reference recovery fills only proven missing simple-TT codes and replays the exact CAS dictionary',async()=>{
  const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts'),{digest}=await import('../lib/library.ts');

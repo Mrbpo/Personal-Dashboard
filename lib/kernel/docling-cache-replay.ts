@@ -32,7 +32,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
  if(identity.sourceEncodingReceiptHash){
   const receipt=await load(identity.sourceEncodingReceiptHash);
   if(digest(receipt)!==identity.sourceEncodingReceiptHash)throw new Error('Cached replay source encoding receipt checksum mismatch');
-  const saved=JSON.parse(Buffer.from(receipt).toString('utf8')) as {proof?:{referenceDictionarySha256?:string}},referenceHash=saved.proof?.referenceDictionarySha256;
+  const saved=JSON.parse(Buffer.from(receipt).toString('utf8')) as {proof?:{version?:string;referenceDictionarySha256?:string}},referenceHash=saved.proof?.referenceDictionarySha256;
   const {prepareSourceFontInput,validateFontReferenceDictionary}=await import('./docling.ts');
   let references;
   if(referenceHash!==undefined){
@@ -40,7 +40,10 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
    const asset=await load(referenceHash);if(digest(asset)!==referenceHash)throw new Error('Cached replay reference asset checksum mismatch');
    references=validateFontReferenceDictionary(JSON.parse(Buffer.from(asset).toString('utf8')));
   }
-  const prepared=await prepareSourceFontInput(original,undefined,references);
+  // Historical v1 must retain its original simple-TT and top-level-only proof
+  // traversal, including on sources that also contain CID fonts.
+  const prepared=await prepareSourceFontInput(original,undefined,references,
+   saved.proof?.version==='source-font-reference-v2'?'source-font-reference-v2':'source-font-reference-v1');
   if(!prepared.proof||digest(JSON.stringify({kind:prepared.proof.version,proof:prepared.proof}))!==identity.sourceEncodingReceiptHash||
    digest(prepared.bytes)!==prepared.proof.inputHash)throw new Error('Cached replay source encoding proof or input mismatch');
   parserPdf=await PDFDocument.load(prepared.bytes,{updateMetadata:false});
