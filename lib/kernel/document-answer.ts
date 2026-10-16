@@ -4,6 +4,7 @@ import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
+import type {FlatTextStructureProvenance} from './document-context.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -21,7 +22,8 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
  /** Real current nodes read by Kernel solely to bind supplemental PNGs. Their
   * bodies must never become text support or quotation units in this lane. */
  imageAnchors?:DocumentSelectedNodeHit[];
- parents:{parentId:string;status:string;headingMetadata?:{text:string;originalSourceHash:string};sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
+ parents:{parentId:string;status:string;headingMetadata?:{text:string;originalSourceHash:string};structureProvenance?:FlatTextStructureProvenance;
+  sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  visual?:{kind:'pdf-page'|'pdf-region';physicalPage:number;rawPdfSha256:string;manifestSha256:string};
@@ -253,7 +255,8 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const unavailableParents=context.parents.filter(parent=>parent.status!=='available').map(parent=>({
   parentId:parent.parentId,status:parent.status,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints}));
  const parentMetadata=context.parents.map(parent=>({parentId:parent.parentId,status:parent.status,
-  headingMetadata:parent.headingMetadata??null,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints}));
+  headingMetadata:parent.headingMetadata??null,sourceNodeCount:parent.sourceNodeCount,sourceBodyCodepoints:parent.sourceBodyCodepoints,
+  ...(parent.structureProvenance?{structureProvenance:parent.structureProvenance}:{})}));
  const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
@@ -343,6 +346,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  const receipt={referencePolicyVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnitManifest:prepared.quoteUnitManifest,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   warnings:prepared.warnings,unavailableParents:prepared.unavailableParents,inputFingerprint:prepared.fingerprint,
+  ...(prepared.input.parentMetadata.some(parent=>parent.structureProvenance)?{
+   flatTextContexts:prepared.input.parentMetadata.filter(parent=>parent.structureProvenance).map(parent=>({parentId:parent.parentId,structureProvenance:parent.structureProvenance}))}:{}),
   ...(prepared.input.imageSelection?{imageSelection:prepared.input.imageSelection}:{}),
   evidence:prepared.supports.map(({image,text,...support})=>support),
   textEvidenceCount:prepared.supports.filter(support=>support.kind==='text').length,
