@@ -2,9 +2,18 @@ import {createHash} from 'node:crypto';
 import {PDFDocument} from 'pdf-lib';
 
 /** Encoding evidence for a corrective parser input, never original quotation or full-page fidelity. */
-export type PdfSourceEncodingProof={version:'source-type1-cmap-v1';sourceHash:string;copyIndices:number[];inputHash:string;
- patches:Array<{pageNumber:number;resourceKey:string;fontFileHash:string;code:number;glyphName:'prime'|'negationslash';
-  unicodeSource:string;beforeCmapHex:string;afterCmapHex:string;beforeCmapHash:string;afterCmapHash:string}>;
+export type PdfFontReferenceDictionary={version:'exact-font-reference-v1';witnessSha256:string;
+ fonts:Array<{sha256:string;unitsPerEm:number}>;
+ mappings:Array<[fontIndex:number,glyphId:number,proofs:Array<{kind:'cmap';codePoint:number}|{kind:'GSUB-ligature';
+  lookupIndex:number;subtableIndex:number;lookupType:number;effectiveType:number;features:string[];coverageIndex:number;
+  outputGlyphId:number;componentGlyphIds:number[];componentUnicodeOptions:number[][]}>]>;
+ entries:Array<[pathSha256:string,utf16Hex:string,mappingIndices:number[]]>};
+export type PdfSourceEncodingProof={version:'source-type1-cmap-v1'|'source-font-reference-v1';sourceHash:string;copyIndices:number[];inputHash:string;
+ referenceDictionarySha256?:string;
+ patches:Array<{pageNumber:number;resourceKey:string;fontFileHash:string;code:number;glyphName?:'prime'|'negationslash';
+  unicodeSource:string;beforeCmapHex:string;afterCmapHex:string;beforeCmapHash:string;afterCmapHash:string;
+  reference?:{dictionarySha256:string;pathSha256:string;glyphId:number;unitsPerEm:number;utf16Hex:string;mappingIndices:number[];
+   sourceMapping:{policy:'symbolic-simple-tt-single-mac-cmap-v1';flags:number;encodingAbsent:true;platformID:1;encodingID:0;format:0|6}}}>;
  preserved:Array<{pageNumber:number;contentHashes:string[];fontFileHashes:string[];unmodifiedCmapHashes:string[]}>};
 
 export type SourceGlyph={symbol:string;font:string;bold:boolean|null;bbox:[number,number,number,number];subscript:string|null};

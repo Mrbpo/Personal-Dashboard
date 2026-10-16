@@ -1,6 +1,8 @@
 import { database as legacy } from '../database.ts';
 import { PDFArray, PDFDocument, PDFName, PDFStream, PDFRawStream, PDFDict, PDFNumber, decodePDFRawStream } from 'pdf-lib';
-import type {PdfSourceEncodingProof} from '../pdf-source-fidelity.ts';
+import {readFile,stat} from 'node:fs/promises';
+import fontkit from '@pdf-lib/fontkit';
+import type {PdfSourceEncodingProof,PdfFontReferenceDictionary} from '../pdf-source-fidelity.ts';
 import { digest, getDocument, readBlob, splitText } from '../library.ts';
 import { kernel } from './service.ts';
 import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION } from './docling-result.ts';
@@ -16,9 +18,55 @@ const SOURCE_ENCODING_VERSION='source-type1-cmap-v1' as const;
 const glyphUnicode={prime:{hex:'2032',accepted:['2032','02B9'] as readonly string[],source:'https://github.com/mozilla/pdf.js/blob/master/src/core/glyphlist.js'},
  negationslash:{hex:'0338',accepted:['0338'] as readonly string[],source:'https://github.com/kohler/lcdf-typetools/blob/master/texglyphlist.txt'}} as const;
 const encodingReview=(reason:string):never=>{throw new Error(`Source font encoding needs review; original version retained: ${reason}`);};
+const referenceVersion='source-font-reference-v1' as const,hexSha=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
+const unicodeHex=(values:number[])=>Buffer.from(String.fromCodePoint(...values),'utf16le').swap16().toString('hex').toUpperCase();
+/** Administrator-generated, content-pinned asset; never inferred from a query or PDF name. */
+export function validateFontReferenceDictionary(value:unknown):PdfFontReferenceDictionary{
+ const d=value as PdfFontReferenceDictionary,integer=(v:unknown,max=65535):v is number=>Number.isInteger(v)&&Number(v)>=0&&Number(v)<=max,
+  codepoint=(v:unknown):v is number=>integer(v,0x10ffff)&&!(Number(v)>=0xd800&&Number(v)<=0xdfff);
+ if(!d||d.version!=='exact-font-reference-v1'||!hexSha(d.witnessSha256)||!Array.isArray(d.fonts)||!d.fonts.length||d.fonts.length>16||
+  d.fonts.some(f=>!f||!hexSha(f.sha256)||!integer(f.unitsPerEm)||f.unitsPerEm<1)||!Array.isArray(d.mappings)||d.mappings.length>16384||
+  !Array.isArray(d.entries)||d.entries.length>8192)throw Error('Invalid bounded font reference asset');
+ const sequences=d.mappings.map(m=>{
+  if(!Array.isArray(m)||m.length!==3||!integer(m[0],d.fonts.length-1)||!integer(m[1])||!Array.isArray(m[2])||!m[2].length||m[2].length>16)throw Error('Invalid font reference provenance');
+  const options=m[2].map(p=>{
+   if(p?.kind==='cmap'&&codepoint(p.codePoint))return unicodeHex([p.codePoint]);
+   if(p?.kind!=='GSUB-ligature'||![p.lookupIndex,p.subtableIndex,p.coverageIndex].every(n=>integer(n))||![4,7].includes(p.lookupType)||p.effectiveType!==4||
+    p.outputGlyphId!==m[1]||!Array.isArray(p.features)||p.features.some(f=>typeof f!=='string'||!/^[\x20-\x7e]{4}$/.test(f))||
+    !Array.isArray(p.componentGlyphIds)||p.componentGlyphIds.length<2||p.componentGlyphIds.length>8||p.componentGlyphIds.some(g=>!integer(g))||
+    !Array.isArray(p.componentUnicodeOptions)||p.componentUnicodeOptions.length!==p.componentGlyphIds.length||p.componentUnicodeOptions.some(a=>!Array.isArray(a)||a.length!==1||!codepoint(a[0])))throw Error('Unproven font reference sequence');
+   return unicodeHex(p.componentUnicodeOptions.map(a=>a[0]));
+  });if(new Set(options).size!==1)throw Error('Ambiguous font reference provenance');return options[0];
+ });
+ const keys=new Set<string>();for(const e of d.entries){
+  if(!Array.isArray(e)||e.length!==3||!hexSha(e[0])||keys.has(e[0])||typeof e[1]!=='string'||!/^(?:[0-9A-F]{4}){1,16}$/.test(e[1])||
+   !Array.isArray(e[2])||!e[2].length||e[2].length>32||new Set(e[2]).size!==e[2].length||e[2].some(i=>!integer(i,d.mappings.length-1)||sequences[i]!==e[1]))throw Error('Ambiguous or invalid font reference entry');keys.add(e[0]);
+ }return d;
+}
+async function configuredFontReferences(){
+ const path=process.env.PDF_FONT_REFERENCE_DICTIONARY,pin=process.env.PDF_FONT_REFERENCE_DICTIONARY_SHA256;
+ if(!path&&!pin)return undefined;if(!path||!hexSha(pin))throw Error('Font reference path and SHA256 must both be configured');
+ if((await stat(path)).size>2*1024*1024)throw Error('Configured font reference asset exceeds limit');
+ const bytes=await readFile(path);if(bytes.length>2*1024*1024||digest(bytes)!==pin)throw Error('Configured font reference asset checksum/size mismatch');
+ return validateFontReferenceDictionary(JSON.parse(bytes.toString('utf8')));
+}
+function referenceCmap(text:string){
+ const entries=new Map<number,string>(),put=(code:number,value:string)=>{if(code>255||entries.has(code))throw Error('Unsupported source CMap');entries.set(code,value.replace(/\s/g,'').toUpperCase());};
+ if(!/1\s+begincodespacerange\s*<00>\s*<ff>\s*endcodespacerange/i.test(text)||(text.match(/\bendcmap\b/g)||[]).length!==1)throw Error('Unsupported source code space');
+ for(const b of text.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)){
+  const pairs=[...b[2].matchAll(/<([\da-f]+)>\s*<([\da-f\s]+)>/gi)];if(pairs.length!==+b[1])throw Error('Unsupported source bfchar');for(const p of pairs)put(parseInt(p[1],16),p[2]);
+ }
+ for(const b of text.matchAll(/(\d+)\s+beginbfrange\b([\s\S]*?)\bendbfrange/g)){
+  const ranges=[...b[2].matchAll(/<([\da-f]+)>\s*<([\da-f]+)>\s*<([\da-f]+)>/gi)];if(ranges.length!==+b[1])throw Error('Unsupported source bfrange');
+  for(const r of ranges){const start=parseInt(r[1],16),end=parseInt(r[2],16);if(end<start||end>255)throw Error('Unsupported source range');
+   for(let code=start;code<=end;code++)put(code,(BigInt('0x'+r[3])+BigInt(code-start)).toString(16).padStart(r[3].length,'0'));}
+ }if(!entries.size)throw Error('Missing source CMap');return entries;
+}
 
 /** @internal Pure server-side input preparation; no I/O, OCR, model, CAS or publication. */
-export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
+export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[],references?:PdfFontReferenceDictionary):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
+ if(references)validateFontReferenceDictionary(references);
+ const referenceHash=references?digest(JSON.stringify(references)):undefined,referenceIndex=new Map(references?.entries.map(e=>[e[0],e])??[]);
  const sourceHash=digest(bytes),original=await PDFDocument.load(bytes,{updateMetadata:false});
  const indices=selected??Array.from({length:original.getPageCount()},(_,i)=>i);
  if(!indices.length||new Set(indices).size!==indices.length||indices.some(i=>!Number.isInteger(i)||i<0||i>=original.getPageCount()))
@@ -33,6 +81,46 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   const fonts=lookup(original,page.node.Resources()?.get(PDFName.of('Font')));
   for(const [key,ref] of fonts instanceof PDFDict?fonts.entries():[]){
    const font=lookup(original,ref);if(!(font instanceof PDFDict))continue;
+   if(String(font.get(PDFName.of('Subtype')))==='/TrueType'&&references){
+    // PDF.js' symbolic/simple-TT branch uses raw codes for a single Mac cmap.
+    // Encoding overrides, non-symbolic fonts and competing cmap choices are not guessed.
+    try{
+     const descriptor=lookup(original,font.get(PDFName.of('FontDescriptor'))),flags=descriptor instanceof PDFDict?descriptor.lookup(PDFName.of('Flags')):undefined;
+     const first=font.lookup(PDFName.of('FirstChar')),last=font.lookup(PDFName.of('LastChar'));
+     if(!(descriptor instanceof PDFDict)||!(flags instanceof PDFNumber)||!Number.isSafeInteger(flags.asNumber())||flags.asNumber()<0||
+      !(flags.asNumber()&4)||(flags.asNumber()&32)||font.has(PDFName.of('Encoding'))||!(first instanceof PDFNumber)||!(last instanceof PDFNumber)||
+      !Number.isInteger(first.asNumber())||!Number.isInteger(last.asNumber())||first.asNumber()<0||last.asNumber()>255||last.asNumber()<first.asNumber())continue;
+     const stream=lookup(original,descriptor.get(PDFName.of('FontFile2'))),cmap=lookup(original,font.get(PDFName.of('ToUnicode')));
+     if(!(stream instanceof PDFRawStream)||!(cmap instanceof PDFRawStream)||stream.getContentsSize()>2*1024*1024||cmap.getContentsSize()>65536)continue;
+     const file=decode(stream),before=decode(cmap);if(file.length>4*1024*1024||before.length>65536)continue;
+     const native=fontkit.create(file) as ReturnType<typeof fontkit.create>&{cmap:{tables:Array<{platformID:number;encodingID:number;
+      table:{version:number;codeMap:{get:(i:number)=>number};firstCode:number;glyphIndices:{length:number;get:(i:number)=>number}}}>}};
+     if(native.cmap.tables.length!==1||native.cmap.tables[0].platformID!==1||native.cmap.tables[0].encodingID!==0)continue;
+     const table=native.cmap.tables[0].table;if(table.version!==0&&table.version!==6)continue;
+     const text=before.toString('latin1'),mapped=referenceCmap(text),added:PdfSourceEncodingProof['patches']=[];
+     for(let code=first.asNumber();code<=last.asNumber();code++){
+      if(mapped.has(code))continue;
+      // Read the actual raw cmap slot: glyphForCodePoint may re-encode MacRoman
+      // and is not a general PDF raw-byte-to-GID API, especially above 0x7f.
+      const offset=code-table.firstCode,gid=table.version===0?table.codeMap.get(code):offset>=0&&offset<table.glyphIndices.length?table.glyphIndices.get(offset):0;
+      if(!Number.isInteger(gid)||gid<1||gid>=native.numGlyphs)continue;const glyph=native.getGlyph(gid);
+      const commands=(glyph.path as unknown as {commands:Array<{command:string;args:number[]}>}).commands.map(c=>({command:c.command,args:[...c.args]}));
+      if(!commands.length||commands.length>10000||commands.some(c=>c.args.some(n=>!Number.isFinite(n))))continue;
+      const pathSha256=digest(JSON.stringify({unitsPerEm:native.unitsPerEm,commands})),entry=referenceIndex.get(pathSha256);
+      if(!entry||entry[2].some(i=>references.fonts[references.mappings[i][0]].unitsPerEm!==native.unitsPerEm))continue;
+      added.push({pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file),code,unicodeSource:`font-reference:${referenceHash}`,
+       beforeCmapHex:before.toString('hex'),afterCmapHex:'',beforeCmapHash:digest(before),afterCmapHash:'',
+       reference:{dictionarySha256:referenceHash!,pathSha256,glyphId:glyph.id,unitsPerEm:native.unitsPerEm,utf16Hex:entry[1],mappingIndices:[...entry[2]],
+        sourceMapping:{policy:'symbolic-simple-tt-single-mac-cmap-v1',flags:flags.asNumber(),encodingAbsent:true,platformID:1,encodingID:0,format:table.version}}});
+     }
+     if(added.length){const suffix=added.map(p=>`<${p.code.toString(16).padStart(2,'0').toUpperCase()}> <${p.reference!.utf16Hex}>`).join('\n'),
+       after=Buffer.from(text.replace(/\bendcmap\b/,`${added.length} beginbfchar\n${suffix}\nendbfchar\nendcmap`),'latin1'),verified=referenceCmap(after.toString('latin1'));
+      if(verified.size!==mapped.size+added.length||[...mapped].some(([c,v])=>verified.get(c)!==v))continue;
+      for(const patch of added){patch.afterCmapHex=after.toString('hex');patch.afterCmapHash=digest(after);plans.push({index,key:key.toString(),patch});}
+     }
+    }catch{/* Unsupported/ambiguous font evidence retains its original mapping. */}
+    continue;
+   }
    if(String(font.get(PDFName.of('Subtype')))!=='/Type1')continue;
    const descriptor=lookup(original,font.get(PDFName.of('FontDescriptor')));
    const stream=descriptor instanceof PDFDict?lookup(original,descriptor.get(PDFName.of('FontFile'))):undefined;
@@ -130,7 +218,9 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   }
  }
  const result=await derived.save();
- return {bytes:result,...(plans.length?{proof:{version:SOURCE_ENCODING_VERSION,sourceHash,copyIndices:indices,inputHash:digest(result),patches:plans.map(p=>p.patch),preserved}}:{})};
+ const referenceUsed=plans.some(p=>p.patch.reference);
+ return {bytes:result,...(plans.length?{proof:{version:referenceUsed?referenceVersion:SOURCE_ENCODING_VERSION,sourceHash,copyIndices:indices,inputHash:digest(result),
+  ...(referenceUsed?{referenceDictionarySha256:referenceHash}:{}),patches:plans.map(p=>p.patch),preserved}}:{})};
 }
 
 export function nativePdfTextIsComplete(pages:string[]|null,expectedPages:number,blankPages:number[]=[]):boolean{
@@ -186,9 +276,11 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   const formulaPreset=process.env.DOCLING_FORMULA_PRESET||'codeformulav2';
   const headers:HeadersInit=process.env.DOCLING_API_KEY?{'X-Api-Key':process.env.DOCLING_API_KEY}:{};
   const endpoint=base.replace(/\/$/,'');
-  const encoding=await prepareSourceFontInput(bytes);
+  const references=await configuredFontReferences(),encoding=await prepareSourceFontInput(bytes,undefined,references);
   if(encoding.proof&&(savedResult||legacyTaskId))encodingReview('legacy full-result input has no corrected-input identity');
-  const sourceEncodingReceiptHash=encoding.proof?await storeDoclingResult({kind:SOURCE_ENCODING_VERSION,proof:encoding.proof}):undefined;
+  if(encoding.proof?.referenceDictionarySha256&&(!references||await storeDoclingResult(references)!==encoding.proof.referenceDictionarySha256))
+    throw Error('Font reference CAS identity mismatch');
+  const sourceEncodingReceiptHash=encoding.proof?await storeDoclingResult({kind:encoding.proof.version,proof:encoding.proof}):undefined;
   const parserPdf=encoding.proof?await PDFDocument.load(encoding.bytes,{updateMetadata:false}):originalPdf;
   const native=localFormula||process.env.DOCLING_NATIVE_TEXT_FASTPATH==='false'||savedResult||legacyTaskId||progress?null:await localPdfTextPages(encoding.bytes);
   // Keep the strict native gate: sparse/image-only bodies still need parsing.
@@ -234,14 +326,16 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
       ...(sourceEncodingReceiptHash?{sourceEncodingReceiptHash}:{}),
       optionsHash:digest(JSON.stringify({transport:'docling-derived-v1',endpoint,parser:formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION,
         doOcr:true,doTableStructure:true,localFormula,formulaBackend,formulaPreset,scanBackend,
-        ...(sourceEncodingReceiptHash?{sourceEncodingReceiptHash,sourceEncodingVersion:SOURCE_ENCODING_VERSION,textNormalization:'NFC'}:{} )}))},
+        ...(sourceEncodingReceiptHash?{sourceEncodingReceiptHash,sourceEncodingVersion:encoding.proof!.version,textNormalization:'NFC'}:{} )}))},
       progress,verifiedBlankPages,formulaEnriched:localFormula,endpoint,headers,prepare,
       persist:async value=>{
         if(job)await rememberDoclingProgress(job.id,job.leaseToken,value);
         currentProgress=structuredClone(value);
       }});
   let pages=decoded.pages,warnings=decoded.warnings;
-  if(sourceEncodingReceiptHash&&!visual)warnings=[...warnings,'源字体 Unicode 映射冲突已按嵌入字形证明修正；其余公式、上下标及页面结构未验证'];
+  if(sourceEncodingReceiptHash&&!visual)warnings=[...warnings,encoding.proof?.referenceDictionarySha256?
+    '源字体缺失的 Unicode 映射已按精确字形及参考字符证明恢复；其余公式、上下标及页面结构未验证':
+    '源字体 Unicode 映射冲突已按嵌入字形证明修正；其余公式、上下标及页面结构未验证'];
   const totalPages=decoded.totalPages;
   if(visual)warnings=[...warnings,...pages.filter(page=>page.text.includes('[无法可靠辨认')).map(page=>`第 ${page.pageNumber} 页含无法可靠辨认的片段，须核对原 PDF`)];
   if(formulaEnriched&&!visual&&(!localFormula||nativeComplete)){
@@ -252,7 +346,8 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   // Canonical Unicode composition only: raw parser responses and glyph evidence
   // remain unchanged; no formula, layout or whitespace inference is performed.
   if(sourceEncodingReceiptHash&&!visual)pages=pages.map(page=>({...page,text:page.text.normalize('NFC')}));
-  const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceEncodingReceiptHash&&!visual?'-source-encoding-v1':'');
+  const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceEncodingReceiptHash&&!visual?
+    encoding.proof?.referenceDictionarySha256?'-source-font-reference-v1':'-source-encoding-v1':'');
   const current=await getDocument(owner,id);
   if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');
   if(digest(await readBlob(current.hash))!==document.hash)throw new Error('Original PDF checksum changed during conversion');
@@ -273,7 +368,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
       ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,
       batchProvenance:currentProgress?{schema:currentProgress.schema,identity:currentProgress.identity,
         batchSize:currentProgress.batchSize,batches:currentProgress.batches}:sourceEncodingReceiptHash&&!visual?
-        {sourceEncoding:{receiptHash:sourceEncodingReceiptHash,parserInputHash:encoding.proof!.inputHash,version:SOURCE_ENCODING_VERSION,textNormalization:'NFC'}}:undefined,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
+        {sourceEncoding:{receiptHash:sourceEncodingReceiptHash,parserInputHash:encoding.proof!.inputHash,version:encoding.proof!.version,textNormalization:'NFC'}}:undefined,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
       (formulaEnriched?'native-text-plus-ai-formula':'native-text'):formulaEnriched?`docling-plus-${formulaBackend}-formula`:'docling-text'});
   const chunks=pages.flatMap(page=>splitText(page.text).map(body=>({locator:page.locator,body})));
   // Search chunks are a rebuildable cache. The original blob and provenance remain available.
