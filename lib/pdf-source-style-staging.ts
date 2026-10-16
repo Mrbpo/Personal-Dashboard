@@ -18,7 +18,9 @@ const styleCommands=new Set(['\\mathbf','\\boldsymbol','\\mathit','\\mathrm','\\
 const containers=new Map(['vec','hat','widehat','bar','overline','underline','tilde','widetilde','dot','ddot','overrightarrow','overleftarrow','sqrt']
  .map(name=>['\\'+name,1]));
 for(const name of ['frac','dfrac','tfrac'])containers.set('\\'+name,2);
-const operators=new Set(['int','iint','iiint','oint','oiint','sum','prod','cdot','times','div','pm','mp','le','leq','ge','geq','ne','neq','in','notin','to','infty','partial','nabla']
+// Standard zero-argument variants stay opaque: preserve their spelling, offer no style mapping.
+const operators=new Set(['int','iint','iiint','oint','oiint','sum','prod','cdot','times','div','pm','mp','le','leq','ge','geq','ne','neq','in','notin','to','infty','partial','nabla',
+ 'varepsilon','vartheta','varkappa','varphi','varrho','varpi','varsigma']
  .map(name=>'\\'+name));
 type TextSpan={id:string;start:number;end:number;text:string;atom:string;context:string};
 type NativeSpan={id:string;runIndex:number;spanIndex:number;text:string;fragment:string;textOffset:{start:number;end:number};atom:string;runBox:{left:number;top:number;width:number;height:number};

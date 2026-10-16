@@ -81,6 +81,10 @@ test('unknown encoding/font, words, ambiguous math and existing styles are skipp
  literal.nativeHints.sidecar.runs![0].text='α';literal.nativeHints.sidecar.runs![0].observedSpans[0].text='α';
  const actualGreek=preparePdfStyleSelection(reseal(literal));
  assert.equal(stagePdfStyleSelection(actualGreek,{pairs:[{textSpanId:actualGreek.textSpans[0].id,nativeStyleSpanId:actualGreek.nativeSpans.find(span=>span.atom==='\\alpha')!.id}]}).text,'\\(\\boldsymbol{\\alpha}\\)');
+ const variants=['varepsilon','vartheta','varkappa','varphi','varrho','varpi','varsigma'].map(name=>'\\'+name),body='\\('+variants.join('+')+'+u\\)';
+ const opaque=preparePdfStyleSelection(fixture(body));assert.deepEqual(opaque.textSpans.map(span=>span.text),['u']);
+ const preserved=stagePdfStyleSelection(opaque,{pairs:[{textSpanId:opaque.textSpans[0].id,nativeStyleSpanId:opaque.nativeSpans.find(span=>span.atom==='u')!.id}]});
+ assert.equal(preserved.text,'\\('+variants.join('+')+'+\\mathbf{u}\\)','opaque variants stay byte-identical and do not block neighboring leaves');
 });
 
 test('baseline/sidecar/PNG identity changes reject; different source pages require an explicitly unverified map',()=>{
