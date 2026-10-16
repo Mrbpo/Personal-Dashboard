@@ -10,7 +10,7 @@ import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
 import {queueIngestionJob,doclingStageBlobHashes} from './kernel/jobs.ts';
 import {kernel} from './kernel/service.ts';
 import {documentSearchText,splitDocumentText} from './kernel/document-search.ts';
-import {DOCLING_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
+import {DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
 import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
 export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
@@ -57,7 +57,7 @@ export async function previewDocument(owner:string,id:string) {
       pages=persisted.map(page=>({page:page.page_number,locator:page.locator,text:page.body}));
       return {document,text,pages};
     }
-    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, 'docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 WHEN parser='docling-v1' THEN 1 WHEN parser=? THEN 2 ELSE 3 END LIMIT 1000").bind(id,DOCLING_PARSER_VERSION,PDF_PARSER_VERSION,DOCLING_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
+    const parsed=(await db.prepare("SELECT page,body,parser FROM library_parse_pages WHERE document_id=? AND parser IN (?, ?, 'docling-v2-search', 'docling-v2-text-search', 'docling-v1', ?, 'pdf-page-v2') ORDER BY page, CASE WHEN parser=? THEN 0 WHEN parser=? THEN 1 WHEN parser='docling-v2-search' THEN 2 WHEN parser='docling-v2-text-search' THEN 3 WHEN parser='docling-v1' THEN 4 WHEN parser=? THEN 5 ELSE 6 END LIMIT 1000").bind(id,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION).all<{page:number;body:string;parser:string}>()).results;
     const job=await db.prepare('SELECT status,payload FROM background_jobs WHERE id=?').bind(`index:${id}`).first<{status:string;payload:string}>();
     const explicitUnfinished=job&&['queued','running','failed'].includes(job.status)&&JSON.parse(job.payload).forcePdfFormulaReparse===true;
     const preserveOld=document.status!=='ready'||explicitUnfinished;

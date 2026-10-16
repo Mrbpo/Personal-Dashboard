@@ -1,8 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PDFDocument,StandardFonts} from 'pdf-lib';
-import {appendPdfLatex,mayContainPdfMath} from '../lib/pdf-formulas.ts';
+import {appendPdfLatex,mayContainPdfMath,assessPdfFormulaPreservation} from '../lib/pdf-formulas.ts';
 process.env.AI_BUDGET_TEST_BYPASS='true';
+
+test('formula character preservation accepts its explicit LaTeX subset without claiming semantic proof',()=>{
+ for(const [source,latex]of [
+  ['δk′(s,u) + w(u,v) ≤ 10','\\delta_{k^\\prime}(s,u)+\\mathrm{w}(u,v)\\leq10'],
+  ['min{{a}∪{b}}','\\min\\left\\{\\{a\\}\\cup\\{b\\}\\right\\}'],
+  ['α1+β2=3','\\alpha_{1}+\\beta_{2}=3'],
+  ['x ≠ 0','x\\neq0'],
+ ])assert.equal(assessPdfFormulaPreservation(source,latex).status,'characters-preserved');
+});
+
+test('formula character preservation detects lost primes, literal set scope and changed true numbers; unknown stays unassessed',()=>{
+ for(const [source,latex]of [
+  ['f′(x)=0','f(x)=0'],
+  ['min{{a}∪{b}}','\\min\\{a\\}\\cup\\{b\\}'],
+  ['x0=10','x_{\\prime}=10'],
+  ['x=2','x=20'],
+ ])assert.equal(assessPdfFormulaPreservation(source,latex).status,'changed');
+ assert.equal(assessPdfFormulaPreservation('√x','\\sqrt{x}').status,'unassessed');
+ assert.equal(assessPdfFormulaPreservation('x','\\unknown{x}').status,'unassessed');
+ assert.equal(assessPdfFormulaPreservation('x^2','x^{2}').status,'unassessed');
+});
+
+test('formula character preservation rejects TeX comments, parameters and active syntax but retains escaped literals',()=>{
+ for(const literal of ['%','#','~'])
+  assert.equal(assessPdfFormulaPreservation(`x${literal}1`,`x${literal}1`).status,'unassessed');
+ for(const literal of ['%','#'])
+  assert.equal(assessPdfFormulaPreservation(`x${literal}1`,`x\\${literal}1`).status,'characters-preserved');
+ assert.equal(assessPdfFormulaPreservation('20%x','\\text{20%x}').status,'unassessed');
+ assert.equal(assessPdfFormulaPreservation('20%x','\\text{20\\%x}').status,'characters-preserved');
+});
 
 test('Docling formula augmentation resumes successful pages without exceeding the per-document cap',async()=>{
  process.env.DATABASE_URL=':memory:';

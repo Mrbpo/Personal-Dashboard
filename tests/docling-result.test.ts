@@ -13,6 +13,30 @@ function result(pages = 1) {
   }}};
 }
 
+test('Docling source preservation keeps original formula strings in body, table and picture references even in text mode',()=>{
+ const value=result(),doc=value.document.json_content;
+ doc.texts=[item('f(x)=0',1,{label:'formula',orig:'f′(x)=0'}),
+  item('\\min\\{a\\}\\cup\\{b\\}',1,{label:'formula',orig:'min{{a}∪{b}}'}),
+  item('\\sqrt{x}',1,{label:'formula',orig:'√x'}),
+  item('\\alpha_1+\\beta_2=3',1,{label:'formula',orig:'α1+β2=3'}),
+  item('g(x)=0',1,{label:'formula',orig:'g′(x)=0',parent:ref('pictures/0')})];
+ doc.tables=[{prov:[{page_no:1}],data:{num_rows:1,num_cols:1,table_cells:[{ref:ref('texts/1'),start_row_offset_idx:0,start_col_offset_idx:0}]}}];
+ doc.pictures=[{prov:[{page_no:1,bbox:{l:10,t:10,r:100,b:100,coord_origin:'TOPLEFT'}}],children:[ref('texts/4')]}];
+ doc.body.children=[ref('texts/0'),ref('tables/0'),ref('texts/2'),ref('texts/3'),ref('pictures/0')];
+ const original=JSON.stringify(value);
+ for(const formulaEnriched of [true,false]){
+  const decoded=decodeDoclingResult(value,1,{formulaEnriched});
+  assert.equal(decoded.pages[0].text,'f′(x)=0\n\n| min{{a}∪{b}} |\n\n√x\n\n'+
+   (formulaEnriched?'$$\n\\alpha_1+\\beta_2=3\n$$':'\\alpha_1+\\beta_2=3')+'\n\ng′(x)=0');
+  assert.equal(decoded.nativeTables[0].cellTexts[0].text,'min{{a}∪{b}}');
+  assert.equal(decoded.visualLayout.regions[0].textReferences[0].text,'g′(x)=0');
+  assert.ok(decoded.warnings.some(w=>w.includes('changed')));
+  assert.ok(decoded.warnings.some(w=>w.includes('unassessed')));
+  assert.ok(decoded.warnings.some(w=>w.includes('保留原始抽取文本')));
+ }
+ assert.equal(JSON.stringify(value),original,'Raw extraction and rejected machine text remain immutable');
+});
+
 test('reading order follows nested body refs, not text array order, with formula and table content', () => {
   const value = result(2), doc = value.document.json_content;
   doc.texts = [item('Conclusion', 2), item('Introduction'), item('x^2 + y^2 = z^2', 1, {label: 'formula'}), item('Study schedule', 2)];
