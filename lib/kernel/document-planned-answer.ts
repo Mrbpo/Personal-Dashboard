@@ -2,11 +2,12 @@ import {createHash} from 'node:crypto';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
-import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
+import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v4';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v5';
+export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
  originalQuery?:string;focusPolicy?:'resolved-exact-title-scope-value-v1';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
@@ -115,14 +116,65 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
   questionContract:original.contract,unverifiedEvidencePlan:binding.plan,supplementalRetrieval:receipt.supplemental}};
  return {context,prepared,selectedPrepared,receipt,bindingSha256:digest(receipt)};
 }
-export function buildPlannedStudyGenerationRequest(packet:ReturnType<typeof preparePlannedStudyGeneration>){
- const body=buildDocumentAnswerRequest(packet.selectedPrepared,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000});
+function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlannedStudyGeneration>['selectedPrepared']){
+ const body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000});
  body.input[0].content+=' The complete original question, question-contract aspects and requested scope must all remain in force; the contract itself is fallible. '+
   'The evidence plan is an unverified proposal, not factual evidence. Use only actual quote units and images to establish an answer. '+
   'Answer every requested parallel subject/configuration and preserve same-context genuine conflicts; do not substitute a subset for an explicit total. '+
   'Return at most six final atomic claims without dropping material requirements to meet that limit. If capacity or evidence prevents a complete answer, do not claim completeness. '+
   'This response will receive only citation-local support checks; those cannot certify complete coverage.';
  return body;
+}
+
+/** Only typed citation-ID fields cross this transport boundary. Source text,
+ * metadata, nonselectable caption members, image bytes and order stay intact.
+ * Canonical q/i identities remain in the packet, manifest and local audits. */
+export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof preparePlannedStudyGeneration>){
+ const prepared=packet.selectedPrepared,ids=[...prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),
+  ...prepared.supports.filter(s=>s.kind==='image').map(s=>s.id)];
+ if(!ids.length||new Set(ids).size!==ids.length||digest(ids)!==digest(packet.receipt.selectedSourceIds))throw Error('Invalid planned source labels');
+ const canonicalPacketSha256=digest({bindingSha256:packet.bindingSha256,input:prepared.input}),
+  mapping={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalPacketSha256,entries:ids.map((canonicalId,index)=>({label:`Source${index+1}`,canonicalId}))},
+  byId=new Map(mapping.entries.map(e=>[e.canonicalId,e.label])),
+  nonselectable=new Set(packet.prepared.quoteUnits.filter(u=>!u.selectable).map(u=>u.id));
+ const selectedId=(id:string)=>{const label=byId.get(id);if(!label)throw Error('Incomplete planned source label mapping');return label;};
+ // A saved plan may reference a caption that became a nonselectable member of
+ // an actual visual unit. Keep that provenance without making it selectable.
+ const planId=(id:string)=>byId.get(id)??(nonselectable.has(id)?id:selectedId(id)),plan=prepared.input.unverifiedEvidencePlan,
+  quoteUnits=prepared.quoteUnits.map(u=>({...u,id:selectedId(u.id)})),
+  supports=prepared.supports.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s),
+  input={...prepared.input,quoteUnits,evidence:prepared.input.evidence.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s),
+   unverifiedEvidencePlan:{...plan,clusters:plan.clusters.map(c=>({...c,sourceIds:c.sourceIds.map(planId)})),
+    conflicts:plan.conflicts.map(c=>({...c,leftSourceIds:c.leftSourceIds.map(planId),rightSourceIds:c.rightSourceIds.map(planId)})),
+    sourceSubscopes:plan.sourceSubscopes.map(s=>({...s,sourceIds:s.sourceIds.map(planId)}))}},
+  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input}),mappingSha256=digest(mapping),
+  binding={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalBindingSha256:packet.bindingSha256,
+   canonicalInputFingerprint:packet.prepared.fingerprint,canonicalPacketSha256,mappingSha256,providerRequestSha256:digest(request)},
+  bindingSha256=digest(binding);
+ return {request,mapping,binding,bindingSha256,...studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,request,bindingSha256)};
+}
+export function buildPlannedStudyGenerationRequest(packet:ReturnType<typeof preparePlannedStudyGeneration>){
+ return preparePlannedStudyGenerationTransport(packet).request;
+}
+
+/** Decode exactly once, after the original provider raw has been durably
+ * journaled. A complete current packet and actual execution identity are
+ * required; old canonical answers and stale/tampered mappings cannot decode. */
+export function decodePlannedStudyGenerationSelections(value:unknown,packet:ReturnType<typeof preparePlannedStudyGeneration>,
+ transport:ReturnType<typeof preparePlannedStudyGenerationTransport>,execution:{providerRequestSha256:string;requestIdentity:string}){
+ const current=preparePlannedStudyGenerationTransport(packet);
+ if(digest(transport)!==digest(current)||execution.providerRequestSha256!==current.providerRequestSha256||execution.requestIdentity!==current.requestIdentity)
+  throw Error('Planned source label binding changed');
+ const exact=(v:unknown,keys:string[])=>v!==null&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===keys.length&&keys.every(k=>Object.hasOwn(v,k));
+ if(!exact(value,['status','message','claims'])||!Array.isArray((value as DocumentAnswerSelections).claims))throw Error('Invalid planned source label response');
+ const selections=value as DocumentAnswerSelections,byLabel=new Map(transport.mapping.entries.map(e=>[e.label,e.canonicalId]));
+ return {...selections,claims:selections.claims.map(claim=>{
+  if(!exact(claim,['text','citations'])||!Array.isArray(claim.citations))throw Error('Invalid planned source label response');
+  const seen=new Set<string>();return {...claim,citations:claim.citations.map(ref=>{
+   if(!exact(ref,['id'])||typeof ref.id!=='string'||!byLabel.has(ref.id)||seen.has(ref.id))throw Error('Unknown or duplicate planned source label');
+   seen.add(ref.id);return {id:byLabel.get(ref.id)!};
+  })};
+ })};
 }
 
 /** At most one plan, one lexical batch, one generation and six actual final
@@ -137,11 +189,14 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource);};
  const packet=await read();await policy.recordState({event:'supplement',receipt:packet.receipt});
  if(!packet.selectedPrepared.supports.length)return {status:'unavailable',plan,receipt:packet.receipt,wholeAnswerVerified:false};
- const body=buildPlannedStudyGenerationRequest(packet),budget=studyAnswerPlanRequestBudget(body,{prepared:packet.selectedPrepared}),
-  checkedRead=async()=>{const current=await read();if(current.bindingSha256!==packet.bindingSha256)throw Error('Planned answer composite source changed');return current.context;},
+ const transport=preparePlannedStudyGenerationTransport(packet),body=transport.request,budget=studyAnswerPlanRequestBudget(body,{prepared:packet.selectedPrepared});
+ await policy.recordState({event:'generation-request',version:PLANNED_STUDY_ANSWER_VERSION,transport});
+ const checkedRead=async()=>{const current=await read();if(current.bindingSha256!==packet.bindingSha256||
+   digest(preparePlannedStudyGenerationTransport(current))!==digest(transport))throw Error('Planned answer composite source changed');return current.context;},
   recheck=async()=>{await checkedRead();},
-  {value,...generation}=await executeStudyPlanningRequest(PLANNED_STUDY_ANSWER_VERSION,'generation',body,packet.bindingSha256,budget,journal(policy,'generation'),recheck);
- await policy.recordState({event:'generation',value,...generation,receipt:packet.receipt});
+  {value:aliasSelections,...execution}=await executeStudyPlanningRequest(PLANNED_STUDY_ANSWER_VERSION,'generation',body,transport.bindingSha256,budget,journal(policy,'generation'),recheck),
+  value=decodePlannedStudyGenerationSelections(aliasSelections,packet,transport,execution),generation={...execution,sourceLabels:transport};
+ await policy.recordState({event:'generation',value,aliasSelections,...generation,receipt:packet.receipt});
  if(value&&typeof value==='object'&&Array.isArray((value as DocumentAnswerSelections).claims)&&(value as DocumentAnswerSelections).claims.length>6)
   return {status:'capacity-exceeded',plan,generation,untruncatedValue:value,receipt:packet.receipt,wholeAnswerVerified:false};
  const restored=resolveDocumentAnswerSelections(value,packet.prepared.supports),allowed=new Set(packet.receipt.selectedSourceIds);

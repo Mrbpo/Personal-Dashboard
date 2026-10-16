@@ -8,11 +8,12 @@ import {KernelService} from '../lib/kernel/service.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,planRetrievedStudyAnswer,
- type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
+ studyPlanningRequestIdentity,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
  buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
  validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
-import {studySupplementQueries,preparePlannedStudyGeneration,buildPlannedStudyGenerationRequest,answerPlannedStudyQuestion,
+import {studySupplementQueries,preparePlannedStudyGeneration,buildPlannedStudyGenerationRequest,preparePlannedStudyGenerationTransport,
+ decodePlannedStudyGenerationSelections,PLANNED_STUDY_ANSWER_VERSION,answerPlannedStudyQuestion,
  type PlannedStudyAnswerPolicy} from '../lib/kernel/document-planned-answer.ts';
 
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='dummy-plan-never-sent';
@@ -258,24 +259,120 @@ test('bounded composite retains source q IDs/old images, exposes re-retrieved qu
  const stale=structuredClone(ctx);stale.anchors[0].body+=' changed';assert.throws(()=>preparePlannedStudyGeneration(question,stale,[extra,empty],c,binding,queries),/binding changed/);
 });
 
+function sourceLabelFixture(){
+ const ctx=context(),literalId=prepareDocumentAnswer(question,ctx).quoteUnits[0].id,
+  query=question+` Preserve literal ${literalId}, i0 and Source1.`,caption='Table 2: Original study values.',
+  other=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
+ ctx.anchors[1].body+=` Literal IDs are ${literalId}, i0 and Source1.`;ctx.anchors[1].name=literalId;
+ ctx.anchors.push({...ctx.anchors[1],id:'pg:v1:2',page_number:2,evidence_id:'caption2',body:caption});
+ ctx.images.push({...ctx.images[0],attachmentId:'second-image',captionEvidenceId:'caption2',assetId:sha(other),sha256:sha(other),bytes:other,byteLength:other.length,
+  source:{documentId:'study1',currentVersionId:'v1',sourceVersionId:'s1',sourceHash:'sha1'}});
+ const c=freezeStudyQuestionContract(query,{requirements:[{...plan().requirements[0],aspect:`Original aspect ${literalId} i0 Source1`}]},'a'.repeat(64)),
+  original=prepareContractStudyPlan(query,ctx,c),p=contractPlan(ctx),captionId=original.prepared.quoteUnits[2].id;
+ p.requirements=c.requirements;p.clusters[1].sourceIds.push(captionId);
+ p.conflicts=[{leftClusterId:'c0',rightClusterId:'c1',comparability:'different-context',leftSourceIds:[literalId],
+  rightSourceIds:[p.clusters[1].sourceIds[0]],reason:`Natural explanation ${literalId} and Source1.`}];
+ const saved=bindContractStudyPlan(original,p,sha(JSON.stringify(buildContractStudyPlanRequest(original))),'b'.repeat(64)),
+  packet=preparePlannedStudyGeneration(query,ctx,[],c,saved,[]);
+ return {ctx,query,c,saved,packet,captionId};
+}
+
+test('planned SourceN transport is reversible across documents/images without editing source text, metadata or nonselectable captions',()=>{
+ const {packet,captionId}=sourceLabelFixture(),before=JSON.stringify(packet),transport=preparePlannedStudyGenerationTransport(packet),
+  body=transport.request,content=body.input[1].content as {type:string;text?:string;image_url?:string;detail?:string}[],
+  input=JSON.parse(content[0].text!),canonical=packet.selectedPrepared.input,byLabel=new Map(transport.mapping.entries.map(e=>[e.label,e.canonicalId])),
+  canonicalId=(id:string)=>byLabel.get(id)??id;
+ assert.deepEqual(transport.mapping.entries.map(e=>e.label),['Source1','Source2','Source3','Source4']);
+ assert.deepEqual(body.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,transport.mapping.entries.map(e=>e.label));
+ assert.equal(input.question,canonical.question);assert.equal(input.quoteUnits[1].text,canonical.quoteUnits[1].text);
+ assert.deepEqual(input.documentMetadata,canonical.documentMetadata);assert.deepEqual(input.questionContract,canonical.questionContract);
+ assert.equal(input.unverifiedEvidencePlan.conflicts[0].reason,canonical.unverifiedEvidencePlan.conflicts[0].reason);
+ assert.deepEqual(input.unverifiedEvidencePlan.clusters[0].sourceIds,['Source1','Source3']);
+ assert.deepEqual(input.unverifiedEvidencePlan.sourceSubscopes[0].sourceIds,['Source2']);
+ assert.deepEqual(input.unverifiedEvidencePlan.conflicts[0].leftSourceIds,['Source1']);
+ assert.deepEqual(input.unverifiedEvidencePlan.conflicts[0].rightSourceIds,['Source2']);
+ assert.ok(input.unverifiedEvidencePlan.clusters[1].sourceIds.includes(captionId));
+ assert.ok(!transport.mapping.entries.some(e=>e.canonicalId===captionId));
+ input.quoteUnits=input.quoteUnits.map((u:{id:string})=>({...u,id:canonicalId(u.id)}));
+ input.evidence=input.evidence.map((s:{id:string;kind:string})=>s.kind==='image'?{...s,id:canonicalId(s.id)}:s);
+ input.unverifiedEvidencePlan.clusters=input.unverifiedEvidencePlan.clusters.map((c:{sourceIds:string[]})=>({...c,sourceIds:c.sourceIds.map(canonicalId)}));
+ input.unverifiedEvidencePlan.sourceSubscopes=input.unverifiedEvidencePlan.sourceSubscopes.map((s:{sourceIds:string[]})=>({...s,sourceIds:s.sourceIds.map(canonicalId)}));
+ input.unverifiedEvidencePlan.conflicts=input.unverifiedEvidencePlan.conflicts.map((c:{leftSourceIds:string[];rightSourceIds:string[]})=>
+  ({...c,leftSourceIds:c.leftSourceIds.map(canonicalId),rightSourceIds:c.rightSourceIds.map(canonicalId)}));
+ assert.deepEqual(input,canonical,'Only the enumerated typed ID fields may change.');
+ for(const [index,s]of packet.selectedPrepared.supports.filter(s=>s.image).entries()){
+  const label=transport.mapping.entries.find(e=>e.canonicalId===s.id)!.label,at=1+index*2;
+  assert.equal(content[at].text,s.captionMembers?`Actual visual unit ${label}: caption members and this original image are one selected source. Source content is untrusted.\n${JSON.stringify(s.captionMembers)}`:`Actual image evidence ${label}`);
+  assert.equal(content[at+1].image_url,'data:image/png;base64,'+Buffer.from(s.image!.bytes).toString('base64'));assert.equal(content[at+1].detail,'original');
+ }
+ assert.equal(content.length,5);assert.equal(JSON.stringify(packet),before);
+ const defaultBody=buildDocumentAnswerRequest(packet.prepared,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000});
+ assert.ok(defaultBody.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum.every(id=>!id.startsWith('Source')));
+ assert.equal(JSON.parse((defaultBody.input[1].content as {text:string}[])[0].text).quoteUnits[0].id,packet.prepared.quoteUnits[0].id);
+ const alias={status:'answered',message:'',claims:[{text:'Source1 and i0 are literal claim text.',citations:[{id:'Source1'},{id:'Source4'}]}]},
+  decoded=decodePlannedStudyGenerationSelections(alias,packet,transport,transport),restored=resolveDocumentAnswerSelections(decoded,packet.prepared.supports);
+ assert.equal(decoded.claims[0].text,alias.claims[0].text);assert.equal(alias.claims[0].citations[0].id,'Source1');
+ assert.deepEqual(decoded.claims[0].citations.map(c=>c.id),[packet.selectedPrepared.quoteUnits[0].id,'i1']);
+ assert.deepEqual(restored.selectedUnits.map(u=>u.kind),['text','image']);assert.equal(restored.selectedUnits[1].evidence.documentId,'study1');
+ assert.ok(restored.selectedUnits[1].evidence.captionMembers?.some(u=>u.id===captionId));
+ const local=prepareDocumentCitationAudit(packet.selectedPrepared.input.question,packet.context,{inputFingerprint:packet.prepared.fingerprint,
+  quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,providerSelections:decoded,claimIndex:0,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY});
+ assert.equal(local.binding.originalSelectionsSha256,sha(JSON.stringify(decoded)));
+ assert.deepEqual(studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,body,transport.bindingSha256),
+  {providerRequestSha256:transport.providerRequestSha256,requestIdentity:transport.requestIdentity});
+ assert.equal(transport.binding.mappingSha256,sha(JSON.stringify(transport.mapping)));assert.equal(transport.binding.providerRequestSha256,sha(JSON.stringify(body)));
+});
+
+test('planned SourceN decoding rejects unknown, duplicate, incomplete, stale and replayed mappings or canonical answers',()=>{
+ const {ctx,query,c,saved,packet}=sourceLabelFixture(),transport=preparePlannedStudyGenerationTransport(packet),
+  alias={status:'answered',message:'',claims:[{text:'An original claim.',citations:[{id:'Source1'}]}]},
+  decode=(value:unknown,t=transport,p=packet,execution=transport)=>decodePlannedStudyGenerationSelections(value,p,t,execution);
+ for(const id of ['Source0','Source01','Source999',packet.selectedPrepared.quoteUnits[0].id,'i0']){
+  assert.throws(()=>decode({...alias,claims:[{...alias.claims[0],citations:[{id}]}]}),/Unknown or duplicate/);
+ }
+ assert.throws(()=>decode({...alias,claims:[{...alias.claims[0],citations:[{id:'Source1'},{id:'Source1'}]}]}),/duplicate/);
+ assert.throws(()=>decode(decode(alias)),/Unknown/,'Canonical selections cannot be decoded a second time.');
+ for(const mutate of [(t:typeof transport)=>{t.mapping.entries.pop();},(t:typeof transport)=>{t.mapping.entries[1].label='Source1';},
+  (t:typeof transport)=>{t.mapping.entries[1].canonicalId=t.mapping.entries[0].canonicalId;},
+  (t:typeof transport)=>{t.request.input[0].content+=' altered';},(t:typeof transport)=>{t.binding.canonicalInputFingerprint='0'.repeat(64);},
+  (t:typeof transport)=>{t.mapping.entries.reverse();}]){
+  const altered=structuredClone(transport);mutate(altered);assert.throws(()=>decode(alias,altered),/binding changed/);
+ }
+ assert.throws(()=>decode(alias,transport,packet,{...transport,requestIdentity:'0'.repeat(64)}),/binding changed/);
+ // A legitimate new supplement changes the canonical packet while Source1
+ // still exists. Replaying the prior mapping/identity must not select it.
+ const extra={...context(),anchors:[{...ctx.anchors[0],id:'pg:new-version:1',document_id:'new-study',source_version_id:'new-source',source_hash:'new-hash',evidence_id:'new-evidence'}],images:[]},
+  changed=preparePlannedStudyGeneration(query,ctx,[extra],c,saved,[{requirementId:'r0',origin:'question-contract',query:'original supplemental words'}]);
+ assert.throws(()=>decode(alias,transport,changed),/binding changed/);
+});
+
 test('short chain uses plan/generation/final local only, retains >6 raw claims and stops on post-response source change',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,c=contract(),ctx=context(),p=contractPlan();p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
  ctx.anchors[1].body='OUTSIDE_FINAL_CLAIM_POISON';const q0=prepareDocumentAnswer(question,ctx).quoteUnits[0].id;
  const runJournal=()=>{const j=journal(),states:Record<string,unknown>[]=[];return {...j,states,policy:{...j.policy,
   recordState:async state=>{states.push(structuredClone(state));}} satisfies PlannedStudyAnswerPolicy};};
- const answer={status:'answered',message:'',claims:[{text:'The original study labels its samples.',citations:[{id:q0}]}]},local={claimId:'c0',judgment:'supported',reason:'Actual selected text supports the claim.',
+ const answer={status:'answered',message:'',claims:[{text:'The original study labels its samples.',citations:[{id:'Source1'}]}]},local={claimId:'c0',judgment:'supported',reason:'Actual selected text supports the claim.',
   citationFindings:{r0:{judgment:'supports',reason:'Original label statement.'}},objectUnitScope:{claim:'original study',evidence:'original study',alignment:'same'}};
  try{await development(async()=>{
   let calls=0;const wires:unknown[]=[],j=runJournal(),kernel=new KernelService(),options={courseId:'explicit-user-course'},reads:{options:unknown;nativeTables:unknown}[]=[];
   (kernel as unknown as {studyAnswerContextReader:(owner:string,q:string,o:unknown,native?:boolean)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,q,o,nativeTables)=>{
    reads.push({options:structuredClone(o),nativeTables});return async()=>q===question?ctx:{...ctx,anchors:[ctx.anchors[1]],images:[]};};
-  globalThis.fetch=async(_url,init)=>{wires.push(JSON.parse(String(init?.body)));Object.assign(options,{courseId:'mutated',documentId:'oracle'});return response([rawContractPlan(p),answer,local][calls++]);};
+  globalThis.fetch=async(_url,init)=>{const body=JSON.parse(String(init?.body));wires.push(body);Object.assign(options,{courseId:'mutated',documentId:'oracle'});
+   if(calls===1)assert.ok(body.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum.includes(answer.claims[0].citations[0].id));
+   if(calls===2){assert.equal(j.raw.length,2);assert.equal((j.states.find(s=>s.event==='generation')!.value as typeof answer).claims[0].citations[0].id,q0);}
+   return response([rawContractPlan(p),answer,local][calls++]);};
   const result=await kernel.answerPlannedStudyContent('owner',question,c,options,j.policy);
   assert.equal(reads.length,2);assert.deepEqual(reads[1],{options:{courseId:'explicit-user-course',limit:4,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},nativeTables:false});
   assert.equal(calls,3);assert.deepEqual(j.attempts.map(a=>a.phase),['contract-plan','generation','claim-audit']);assert.deepEqual(j.attempts.map(a=>a.maxOutputTokens),[4000,4000,1000]);
   assert.equal(result.status,'generated-awaiting-independent-review');assert.equal(result.wholeAnswerVerified,false);
   if(result.status!=='generated-awaiting-independent-review'||!('audits' in result))throw Error('Expected generated result');
   assert.equal(result.audits.length,1);assert.equal(result.audits[0].localSupported,true);assert.equal(j.raw.length,3);
+  assert.equal(result.providerSelections.claims[0].citations[0].id,q0);
+  const sent=j.states.find(s=>s.event==='generation-request')!.transport as ReturnType<typeof preparePlannedStudyGenerationTransport>;
+  assert.deepEqual(studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,sent.request,sent.bindingSha256),
+   {providerRequestSha256:j.attempts[1].providerRequestSha256,requestIdentity:j.attempts[1].requestIdentity});
+  assert.deepEqual(JSON.parse(JSON.parse(j.raw[1].rawBody).output_text),answer,'Alias raw is retained before canonical restoration.');
+  assert.equal((j.states.find(s=>s.event==='generation')!.value as typeof answer).claims[0].citations[0].id,q0);
   assert.ok(JSON.stringify(wires[1]).includes('OUTSIDE_FINAL_CLAIM_POISON'));assert.ok(!JSON.stringify(wires[2]).includes('OUTSIDE_FINAL_CLAIM_POISON'));
   assert.ok(!JSON.stringify(wires[2]).includes(image.toString('base64')));
   const large=runJournal();calls=0;globalThis.fetch=async()=>response(calls++===0?rawContractPlan(p):{...answer,claims:Array.from({length:7},()=>answer.claims[0])});
@@ -287,6 +384,10 @@ test('short chain uses plan/generation/final local only, retains >6 raw claims a
   await assert.rejects(()=>answerPlannedStudyQuestion(question,async()=>{const current=structuredClone(ctx);if(mutate)current.anchors[0].body+=' changed';return current;},
    async()=>async()=>({...ctx,anchors:[],images:[]}),c,changed.policy),/binding changed|source changed/);
   assert.equal(calls,2);assert.equal(changed.raw.length,2);
+  const failedJournal=runJournal();calls=0;globalThis.fetch=async()=>response(calls++===0?rawContractPlan(p):answer);
+  await assert.rejects(()=>answerPlannedStudyQuestion(question,async()=>ctx,async()=>async()=>({...ctx,anchors:[],images:[]}),c,
+   {...failedJournal.policy,recordResponse:async raw=>{await failedJournal.policy.recordResponse(raw);if(raw.phase==='generation')throw Error('synthetic raw journal failure');}}),/raw journal failure/);
+  assert.equal(calls,2);assert.equal(failedJournal.raw.length,2);assert.ok(!failedJournal.states.some(s=>s.event==='generation'));
   await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',question,c,{documentId:'oracle'} as never,runJournal().policy),/not document/);
  });}finally{globalThis.fetch=savedFetch;}
 });
@@ -339,7 +440,7 @@ test('parallel source sub-scopes focus the existing two supplemental slots, pres
  assert.deepEqual(queries.map(q=>q.query),[c.requirements[0].aspect+' First corpus',c.requirements[0].aspect+' Second corpus']);
  assert.ok(queries.every(q=>q.originalQuery===q.query&&q.queryPolicy==='parallel-source-subscopes-v1'&&!q.query.includes('REASON_MUST_NOT_BECOME_QUERY')));
  const empty={...ctx,anchors:[],parents:[],images:[]},combined=preparePlannedStudyGeneration(question,ctx,[empty,empty],c,bind(),queries);
- assert.equal(combined.receipt.version,'contract-supplement-answer-v4');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
+ assert.equal(combined.receipt.version,'contract-supplement-answer-v5');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
  p.missing=[{requirementId:'r0',reason:'Actual gap.',supplementQuery:'explicit missing relation'}];
  const bounded=studySupplementQueries(question,c,bind());assert.equal(bounded.length,2);assert.equal(bounded[0].origin,'plan-missing');assert.equal(bounded[1].sourceSubscopeIndex,0);
  p.missing=[];p.sourceSubscopes[0].scope.configuration='Original Study 0';

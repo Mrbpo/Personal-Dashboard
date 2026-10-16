@@ -132,12 +132,16 @@ export async function assertStudyAnswerPlanPolicy(policy:StudyAnswerPlanPolicy){
 
 /** Shared single-request boundary for explicit development planning phases.
  * Callers still own durable attempt/raw journals and per-batch authorization. */
+export function studyPlanningRequestIdentity(version:string,request:StudyPlanningRequest,bindingSha256:string){
+ const providerRequestSha256=sha(JSON.stringify(request));
+ return {providerRequestSha256,requestIdentity:sha(JSON.stringify({version,providerRequestSha256,bindingSha256}))};
+}
 export async function executeStudyPlanningRequest(version:string,phase:StudyAnswerPlanAttempt['phase'],request:StudyPlanningRequest,
  bindingSha256:string,budget:ReturnType<typeof studyAnswerPlanRequestBudget>,policy:StudyAnswerPlanPolicy,recheck:()=>Promise<void>){
  await assertStudyAnswerPlanPolicy(policy);
  if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!=='low'||request.max_output_tokens!==4000||budget.maxOutputTokens!==4000)
   throw new Error('Planning phase settings must remain fixed');
- const providerRequestSha256=sha(JSON.stringify(request)),requestIdentity=sha(JSON.stringify({version,providerRequestSha256,bindingSha256}));
+ const {providerRequestSha256,requestIdentity}=studyPlanningRequestIdentity(version,request,bindingSha256);
  await policy.beforeAttempt(Object.freeze({phase,requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();
  const response=await paidOpenAI('responses',request,AbortSignal.timeout(30000),{kind:'document-answer',dailyLimit:policy.dailyLimit??200}),
   rawBody=await response.text(),rawSha256=sha(rawBody);
