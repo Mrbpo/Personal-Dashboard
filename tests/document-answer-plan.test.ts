@@ -6,15 +6,17 @@ import {tmpdir} from 'node:os';
 import {database} from '../lib/database.ts';
 import {KernelService} from '../lib/kernel/service.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
-import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
+import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,DOCUMENT_CITATION_AUDIT_VERSION,
+ type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
+import type {DocumentCitationRevisionContinuation} from '../lib/kernel/document-citation-revision.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,planRetrievedStudyAnswer,
  studyPlanningRequestIdentity,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
  buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
  validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
 import {studySupplementQueries,preparePlannedStudyGeneration,buildPlannedStudyGenerationRequest,preparePlannedStudyGenerationTransport,
- decodePlannedStudyGenerationSelections,PLANNED_STUDY_ANSWER_VERSION,answerPlannedStudyQuestion,
- type PlannedStudyAnswerPolicy} from '../lib/kernel/document-planned-answer.ts';
+ decodePlannedStudyGenerationSelections,PLANNED_STUDY_ANSWER_VERSION,answerPlannedStudyQuestion,revisePlannedStudyCitation,
+ type PlannedStudyAnswerPolicy,type PlannedStudyAnswerAttempt} from '../lib/kernel/document-planned-answer.ts';
 
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='dummy-plan-never-sent';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'study-plan-empty-'+randomUUID());
@@ -42,8 +44,9 @@ async function development<T>(work:()=>Promise<T>){
  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';try{return await work();}finally{for(const n of names){if(saved[n]===undefined)delete process.env[n];else process.env[n]=saved[n];}}
 }
-function journal(){const attempts:Parameters<StudyAnswerPlanPolicy['beforeAttempt']>[0][]=[],raw:Parameters<StudyAnswerPlanPolicy['recordResponse']>[0][]=[];
- const policy:StudyAnswerPlanPolicy={scope:'development',beforeAttempt:async a=>{attempts.push(a);},recordResponse:async r=>{assert.equal(sha(r.rawBody),r.rawSha256);raw.push(r);}};
+function journal(){const attempts:Readonly<PlannedStudyAnswerAttempt>[]=[],raw:DocumentCitationAuditResponse[]=[];
+ const policy={scope:'development' as const,beforeAttempt:async(a:Readonly<PlannedStudyAnswerAttempt>)=>{attempts.push(a);},
+  recordResponse:async(r:DocumentCitationAuditResponse)=>{assert.equal(sha(r.rawBody),r.rawSha256);raw.push(r);}} satisfies StudyAnswerPlanPolicy;
  return {attempts,raw,policy};}
 const response=(value:unknown)=>Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',
  usage:{input_tokens:100,output_tokens:100},output_text:JSON.stringify(value)});
@@ -348,6 +351,82 @@ test('planned SourceN decoding rejects unknown, duplicate, incomplete, stale and
  assert.throws(()=>decode(alias,transport,changed),/binding changed/);
 });
 
+test('opt-in revision resumes a bound image failure with all final candidates, two calls only and immutable claims',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,{ctx,query,c}=sourceLabelFixture();
+ ctx.anchors.push({...ctx.anchors[2],id:'pg:v1:3',page_number:3,evidence_id:'caption3',body:'Another original figure.'});
+ ctx.images.push({...ctx.images[1],attachmentId:'third-image',captionEvidenceId:'caption3'});
+ const initial=prepareContractStudyPlan(query,ctx,c),p=contractPlan(ctx);p.requirements=c.requirements;p.sourceSubscopes=[];
+ const saved=bindContractStudyPlan(initial,p,sha(JSON.stringify(buildContractStudyPlanRequest(initial))),'b'.repeat(64)),
+  packet=preparePlannedStudyGeneration(query,ctx,[],c,saved,[]),receipt={...packet.receipt,version:'contract-supplement-answer-v7'},
+  historical=preparePlannedStudyGenerationTransport({...packet,receipt,bindingSha256:sha(JSON.stringify(receipt))});
+ Object.assign(historical,studyPlanningRequestIdentity(receipt.version,historical.request,historical.bindingSha256));
+ const selections={status:'answered' as const,message:'',claims:[
+  {text:'The first original statement.',citations:[{id:packet.selectedPrepared.quoteUnits[0].id}]},
+  {text:'The unchanged comparison uses the original configurations.',citations:[{id:'i0'}]},
+  {text:'Another unchanged comparison.',citations:[{id:'i0'}]}]},
+  audits=selections.claims.map((_claim,claimIndex)=>{
+   const local=prepareDocumentCitationAudit(query,packet.context,{inputFingerprint:packet.prepared.fingerprint,
+    quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,providerSelections:selections,claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY}),
+    providerRequestSha256=sha(JSON.stringify(buildDocumentCitationAuditRequest(local.packet))),
+    result:DocumentCitationRevisionContinuation['originalAudit']={version:DOCUMENT_CITATION_AUDIT_VERSION,
+     diagnostics:{claimId:'c0',judgment:claimIndex===0?'supported':'unsupported',reason:'Synthetic original local result.',
+      citationFindings:{r0:{judgment:claimIndex===0?'supports':'does-not-establish',reason:'Synthetic reference finding.'}},
+      objectUnitScope:{claim:'original configuration',evidence:'other original figure',alignment:claimIndex===0?'same':'different'}},
+     providerRequestSha256,requestIdentity:sha(JSON.stringify({version:DOCUMENT_CITATION_AUDIT_VERSION,providerRequestSha256,bindingSha256:local.bindingSha256})),
+     rawResponseSha256:sha('synthetic original raw '+claimIndex),binding:local.binding,bindingSha256:local.bindingSha256,
+     requestedModel:'gpt-5.4-mini',model:'gpt-5.4-mini-2026-03-17'};
+   return {claimIndex,localSupported:claimIndex===0,result};
+  }),artifact={receipt,providerSelections:selections,generation:{...historical,sourceLabels:historical,rawResponseSha256:sha('synthetic generation raw')},audits},
+  original=JSON.stringify(artifact),j=journal(),states:Record<string,unknown>[]=[],
+  policy:PlannedStudyAnswerPolicy={...j.policy,citationRevision:true,recordState:async state=>{states.push(structuredClone(state));}};
+ let calls=0,candidate='i1',finalSupported=true;
+ try{await development(async()=>{
+  globalThis.fetch=async(_url,init)=>{
+   calls++;const body=JSON.parse(String(init?.body)),phase=j.attempts.at(-1)!.phase,input=JSON.parse(body.input[1].content[0].text);
+   assert.equal(body.max_output_tokens,1000);assert.equal(body.reasoning.effort,'low');
+   if(phase==='citation-proposal'){
+    assert.equal(input.claim,selections.claims[1].text);
+    assert.deepEqual(input.references.map((r:{id:string})=>r.id),packet.receipt.selectedSourceIds);
+    assert.equal(body.input[1].content.filter((item:{type:string})=>item.type==='input_image').length,3);
+    assert.ok(JSON.stringify(body).includes('Table 2: Original study values.'));
+    return response({status:'candidate-references',referenceIds:[candidate]});
+   }
+   assert.equal(phase,'revised-local-audit');assert.equal(input.claim.text,selections.claims[1].text);
+   assert.equal(j.raw.length,calls-1,'Proposal raw is durable before final audit.');
+   return response({claimId:'c0',judgment:finalSupported?'supported':'unsupported',reason:'Synthetic final local result.',
+    citationFindings:{r0:{judgment:finalSupported?'supports':'does-not-establish',reason:'Synthetic reference finding.'}},
+    objectUnitScope:{claim:'configuration',evidence:'configuration',alignment:finalSupported?'same':'different'}});
+  };
+  const revised=await revisePlannedStudyCitation(query,async()=>packet,artifact,policy);
+  assert.equal(revised.status,'revised');if(!('answer'in revised))throw Error('Expected citation revision');
+  assert.equal(calls,2);assert.deepEqual(j.attempts.map(a=>a.phase),['citation-proposal','revised-local-audit']);
+  assert.ok(j.attempts.every(a=>a.claimIndex===1&&a.fundingUpperUSD>=a.reservationUSD));
+  assert.equal(revised.targetClaimIndex,1);assert.deepEqual(revised.answer.claims.map(x=>x.text),selections.claims.map(x=>x.text));
+  assert.deepEqual(revised.providerSelections.claims[0],selections.claims[0]);assert.deepEqual(revised.providerSelections.claims[2],selections.claims[2]);
+  assert.equal(revised.providerSelections.claims[1].citations[0].id,'i1');assert.equal(revised.wholeAnswerVerified,false);
+  assert.equal(JSON.stringify(artifact),original);assert.equal(artifact.audits[1].localSupported,false);
+  assert.ok(states.some(s=>s.event==='citation-revision'&&(s.state as {event:string}).event==='original'));
+  // Failure preserves the old answer, with no second proposal or generation.
+  finalSupported=false;const unresolved=await revisePlannedStudyCitation(query,async()=>packet,artifact,policy);
+  assert.equal(unresolved.status,'unresolved');if(!('providerSelections'in unresolved))throw Error('Expected original selections');
+  assert.deepEqual(unresolved.providerSelections,selections);assert.equal(calls,4);
+  // A final-packet correction can use text alone; the legacy branch still requires an image.
+  finalSupported=true;candidate=packet.selectedPrepared.quoteUnits[0].id;
+  const textOnly=await revisePlannedStudyCitation(query,async()=>packet,artifact,policy);
+  assert.equal(textOnly.status,'revised');assert.equal(calls,6);
+  const replay=structuredClone(artifact);replay.providerSelections.claims[1].text+=' changed';
+  await assert.rejects(()=>revisePlannedStudyCitation(query,async()=>packet,replay,policy),/unsupported audit binding changed/);
+  const changed=structuredClone(packet);changed.prepared.fingerprint='0'.repeat(64);
+  await assert.rejects(()=>revisePlannedStudyCitation(query,async()=>changed,artifact,policy),/wire binding changed/);
+  const tampered=structuredClone(artifact);tampered.generation.sourceLabels.mapping.entries.reverse();
+  await assert.rejects(()=>revisePlannedStudyCitation(query,async()=>packet,tampered,policy),/wire binding changed/);
+  const supported=structuredClone(artifact);for(const a of supported.audits){a.localSupported=true;a.result.diagnostics.judgment='supported';}
+  assert.equal((await revisePlannedStudyCitation(query,async()=>{throw Error('No reader or request needed');},supported,policy)).status,'not-applicable');
+  await assert.rejects(()=>revisePlannedStudyCitation(query,async()=>packet,artifact,{...policy,citationRevision:false}),/explicit opt-in/);
+  assert.equal(calls,6,'Mismatch, supported-only and missing opt-in never pay.');
+ });}finally{globalThis.fetch=savedFetch;}
+});
+
 test('short chain uses plan/generation/final local only, retains >6 raw claims and stops on post-response source change',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,c=contract(),ctx=context(),p=contractPlan();p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
  ctx.anchors[1].body='OUTSIDE_FINAL_CLAIM_POISON';const q0=prepareDocumentAnswer(question,ctx).quoteUnits[0].id;
@@ -551,7 +630,7 @@ test('parallel source sub-scopes focus the existing two supplemental slots, pres
  assert.deepEqual(queries.map(q=>q.query),[c.requirements[0].aspect+' First corpus',c.requirements[0].aspect+' Second corpus']);
  assert.ok(queries.every(q=>q.originalQuery===q.query&&q.queryPolicy==='parallel-source-subscopes-v1'&&!q.query.includes('REASON_MUST_NOT_BECOME_QUERY')));
  const empty={...ctx,anchors:[],parents:[],images:[]},combined=preparePlannedStudyGeneration(question,ctx,[empty,empty],c,bind(),queries);
- assert.equal(combined.receipt.version,'contract-supplement-answer-v7');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
+ assert.equal(combined.receipt.version,PLANNED_STUDY_ANSWER_VERSION);assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
  p.missing=[{requirementId:'r0',reason:'Actual gap.',supplementQuery:'explicit missing relation'}];
  const bounded=studySupplementQueries(question,c,bind());assert.equal(bounded.length,2);assert.equal(bounded[0].origin,'plan-missing');assert.equal(bounded[1].sourceSubscopeIndex,0);
  p.missing=[];p.sourceSubscopes[0].scope.configuration='Original Study 0';

@@ -1,26 +1,30 @@
 import {createHash} from 'node:crypto';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
+import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v7';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v8';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
  originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
-export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;
- beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt&{claimIndex?:number}>)=>Promise<void>;
- recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:StudyAnswerPlanAttempt['phase'];claimIndex?:number}>)=>Promise<void>;
+type PlannedPhase=StudyAnswerPlanAttempt['phase']|DocumentCitationRevisionAttempt['phase'];
+export type PlannedStudyAnswerAttempt=Omit<StudyAnswerPlanAttempt,'phase'>&{phase:PlannedPhase;claimIndex?:number};
+export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;citationRevision?:boolean;
+ beforeAttempt:(attempt:Readonly<PlannedStudyAnswerAttempt>)=>Promise<void>;
+ recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:PlannedPhase;claimIndex?:number}>)=>Promise<void>;
  recordState:(state:Readonly<Record<string,unknown>>)=>Promise<void>};
 const sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex'),digest=(v:unknown)=>sha(JSON.stringify(v));
 const journal=(policy:PlannedStudyAnswerPolicy,phase:StudyAnswerPlanAttempt['phase'],claimIndex?:number):StudyAnswerPlanPolicy=>({scope:policy.scope,dailyLimit:policy.dailyLimit,
  beforeAttempt:async attempt=>policy.beforeAttempt(Object.freeze({...attempt,phase,...(claimIndex!==undefined?{claimIndex}:{})})),
  recordResponse:async raw=>policy.recordResponse({...raw,phase,...(claimIndex!==undefined?{claimIndex}:{})})});
 export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPolicy){
- if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','beforeAttempt','recordResponse','recordState'].includes(k))||
+ if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','citationRevision','beforeAttempt','recordResponse','recordState'].includes(k))||
+  (policy.citationRevision!==undefined&&typeof policy.citationRevision!=='boolean')||
   typeof policy.recordState!=='function'||typeof policy.beforeAttempt!=='function'||typeof policy.recordResponse!=='function')
   throw Error('Planned answers require durable development state/attempt/raw journals');
  await assertStudyAnswerPlanPolicy(journal(policy,'contract-plan'));
@@ -178,8 +182,49 @@ export function decodePlannedStudyGenerationSelections(value:unknown,packet:Retu
  })};
 }
 
-/** At most one plan, one lexical batch, one generation and six actual final
- * claim audits. No pre-audit, second plan, citation repair or model escalation. */
+type PlannedCitationOriginal={receipt:ReturnType<typeof preparePlannedStudyGeneration>['receipt'];
+ providerSelections:DocumentAnswerSelections;generation:{providerRequestSha256:string;rawResponseSha256:string;requestIdentity:string;
+  sourceLabels:ReturnType<typeof preparePlannedStudyGenerationTransport>};
+ audits:{claimIndex:number;localSupported:boolean;result:Awaited<ReturnType<typeof auditDocumentCitationClaim>>}[]};
+
+/** Resume only citation selection. The reader must reconstruct the same final
+ * Kernel packet; archived wire JSON is a comparison artifact, never a reader. */
+export async function revisePlannedStudyCitation(question:string,readPacket:()=>Promise<ReturnType<typeof preparePlannedStudyGeneration>>,
+ artifact:PlannedCitationOriginal,policy:PlannedStudyAnswerPolicy){
+ await assertPlannedStudyAnswerPolicy(policy);
+ if(policy.citationRevision!==true)throw Error('Planned citation revision requires explicit opt-in');
+ const original=structuredClone(artifact);
+ if(original.audits.length!==original.providerSelections.claims.length||original.audits.some((a,i)=>a.claimIndex!==i))
+  throw Error('Original complete local audit sequence required');
+ const failed=original.audits.find(a=>!a.localSupported&&a.result.diagnostics.judgment==='unsupported');
+ if(!failed)return {status:'not-applicable' as const,reason:'no-original-unsupported-claim',wholeAnswerVerified:false};
+ const checkedRead=async()=>{
+  const packet=await readPacket(),receipt=original.receipt;
+  // A historical version stays historical. Compare its original receipt and
+  // actual body, without predicting an old runtime request identity.
+  if(!['contract-supplement-answer-v7',PLANNED_STUDY_ANSWER_VERSION].includes(receipt.version)||
+   digest({...packet.receipt,version:receipt.version})!==digest(receipt))throw Error('Planned revision final source changed');
+  const current=preparePlannedStudyGenerationTransport({...packet,receipt,bindingSha256:digest(receipt)}),sent=original.generation.sourceLabels;
+  if(digest(current.request)!==digest(sent.request)||digest(current.mapping)!==digest(sent.mapping)||digest(current.binding)!==digest(sent.binding)||
+   current.bindingSha256!==sent.bindingSha256||current.providerRequestSha256!==original.generation.providerRequestSha256||
+   sent.providerRequestSha256!==original.generation.providerRequestSha256||sent.requestIdentity!==original.generation.requestIdentity||
+   !/^[a-f0-9]{64}$/u.test(original.generation.rawResponseSha256))throw Error('Original planned revision wire binding changed');
+  return packet;
+ };
+ const packet=await checkedRead(),binding={inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,
+  providerSelections:original.providerSelections,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,originalArtifact:{
+   providerRequestSha256:original.generation.providerRequestSha256,rawResponseSha256:original.generation.rawResponseSha256,
+   inputFingerprint:packet.prepared.fingerprint,answerVersion:original.receipt.version}} as const;
+ return reviseDocumentCitationClaim(question,async()=>(await checkedRead()).context,binding,{
+  scope:policy.scope,dailyLimit:policy.dailyLimit,
+  beforeAttempt:async attempt=>policy.beforeAttempt(Object.freeze({...attempt,claimIndex:failed.claimIndex})),
+  recordResponse:async raw=>policy.recordResponse({...raw,claimIndex:failed.claimIndex}),
+  recordState:async state=>policy.recordState({event:'citation-revision',claimIndex:failed.claimIndex,state})},
+ {claimIndex:failed.claimIndex,selectedSourceIds:packet.receipt.selectedSourceIds,originalAudit:failed.result});
+}
+
+/** One plan, lexical batch, generation and at most six original claim audits.
+ * Explicit opt-in may add one citation-only proposal and one final audit. */
 export async function answerPlannedStudyQuestion(question:string,readInitial:()=>Promise<DocumentAnswerContext>,
  readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy,supplementalSource?:SupplementalSource){
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract),plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
@@ -217,7 +262,9 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
    !Object.values(d.citationFindings).some(f=>f.judgment==='contradicts')&&!['different','not-established'].includes(d.objectUnitScope.alignment);
   audits.push({claimIndex,localSupported:supported,result});await policy.recordState({event:'claim-audit',claimIndex,localSupported:supported,result});
  }
- await recheck();const result={status:'generated-awaiting-independent-review',plan,generation,...restored,audits,receipt:packet.receipt,
+ await recheck();const original={plan,generation,...restored,audits,receipt:packet.receipt},
+  citationRevision=policy.citationRevision===true?await revisePlannedStudyCitation(question,read,original,policy):undefined,
+  result={status:'generated-awaiting-independent-review',...original,...(citationRevision?{citationRevision}:{}),
   unassessedPlanningGaps:plan.plan.missing,localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),
   semanticVerified:false,wholeAnswerVerified:false,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
  await policy.recordState({event:'result',...result});return result;
