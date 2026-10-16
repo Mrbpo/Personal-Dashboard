@@ -1,0 +1,13 @@
+# Insertion-only PDF style staging
+
+Issue #138 reuses the reviewed PR136 Poppler native text-run producer without enabling whole-page rewrite, adding its failed prompt, or adding a SQLite envelope. All new selection/staging functions are pure; no model, PDF parser, database, UI or publish path calls them automatically.
+
+`preparePdfStyleSelection` freezes the old checked body SHA, old source/page/PNG identity and actual native sidecar. A different old/producer source requires an explicit declared page map and remains unverified. It finds eligible existing math leaves with a deliberately bounded grammar; unknown commands, unsupported unbraced structures, script fields and existing style groups are skipped. It does not correct the old body or add math delimiters.
+
+Native positive bold/italic spans retain their actual full run boxes. Whitespace-separated single decoded atoms may have offsets into the original style-span text; those offsets never create glyph boxes or font-file proof. Continuous words, combined bold+italic, italic Greek and obvious symbolic/custom font families are conservatively declined. The font-name filter can over-decline legitimate fonts and cannot certify other encodings. All remaining decoding and alignment remains unverified. Repeated atoms retain separate real IDs and require review; model choice is not source proof.
+
+`buildPdfStyleSelection` gives a bounded pair-only schema; output cannot carry text, coordinates, offsets or styles. `validatePdfStyleSelection` accepts only existing compatible IDs, each used once. The server chooses the allowed positive wrapper. `stagePdfStyleSelection` inserts wrappers without deleting or replacing any existing character, and records only the owned insertions. Their inverse must restore the original UTF-8 bytes; non-style token and math-boundary signatures are retained, and arrows/operators/scripts are checked unchanged. `validatePdfStyleStage` reconstructs the exact result and rejects changed text or operation ranges.
+
+The receipt reuses derived staging fields (`rawRecognitionSha256`, `derivedTextSha256`, operations, `requiresManualReview`, `notForApplyPageRepair`) and always declares `sourceProven:false`/`alignmentVerification:unverified`. No glyph geometry or `vectorOrderVerified` is invented. Unsupported/empty selection leaves the old body unchanged. Matching IDs and passing invariants establish content preservation, not correct style placement, mathematical correctness or full-page fidelity. No automatic application is provided.
+
+This implementation performs no new paid call, PDF parsing, PostgreSQL write, calibration retry or hidden/Gold read. PR136's failed whole-page output is never used as a baseline, and old raw/scores stay untouched.
