@@ -118,10 +118,13 @@ export async function rememberDoclingProgress(id:string,token:string,progress:Do
   if(result.rowCount!==1)throw new Error('PDF ingestion lease or source identity lost');
 }
 export async function doclingStageBlobHashes():Promise<string[]>{
-  const rows=(await kernelPool().query<{hash:string}>(`SELECT batch->>'resultHash' hash FROM ingestion_jobs,
-    LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'doclingProgress'->'batches')='array'
-      THEN payload->'doclingProgress'->'batches' ELSE '[]'::jsonb END) batch WHERE kind='docling_document'`)).rows;
-  return rows.map(row=>row.hash).filter(hash=>typeof hash==='string'&&/^[a-f0-9]{64}$/.test(hash));
+  const rows=(await kernelPool().query<{payload:{owner:string;id:string;sourceHash?:string;doclingProgress:DoclingProgress}}>(
+    `SELECT payload FROM ingestion_jobs WHERE kind='docling_document' AND payload ? 'doclingProgress'`)).rows;
+  const {parsingProvenanceBlobHashes}=await import('./docling-batches.ts'),hashes=new Set<string>();
+  for(const {payload} of rows)for(const hash of await parsingProvenanceBlobHashes(payload.doclingProgress,
+    {owner:payload.owner,documentId:payload.id,sourceHash:payload.sourceHash??payload.doclingProgress?.identity?.sourceHash,
+     totalPages:payload.doclingProgress?.identity?.totalPages}))hashes.add(hash);
+  return [...hashes];
 }
 
 export async function finishIngestionJob(id: string, token: string, error?: string): Promise<void> {

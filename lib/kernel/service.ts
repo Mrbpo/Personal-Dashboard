@@ -964,6 +964,11 @@ export class KernelService {
     return Promise.all([documentImageBlobHashes(kernelPool()),pdfVisualBlobHashes(kernelPool())]).then(parts=>[...new Set(parts.flat())]);
   }
 
+  async publishedDocumentBlobHashes(){
+    const {publishedParsingBlobHashes}=await import('./docling-batches.ts');
+    return publishedParsingBlobHashes(kernelPool());
+  }
+
   readPdfVisualEvidence(owner:string,source:DocumentContextSource,pageEvidenceIds?:string[]){
     return readPdfVisualEvidence(kernelPool(),owner,source,pageEvidenceIds);
   }
