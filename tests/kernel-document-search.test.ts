@@ -10,6 +10,26 @@ test('PDF search copy normalizes ligatures, line-wrap hyphens, Unicode math and 
   assert.match(documentSearchText('线性代数特征值'),/特征 征值/);
 });
 
+test('strict short formula and numeric queries find current indexed pages without an index rebuild',async()=>{
+  await migrateKernel();
+  const tag=randomUUID(),owner=`short-query-${tag}`,id=`short-query-document-${tag}`;
+  const texts=['The recurrence is 4T(n/4) 5n.','A different recurrence is 7S(k/3) 8k.','The standalone count is 9.'];
+  await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:'Recurrences.pdf',hash:tag,
+    mime:'application/pdf',origin:'upload',originKey:id},
+    texts.map((text,index)=>({pageNumber:index+1,locator:`Page ${index+1}`,text})),
+    {parserVersion:'short-query-test',expectedPages:3});
+  for(const [query,page] of [['4T(n/4) 5n',1],['7S(k/3) 8k',2],['9',3],['t',1]] as const){
+    const hits=await kernel.searchDocumentText(owner,query,{strict:true});
+    assert.deepEqual(hits.map(hit=>hit.page_number),[page]);
+    assert.equal(hits[0].document_id,id);
+    assert.equal(hits[0].body,texts[page-1]);
+  }
+  assert.deepEqual(await kernel.searchDocumentText('other-'+owner,'4T(n/4) 5n',{strict:true}),[]);
+  const stored=await kernelPool().query<{search_text:string}>(
+    'SELECT p.search_text FROM document_text_pages p JOIN document_texts d ON d.current_version_id=p.version_id WHERE d.id=$1 ORDER BY p.page_number',[id]);
+  assert.deepEqual(stored.rows.map(row=>row.search_text),texts.map(documentSearchText));
+});
+
 test('full PDF text beyond evidence excerpt is searchable, scoped, versioned and rebuildable',async()=>{
   await migrateKernel();
   const tag=randomUUID(),owner=`pdf-${tag}`,course=`pdf-course-${tag}`,id=`pdf-${tag}`;
