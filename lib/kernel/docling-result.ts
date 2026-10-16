@@ -1,6 +1,7 @@
+import {assessPdfFormulaPreservation} from '../pdf-formulas.ts';
 /** Decode Docling's document tree, whose references carry reading order and PDF provenance. */
-export const DOCLING_PARSER_VERSION = 'docling-v2-search';
-export const DOCLING_TEXT_PARSER_VERSION = 'docling-v2-text-search';
+export const DOCLING_PARSER_VERSION = 'docling-v3-source-preserved-search';
+export const DOCLING_TEXT_PARSER_VERSION = 'docling-v3-source-preserved-text-search';
 export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
 }
@@ -59,6 +60,19 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const occupied = new Set<number>();
   const visited = new Set<string>();
   const warnings: string[] = [];
+  const sourceFallback=new WeakSet<Json>(),selectedContent=new WeakMap<Json,string>();
+  function content(node:Json):string{
+    const known=selectedContent.get(node);if(known!==undefined)return known;
+    let value=nodeContent(node);
+    if(node.label==='formula'&&text(node.orig)&&text(node.text)){
+      const assessment=assessPdfFormulaPreservation(node.orig as string,node.text as string);
+      if(assessment.status!=='characters-preserved'){
+        value=node.orig as string;sourceFallback.add(node);
+        warnings.push(`公式增强未通过原字符保留检查（${assessment.status}: ${assessment.reason}）；保留完整原始抽取文本，未验证公式语义和上下标`);
+      }
+    }
+    selectedContent.set(node,value);return value;
+  }
   const formulaPageNumbers=new Set<number>();
   const nativeTables:DoclingNativeTable[]=[];
   if(options.formulaEnriched === false) warnings.push('公式增强未启用；正文可检索，公式须核对原 PDF');
@@ -110,16 +124,17 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
 
   function noteFormula(node: Json): void {
     if(node.label!=='formula')return;
+    content(node);
     const locations=provenance(node);
     for(const location of locations)formulaPageNumbers.add(location.page_no as number);
-    if(!text(node.text)&&text(node.orig))warnings.push(`第 ${locations[0].page_no} 页公式保留原始抽取文本；未验证 LaTeX、符号和上下标，请核对原 PDF`);
+    if((!text(node.text)||sourceFallback.has(node))&&text(node.orig))warnings.push(`第 ${locations[0].page_no} 页公式保留原始抽取文本；未验证 LaTeX、符号和上下标，请核对原 PDF`);
     // Enrichment describes execution, not source fidelity. A nonempty model
     // result (including valid-looking LaTeX) has not been checked against print.
     else if(text(node.text))for(const location of locations)warnings.push(`第 ${location.page_no} 页机器公式未核验符号和上下标，请核对原 PDF`);
   }
 
   function cellText(cell: Json, ancestors: Set<string>, tablePages: Set<unknown>): string {
-    if (!cell.ref) return nodeContent(cell);
+    if (!cell.ref) return content(cell);
     const collect = (reference: unknown, stack: Set<string>): string => {
       const {ref, node} = resolve(reference);
       if (stack.has(ref)) throw new Error('Docling document references contain a cycle');
@@ -129,9 +144,9 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
         if (provenance(node).some(location => !tablePages.has(location.page_no))) throw new Error('Docling rich table cell has ambiguous page provenance');
         noteFormula(node);
       }
-      return [nodeContent(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
+      return [content(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
     };
-    return collect(cell.ref, ancestors) || nodeContent(cell);
+    return collect(cell.ref, ancestors) || content(cell);
   }
 
   function tableText(node: Json, ancestors: Set<string>,reference:string): string {
@@ -199,17 +214,17 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
         regions.push({pictureRef:ref,pageNumber,derivedPageNumber:pageNumber,pageSize:{width,height},
           bbox:{l,t,r,b,coord_origin:box.coord_origin as 'BOTTOMLEFT'|'TOPLEFT'},
           textReferences:list(document!.texts).flatMap((value,index)=>{const child=object(value);
-            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:nodeContent(child),provenance:list(child.prov)}]:[];})});
+            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:content(child),provenance:list(child.prov)}]:[];})});
       }
     } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
-      const content = nodeContent(node);
-      const originalFallback = !text(node.text) && Boolean(text(node.orig));
+      const value = content(node);
+      const originalFallback = (!text(node.text)||sourceFallback.has(node)) && Boolean(text(node.orig));
       noteFormula(node);
-      if (node.label === 'formula' && !content.trim()) {
+      if (node.label === 'formula' && !value.trim()) {
         if(options.formulaEnriched !== false)throw new Error('Docling formula has no readable LaTeX');
         warnings.push(`第 ${provenance(node)[0].page_no} 页有公式尚未转写，请核对原 PDF`);
       }
-      add(node, node.label === 'formula' && content && !originalFallback && options.formulaEnriched !== false ? `$$\n${content}\n$$` : content);
+      add(node, node.label === 'formula' && value && !originalFallback && options.formulaEnriched !== false ? `$$\n${value}\n$$` : value);
     }
     for (const child of [...list(node.children), ...list(node.captions), ...list(node.footnotes), ...list(node.references)]) visit(child, next);
   }

@@ -1,8 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PDFDocument,StandardFonts} from 'pdf-lib';
-import {appendPdfLatex,mayContainPdfMath} from '../lib/pdf-formulas.ts';
+import {appendPdfLatex,mayContainPdfMath,assessPdfFormulaPreservation} from '../lib/pdf-formulas.ts';
 process.env.AI_BUDGET_TEST_BYPASS='true';
+
+test('formula character preservation accepts its explicit LaTeX subset without claiming semantic proof',()=>{
+ for(const [source,latex]of [
+  ['δk′(s,u) + w(u,v) ≤ 10','\\delta_{k^\\prime}(s,u)+\\mathrm{w}(u,v)\\leq10'],
+  ['min{{a}∪{b}}','\\min\\left\\{\\{a\\}\\cup\\{b\\}\\right\\}'],
+  ['α1+β2=3','\\alpha_{1}+\\beta_{2}=3'],
+  ['x ≠ 0','x\\neq0'],
+ ])assert.equal(assessPdfFormulaPreservation(source,latex).status,'characters-preserved');
+});
+
+test('formula character preservation detects lost primes, literal set scope and changed true numbers; unknown stays unassessed',()=>{
+ for(const [source,latex]of [
+  ['f′(x)=0','f(x)=0'],
+  ['min{{a}∪{b}}','\\min\\{a\\}\\cup\\{b\\}'],
+  ['x0=10','x_{\\prime}=10'],
+  ['x=2','x=20'],
+ ])assert.equal(assessPdfFormulaPreservation(source,latex).status,'changed');
+ assert.equal(assessPdfFormulaPreservation('√x','\\sqrt{x}').status,'unassessed');
+ assert.equal(assessPdfFormulaPreservation('x','\\unknown{x}').status,'unassessed');
+ assert.equal(assessPdfFormulaPreservation('x^2','x^{2}').status,'unassessed');
+});
+
+test('formula character preservation rejects TeX comments, parameters and active syntax but retains escaped literals',()=>{
+ for(const literal of ['%','#','~'])
+  assert.equal(assessPdfFormulaPreservation(`x${literal}1`,`x${literal}1`).status,'unassessed');
+ for(const literal of ['%','#'])
+  assert.equal(assessPdfFormulaPreservation(`x${literal}1`,`x\\${literal}1`).status,'characters-preserved');
+ assert.equal(assessPdfFormulaPreservation('20%x','\\text{20%x}').status,'unassessed');
+ assert.equal(assessPdfFormulaPreservation('20%x','\\text{20\\%x}').status,'characters-preserved');
+});
 
 test('Docling formula augmentation resumes successful pages without exceeding the per-document cap',async()=>{
  process.env.DATABASE_URL=':memory:';
@@ -83,6 +113,42 @@ test('the previous PDF text remains visible while the LaTeX parser reindexes',as
  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,0,?)').bind(id,'pdf-page-v3-latex','Original searchable page text\n\\[E=mc^{2}\\]').run();
  const updated=await previewDocument('formula-owner',id);
  assert.match(updated.pages[0]?.text||'',/\\\[E=mc\^\{2\}\\\]/u);
+});
+
+test('legacy PDF preview limits distinct pages, recognizes current Docling caches and preserves old pages only during unfinished work',async(t)=>{
+ process.env.DATABASE_URL=':memory:';
+ const backfill=process.env.PDF_FORMULA_BACKFILL;process.env.PDF_FORMULA_BACKFILL='true';
+ t.after(()=>{if(backfill===undefined)delete process.env.PDF_FORMULA_BACKFILL;else process.env.PDF_FORMULA_BACKFILL=backfill;});
+ const {database:db}=await import('../lib/database.ts'),{saveDocument,previewDocument}=await import('../lib/library.ts'),
+  {kernel}=await import('../lib/kernel/service.ts'),{DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION}=await import('../lib/kernel/docling-result.ts');
+ t.mock.method(kernel,'parsedDocument',async()=>[]); // Exercise only the SQLite historical-preview fallback.
+ const owner='preview-cache-owner',bytes=Buffer.from('%PDF-1.4 preview cache fixture'),
+  id=await saveDocument(owner,'','upload','long-cache.pdf','long-cache.pdf','application/pdf',bytes),
+  parsers=[DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,'docling-v2-search','docling-v2-text-search','pdf-page-v2'];
+ await db.batch(parsers.flatMap(parser=>Array.from({length:500},(_,page)=>
+  db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,parser,page,`${parser}: ${page+1}`))));
+ await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+ let preview=await previewDocument(owner,id);
+ assert.equal(preview.pages.length,500);assert.equal(preview.pages[499].page,500);
+ assert.equal(preview.pages[499].text,`${DOCLING_PARSER_VERSION}: 500`);
+ for(const parser of [DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,'docling-v2-text-search']){
+  const currentId=await saveDocument(owner,'','upload',parser,`${parser}.pdf`,'application/pdf',bytes);
+  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,0,?)').bind(currentId,parser,'Only cached page').run();
+  await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(currentId).run();
+  await previewDocument(owner,currentId);await previewDocument(owner,currentId);
+  const job=await db.prepare('SELECT 1 ok FROM background_jobs WHERE id=?').bind(`index:${currentId}`).first();
+  assert.equal(Boolean(job),parser==='docling-v2-text-search','Historical v2 is not current; either current v3 avoids requeue');
+ }
+ await db.prepare("UPDATE library_documents SET status='pending' WHERE id=?").bind(id).run();
+ preview=await previewDocument(owner,id);
+ assert.equal(preview.pages.length,500);assert.equal(preview.pages[499].text,'pdf-page-v2: 500');
+ await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(id).run();
+ for(const status of ['queued','running','failed','complete']){
+  await db.prepare('UPDATE background_jobs SET status=?,payload=? WHERE id=?').bind(status,JSON.stringify({owner,id,forcePdfFormulaReparse:true}),`index:${id}`).run();
+  preview=await previewDocument(owner,id);
+  assert.equal(preview.pages.length,500);
+  assert.equal(preview.pages[499].text,`${status==='complete'?DOCLING_PARSER_VERSION:'pdf-page-v2'}: 500`);
+ }
 });
 
 test('an incomplete legacy PDF retries even when historical backfill is disabled',async()=>{

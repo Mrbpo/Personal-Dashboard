@@ -69,3 +69,57 @@ export function appendPdfLatex(text:string,formulae:unknown,complete:unknown){
  if(!normalized.formulae.length)return !normalized.complete?`${text}\n\n[本页公式识别不完整，请核对原 PDF]`:text;
  return `${text}\n\n[以下 LaTeX 公式由 PDF 原页视觉识别，请核对原页]\n${normalized.formulae.map(value=>`\\[${value}\\]`).join('\n')}${!normalized.complete?'\n[部分公式无法可靠识别，请核对原 PDF]':''}`;
 }
+
+/** A deliberately finite character check, not a LaTeX parser or semantic proof.
+ * Syntax groups/scripts/spacing are omitted; escaped literal sets are retained.
+ * Unsupported commands cannot be guessed into a successful comparison. */
+export function assessPdfFormulaPreservation(original:string,enhanced:string):{
+ status:'characters-preserved'|'changed'|'unassessed';reason:string
+}{
+ const commands:Record<string,string>={
+  alpha:'α',beta:'β',gamma:'γ',Gamma:'Γ',delta:'δ',Delta:'Δ',zeta:'ζ',eta:'η',theta:'θ',Theta:'Θ',
+  iota:'ι',kappa:'κ',lambda:'λ',Lambda:'Λ',mu:'μ',nu:'ν',xi:'ξ',Xi:'Ξ',pi:'π',Pi:'Π',rho:'ρ',sigma:'σ',Sigma:'Σ',
+  tau:'τ',upsilon:'υ',Upsilon:'Υ',Phi:'Φ',chi:'χ',psi:'ψ',Psi:'Ψ',omega:'ω',Omega:'Ω',
+  prime:"'",in:'∈',notin:'∉',ni:'∋',neq:'≠',ne:'≠',leq:'≤',le:'≤',geq:'≥',ge:'≥',
+  cup:'∪',cap:'∩',subset:'⊂',subseteq:'⊆',supset:'⊃',supseteq:'⊇',infty:'∞',emptyset:'∅',
+  forall:'∀',exists:'∃',times:'×',cdot:'·',pm:'±',mp:'∓',to:'→',rightarrow:'→',leftarrow:'←',
+  min:'min',max:'max',sin:'sin',cos:'cos',tan:'tan',log:'log',ln:'ln',exp:'exp',lim:'lim',sup:'sup',inf:'inf',
+  lbrace:'{',rbrace:'}',lvert:'|',rvert:'|',vert:'|',ldots:'...',cdots:'⋯',
+ };
+ const formatting=new Set(['text','textrm','mathrm','mathit','mathbf','mathsf','mathtt','operatorname']),
+  spacing=new Set(['quad','qquad','enspace','thinspace','medspace','thickspace']);
+ const stream=(value:string,latex:boolean):string|null=>{
+  if(!value.trim()||value.length>20000||/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(value))return null;
+  const input=value.normalize('NFC');let result='',depth=0;
+  for(let i=0;i<input.length;){
+   const char=String.fromCodePoint(input.codePointAt(i)!);i+=char.length;
+   if(/\s/u.test(char))continue;
+   if(char==='\\'){
+    if(!latex||i>=input.length)return null;
+    const symbol=input[i];
+    if(['{','}','|','%','#','$','&','_'].includes(symbol)){result+=symbol;i++;continue;}
+    if(['\\',',',';',':','!',' '].includes(symbol)){i++;continue;}
+    const command=/^[A-Za-z]+/u.exec(input.slice(i))?.[0];if(!command)return null;i+=command.length;
+    if(Object.hasOwn(commands,command)){result+=commands[command];continue;}
+    if(spacing.has(command))continue;
+    if(formatting.has(command)){if(!/^\s*\{/u.test(input.slice(i)))return null;continue;}
+    if(command==='left'||command==='right'){
+     if(!/^\s*(?:[()[\]|]|\\(?:[{}|]|lbrace\b|rbrace\b|lvert\b|rvert\b))/u.test(input.slice(i)))return null;
+     continue;
+    }
+    return null;
+   }
+   if(latex&&char==='{'){depth++;continue;}
+   if(latex&&char==='}'){if(--depth<0)return null;continue;}
+   if(latex&&['%','#','~'].includes(char))return null; // Comment, parameter and active-space syntax are not literal glyphs.
+   if(latex&&['^','_','&','$'].includes(char))continue;
+   if(!latex&&['^','_'].includes(char))return null; // Native extraction with ambiguous literal/script syntax.
+   result+=char==='−'?'-':char==='′'||char==='ʹ'?"'":char==='…'?'...':char;
+  }
+  return depth===0?result:null;
+ };
+ const source=stream(original,false),machine=stream(enhanced,true);
+ if(source===null||machine===null)return {status:'unassessed',reason:source===null?'unsupported-source-stream':'unsupported-latex-stream'};
+ return source===machine?{status:'characters-preserved',reason:'same-supported-character-stream'}:
+  {status:'changed',reason:'source-character-or-literal-delimiter-order-differs'};
+}

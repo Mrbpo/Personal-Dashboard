@@ -25,3 +25,13 @@ node --experimental-strip-types scripts/audit-pdf-source-fidelity.ts --original 
 公开 MIT 原页的 6 处向量恢复由 4 个独立编号区域各自证明；另外规范一处编号/display和一处集合边界。8 个原式逐式核对及现有 KaTeX 渲染通过，删除仅批准的字体/边界标记后，数学字符序列与 v3 原识别完全相同。原 PDF、v2/v3 原缓存、源字形、派生暂存、渲染结果及检查在忽略目录 `data/ml16-vision/` 保存，费用为零。
 
 这只是单页校准，不能认证其他 PDF 或整体 100% 检索。代码与针对性检查可审阅；服务未部署，生产未切换，派生暂存未发布/索引。若要最终发布，须另明确管理员入口范围，重新核验当前 CAS、原缓存/字形和逐页派生 provenance；本工具没有这种权限。
+
+## Docling 增强公式的原字符保护（Issue #143）
+
+`assessPdfFormulaPreservation` 只对明确支持的有限 LaTeX 子集比较字符顺序。它忽略空白、字体排版、脚本语法和非字面分组；保留数字、prime、运算符和 `\{`／`\}` 真正显示的集合括号。因此字面集合的嵌套／顺序变化也不能通过。未知命令（包括当前未支持的分式、根号、矩阵）、歧义来源或过长输入返回 `unassessed`，不猜测对应关系。裸 `%`、`#`、`~` 属于注释、参数或活动字符语法，不当作字面字符核对；`\%`、`\#` 可作为明确的字面字符比较。
+
+Docling 正文、表格引用和图片区域文字引用的 formula 节点共用该门；文本模式或旧 raw 缓存重读不能绕过。有完整 `orig` 时，增强字符不一致或无法核对都会保留完整原串并告警，不把它包装成已验证 LaTeX；失败的机器 `text` 仍在原始 Docling JSON。`formulaEnriched=false` 只影响 LaTeX 包装与增强状态告警，不关闭字符保护。没有 `orig` 的机器公式仍保留原来的未核验告警，不能声称来源已验证。相同字符流也不证明上下标、字体、运算优先级或数学语义正确；原抽取本身错误不会被本检查修好。
+
+公式和文本 parser 身份分别改为 `docling-v3-source-preserved-search`、`docling-v3-source-preserved-text-search`，使新的 options/cache 身份与旧结果区分。历史 PostgreSQL 版本和 raw 不回写；SQLite 旧 `docling-v2-search`／`docling-v2-text-search` 仍仅作历史预览候选，不冒认为新 parser。此改动不后台重跑 PDF、模型或整组验收。
+
+历史预览先按页选定一个缓存版本，再限制最多 1000 页，多个版本不挤掉后页。两个当前 Docling 版本均可阻止就绪文档因预览而重复排队；旧 v2 不算当前版本。未完成或显式重解析尚未结束时，仍保留原先 `pdf-page-v2` 预览优先级。
