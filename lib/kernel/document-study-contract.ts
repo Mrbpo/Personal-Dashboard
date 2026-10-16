@@ -121,7 +121,7 @@ export async function planContractStudyAnswer(question:string,read:()=>Promise<D
   unavailableParents:packet.prepared.unavailableParents,semanticVerified:false,wholeAnswerVerified:false,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
 }
 
-export function prepareStudyClusterCheck(question:string,context:DocumentAnswerContext,contract:StudyQuestionContract,binding:StudyContractPlanBinding,clusterId:string){
+export function restoreContractStudyPlan(question:string,context:DocumentAnswerContext,contract:StudyQuestionContract,binding:StudyContractPlanBinding){
  const packet=prepareContractStudyPlan(question,context,contract);
  if(!exact(binding,['contractSha256','inputFingerprint','quoteUnitManifestSha256','plan','planSha256','providerRequestSha256','rawResponseSha256'])||
   binding.contractSha256!==packet.contract.contractSha256||binding.inputFingerprint!==packet.prepared.fingerprint||
@@ -129,6 +129,10 @@ export function prepareStudyClusterCheck(question:string,context:DocumentAnswerC
   binding.providerRequestSha256!==digest(buildContractStudyPlanRequest(packet))||!isSha(binding.rawResponseSha256))throw new Error('Cluster plan/contract/current source binding changed');
  const {requirements:_requirements,...rawPlan}=binding.plan,plan=validateContractStudyPlan(rawPlan,packet.contract,packet.input.allowedSourceIds);
  if(digest(plan)!==binding.planSha256)throw new Error('Cluster plan requirements changed');
+ return {...packet,plan};
+}
+export function prepareStudyClusterCheck(question:string,context:DocumentAnswerContext,contract:StudyQuestionContract,binding:StudyContractPlanBinding,clusterId:string){
+ const packet=restoreContractStudyPlan(question,context,contract,binding),plan=packet.plan;
  const cluster=plan.clusters.find(c=>c.id===clusterId);
  if(!cluster||!cluster.sourceIds.length||cluster.sourceIds.length>20)throw new Error('Cluster requires 1 to 20 actual selections; no truncation');
  const local=prepareDocumentCitationAudit(question,context,{inputFingerprint:binding.inputFingerprint,quoteUnitManifestSha256:binding.quoteUnitManifestSha256,

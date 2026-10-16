@@ -13,6 +13,7 @@ import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type Do
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,
  type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
+import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -1094,7 +1095,7 @@ export class KernelService {
   /** Shared existing retrieval/current-source callback; the default answering
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={}){
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
     const {includeParents=false,includeImages=false,...searchOptions}=options;
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
@@ -1104,7 +1105,7 @@ export class KernelService {
       throw new Error('Study answer retrieval was degraded; no answer was generated');
     const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
       {courseId:searchOptions.courseId})):undefined;
-    const tableCandidates=includeImages?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
+    const tableCandidates=includeImages&&nativeTables?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
       documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
     return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
@@ -1173,6 +1174,17 @@ export class KernelService {
   async verifyStudyAnswerPlanCluster(owner:string,question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,
     clusterId:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
     return verifyStudyAnswerCluster(question,await this.contractStudyContext(owner,question,options,policy),contract,binding,clusterId,policy);
+  }
+
+  /** Explicit development chain; source selection is query-only and all core
+   * evidence is re-read. Supplemental batches do not add image-only anchors. */
+  async answerPlannedStudyContent(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string},policy:PlannedStudyAnswerPolicy){
+    const scope=structuredClone(options);
+    await assertPlannedStudyAnswerPolicy(policy);
+    const read=await this.contractStudyContext(owner,question,scope,{scope:policy.scope,dailyLimit:policy.dailyLimit,
+      beforeAttempt:policy.beforeAttempt,recordResponse:raw=>policy.recordResponse({...raw,phase:'contract-plan'})});
+    return answerPlannedStudyQuestion(question,read,query=>this.studyAnswerContextReader(owner,query,{...scope,limit:4,
+      semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},false),contract,policy);
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {

@@ -16,8 +16,8 @@ export type StudyAnswerPlan={requirements:{id:string;aspect:string;requestedScop
  conflicts:{leftClusterId:string;rightClusterId:string;comparability:'same-context'|'different-context'|'unresolved';
   leftSourceIds:string[];rightSourceIds:string[];reason:string}[];
  missing:{requirementId:string;reason:string;supplementQuery:string|null}[]};
-export type StudyAnswerPlanAttempt={phase:'plan'|'question-contract'|'contract-plan'|'cluster-check';requestIdentity:string;providerRequestSha256:string;
- inputTokenUpper:number;imageInputTokenUpper:number;nonImageBodyUtf8Bytes:number;maxOutputTokens:4000;
+export type StudyAnswerPlanAttempt={phase:'plan'|'question-contract'|'contract-plan'|'cluster-check'|'generation'|'claim-audit';requestIdentity:string;providerRequestSha256:string;
+ inputTokenUpper:number;imageInputTokenUpper:number;nonImageBodyUtf8Bytes:number;maxOutputTokens:1000|4000;
  reservationUSD:number;usageUpperUSD:number;fundingUpperUSD:number};
 export type StudyAnswerPlanPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt>)=>Promise<void>;
@@ -105,7 +105,8 @@ export function validateStudyAnswerPlan(value:unknown,allowedSourceIds:readonly 
  return result;
 }
 
-export function studyAnswerPlanRequestBudget(request:unknown,packet:{prepared:{supports:readonly {image?:DocumentAnswerContext['images'][number]}[]}}){
+export function studyAnswerPlanRequestBudget(request:unknown,packet:{prepared:{supports:readonly {image?:DocumentAnswerContext['images'][number]}[]}},maxOutputTokens:1000|4000=4000){
+ if(maxOutputTokens!==1000&&maxOutputTokens!==4000)throw new Error('Invalid planning request output bound');
  const images=createDocumentImageBudget();
  for(const [index,s] of packet.prepared.supports.entries())if(s.image&&!images.include(s.image,index+1))throw new Error('Plan image budget exceeded');
  const nonImageBody=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?
@@ -113,8 +114,8 @@ export function studyAnswerPlanRequestBudget(request:unknown,packet:{prepared:{s
  const inputTokenUpper=nonImageBodyUtf8Bytes+imageInputTokenUpper+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens;
  if(!Number.isSafeInteger(inputTokenUpper)||inputTokenUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens)throw new Error('Plan request input limit exceeded');
  const reservationTokens=Math.min(400000,Math.max(1000,Math.ceil(Buffer.byteLength(JSON.stringify(request))/2))),
-  reservationUSD=(reservationTokens*.75+4000*4.5)/1e6,usageUpperUSD=(inputTokenUpper*.75+4000*4.5)/1e6;
- return {inputTokenUpper,imageInputTokenUpper,nonImageBodyUtf8Bytes,maxOutputTokens:4000 as const,reservationUSD,usageUpperUSD,
+  reservationUSD=(reservationTokens*.75+maxOutputTokens*4.5)/1e6,usageUpperUSD=(inputTokenUpper*.75+maxOutputTokens*4.5)/1e6;
+ return {inputTokenUpper,imageInputTokenUpper,nonImageBodyUtf8Bytes,maxOutputTokens,reservationUSD,usageUpperUSD,
   fundingUpperUSD:Math.max(reservationUSD,usageUpperUSD)};
 }
 function assertBilling(){
@@ -134,7 +135,7 @@ export async function assertStudyAnswerPlanPolicy(policy:StudyAnswerPlanPolicy){
 export async function executeStudyPlanningRequest(version:string,phase:StudyAnswerPlanAttempt['phase'],request:StudyPlanningRequest,
  bindingSha256:string,budget:ReturnType<typeof studyAnswerPlanRequestBudget>,policy:StudyAnswerPlanPolicy,recheck:()=>Promise<void>){
  await assertStudyAnswerPlanPolicy(policy);
- if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!=='low'||request.max_output_tokens!==4000)
+ if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!=='low'||request.max_output_tokens!==4000||budget.maxOutputTokens!==4000)
   throw new Error('Planning phase settings must remain fixed');
  const providerRequestSha256=sha(JSON.stringify(request)),requestIdentity=sha(JSON.stringify({version,providerRequestSha256,bindingSha256}));
  await policy.beforeAttempt(Object.freeze({phase,requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();

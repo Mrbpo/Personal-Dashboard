@@ -11,6 +11,8 @@ import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPl
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
  buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
  validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
+import {studySupplementQueries,preparePlannedStudyGeneration,buildPlannedStudyGenerationRequest,answerPlannedStudyQuestion,
+ type PlannedStudyAnswerPolicy} from '../lib/kernel/document-planned-answer.ts';
 
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='dummy-plan-never-sent';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'study-plan-empty-'+randomUUID());
@@ -220,5 +222,57 @@ test('explicit phases journal raw independently, retain missing/capacity, and re
   (kernel as unknown as {studyAnswerContextReader:()=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async()=>{retrievals++;return async()=>context();};
   await assert.rejects(()=>kernel.planStudyAnswerWithContract('owner',question,c,{sourceHint:'oracle'} as never,journal().policy),/not document/);
   assert.equal(retrievals,0);
+ });}finally{globalThis.fetch=savedFetch;}
+});
+
+test('bounded composite retains source q IDs/old images, exposes re-retrieved quotes, and records global image omissions without extra image anchors',()=>{
+ const ctx=context();ctx.images=Array.from({length:64},(_,i)=>({...ctx.images[0],attachmentId:'original-'+i}));
+ const c=contract(),packet=prepareContractStudyPlan(question,ctx,c),p=contractPlan(ctx);p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
+ p.missing=[{requirementId:'r0',reason:'More direct support needed.',supplementQuery:'label judgments origin'}];
+ const binding=bindContractStudyPlan(packet,p,sha(JSON.stringify(buildContractStudyPlanRequest(packet))),'b'.repeat(64)),queries=studySupplementQueries(question,c,binding);
+ assert.equal(queries.length,2);assert.equal(queries[0].origin,'plan-missing');assert.equal(queries[1].origin,'question-contract');
+ const extra={...context(),anchors:ctx.anchors,images:[{...ctx.images[0],attachmentId:'supplemental-image'}]},empty={...context(),anchors:[],images:[]};
+ const combined=preparePlannedStudyGeneration(question,ctx,[extra,empty],c,binding,queries),body=buildPlannedStudyGenerationRequest(combined),wire=JSON.stringify(body),
+  oldQuote=packet.prepared.quoteUnits[1];
+ assert.ok(combined.receipt.originalQuoteIds.includes(oldQuote.id));assert.ok(combined.receipt.selectedSourceIds.includes(oldQuote.id));
+ assert.ok(wire.includes(oldQuote.text));assert.equal(combined.context.images.length,64);
+ assert.equal(combined.context.images[0].attachmentId,'original-0');assert.equal(combined.context.imageAnchors.length,0);
+ assert.equal(combined.context.imageSelection.omitted.find(i=>i.attachmentId==='supplemental-image')?.reason,'image-count-limit');
+ assert.equal(combined.receipt.supplemental[0].extraNativeTableLane,false);
+ assert.equal(JSON.parse((body.input[1].content as {text:string}[])[0].text).question,question);
+ assert.throws(()=>preparePlannedStudyGeneration(question,ctx,[{...extra,imageAnchors:[{} as never]},empty],c,binding,queries),/bounded supplemental/);
+ const stale=structuredClone(ctx);stale.anchors[0].body+=' changed';assert.throws(()=>preparePlannedStudyGeneration(question,stale,[extra,empty],c,binding,queries),/binding changed/);
+});
+
+test('short chain uses plan/generation/final local only, retains >6 raw claims and stops on post-response source change',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,c=contract(),ctx=context(),p=contractPlan();p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
+ ctx.anchors[1].body='OUTSIDE_FINAL_CLAIM_POISON';const q0=prepareDocumentAnswer(question,ctx).quoteUnits[0].id;
+ const runJournal=()=>{const j=journal(),states:Record<string,unknown>[]=[];return {...j,states,policy:{...j.policy,
+  recordState:async state=>{states.push(structuredClone(state));}} satisfies PlannedStudyAnswerPolicy};};
+ const answer={status:'answered',message:'',claims:[{text:'The original study labels its samples.',citations:[{id:q0}]}]},local={claimId:'c0',judgment:'supported',reason:'Actual selected text supports the claim.',
+  citationFindings:{r0:{judgment:'supports',reason:'Original label statement.'}},objectUnitScope:{claim:'original study',evidence:'original study',alignment:'same'}};
+ try{await development(async()=>{
+  let calls=0;const wires:unknown[]=[],j=runJournal(),kernel=new KernelService(),options={courseId:'explicit-user-course'},reads:{options:unknown;nativeTables:unknown}[]=[];
+  (kernel as unknown as {studyAnswerContextReader:(owner:string,q:string,o:unknown,native?:boolean)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,q,o,nativeTables)=>{
+   reads.push({options:structuredClone(o),nativeTables});return async()=>q===question?ctx:{...ctx,anchors:[ctx.anchors[1]],images:[]};};
+  globalThis.fetch=async(_url,init)=>{wires.push(JSON.parse(String(init?.body)));Object.assign(options,{courseId:'mutated',documentId:'oracle'});return response([rawContractPlan(p),answer,local][calls++]);};
+  const result=await kernel.answerPlannedStudyContent('owner',question,c,options,j.policy);
+  assert.equal(reads.length,2);assert.deepEqual(reads[1],{options:{courseId:'explicit-user-course',limit:4,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},nativeTables:false});
+  assert.equal(calls,3);assert.deepEqual(j.attempts.map(a=>a.phase),['contract-plan','generation','claim-audit']);assert.deepEqual(j.attempts.map(a=>a.maxOutputTokens),[4000,4000,1000]);
+  assert.equal(result.status,'generated-awaiting-independent-review');assert.equal(result.wholeAnswerVerified,false);
+  if(result.status!=='generated-awaiting-independent-review'||!('audits' in result))throw Error('Expected generated result');
+  assert.equal(result.audits.length,1);assert.equal(result.audits[0].localSupported,true);assert.equal(j.raw.length,3);
+  assert.ok(JSON.stringify(wires[1]).includes('OUTSIDE_FINAL_CLAIM_POISON'));assert.ok(!JSON.stringify(wires[2]).includes('OUTSIDE_FINAL_CLAIM_POISON'));
+  assert.ok(!JSON.stringify(wires[2]).includes(image.toString('base64')));
+  const large=runJournal();calls=0;globalThis.fetch=async()=>response(calls++===0?rawContractPlan(p):{...answer,claims:Array.from({length:7},()=>answer.claims[0])});
+  const capacity=await answerPlannedStudyQuestion(question,async()=>ctx,async()=>async()=>({...ctx,anchors:[],images:[]}),c,large.policy);
+  assert.equal(capacity.status,'capacity-exceeded');assert.equal(calls,2);assert.equal(large.raw.length,2);
+  if(!('untruncatedValue' in capacity))throw Error('Expected retained raw claims');assert.equal((capacity.untruncatedValue as typeof answer).claims.length,7);
+  const changed=runJournal();let mutate=false;calls=0;
+  globalThis.fetch=async()=>{if(calls++===0)return response(rawContractPlan(p));mutate=true;return response(answer);};
+  await assert.rejects(()=>answerPlannedStudyQuestion(question,async()=>{const current=structuredClone(ctx);if(mutate)current.anchors[0].body+=' changed';return current;},
+   async()=>async()=>({...ctx,anchors:[],images:[]}),c,changed.policy),/binding changed|source changed/);
+  assert.equal(calls,2);assert.equal(changed.raw.length,2);
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',question,c,{documentId:'oracle'} as never,runJournal().policy),/not document/);
  });}finally{globalThis.fetch=savedFetch;}
 });
