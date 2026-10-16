@@ -1176,15 +1176,32 @@ export class KernelService {
     return verifyStudyAnswerCluster(question,await this.contractStudyContext(owner,question,options,policy),contract,binding,clusterId,policy);
   }
 
-  /** Explicit development chain; source selection is query-only and all core
-   * evidence is re-read. Supplemental batches do not add image-only anchors. */
-  async answerPlannedStudyContent(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string},policy:PlannedStudyAnswerPolicy){
+  /** Initial library retrieval remains query-only. An explicit title appearing
+   * in the question may scope only the supplemental batch; it is not global recall. */
+  async answerPlannedStudyContent(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string;sourceHint?:DocumentSourceHint},policy:PlannedStudyAnswerPolicy){
     const scope=structuredClone(options);
+    if(!scope||Object.keys(scope).some(key=>!['courseId','sourceHint'].includes(key))||
+      (scope.courseId!==undefined&&(typeof scope.courseId!=='string'||!scope.courseId.trim())))
+      throw new Error('Planned answers allow user course/title context, not document filters');
+    const {sourceHint,...courseContext}=scope;
+    if(sourceHint!==undefined&&(!sourceHint||Object.keys(sourceHint).length!==1||typeof sourceHint.selectedDocumentTitle!=='string'||
+      !sourceHint.selectedDocumentTitle.trim()||!question.normalize('NFKC').includes(sourceHint.selectedDocumentTitle.normalize('NFKC'))))
+      throw new Error('A supplemental source hint must be a complete user title present in the original question');
     await assertPlannedStudyAnswerPolicy(policy);
-    const read=await this.contractStudyContext(owner,question,scope,{scope:policy.scope,dailyLimit:policy.dailyLimit,
+    const selected=sourceHint?await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}):undefined;
+    if(selected)requireResolvedDocumentSource(selected);
+    const read=await this.contractStudyContext(owner,question,courseContext,{scope:policy.scope,dailyLimit:policy.dailyLimit,
       beforeAttempt:policy.beforeAttempt,recordResponse:raw=>policy.recordResponse({...raw,phase:'contract-plan'})});
-    return answerPlannedStudyQuestion(question,read,query=>this.studyAnswerContextReader(owner,query,{...scope,limit:4,
-      semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},false),contract,policy);
+    return answerPlannedStudyQuestion(question,read,async query=>{
+      const supplement=await this.studyAnswerContextReader(owner,query,{...courseContext,...(sourceHint?{sourceHint}:{}),limit:4,
+        semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},false);
+      return async()=>{
+        const context=await supplement();
+        if(sourceHint&&JSON.stringify(await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}))!==JSON.stringify(selected))
+          throw new DocumentEvidenceChangedError();
+        return context;
+      };
+    },contract,policy,selected?.status==='resolved'?selected:undefined);
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {

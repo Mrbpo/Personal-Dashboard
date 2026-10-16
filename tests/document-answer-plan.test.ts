@@ -153,7 +153,15 @@ test('question-only contract fixes original requirements; source discoveries rem
  const changed=structuredClone(c);changed.requirements[0].aspect='Invented requirement';assert.throws(()=>validateStudyQuestionContract(question,changed),/changed/);
  const packet=prepareContractStudyPlan(question,context(),c),req=buildContractStudyPlanRequest(packet),p=contractPlan();
  assert.deepEqual(p.requirements,c.requirements);assert.equal(Object.hasOwn(req.text.format.schema.properties,'requirements'),false);
+ const schema=req.text.format.schema.properties as unknown as Record<string,{items:{properties:{sourceIds:{minItems:number}}}}>;
+ assert.equal(schema.clusters.items.properties.sourceIds.minItems,1);assert.equal(schema.sourceSubscopes.items.properties.sourceIds.minItems,1);
  assert.deepEqual(validateContractStudyPlan(rawContractPlan(p),c,packet.input.allowedSourceIds),p);
+ const emptyCluster=rawContractPlan(structuredClone(p));emptyCluster.clusters[0].sourceIds=[];emptyCluster.clusters[0].groundedScope={...unknown};
+ emptyCluster.clusters[0].status='needs-evidence';assert.throws(()=>validateContractStudyPlan(emptyCluster,c,packet.input.allowedSourceIds),/actual evidence/);
+ const emptySubscope=rawContractPlan(structuredClone(p));emptySubscope.sourceSubscopes[0].sourceIds=[];
+ assert.throws(()=>validateContractStudyPlan(emptySubscope,c,packet.input.allowedSourceIds),/sub-scope/);
+ const onlyMissing={clusters:[],conflicts:[],sourceSubscopes:[],missing:[{requirementId:'r0',reason:'No actual evidence was retrieved.',supplementQuery:null}]};
+ assert.deepEqual(validateContractStudyPlan(onlyMissing,c,packet.input.allowedSourceIds),{requirements:c.requirements,...onlyMissing});
  assert.throws(()=>validateContractStudyPlan(p,c,packet.input.allowedSourceIds),/cannot rewrite/);
  const foreign=rawContractPlan(structuredClone(p));foreign.sourceSubscopes[0].requirementId='r1';
  assert.throws(()=>validateContractStudyPlan(foreign,c,packet.input.allowedSourceIds),/sub-scope/);
@@ -228,6 +236,7 @@ test('explicit phases journal raw independently, retain missing/capacity, and re
 test('bounded composite retains source q IDs/old images, exposes re-retrieved quotes, and records global image omissions without extra image anchors',()=>{
  const ctx=context();ctx.images=Array.from({length:64},(_,i)=>({...ctx.images[0],attachmentId:'original-'+i}));
  const c=contract(),packet=prepareContractStudyPlan(question,ctx,c),p=contractPlan(ctx);p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
+ p.clusters[0].sourceIds=p.clusters[0].sourceIds.filter(id=>!id.startsWith('i'));
  p.missing=[{requirementId:'r0',reason:'More direct support needed.',supplementQuery:'label judgments origin'}];
  const binding=bindContractStudyPlan(packet,p,sha(JSON.stringify(buildContractStudyPlanRequest(packet))),'b'.repeat(64)),queries=studySupplementQueries(question,c,binding);
  assert.equal(queries.length,2);assert.equal(queries[0].origin,'plan-missing');assert.equal(queries[1].origin,'question-contract');
@@ -235,7 +244,11 @@ test('bounded composite retains source q IDs/old images, exposes re-retrieved qu
  const combined=preparePlannedStudyGeneration(question,ctx,[extra,empty],c,binding,queries),body=buildPlannedStudyGenerationRequest(combined),wire=JSON.stringify(body),
   oldQuote=packet.prepared.quoteUnits[1];
  assert.ok(combined.receipt.originalQuoteIds.includes(oldQuote.id));assert.ok(combined.receipt.selectedSourceIds.includes(oldQuote.id));
+ const advisory=preparePlannedStudyGeneration(question,ctx,[],c,binding,[]);
+ assert.ok(advisory.receipt.selectedSourceIds.includes(oldQuote.id));assert.ok(JSON.stringify(buildPlannedStudyGenerationRequest(advisory)).includes(oldQuote.text));
+ assert.equal(advisory.receipt.originalTextSelection,'all-original-selectable-v1');assert.equal(advisory.receipt.initialRetrievalScope,'whole-library-query');
  assert.ok(wire.includes(oldQuote.text));assert.equal(combined.context.images.length,64);
+ assert.equal((body.input[1].content as {type:string}[]).filter(part=>part.type==='input_image').length,64);
  assert.equal(combined.context.images[0].attachmentId,'original-0');assert.equal(combined.context.imageAnchors.length,0);
  assert.equal(combined.context.imageSelection.omitted.find(i=>i.attachmentId==='supplemental-image')?.reason,'image-count-limit');
  assert.equal(combined.receipt.supplemental[0].extraNativeTableLane,false);
@@ -274,5 +287,39 @@ test('short chain uses plan/generation/final local only, retains >6 raw claims a
    async()=>async()=>({...ctx,anchors:[],images:[]}),c,changed.policy),/binding changed|source changed/);
   assert.equal(calls,2);assert.equal(changed.raw.length,2);
   await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',question,c,{documentId:'oracle'} as never,runJournal().policy),/not document/);
+ });}finally{globalThis.fetch=savedFetch;}
+});
+
+test('explicit complete user title scopes supplements only, freezes source identity and rejects unresolved or changed sources',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,
+  query=`For "${title}", where did its labels come from?`,c=freezeStudyQuestionContract(query,{requirements:plan().requirements},'a'.repeat(64)),
+  p=contractPlan(ctx),selected={scope:'selected-title-scoped' as const,selectedDocumentTitle:title,status:'resolved' as const,
+   document:{documentId:'study0',title,currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}};
+ p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
+ const kernel=new KernelService(),reads:Record<string,unknown>[]=[],options={sourceHint:{selectedDocumentTitle:title}},states:Record<string,unknown>[]=[],j=journal(),
+  policy:PlannedStudyAnswerPolicy={...j.policy,recordState:async state=>{states.push(structuredClone(state));}};
+ let resolutions=0,calls=0;kernel.resolveDocumentSource=async()=>{resolutions++;return structuredClone(selected);};
+ (kernel as unknown as {studyAnswerContextReader:(owner:string,q:string,o:Record<string,unknown>)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,_q,o)=>{
+  reads.push(structuredClone(o));return async()=>o.sourceHint?{...ctx,anchors:[ctx.anchors[0]],images:[]}:ctx;};
+ try{await development(async()=>{
+  globalThis.fetch=async()=>{options.sourceHint.selectedDocumentTitle='Changed caller title';return response(calls++===0?rawContractPlan(p):{status:'insufficient-evidence',message:'I cannot provide a sufficiently supported answer.',claims:[]});};
+  const result=await kernel.answerPlannedStudyContent('owner',query,c,options,policy);
+  assert.equal(calls,2);assert.equal(reads[0].sourceHint,undefined);assert.deepEqual(reads[1].sourceHint,{selectedDocumentTitle:title});
+  if(!('receipt' in result)||!result.receipt)throw Error('Expected composite receipt');
+  assert.equal(result.receipt.initialRetrievalScope,'whole-library-query');assert.equal(result.receipt.supplemental[0].retrievalScope,'selected-title-scoped');
+  assert.deepEqual(result.receipt.supplemental[0].sourceSelection,selected);
+  const before=calls,readCount=reads.length;
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:'Absent title'}},policy),/original question/);
+  assert.equal(reads.length,readCount);assert.equal(calls,before);
+  kernel.resolveDocumentSource=async()=>({...selected,status:'ambiguous',matches:[selected.document,selected.document]});
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:title}},policy),/ambiguous/);
+  kernel.resolveDocumentSource=async()=>({...selected,status:'not-found'});
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:title}},policy),/not found/);
+  assert.equal(calls,before);resolutions=0;
+  kernel.resolveDocumentSource=async()=>({...selected,document:{...selected.document,sourceHash:++resolutions===1?'sha0':'changed'}});
+  const changed=journal();calls=0;globalThis.fetch=async()=>{calls++;return response(rawContractPlan(p));};
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:title}},
+   {...changed.policy,recordState:async()=>{}}),/no longer current|changed/);
+  assert.equal(calls,1);assert.equal(changed.raw.length,1);
  });}finally{globalThis.fetch=savedFetch;}
 });

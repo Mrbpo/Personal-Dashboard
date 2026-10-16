@@ -4,8 +4,10 @@ import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocu
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
+import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v1';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v2';
+type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'question-contract';query:string};
 export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt&{claimIndex?:number}>)=>Promise<void>;
@@ -54,13 +56,16 @@ function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContex
   sourceContentIsUntrusted:true as const,imageSelection:{...selection,omitted:[...omitted.values()]}};
 }
 
-/** Retain the entire original context while limiting the generation input to
- * actual plan selections plus new retrieved evidence. q IDs are source-stable;
+/** Retain all original selectable text; the fallible plan is only advisory.
+ * Supplemental text remains actual retrieved evidence. q IDs are source-stable;
  * original image order is retained. The extension is not a new model plan. */
 export function preparePlannedStudyGeneration(question:string,initial:DocumentAnswerContext,extras:DocumentAnswerContext[],contract:StudyQuestionContract,
- binding:StudyContractPlanBinding,queries:StudySupplementQuery[]){
+ binding:StudyContractPlanBinding,queries:StudySupplementQuery[],supplementalSource?:SupplementalSource){
  const original=restoreContractStudyPlan(question,initial,contract,binding),context=mergeContexts(initial,extras),prepared=prepareDocumentAnswer(question,context);
  if(queries.length!==extras.length)throw Error('Supplemental query/context mismatch');
+ if(supplementalSource&&extras.some(c=>c.anchors.some(h=>h.document_id!==supplementalSource.document.documentId||
+  h.source_hash!==supplementalSource.document.sourceHash||h.source_version_id!==supplementalSource.document.sourceVersionId||
+  h.id!==`pg:${supplementalSource.document.currentVersionId}:${h.page_number}`)))throw Error('Selected supplemental source changed');
  const byUnit=new Map(prepared.quoteUnits.map(u=>[u.id,u]));
  for(const unit of original.prepared.quoteUnits){const current=byUnit.get(unit.id);if(!current||current.text!==unit.text||current.quoteSha256!==unit.quoteSha256||
   current.startUtf16!==unit.startUtf16||current.endUtf16!==unit.endUtf16)throw Error('Original quote unit lost during supplementation');}
@@ -68,6 +73,8 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
  if(originalImages.some(s=>!prepared.supports.some(p=>p.id===s.id&&p.kind==='image'&&p.sha256===s.sha256&&p.documentId===s.documentId&&
   p.documentVersionId===s.documentVersionId&&p.sourceVersionId===s.sourceVersionId&&p.sourceHash===s.sourceHash)))throw Error('Original image identity/order changed');
  const selected=new Set(binding.plan.clusters.flatMap(c=>c.sourceIds));
+ for(const unit of original.prepared.quoteUnits)if(unit.selectable)selected.add(unit.id);
+ for(const image of originalImages)selected.add(image.id);
  for(const extra of extras){const actual=prepareDocumentAnswer(question,extra);
   for(const unit of actual.quoteUnits)if(unit.selectable)selected.add(unit.id);
   for(const image of actual.supports.filter(s=>s.kind==='image')){const mapped=prepared.supports.find(s=>s.kind==='image'&&s.image!.attachmentId===image.image!.attachmentId&&s.sha256===image.sha256);if(mapped)selected.add(mapped.id);}
@@ -76,12 +83,14 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
   supports=prepared.supports.filter(s=>s.kind==='image'?selected.has(s.id):supportIds.has(s.id)),actualIds=new Set([...quoteUnits.map(u=>u.id),...supports.filter(s=>s.kind==='image').map(s=>s.id)]);
  if([...selected].some(id=>!actualIds.has(id)))throw Error('Plan selection is not in current composite source');
  const supplemental=extras.map((c,index)=>({...queries[index],ranking:'keyword-related-v1',limit:4,extraNativeTableLane:false,
+  retrievalScope:supplementalSource?.scope??'whole-library-query',sourceSelection:supplementalSource??null,
   selections:c.anchors.map((h,rank)=>({rank:rank+1,id:h.id,documentId:h.document_id,sourceVersionId:h.source_version_id,sourceHash:h.source_hash,evidenceId:h.evidence_id,bodySha256:sha(h.body)})),
   imageSelection:c.imageSelection??null}));
  const receipt={version:PLANNED_STUDY_ANSWER_VERSION,contractSha256:contract.contractSha256,originalPlanSha256:binding.planSha256,
   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256,
   originalInputFingerprint:binding.inputFingerprint,inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,
+  initialRetrievalScope:'whole-library-query',originalTextSelection:'all-original-selectable-v1',
   originalQuoteIds:original.prepared.quoteUnits.map(u=>u.id),selectedSourceIds:[...actualIds],
   imageIds:prepared.supports.filter(s=>s.kind==='image').map(s=>({id:s.id,sha256:s.sha256,sourceVersionId:s.sourceVersionId})),
   originalContextRetained:true,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
@@ -102,13 +111,13 @@ export function buildPlannedStudyGenerationRequest(packet:ReturnType<typeof prep
 /** At most one plan, one lexical batch, one generation and six actual final
  * claim audits. No pre-audit, second plan, citation repair or model escalation. */
 export async function answerPlannedStudyQuestion(question:string,readInitial:()=>Promise<DocumentAnswerContext>,
- readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy){
+ readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy,supplementalSource?:SupplementalSource){
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract),plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
  await policy.recordState({event:'plan',result:plan});
  if(plan.completion==='capacity-exceeded')return {status:'capacity-exceeded',plan,wholeAnswerVerified:false};
  const queries=studySupplementQueries(question,checked,plan.binding),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
  for(const q of queries)readers.push(await readSupplement(q.query));
- const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries);};
+ const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource);};
  const packet=await read();await policy.recordState({event:'supplement',receipt:packet.receipt});
  if(!packet.selectedPrepared.supports.length)return {status:'unavailable',plan,receipt:packet.receipt,wholeAnswerVerified:false};
  const body=buildPlannedStudyGenerationRequest(packet),budget=studyAnswerPlanRequestBudget(body,{prepared:packet.selectedPrepared}),
