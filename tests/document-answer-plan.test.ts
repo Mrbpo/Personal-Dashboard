@@ -392,6 +392,52 @@ test('short chain uses plan/generation/final local only, retains >6 raw claims a
  });}finally{globalThis.fetch=savedFetch;}
 });
 
+test('Kernel learning entry creates and journals the real contract before the existing SourceN chain, rejecting invalid options and changed explicit sources before the next request',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,
+  query=`For "${title}", how are the original samples labeled?`,options={courseId:'explicit-course',sourceHint:{selectedDocumentTitle:title}},
+  selected={scope:'selected-title-scoped' as const,selectedDocumentTitle:title,status:'resolved' as const,
+   document:{documentId:'study0',title,currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}},p=contractPlan(ctx),
+  kernel=new KernelService(),j=journal(),states:Record<string,unknown>[]=[],reads:unknown[]=[],
+  policy:PlannedStudyAnswerPolicy={...j.policy,recordState:async state=>{states.push(structuredClone(state));}};
+ p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
+ kernel.resolveDocumentSource=async()=>structuredClone(selected);
+ (kernel as unknown as {studyAnswerContextReader:(owner:string,q:string,o:Record<string,unknown>)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,_q,o)=>{
+  reads.push(structuredClone(o));return async()=>o.sourceHint?{...ctx,anchors:[ctx.anchors[0]],images:[]}:ctx;};
+ const local={claimId:'c0',judgment:'supported',reason:'Actual selected text supports the claim.',citationFindings:{r0:{judgment:'supports',reason:'Original source text.'}},
+  objectUnitScope:{claim:'original samples',evidence:'original samples',alignment:'same'}};
+ let calls=0;
+ try{await development(async()=>{
+  globalThis.fetch=async(_url,init)=>{const body=JSON.parse(String(init?.body)),phase=j.attempts.at(-1)!.phase;calls++;
+   Object.assign(options,{courseId:'mutated',documentId:'oracle'});options.sourceHint.selectedDocumentTitle='mutated';
+   if(phase==='question-contract'){assert.deepEqual(JSON.parse(body.input[1].content[0].text),{question:query});return response({requirements:p.requirements});}
+   assert.equal(states[0].event,'question-contract');assert.equal((states[0].result as {contract:{question:string}}).contract.question,query);
+   if(phase==='contract-plan')return response(rawContractPlan(p));
+   if(phase==='generation'){const labels=body.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum;
+    assert.ok(labels.every((id:string)=>/^Source[1-9][0-9]*$/.test(id)));return response({status:'answered',message:'',claims:[{text:'The original study assigns sample labels.',citations:[{id:labels[0]}]}]});}
+   assert.equal(phase,'claim-audit');return response(local);
+  };
+  const result=await kernel.answerLearningContent('owner',query,options,policy);
+  assert.equal(result.status,'generated-awaiting-independent-review');assert.equal(result.questionContract.contract.question,query);
+  assert.equal(result.questionContract.rawResponseSha256,j.raw[0].rawSha256);assert.equal(result.wholeAnswerVerified,false);
+  assert.deepEqual(j.attempts.map(a=>a.phase),['question-contract','contract-plan','generation','claim-audit']);
+  assert.deepEqual(j.raw.map(r=>(r as {phase?:string}).phase),j.attempts.map(a=>a.phase));assert.equal(calls,4);
+  assert.deepEqual(reads,[{courseId:'explicit-course',limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},
+   {courseId:'explicit-course',sourceHint:{selectedDocumentTitle:title},limit:4,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true}]);
+  const priorReads=reads.length,priorAttempts=j.attempts.length;
+  for(const invalid of [{documentId:'oracle'},{semantic:true},{sourceHint:{selectedDocumentTitle:'not in question'}},[]])
+   await assert.rejects(()=>kernel.answerLearningContent('owner',query,invalid as never,policy),/not document filters|original question/);
+  assert.equal(calls,4);assert.equal(reads.length,priorReads);assert.equal(j.attempts.length,priorAttempts);
+  kernel.resolveDocumentSource=async()=>({...selected,status:'not-found'});
+  await assert.rejects(()=>kernel.answerLearningContent('owner',query,{sourceHint:{selectedDocumentTitle:title}},policy),/not found/);assert.equal(calls,4);
+  const changed=journal(),changedStates:Record<string,unknown>[]=[];let sourceChanged=false;
+  kernel.resolveDocumentSource=async()=>({...selected,document:{...selected.document,sourceHash:sourceChanged?'changed':'sha0'}});
+  globalThis.fetch=async()=>{calls++;sourceChanged=true;return response({requirements:p.requirements});};
+  await assert.rejects(()=>kernel.answerLearningContent('owner',query,{sourceHint:{selectedDocumentTitle:title}},
+   {...changed.policy,recordState:async state=>{changedStates.push(structuredClone(state));}}),/changed|no longer current/);
+  assert.equal(calls,5);assert.equal(changed.raw.length,1);assert.equal(changed.attempts.length,1);assert.equal(changedStates[0].event,'question-contract');
+ });}finally{globalThis.fetch=savedFetch;}
+});
+
 test('explicit complete user title scopes supplements only, freezes source identity and rejects unresolved or changed sources',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,
   query=`For "${title}", where did its labels come from?`,c=freezeStudyQuestionContract(query,{requirements:[{...plan().requirements[0],requestedScope:{...unknown,subject:title}}]},'a'.repeat(64)),
