@@ -10,6 +10,8 @@ import {DocumentContextError,readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE
 import {DocumentNodeSelectionError} from '../lib/kernel/document-nodes.ts';
 import {DocumentEvidenceChangedError} from '../lib/kernel/document-evidence.ts';
 import {buildDocumentAnswerRequest,prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
+import {freezeStudyQuestionContract,prepareContractStudyPlan,buildContractStudyPlanRequest,bindContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
+import {preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport} from '../lib/kernel/document-planned-answer.ts';
 const hash=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQWQAAAAASUVORK5CYII=','base64');
 const pg={skip:!process.env.KERNEL_DATABASE_URL};
@@ -67,6 +69,41 @@ test('whole source covers every original node and real caption image beyond14; r
  assert.deepEqual(await kernel.searchDocumentText(item.owner,'baseline',options),before);
  await assert.rejects(kernel.readDocumentNodes(item.owner,item.source,item.nodes.slice(0,15).map(n=>n.evidenceId)),DocumentNodeSelectionError);
  assert.equal(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens,300000);
+});
+
+test('selected complete initial route carries a real PG paragraph missed by ranked14 into actual generation input and binds current original images',pg,async()=>{
+ const item=await fixture({separateParents:true,bodies:Array.from({length:20},(_,i)=>`Shared study terms. Original method observation ${i}.`)}),
+  question=`In "${item.title}", describe the shared study method.`,ranked=await kernel.searchDocumentText(item.owner,'shared study terms',
+   {limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false});
+ assert.equal(ranked.length,14);const rankedEvidence=new Set(ranked.map(h=>h.evidence_id)),absent=item.nodes.slice(0,20).find(n=>!rankedEvidence.has(n.evidenceId));assert.ok(absent);
+ const complete=await kernel.readCompleteDocumentSource(item.owner,item.source);assert.equal(complete.status,'available');
+ if(complete.status!=='available')throw Error('Expected complete reader');
+ const context={...complete.context,completeSourceProof:{policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:item.title,manifest:complete.manifest}},
+  scope={subject:null,attribute:null,unit:null,population:null,stage:null,configuration:null,time:null},
+  contract=freezeStudyQuestionContract(question,{requirements:[{id:'r0',aspect:'Describe the method',requestedScope:scope}]},hash('mock contract raw')),
+  packet=prepareContractStudyPlan(question,context,contract),unit=packet.prepared.quoteUnits.find(q=>q.text===absent!.body);
+ assert.ok(unit);const mockPlan={requirements:contract.requirements,clusters:[{id:'c0',requirementIds:['r0'],sourceIds:[unit.id],groundedScope:scope,status:'sufficient' as const}],
+  conflicts:[],missing:[],sourceSubscopes:[]},binding=bindContractStudyPlan(packet,mockPlan,hash(JSON.stringify(buildContractStudyPlanRequest(packet))),hash('mock plan raw')),
+  generated=preparePlannedStudyGeneration(question,context,[],contract,binding,[]),transport=preparePlannedStudyGenerationTransport(generated),
+  input=JSON.parse((transport.request.input[1].content as {text:string}[])[0].text);
+ assert.ok(input.quoteUnits.some((q:{text:string})=>q.text===absent!.body));assert.equal(input.completeSourceProof.manifest.manifestSha256,complete.manifest.manifestSha256);
+ assert.equal(generated.receipt.originalQuoteIds.length,22);assert.equal(generated.receipt.initialRetrievalScope,'selected-complete-source');
+ assert.deepEqual(generated.receipt.supplemental,[]);assert.equal(generated.receipt.fullSourceCoverage,'unassessed');
+ assert.deepEqual(generated.context.images.map(i=>hash(i.bytes)),[hash(png),hash(png)]);
+ await assert.rejects(kernel.readCompleteDocumentSource('other-owner',item.source),changed);
+ await kernel.ingestParsedDocument(item.document,item.pages.map((p,i)=>i? p:{...p,text:p.text+' Changed current source.'}),{parserVersion:'changed-original-v2'});
+ await assert.rejects(kernel.readCompleteDocumentSource(item.owner,item.source),changed);
+});
+
+test('cross-source gate uses only exact complete titles from current visible owner metadata',pg,async()=>{
+ const item=await fixture({captions:0,bodies:['Original study.']}),otherId='other-title-'+randomUUID(),title='Another complete source '+randomUUID(),
+  other={...item.document,id:otherId,name:title,hash:hash(title),originKey:otherId};
+ await kernel.ingestParsedDocument(other,[{pageNumber:1,locator:'original:1',text:'Another original source.'}],{parserVersion:'fixture'});
+ assert.deepEqual(await kernel.mentionedOtherDocumentSources(item.owner,`Use ${item.title} and ${title}.`,item.id),[{documentId:otherId,title}]);
+ assert.deepEqual(await kernel.mentionedOtherDocumentSources(item.owner,'Compare with an unnamed study.',item.id),[]);
+ assert.deepEqual(await kernel.mentionedOtherDocumentSources('foreign-owner',title,item.id),[]);
+ await kernel.hideParsedDocument(item.owner,otherId);
+ assert.deepEqual(await kernel.mentionedOtherDocumentSources(item.owner,title,item.id),[]);
 });
 
 test('complete source refuses overflow, missing or ambiguous originals without returning clipped context',pg,async()=>{

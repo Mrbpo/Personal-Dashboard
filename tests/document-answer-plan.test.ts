@@ -5,6 +5,8 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {database} from '../lib/database.ts';
 import {KernelService} from '../lib/kernel/service.ts';
+import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceManifest} from '../lib/kernel/document-context.ts';
+import {validateCompleteStudySource} from '../lib/kernel/document-study-source.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,DOCUMENT_CITATION_AUDIT_VERSION,
  type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
@@ -29,7 +31,11 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
  evidence_id:`evidence${n}`,parser_version:'fixture',score:1,evidence_body:'full-page'})),images:[{
  attachmentId:'image',assetId:sha(image),captionEvidenceId:'unread-caption-evidence',sha256:sha(image),byteLength:image.length,width:1,height:1,
  mime:'image/png',bytes:image,source:{documentId:'study0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}}]};}
-function emptyTitleOutline(kernel:KernelService){kernel.readDocumentOutline=async(_owner,source)=>({
+function rankedTitleFallback(kernel:KernelService){
+ kernel.mentionedOtherDocumentSources=async()=>[];
+ kernel.readCompleteDocumentSource=async()=>({status:'unavailable',reason:'structure-unavailable',manifest:{complete:false,reason:'structure-unavailable'} as never});
+}
+function emptyTitleOutline(kernel:KernelService){rankedTitleFallback(kernel);kernel.readDocumentOutline=async(_owner,source)=>({
  source:{documentId:source.documentId,currentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,sourceHash:source.sourceHash},
  manifestSha256:'a'.repeat(64),parents:[],nodes:[],sourceContentIsUntrusted:true});}
 const unknown={subject:null,attribute:null,unit:null,population:null,stage:null,configuration:null,time:null};
@@ -50,6 +56,118 @@ function journal(){const attempts:Readonly<PlannedStudyAnswerAttempt>[]=[],raw:D
  return {attempts,raw,policy};}
 const response=(value:unknown)=>Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',
  usage:{input_tokens:100,output_tokens:100},output_text:JSON.stringify(value)});
+
+function completeInitialFixture(count=20,bodySize=0){
+ const title='Explicit original study',source={documentId:'selected-study',currentVersionId:'selected-v1',sourceVersionId:'selected-source',sourceHash:sha('original'),courseId:''};
+ const base=context().anchors[0],anchors=Array.from({length:count},(_,i)=>({...base,name:title,document_id:source.documentId,
+  id:`pg:${source.currentVersionId}:${i+1}`,page_number:i+1,evidence_id:`selected-node-${i}`,locator:`original:${i}`,
+  source_hash:source.sourceHash,source_version_id:source.sourceVersionId,body:bodySize?'x'.repeat(bodySize):`Original observation ${i}: ${i===count-2?'the method is described in this late paragraph':'neutral study prose'}.`}));
+ const last=anchors.at(-1)!,ctx:DocumentAnswerContext={sourceContentIsUntrusted:true,anchors,parents:[],
+  images:[{...context().images[0],source,captionEvidenceId:last.evidence_id}]};
+ const unsigned:Omit<CompleteDocumentSourceManifest,'manifestSha256'>={method:'complete-current-source',nodeOrder:'original-source',complete:true,reason:null,
+  source,sourceNodeCount:count,returnedNodeCount:count,sourceBodyCodepoints:anchors.reduce((n,h)=>n+Array.from(h.body).length,0),
+  sourceBodyUtf8Bytes:anchors.reduce((n,h)=>n+Buffer.byteLength(h.body),0),orderedTextSha256:sha(JSON.stringify(anchors.map(h=>h.body))),
+  structureManifestSha256:sha('original structure'),parserWarnings:[],document:{name:title,origin:'fixture',originKey:'source',parserVersion:'fixture'},hierarchy:[],
+  nodes:anchors.map((h,i)=>({documentId:source.documentId,documentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,
+   sourceHash:source.sourceHash,evidenceId:h.evidence_id,locator:h.locator,ordinal:i,kind:i===count-1?'caption':'paragraph',bodySha256:sha(h.body)})),
+  images:ctx.images.map(im=>({attachmentId:im.attachmentId,captionEvidenceId:last.evidence_id,sha256:im.sha256,byteLength:im.byteLength,width:im.width,height:im.height})),
+  imageInputTokenUpper:3,limits:COMPLETE_DOCUMENT_SOURCE_LIMITS};
+ const manifest={...unsigned,manifestSha256:sha(JSON.stringify(unsigned,(_k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v))};
+ const selected={scope:'selected-title-scoped' as const,selectedDocumentTitle:title,status:'resolved' as const,document:{...source,title}},
+  kernel=new KernelService(),question=`For "${title}", describe the method and any external comparison.`;
+ kernel.resolveDocumentSource=async()=>structuredClone(selected);kernel.mentionedOtherDocumentSources=async()=>[];
+ kernel.readCompleteDocumentSource=async()=>({status:'available',context:ctx as never,manifest:structuredClone(manifest)});
+ return {title,source,ctx,manifest,selected,kernel,question};
+}
+
+test('explicit complete-source initial evidence reaches plan and generation past ranked14 without supplements or certifying the question',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();
+ const f=completeInitialFixture(),states:Record<string,unknown>[]=[],j=journal(),oldFetch=globalThis.fetch;
+ const requirements=[{id:'r0',aspect:'Describe the selected method',requestedScope:{...unknown}},
+  {id:'r1',aspect:'External comparison if established',requestedScope:{...unknown}}];
+ (f.kernel as unknown as {studyAnswerContextReader:()=>never}).studyAnswerContextReader=()=>{throw Error('Complete lane must not retrieve ranked or supplemental evidence');};
+ try{await development(async()=>{
+  globalThis.fetch=async(_url,init)=>{
+   const body=JSON.parse(String(init?.body)),phase=j.attempts.at(-1)!.phase;
+   if(phase==='question-contract'){assert.deepEqual(JSON.parse(body.input[1].content[0].text),{question:f.question});return response({requirements});}
+   const input=JSON.parse(body.input[1].content[0].text);
+   assert.equal(input.completeSourceProof.manifest.manifestSha256,f.manifest.manifestSha256);
+   assert.ok(input.quoteUnits.some((u:{text:string})=>u.text.includes('the method is described in this late paragraph')));
+   assert.equal(body.input[1].content.filter((c:{type:string})=>c.type==='input_image').length,1);
+   assert.equal(input.questionContract.question,f.question);assert.deepEqual(input.questionContract.requirements,requirements);
+   if(phase==='contract-plan')return response({clusters:[],conflicts:[],sourceSubscopes:[],missing:requirements.map(r=>({requirementId:r.id,reason:'Unverified requirement',supplementQuery:r.aspect}))});
+   assert.equal(phase,'generation');return response({status:'insufficient-evidence',message:'I cannot provide a sufficiently supported answer.',claims:[]});
+  };
+  const result=await f.kernel.answerLearningContent('owner',f.question,{sourceHint:{selectedDocumentTitle:f.title}},
+   {...j.policy,recordState:async s=>{states.push(structuredClone(s));}});
+  assert.equal(result.status,'generated-awaiting-independent-review');assert.equal(result.wholeAnswerVerified,false);
+  assert.equal(result.initialEvidence.strategy,'selected-complete-source');assert.equal(result.initialEvidence.questionCoverage,'unassessed');
+  if(!('receipt'in result)||!result.receipt)throw Error('Missing retained source receipt');
+  assert.equal(result.receipt.initialRetrievalScope,'selected-complete-source');assert.equal(result.receipt.originalQuoteIds.length,20);
+  assert.deepEqual(result.receipt.supplemental,[]);assert.deepEqual(j.attempts.map(a=>a.phase),['question-contract','contract-plan','generation']);
+  if(!('unassessedPlanningGaps'in result))throw Error('Missing original gaps');assert.equal(result.unassessedPlanningGaps.length,2);
+  assert.ok(states.some(s=>s.event==='initial-source-evidence'&&s.selectedSourceInputCoverage==='complete'));
+ });}finally{globalThis.fetch=oldFetch;}
+});
+
+test('complete-source binding rejects missing/foreign nodes, omitted images, altered manifests and unsupported ranked overflow',()=>{
+ const f=completeInitialFixture(),proof={policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:f.title,manifest:f.manifest},c={...f.ctx,completeSourceProof:proof};
+ assert.equal(validateCompleteStudySource(c),proof);
+ for(const changed of [{...c,anchors:c.anchors.slice(0,14)},{...c,images:[]},
+  {...c,anchors:c.anchors.map((h,i)=>i? h:{...h,document_id:'other'})},
+  {...c,completeSourceProof:{...proof,manifest:{...f.manifest,structureManifestSha256:sha('other')}}}])
+  assert.throws(()=>validateCompleteStudySource(changed),/binding changed/);
+ const contract=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Original method',requestedScope:{...unknown}}]},'a'.repeat(64)),
+  original=prepareContractStudyPlan(f.question,f.ctx,contract),p={requirements:contract.requirements,clusters:[],conflicts:[],missing:[{requirementId:'r0',reason:'Unknown',supplementQuery:null}],sourceSubscopes:[]},
+  binding=bindContractStudyPlan(original,p,sha(JSON.stringify(buildContractStudyPlanRequest(original))),'b'.repeat(64));
+ assert.throws(()=>preparePlannedStudyGeneration(f.question,f.ctx,[],contract,binding,[]),/Invalid bounded supplemental/);
+});
+
+test('complete-source unavailable/request capacity and another explicit current title journal honest fallbacks; no-hint keeps ranked scope',async()=>{
+ const stop=Error('stop after receipt'),oldFetch=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('No request permitted');};
+ try{await development(async()=>{
+  for(const reason of ['source-size-limit','structure-unavailable','image-unavailable'] as const){
+   const f=completeInitialFixture(),states:Record<string,unknown>[]=[],contract=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Method',requestedScope:{...unknown}}]},'a'.repeat(64));
+   f.kernel.readCompleteDocumentSource=async()=>({status:'unavailable',reason,manifest:{...f.manifest,complete:false,reason,returnedNodeCount:0}});
+   await assert.rejects(f.kernel.answerPlannedStudyContent('owner',f.question,contract,{sourceHint:{selectedDocumentTitle:f.title}},
+    {...journal().policy,recordState:async s=>{states.push(s);throw stop;}}),e=>e===stop);
+   assert.equal(states[0].strategy,'whole-library-query');assert.equal(states[0].reason,reason);assert.equal(states[0].selectedSourceInputCoverage,'unassessed');
+  }
+  const large=completeInitialFixture(512,200),c=freezeStudyQuestionContract(large.question,{requirements:[{id:'r0',aspect:'Method',requestedScope:{...unknown}}]},'a'.repeat(64)),states:Record<string,unknown>[]=[];
+  await assert.rejects(large.kernel.answerPlannedStudyContent('owner',large.question,c,{sourceHint:{selectedDocumentTitle:large.title}},
+   {...journal().policy,recordState:async s=>{states.push(s);throw stop;}}),e=>e===stop);
+  assert.equal(states[0].reason,'request-capacity');assert.equal(states[0].strategy,'whole-library-query');
+  const f=completeInitialFixture(),question=f.question+' Also use "Another current full title".',contract=freezeStudyQuestionContract(question,{requirements:[{id:'r0',aspect:'Compare sources',requestedScope:{...unknown}}]},'a'.repeat(64));
+  let completeReads=0;f.kernel.mentionedOtherDocumentSources=async()=>[{documentId:'other',title:'Another current full title'}];
+  f.kernel.readCompleteDocumentSource=async()=>{completeReads++;throw Error('Cross-source gate must precede image bytes');};
+  await assert.rejects(f.kernel.answerPlannedStudyContent('owner',question,contract,{sourceHint:{selectedDocumentTitle:f.title}},
+   {...journal().policy,recordState:async s=>{assert.equal(s.reason,'other-current-title-mentioned');throw stop;}}),e=>e===stop);
+  assert.equal(completeReads,0);
+  await assert.rejects(f.kernel.answerPlannedStudyContent('owner',question,contract,{},
+   {...journal().policy,recordState:async s=>{assert.equal(s.reason,'no-explicit-selected-source');throw stop;}}),e=>e===stop);
+  assert.equal(completeReads,0);assert.equal(calls,0);
+ });}finally{globalThis.fetch=oldFetch;}
+});
+
+test('complete-source reread rejects manifest drift before the plan request, preserving its initial receipt',async()=>{
+ const f=completeInitialFixture(),j=journal(),oldFetch=globalThis.fetch,c=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Method',requestedScope:{...unknown}}]},'a'.repeat(64));
+ let reads=0,calls=0;f.kernel.readCompleteDocumentSource=async()=>({status:'available',context:f.ctx as never,
+  manifest:{...f.manifest,manifestSha256:++reads===1?f.manifest.manifestSha256:'f'.repeat(64)}});
+ globalThis.fetch=async()=>{calls++;throw Error('No request permitted');};
+ try{await development(async()=>{
+  const states:Record<string,unknown>[]=[];
+  await assert.rejects(f.kernel.answerPlannedStudyContent('owner',f.question,c,{sourceHint:{selectedDocumentTitle:f.title}},
+   {...j.policy,recordState:async s=>{states.push(s);}}),/changed|no longer current/);
+  assert.equal(states[0].strategy,'selected-complete-source');assert.equal(calls,0);assert.equal(j.attempts.length,0);
+  const afterPlan=completeInitialFixture(),next=journal();let drift=false;
+  afterPlan.kernel.readCompleteDocumentSource=async()=>({status:'available',context:afterPlan.ctx as never,
+   manifest:{...afterPlan.manifest,manifestSha256:drift?'f'.repeat(64):afterPlan.manifest.manifestSha256}});
+  globalThis.fetch=async()=>{calls++;drift=true;return response({clusters:[],conflicts:[],sourceSubscopes:[],missing:[{requirementId:'r0',reason:'Unverified',supplementQuery:null}]});};
+  await assert.rejects(afterPlan.kernel.answerPlannedStudyContent('owner',afterPlan.question,c,{sourceHint:{selectedDocumentTitle:afterPlan.title}},
+   {...next.policy,recordState:async()=>{}}),/changed|no longer current/);
+  assert.equal(calls,1);assert.equal(next.raw.length,1);assert.equal(next.attempts.length,1,'No generation request after current manifest drift.');
+ });}finally{globalThis.fetch=oldFetch;}
+});
 
 test('plan retains the full existing input and real shared q/image IDs; scope and conflict sides cannot invent evidence',()=>{
  const ctx=context(),packet=prepareStudyAnswerPlan(question,ctx),request=buildStudyAnswerPlanRequest(packet),original=prepareDocumentAnswer(question,ctx);
@@ -533,6 +651,7 @@ test('explicit title brings all14 original caption images outside global text hi
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,query=`For "${title}", explain the original table.`,
   source={documentId:'study0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'},kernel=new KernelService(),j=journal(),states:Record<string,unknown>[]=[],
   policy:PlannedStudyAnswerPolicy={...j.policy,recordState:async state=>{states.push(structuredClone(state));}};
+ rankedTitleFallback(kernel);
  ctx.anchors.push(...Array.from({length:12},(_,i)=>({...ctx.anchors[1],id:`pg:v1:${i+2}`,page_number:i+2,evidence_id:`global-${i}`,body:`Protected original text${i}.`})));
  const {score:_score,...anchor}=ctx.anchors[0],captionHits=Array.from({length:15},(_,i)=>({...anchor,id:`pg:v0:${i+21}`,page_number:i+21,
   evidence_id:`caption-${i}`,body:`Original caption ${i+1}.`,evidence_body:'full-page' as const,reader_selection:'evidence-node-ids' as const,retrieval_mode:'reader-selection' as const}));
@@ -582,7 +701,7 @@ test('explicit title brings all14 original caption images outside global text hi
  });}finally{globalThis.fetch=savedFetch;}
 });
 
-test('explicit complete user title scopes supplements only, freezes source identity and rejects unresolved or changed sources',async()=>{
+test('unavailable complete reader retains explicit-title scoped supplements and rejects unresolved or changed sources',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,
   query=`For "${title}", where did its labels come from?`,c=freezeStudyQuestionContract(query,{requirements:[{...plan().requirements[0],requestedScope:{...unknown,subject:title}}]},'a'.repeat(64)),
   p=contractPlan(ctx),selected={scope:'selected-title-scoped' as const,selectedDocumentTitle:title,status:'resolved' as const,
@@ -615,7 +734,7 @@ test('explicit complete user title scopes supplements only, freezes source ident
   const changed=journal();calls=0;globalThis.fetch=async()=>{calls++;return response(rawContractPlan(p));};
   await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:title}},
    {...changed.policy,recordState:async()=>{}}),/no longer current|changed/);
-  assert.equal(calls,1);assert.equal(changed.raw.length,1);
+  assert.equal(calls,0);assert.equal(changed.raw.length,0,'Changed explicit source is now rejected before the first request.');
  });}finally{globalThis.fetch=savedFetch;}
 });
 

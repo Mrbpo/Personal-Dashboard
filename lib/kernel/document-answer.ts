@@ -5,6 +5,7 @@ import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evide
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
+import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -19,6 +20,7 @@ type Image=AuthorImage|PdfVisualImageEvidence;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ completeSourceProof?:CompleteStudySourceProof;
  imageSelection?:DocumentImageSelection;
  sourceCaptionProof?:{policy:'resolved-title-caption-images-v1';selectedDocumentTitle:string;source:DocumentContextSource;
   manifestSha256:string;totalCaptions:number;captions:{evidenceId:string;ordinal:number}[]};
@@ -267,6 +269,9 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  if(unitPolicy!==undefined&&unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY)throw new Error('Invalid document citation unit policy');
  if(context.sourceCaptionProof&&!question.normalize('NFKC').includes(context.sourceCaptionProof.selectedDocumentTitle.normalize('NFKC')))
   throw new Error('Resolved caption title must occur in the complete question');
+ if(context.completeSourceProof){validateCompleteStudySource(context);
+  if(!question.normalize('NFKC').includes(context.completeSourceProof.selectedDocumentTitle.normalize('NFKC')))
+   throw Error('Complete source title must occur in the original question');}
  const supports=supportFor(context);
  if(unitPolicy){
   const units=documentQuoteUnits(supports),same=(a:Support,b:Support)=>a.documentId===b.documentId&&a.documentVersionId===b.documentVersionId&&
@@ -294,7 +299,8 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,
-  ...(context.imageSelection?{imageSelection:context.imageSelection}:{}),...(context.sourceCaptionProof?{sourceCaptionProof:context.sourceCaptionProof}:{}),...(unitPolicy?{unitPolicy}:{}),sourceContentIsUntrusted:true};
+  ...(context.imageSelection?{imageSelection:context.imageSelection}:{}),...(context.sourceCaptionProof?{sourceCaptionProof:context.sourceCaptionProof}:{}),
+  ...(context.completeSourceProof?{completeSourceProof:context.completeSourceProof}:{}),...(unitPolicy?{unitPolicy}:{}),sourceContentIsUntrusted:true};
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,...(visualUnitManifest?{visualUnitManifest}:{}),input,warnings,unavailableParents,fingerprint:sha(JSON.stringify(input))};
 }
 

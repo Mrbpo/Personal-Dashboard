@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
-import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
+import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
+import {validateCompleteStudySource} from './document-study-source.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
@@ -62,6 +63,11 @@ export function studySupplementQueries(question:string,contract:StudyQuestionCon
  return out;
 }
 function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContext[]){
+ // This separate bounded lane is licensed only by a complete reader manifest;
+ // ranked retrieval and its original 14/4 limits are unchanged.
+ if(initial.completeSourceProof){validateCompleteStudySource(initial);if(extras.length)throw Error('Complete initial source cannot import supplemental contexts');
+  const budget=createDocumentImageBudget();for(const [i,image]of initial.images.entries())if(!budget.include(image,i+1))throw Error('Complete source image budget exceeded');
+  return {...initial,imageAnchors:initial.imageAnchors??[],imageSelection:initial.imageSelection??budget.snapshot()};}
  if(initial.anchors.length>14||extras.length>2||extras.some(c=>c.anchors.length>4||(c.imageAnchors?.length??0)>0||c.sourceCaptionProof))throw Error('Invalid bounded supplemental context');
  const contexts=[initial,...extras],anchors=new Map<string,DocumentAnswerContext['anchors'][number]>(),parents=new Map<string,DocumentAnswerContext['parents'][number]>();
  const anchorIdentity=(h:DocumentAnswerContext['anchors'][number])=>[h.id,h.document_id,h.course_id,h.name,h.origin,h.origin_key,h.source_hash,h.source_version_id,h.evidence_id,h.locator,h.parser_version,h.parser_warnings??[],h.body];
@@ -115,7 +121,9 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256,
   originalInputFingerprint:binding.inputFingerprint,inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,sourceCaptionProof:initial.sourceCaptionProof??null,
-  initialRetrievalScope:'whole-library-query',originalTextSelection:'all-original-selectable-v1',
+  initialRetrievalScope:initial.completeSourceProof?'selected-complete-source':'whole-library-query',
+  ...(initial.completeSourceProof?{completeSourceProof:initial.completeSourceProof,selectedSourceInputCoverage:'complete',questionCoverage:'unassessed'}:{}),
+  originalTextSelection:'all-original-selectable-v1',
   originalQuoteIds:original.prepared.quoteUnits.map(u=>u.id),selectedSourceIds:[...actualIds],
   imageIds:prepared.supports.filter(s=>s.kind==='image').map(s=>({id:s.id,sha256:s.sha256,sourceVersionId:s.sourceVersionId})),
   originalContextRetained:true,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
@@ -230,7 +238,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract),plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
  await policy.recordState({event:'plan',result:plan});
  if(plan.completion==='capacity-exceeded')return {status:'capacity-exceeded',plan,wholeAnswerVerified:false};
- const queries=studySupplementQueries(question,checked,plan.binding,supplementalSource),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
+ const queries=plan.completeSourceProof?[]:studySupplementQueries(question,checked,plan.binding,supplementalSource),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
  for(const q of queries)readers.push(await readSupplement(q.query));
  const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource);};
  const packet=await read();await policy.recordState({event:'supplement',receipt:packet.receipt});
@@ -268,4 +276,12 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
   unassessedPlanningGaps:plan.plan.missing,localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),
   semanticVerified:false,wholeAnswerVerified:false,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
  await policy.recordState({event:'result',...result});return result;
+}
+
+/** Only actual request/schema capacity failures are eligible for a capacity
+ * receipt. Source drift, invalid evidence and provider errors must still fail. */
+export function isStudyRequestCapacityError(error:unknown){
+ return error instanceof DocumentAnswerRequestLimitError||error instanceof Error&&[
+  'Contract plan enum count limit exceeded','Plan request input limit exceeded','Plan image budget exceeded',
+ ].includes(error.message);
 }
