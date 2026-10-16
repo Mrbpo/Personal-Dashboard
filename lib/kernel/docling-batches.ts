@@ -4,7 +4,7 @@ import {randomUUID} from 'node:crypto';
 import {digest,readBlob} from '../library.ts';
 import {decodeDoclingResult} from './docling-result.ts';
 
-export type DoclingIdentity={owner:string;documentId:string;sourceHash:string;optionsHash:string;totalPages:number};
+export type DoclingIdentity={owner:string;documentId:string;sourceHash:string;optionsHash:string;totalPages:number;sourceEncodingReceiptHash?:string};
 export type DoclingBatch={start:number;end:number;taskId?:string;resultHash?:string;inputHash?:string;copyIndices?:number[]};
 export type DoclingProgress={schema:1;identity:DoclingIdentity;batchSize:number;batches:DoclingBatch[]};
 export type DecodedDocling=ReturnType<typeof decodeDoclingResult>;
@@ -18,6 +18,8 @@ export function validateDoclingProgress(value:unknown,identity:DoclingIdentity):
   const p=value as DoclingProgress;
   const expected=createDoclingProgress(identity,p?.batchSize);
   if(!p||p.schema!==1||p.batchSize!==expected.batchSize||!p.identity||
+    p.identity.sourceEncodingReceiptHash!==identity.sourceEncodingReceiptHash||
+    (identity.sourceEncodingReceiptHash!==undefined&&!/^[a-f0-9]{64}$/.test(identity.sourceEncodingReceiptHash))||
     Object.entries(identity).some(([key,v])=>p.identity[key as keyof DoclingIdentity]!==v)||
     !Array.isArray(p.batches)||p.batches.length!==expected.batches.length||
     p.batches.some((batch,index)=>!batch||batch.start!==expected.batches[index].start||batch.end!==expected.batches[index].end||
