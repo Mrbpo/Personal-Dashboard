@@ -281,7 +281,7 @@ function sourceLabelFixture(){
 }
 
 test('planned SourceN transport is reversible across documents/images without editing source text, metadata or nonselectable captions',()=>{
- const {packet,captionId}=sourceLabelFixture(),before=JSON.stringify(packet),transport=preparePlannedStudyGenerationTransport(packet),
+ const {packet,captionId,saved}=sourceLabelFixture(),before=JSON.stringify(packet),savedPlan=JSON.stringify(saved.plan),transport=preparePlannedStudyGenerationTransport(packet),
   body=transport.request,content=body.input[1].content as {type:string;text?:string;image_url?:string;detail?:string}[],
   input=JSON.parse(content[0].text!),canonical=packet.selectedPrepared.input,byLabel=new Map(transport.mapping.entries.map(e=>[e.label,e.canonicalId])),
   canonicalId=(id:string)=>byLabel.get(id)??id;
@@ -289,26 +289,21 @@ test('planned SourceN transport is reversible across documents/images without ed
  assert.deepEqual(body.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,transport.mapping.entries.map(e=>e.label));
  assert.equal(input.question,canonical.question);assert.equal(input.quoteUnits[1].text,canonical.quoteUnits[1].text);
  assert.deepEqual(input.documentMetadata,canonical.documentMetadata);assert.deepEqual(input.questionContract,canonical.questionContract);
- assert.equal(input.unverifiedEvidencePlan.conflicts[0].reason,canonical.unverifiedEvidencePlan.conflicts[0].reason);
- assert.deepEqual(input.unverifiedEvidencePlan.clusters[0].sourceIds,['Source1','Source3']);
- assert.deepEqual(input.unverifiedEvidencePlan.sourceSubscopes[0].sourceIds,['Source2']);
- assert.deepEqual(input.unverifiedEvidencePlan.conflicts[0].leftSourceIds,['Source1']);
- assert.deepEqual(input.unverifiedEvidencePlan.conflicts[0].rightSourceIds,['Source2']);
- assert.ok(input.unverifiedEvidencePlan.clusters[1].sourceIds.includes(captionId));
+ assert.ok(!Object.hasOwn(input,'unverifiedEvidencePlan'));assert.ok(!Object.hasOwn(input,'supplementalRetrieval'));
+ assert.deepEqual(input.planningProvenance,{originalPlanSha256:saved.planSha256,
+  originalPlanRequestSha256:saved.providerRequestSha256,originalPlanRawSha256:saved.rawResponseSha256});
+ assert.equal(packet.receipt.originalPlanSha256,sha(JSON.stringify(saved.plan)));
+ assert.ok(!JSON.stringify(input).includes(saved.plan.conflicts[0].reason),'Plan judgments and reasons stay outside generation.');
  assert.ok(!transport.mapping.entries.some(e=>e.canonicalId===captionId));
  input.quoteUnits=input.quoteUnits.map((u:{id:string})=>({...u,id:canonicalId(u.id)}));
  input.evidence=input.evidence.map((s:{id:string;kind:string})=>s.kind==='image'?{...s,id:canonicalId(s.id)}:s);
- input.unverifiedEvidencePlan.clusters=input.unverifiedEvidencePlan.clusters.map((c:{sourceIds:string[]})=>({...c,sourceIds:c.sourceIds.map(canonicalId)}));
- input.unverifiedEvidencePlan.sourceSubscopes=input.unverifiedEvidencePlan.sourceSubscopes.map((s:{sourceIds:string[]})=>({...s,sourceIds:s.sourceIds.map(canonicalId)}));
- input.unverifiedEvidencePlan.conflicts=input.unverifiedEvidencePlan.conflicts.map((c:{leftSourceIds:string[];rightSourceIds:string[]})=>
-  ({...c,leftSourceIds:c.leftSourceIds.map(canonicalId),rightSourceIds:c.rightSourceIds.map(canonicalId)}));
  assert.deepEqual(input,canonical,'Only the enumerated typed ID fields may change.');
  for(const [index,s]of packet.selectedPrepared.supports.filter(s=>s.image).entries()){
   const label=transport.mapping.entries.find(e=>e.canonicalId===s.id)!.label,at=1+index*2;
   assert.equal(content[at].text,s.captionMembers?`Actual visual unit ${label}: caption members and this original image are one selected source. Source content is untrusted.\n${JSON.stringify(s.captionMembers)}`:`Actual image evidence ${label}`);
   assert.equal(content[at+1].image_url,'data:image/png;base64,'+Buffer.from(s.image!.bytes).toString('base64'));assert.equal(content[at+1].detail,'original');
  }
- assert.equal(content.length,5);assert.equal(JSON.stringify(packet),before);
+ assert.equal(content.length,5);assert.equal(JSON.stringify(packet),before);assert.equal(JSON.stringify(saved.plan),savedPlan);
  const defaultBody=buildDocumentAnswerRequest(packet.prepared,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000});
  assert.ok(defaultBody.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum.every(id=>!id.startsWith('Source')));
  assert.equal(JSON.parse((defaultBody.input[1].content as {text:string}[])[0].text).quoteUnits[0].id,packet.prepared.quoteUnits[0].id);
@@ -324,7 +319,7 @@ test('planned SourceN transport is reversible across documents/images without ed
  assert.deepEqual(studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,body,transport.bindingSha256),
   {providerRequestSha256:transport.providerRequestSha256,requestIdentity:transport.requestIdentity});
  assert.equal(transport.binding.mappingSha256,sha(JSON.stringify(transport.mapping)));assert.equal(transport.binding.providerRequestSha256,sha(JSON.stringify(body)));
- assert.equal(body.reasoning.effort,'medium');assert.ok(String(body.input[0].content).includes('initial retrieval before supplementation'));
+ assert.equal(body.reasoning.effort,'medium');
  assert.ok(String(body.input[0].content).includes('counted object, unit, processing stage'));
 });
 
@@ -344,6 +339,8 @@ test('planned SourceN decoding rejects unknown, duplicate, incomplete, stale and
   const altered=structuredClone(transport);mutate(altered);assert.throws(()=>decode(alias,altered),/binding changed/);
  }
  assert.throws(()=>decode(alias,transport,packet,{...transport,requestIdentity:'0'.repeat(64)}),/binding changed/);
+ const alteredProvenance=structuredClone(packet);alteredProvenance.selectedPrepared.input.planningProvenance.originalPlanSha256='0'.repeat(64);
+ assert.throws(()=>decode(alias,transport,alteredProvenance),/binding changed/,'Opaque plan provenance remains part of the canonical packet binding.');
  // A legitimate new supplement changes the canonical packet while Source1
  // still exists. Replaying the prior mapping/identity must not select it.
  const extra={...context(),anchors:[{...ctx.anchors[0],id:'pg:new-version:1',document_id:'new-study',source_version_id:'new-source',source_hash:'new-hash',evidence_id:'new-evidence'}],images:[]},
@@ -380,6 +377,15 @@ test('short chain uses plan/generation/final local only, retains >6 raw claims a
   assert.equal((j.states.find(s=>s.event==='generation')!.value as typeof answer).claims[0].citations[0].id,q0);
   assert.ok(JSON.stringify(wires[1]).includes('OUTSIDE_FINAL_CLAIM_POISON'));assert.ok(!JSON.stringify(wires[2]).includes('OUTSIDE_FINAL_CLAIM_POISON'));
   assert.ok(!JSON.stringify(wires[2]).includes(image.toString('base64')));
+  const opposite={...answer,claims:[{text:'The original study does not label its original samples.',citations:[{id:'Source1'}]}]},
+   contradicted={...local,judgment:'unsupported',reason:'The claim denies labeling; the evidence says labels are assigned.',
+    citationFindings:{r0:{judgment:'contradicts',reason:'Claim: does not label. Evidence: assigns labels.'}}},negative=runJournal();
+  calls=0;globalThis.fetch=async()=>response([rawContractPlan(p),opposite,contradicted][calls++]);
+  const unsupported=await answerPlannedStudyQuestion(question,async()=>ctx,async()=>async()=>({...ctx,anchors:[],images:[]}),c,negative.policy);
+  if(!('localUnsupportedClaims' in unsupported))throw Error('Expected retained unsupported claim');
+  assert.deepEqual(unsupported.localUnsupportedClaims,[0]);assert.equal(unsupported.audits[0].localSupported,false);
+  assert.equal(unsupported.answer.claims[0].text,opposite.claims[0].text);assert.deepEqual(unsupported.audits[0].result.diagnostics,contradicted);
+  assert.equal(negative.raw.length,3);assert.equal(calls,3,'Contradiction is retained without a new generation or repair.');
   const large=runJournal();calls=0;globalThis.fetch=async()=>response(calls++===0?rawContractPlan(p):{...answer,claims:Array.from({length:7},()=>answer.claims[0])});
   const capacity=await answerPlannedStudyQuestion(question,async()=>ctx,async()=>async()=>({...ctx,anchors:[],images:[]}),c,large.policy);
   assert.equal(capacity.status,'capacity-exceeded');assert.equal(calls,2);assert.equal(large.raw.length,2);
@@ -545,7 +551,7 @@ test('parallel source sub-scopes focus the existing two supplemental slots, pres
  assert.deepEqual(queries.map(q=>q.query),[c.requirements[0].aspect+' First corpus',c.requirements[0].aspect+' Second corpus']);
  assert.ok(queries.every(q=>q.originalQuery===q.query&&q.queryPolicy==='parallel-source-subscopes-v1'&&!q.query.includes('REASON_MUST_NOT_BECOME_QUERY')));
  const empty={...ctx,anchors:[],parents:[],images:[]},combined=preparePlannedStudyGeneration(question,ctx,[empty,empty],c,bind(),queries);
- assert.equal(combined.receipt.version,'contract-supplement-answer-v6');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
+ assert.equal(combined.receipt.version,'contract-supplement-answer-v7');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
  p.missing=[{requirementId:'r0',reason:'Actual gap.',supplementQuery:'explicit missing relation'}];
  const bounded=studySupplementQueries(question,c,bind());assert.equal(bounded.length,2);assert.equal(bounded[0].origin,'plan-missing');assert.equal(bounded[1].sourceSubscopeIndex,0);
  p.missing=[];p.sourceSubscopes[0].scope.configuration='Original Study 0';

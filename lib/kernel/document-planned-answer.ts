@@ -6,7 +6,7 @@ import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanR
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v6';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v7';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
@@ -115,15 +115,18 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
   originalQuoteIds:original.prepared.quoteUnits.map(u=>u.id),selectedSourceIds:[...actualIds],
   imageIds:prepared.supports.filter(s=>s.kind==='image').map(s=>({id:s.id,sha256:s.sha256,sourceVersionId:s.sourceVersionId})),
   originalContextRetained:true,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
+ // Full planning/retrieval receipts stay journaled and bound; generation receives
+ // their opaque identities and actual final sources, not coverage judgments.
  const selectedPrepared={...prepared,quoteUnits,supports,input:{...prepared.input,quoteUnits,evidence:prepared.input.evidence.filter(s=>supports.some(p=>p.id===s.id)),
-  questionContract:original.contract,unverifiedEvidencePlan:binding.plan,supplementalRetrieval:receipt.supplemental}};
+  questionContract:original.contract,planningProvenance:{originalPlanSha256:binding.planSha256,
+   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256}}};
  return {context,prepared,selectedPrepared,receipt,bindingSha256:digest(receipt)};
 }
 function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlannedStudyGeneration>['selectedPrepared']){
  const body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'medium',maxOutputTokens:4000});
  body.input[0].content+=' The complete original question, question-contract aspects and requested scope must all remain in force; the contract itself is fallible. '+
-  'The evidence plan describes initial retrieval before supplementation. Its covered/missing statuses are historical unverified proposals, not factual evidence. '+
-  'Reassess every requested aspect and comparison family using all actual final quote units and images, including supplemental evidence; initial-plan gaps do not establish final absence. '+
+  'Answer every requested aspect and comparison family using all actual final quote units and images; planning provenance hashes are traceability metadata, not evidence of coverage. '+
+  'Keep every material action, its direction, negation, affected object and population qualifiers faithful to the cited source. '+
   'Preserve the source-stated counted object, unit, processing stage and qualifications in each quantity. Keep executed comparison settings, proposed methods, prior work and future work distinct. '+
   'Answer every requested parallel subject/configuration and preserve same-context genuine conflicts; do not substitute a subset for an explicit total. '+
   'Return at most six final atomic claims without dropping material requirements to meet that limit. If capacity or evidence prevents a complete answer, do not claim completeness. '+
@@ -140,18 +143,11 @@ export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof 
  if(!ids.length||new Set(ids).size!==ids.length||digest(ids)!==digest(packet.receipt.selectedSourceIds))throw Error('Invalid planned source labels');
  const canonicalPacketSha256=digest({bindingSha256:packet.bindingSha256,input:prepared.input}),
   mapping={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalPacketSha256,entries:ids.map((canonicalId,index)=>({label:`Source${index+1}`,canonicalId}))},
-  byId=new Map(mapping.entries.map(e=>[e.canonicalId,e.label])),
-  nonselectable=new Set(packet.prepared.quoteUnits.filter(u=>!u.selectable).map(u=>u.id));
+  byId=new Map(mapping.entries.map(e=>[e.canonicalId,e.label]));
  const selectedId=(id:string)=>{const label=byId.get(id);if(!label)throw Error('Incomplete planned source label mapping');return label;};
- // A saved plan may reference a caption that became a nonselectable member of
- // an actual visual unit. Keep that provenance without making it selectable.
- const planId=(id:string)=>byId.get(id)??(nonselectable.has(id)?id:selectedId(id)),plan=prepared.input.unverifiedEvidencePlan,
-  quoteUnits=prepared.quoteUnits.map(u=>({...u,id:selectedId(u.id)})),
+ const quoteUnits=prepared.quoteUnits.map(u=>({...u,id:selectedId(u.id)})),
   supports=prepared.supports.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s),
-  input={...prepared.input,quoteUnits,evidence:prepared.input.evidence.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s),
-   unverifiedEvidencePlan:{...plan,clusters:plan.clusters.map(c=>({...c,sourceIds:c.sourceIds.map(planId)})),
-    conflicts:plan.conflicts.map(c=>({...c,leftSourceIds:c.leftSourceIds.map(planId),rightSourceIds:c.rightSourceIds.map(planId)})),
-    sourceSubscopes:plan.sourceSubscopes.map(s=>({...s,sourceIds:s.sourceIds.map(planId)}))}},
+  input={...prepared.input,quoteUnits,evidence:prepared.input.evidence.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s)},
   request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input}),mappingSha256=digest(mapping),
   binding={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalBindingSha256:packet.bindingSha256,
    canonicalInputFingerprint:packet.prepared.fingerprint,canonicalPacketSha256,mappingSha256,providerRequestSha256:digest(request)},
