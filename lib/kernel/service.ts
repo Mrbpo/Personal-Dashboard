@@ -4,12 +4,16 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint} from './document-source.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
+import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
+import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,
+ type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
+import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -948,8 +952,8 @@ export class KernelService {
     return readDocumentOutline(kernelPool(),owner,source);
   }
 
-  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={}){
-    return readDocumentParents(kernelPool(),owner,anchors,options);
+  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
+    return readDocumentParents(kernelPool(),owner,anchors,options,imageBudget);
   }
 
   readDocumentImages(owner:string,source:DocumentContextSource,captionEvidenceIds:string[]){
@@ -1088,11 +1092,10 @@ export class KernelService {
     return {status:'available' as const,manifest:initial.manifest,result};
   }
 
-  /** Non-structured study content only; canonical business facts use their own
-   * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
-  async answerStudyContent(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
-    await documentAnswerSettings(policy);
+  /** Shared existing retrieval/current-source callback; the default answering
+   * path keeps the same options, reads, order and provider payload. */
+  private async studyAnswerContextReader(owner:string,question:string,
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
     const {includeParents=false,includeImages=false,...searchOptions}=options;
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
@@ -1102,9 +1105,9 @@ export class KernelService {
       throw new Error('Study answer retrieval was degraded; no answer was generated');
     const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
       {courseId:searchOptions.courseId})):undefined;
-    const tableCandidates=includeImages?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
+    const tableCandidates=includeImages&&nativeTables?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
       documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
-    return synthesizeDocumentAnswer(question,async()=>{
+    return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
         const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
@@ -1126,7 +1129,134 @@ export class KernelService {
       return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
         images,...(imageBudget?{imageSelection:imageBudget.snapshot()}:{}),
         ...('accounting' in context?{accounting:{...context.accounting,imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
-    },policy);
+    };
+  }
+
+  /** Non-structured study content only; canonical business facts use their own
+   * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
+  async answerStudyContent(owner:string,question:string,
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
+    await documentAnswerSettings(policy);
+    return synthesizeDocumentAnswer(question,await this.studyAnswerContextReader(owner,question,options),policy);
+  }
+
+  /** Explicit administrator development lane. A title may occur in query text;
+   * callers cannot secretly replace library retrieval with a document filter. */
+  async planStudyAnswer(owner:string,question:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    await assertStudyAnswerPlanPolicy(policy);
+    if(!options||Object.keys(options).some(key=>key!=='courseId')||
+      (options.courseId!==undefined&&(typeof options.courseId!=='string'||!options.courseId.trim())))
+      throw new Error('Study planning allows only explicit user course context, not document/source filters');
+    const read=await this.studyAnswerContextReader(owner,question,{...options,limit:14,semantic:false,hybrid:false,aiRerank:false,
+      relatedDocuments:true,includeParents:true,includeImages:true});
+    return planRetrievedStudyAnswer(question,read,policy);
+  }
+
+  /** Explicit phases, never an automatic chain. The question-only contract is
+   * fallible and cannot certify coverage; the original plan entry stays intact. */
+  createStudyQuestionContract(question:string,policy:StudyAnswerPlanPolicy){
+    return createStudyQuestionContract(question,policy);
+  }
+
+  private async contractStudyContext(owner:string,question:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    await assertStudyAnswerPlanPolicy(policy);
+    if(!options||Object.keys(options).some(key=>key!=='courseId')||
+      (options.courseId!==undefined&&(typeof options.courseId!=='string'||!options.courseId.trim())))
+      throw new Error('Study planning allows only explicit user course context, not document/source filters');
+    return this.studyAnswerContextReader(owner,question,{...options,limit:14,semantic:false,hybrid:false,aiRerank:false,
+      relatedDocuments:true,includeParents:true,includeImages:true});
+  }
+
+  async planStudyAnswerWithContract(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    return planContractStudyAnswer(question,await this.contractStudyContext(owner,question,options,policy),contract,policy);
+  }
+
+  async verifyStudyAnswerPlanCluster(owner:string,question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,
+    clusterId:string,options:{courseId?:string},policy:StudyAnswerPlanPolicy){
+    return verifyStudyAnswerCluster(question,await this.contractStudyContext(owner,question,options,policy),contract,binding,clusterId,policy);
+  }
+
+  /** Initial library retrieval remains query-only. An explicit title appearing
+   * in the question may scope only the supplemental batch; it is not global recall. */
+  private plannedStudyScope(question:string,options:{courseId?:string;sourceHint?:DocumentSourceHint}){
+    const scope=structuredClone(options);
+    if(!scope||typeof scope!=='object'||Array.isArray(scope)||Object.keys(scope).some(key=>!['courseId','sourceHint'].includes(key))||
+      (scope.courseId!==undefined&&(typeof scope.courseId!=='string'||!scope.courseId.trim())))
+      throw new Error('Planned answers allow user course/title context, not document filters');
+    const {sourceHint}=scope;
+    if(sourceHint!==undefined&&(!sourceHint||Object.keys(sourceHint).length!==1||typeof sourceHint.selectedDocumentTitle!=='string'||
+      !sourceHint.selectedDocumentTitle.trim()||sourceHint.selectedDocumentTitle.length>4000||!question.normalize('NFKC').includes(sourceHint.selectedDocumentTitle.normalize('NFKC'))))
+      throw new Error('A supplemental source hint must be a complete user title present in the original question');
+    return scope;
+  }
+
+  /** One explicit development entry for the real question-contract → planned
+   * answer chain. It establishes no canonical deadlines/tasks/business state. */
+  async answerLearningContent(owner:string,question:string,options:{courseId?:string;sourceHint?:DocumentSourceHint},policy:PlannedStudyAnswerPolicy){
+    const scope=this.plannedStudyScope(question,options);await assertPlannedStudyAnswerPolicy(policy);
+    const {sourceHint,courseId}=scope,selected=sourceHint?await this.resolveDocumentSource(owner,sourceHint,{courseId}):undefined;
+    if(selected)requireResolvedDocumentSource(selected);
+    const recheck=async()=>{
+      if(sourceHint&&JSON.stringify(await this.resolveDocumentSource(owner,sourceHint,{courseId}))!==JSON.stringify(selected))
+        throw new DocumentEvidenceChangedError();
+    },boundPolicy:PlannedStudyAnswerPolicy={...policy,beforeAttempt:async attempt=>{await recheck();await policy.beforeAttempt(attempt);}},
+      questionContract=await this.createStudyQuestionContract(question,{scope:policy.scope,dailyLimit:policy.dailyLimit,
+        beforeAttempt:boundPolicy.beforeAttempt,recordResponse:raw=>policy.recordResponse({...raw,phase:'question-contract'})});
+    await policy.recordState({event:'question-contract',result:questionContract});await recheck();
+    return {questionContract,...await this.answerPlannedStudyContent(owner,question,questionContract.contract,scope,boundPolicy)};
+  }
+
+  private async resolvedTitleCaptionContext(owner:string,context:DocumentAnswerContext,
+    selected:Extract<DocumentSourceResolution,{status:'resolved'}>,policy:PlannedStudyAnswerPolicy):Promise<DocumentAnswerContext>{
+    const outline=await this.readDocumentOutline(owner,selected.document),captions=outline.nodes.filter(n=>n.kind==='caption').sort((a,b)=>a.ordinal-b.ordinal),
+      proof={policy:'resolved-title-caption-images-v1' as const,selectedDocumentTitle:selected.selectedDocumentTitle,source:outline.source,
+        manifestSha256:outline.manifestSha256,totalCaptions:captions.length,captions:captions.map(n=>({evidenceId:n.evidenceId,ordinal:n.ordinal}))};
+    if(captions.length>14){
+      await policy.recordState({event:'source-caption-context',status:'capacity-exceeded',reason:'caption-count-limit',limit:14,proof});
+      throw new DocumentContextError('DOCUMENT_CONTEXT_INVALID','Resolved title caption capacity exceeded; no caption subset was selected');
+    }
+    const budget=createDocumentImageBudget();for(const [i,image]of context.images.entries())if(!budget.include(image,i+1))
+      throw new DocumentContextError('DOCUMENT_CONTEXT_INVALID','Original images exceeded the shared budget');
+    const anchors=captions.length?await this.readDocumentNodes(owner,outline.source,captions.map(n=>n.evidenceId)):[],
+      added=anchors.length?await this.readDocumentParents(owner,anchors,{includeImages:true},budget):null;
+    if(added?.parents.some(p=>p.status!=='available')){
+      await policy.recordState({event:'source-caption-context',status:'capacity-exceeded',reason:'caption-parent-size',proof,parents:added.parents});
+      throw new DocumentContextError('DOCUMENT_CONTEXT_INVALID','Resolved title caption parent context exceeds its reader limit');
+    }
+    const parents=new Map(context.parents.map(p=>[p.parentId,p]));
+    for(const parent of added?.parents??[]){const old=parents.get(parent.parentId);
+      if(old&&JSON.stringify([old.status,old.nodes])!==JSON.stringify([parent.status,parent.nodes]))throw new DocumentEvidenceChangedError();
+      if(!old)parents.set(parent.parentId,parent);
+    }
+    const images=[...new Map([...context.images,...added?.images??[]].map(image=>[image.attachmentId,image])).values()],selection=budget.snapshot(),
+      imageAnchors=[...new Map([...context.imageAnchors??[],...anchors].map(a=>[a.evidence_id,a])).values()],
+      imageSelection={...selection,omitted:[...context.imageSelection?.omitted??[],...selection.omitted]};
+    const current=await this.readDocumentOutline(owner,selected.document);
+    if(current.manifestSha256!==outline.manifestSha256||JSON.stringify(current.source)!==JSON.stringify(outline.source))throw new DocumentEvidenceChangedError();
+    await policy.recordState({event:'source-caption-context',status:'read',proof,imageSelection});
+    return {...context,parents:[...parents.values()],images,imageAnchors,imageSelection,sourceCaptionProof:proof};
+  }
+
+  async answerPlannedStudyContent(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string;sourceHint?:DocumentSourceHint},policy:PlannedStudyAnswerPolicy){
+    const {sourceHint,...courseContext}=this.plannedStudyScope(question,options);
+    await assertPlannedStudyAnswerPolicy(policy);
+    const selected=sourceHint?await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}):undefined;
+    if(selected)requireResolvedDocumentSource(selected);
+    const readInitial=await this.contractStudyContext(owner,question,courseContext,{scope:policy.scope,dailyLimit:policy.dailyLimit,
+      beforeAttempt:policy.beforeAttempt,recordResponse:raw=>policy.recordResponse({...raw,phase:'contract-plan'})});
+    const read=async()=>{
+      const context=await readInitial();return selected?.status==='resolved'?this.resolvedTitleCaptionContext(owner,context,selected,policy):context;
+    };
+    return answerPlannedStudyQuestion(question,read,async query=>{
+      const supplement=await this.studyAnswerContextReader(owner,query,{...courseContext,...(sourceHint?{sourceHint}:{}),limit:4,
+        semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},false);
+      return async()=>{
+        const context=await supplement();
+        if(sourceHint&&JSON.stringify(await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}))!==JSON.stringify(selected))
+          throw new DocumentEvidenceChangedError();
+        return context;
+      };
+    },contract,policy,selected?.status==='resolved'?selected:undefined);
   }
 
   searchDocumentText(owner:string,query:string,options:DocumentSearchOptions={}) {
