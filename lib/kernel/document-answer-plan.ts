@@ -135,6 +135,8 @@ export async function planRetrievedStudyAnswer(question:string,readContext:()=>P
  const receipt={version:STUDY_ANSWER_PLAN_VERSION,method:STUDY_ANSWER_PLAN_METHOD,inputFingerprint:packet.prepared.fingerprint,
   quoteUnitManifest:packet.prepared.quoteUnitManifest,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,
   evidence:packet.prepared.input.evidence,warnings:packet.prepared.warnings,unavailableParents:packet.prepared.unavailableParents,
+  ...(packet.prepared.input.parentMetadata.some(parent=>parent.structureProvenance)?{
+   flatTextContexts:packet.prepared.input.parentMetadata.filter(parent=>parent.structureProvenance).map(parent=>({parentId:parent.parentId,structureProvenance:parent.structureProvenance}))}:{}),
   imageSelection:packet.prepared.input.imageSelection??null,bindingSha256:packet.bindingSha256,semanticVerified:false,wholeAnswerVerified:false};
  if(!packet.input.allowedSourceIds.length)return {...receipt,status:'unavailable' as const,reason:'no-evidence',plan:null};
  const request=buildStudyAnswerPlanRequest(packet),providerRequestSha256=sha(JSON.stringify(request)),budget=studyAnswerPlanRequestBudget(request,packet),

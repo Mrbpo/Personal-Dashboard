@@ -64,8 +64,16 @@ test('one development request journals actual bounds/raw, preserves oversized pl
  await database.prepare('DELETE FROM ai_ledger').run();const originalFetch=globalThis.fetch;let calls=0;
  globalThis.fetch=async()=>{calls++;return response(plan());};
  try{await development(async()=>{
-  const j=journal(),result=await planRetrievedStudyAnswer(question,async()=>context(),j.policy);
+  const flat=context(),hit=flat.anchors[0],provenance={method:'flat-persisted-text-v1' as const,manifestSha256:'a'.repeat(64),
+   originalHierarchyVerified:false as const,originalFileCompletenessVerified:false as const};
+  flat.parents=[{parentId:'flat-node',status:'available',sourceNodeCount:1,sourceBodyCodepoints:hit.body.length,structureProvenance:provenance,
+   nodes:[{documentId:hit.document_id,documentVersionId:'v0',sourceVersionId:hit.source_version_id,sourceHash:hit.source_hash,
+    evidenceId:hit.evidence_id,locator:hit.locator,body:hit.body,bodySha256:sha(hit.body)}]}];
+  const j=journal(),result=await planRetrievedStudyAnswer(question,async()=>flat,j.policy);
   assert.equal(result.status,'planned');if(result.status!=='planned')throw Error('Expected planned');
+  assert.deepEqual(result.flatTextContexts,[{parentId:'flat-node',structureProvenance:provenance}]);
+  assert.equal(result.inputFingerprint,prepareDocumentAnswer(question,flat).fingerprint);
+  assert.notEqual(result.inputFingerprint,prepareDocumentAnswer(question,context()).fingerprint);
   assert.equal(result.completion,'ready-for-review');assert.equal(result.semanticVerified,false);assert.equal(result.wholeAnswerVerified,false);
   assert.equal(calls,1);assert.equal(j.raw.length,1);assert.equal(j.attempts.length,1);assert.ok(j.attempts[0].fundingUpperUSD>=j.attempts[0].reservationUSD);
   assert.equal(j.attempts[0].providerRequestSha256,result.providerRequestSha256);

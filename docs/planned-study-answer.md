@@ -8,6 +8,8 @@ The fixed method is keyword search with `relatedDocuments=true`, limit14, curren
 
 The context callback is the extracted existing `answerStudyContent` callback. Default answering retains its options, source reads, provider request and behavior. Every planning recheck uses those same current source/evidence identities; a change fails the attempt. Parser warnings, unavailable parents and omitted-image accounting remain in the request and receipt. The supplied context is not claimed to cover the entire library.
 
+Eligible unstructured plain text may carry the shared reader's non-persisted `flat-persisted-text-v1` provenance. Its manifest hash, `originalHierarchyVerified=false` and `originalFileCompletenessVerified=false` enter the provider input/fingerprint and the plan receipt's `flatTextContexts`. This does not certify original-file coverage or author hierarchy; registered structures keep their original behavior.
+
 ## Plan
 
 - `requirements`: all material question aspects with `requestedScope` (subject, attribute, unit, population, stage, configuration, time). Unknown dimensions are null.
