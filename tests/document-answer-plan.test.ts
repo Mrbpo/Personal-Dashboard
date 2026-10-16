@@ -328,6 +328,26 @@ test('explicit complete user title scopes supplements only, freezes source ident
  });}finally{globalThis.fetch=savedFetch;}
 });
 
+test('parallel source sub-scopes focus the existing two supplemental slots, preserving explicit gaps and single-scope fallbacks',()=>{
+ const ctx=context(),c=contract(),packet=prepareContractStudyPlan(question,ctx,c),p=contractPlan(ctx);p.sourceSubscopes=[];p.missing=[];
+ const bind=()=>bindContractStudyPlan(packet,p,sha(JSON.stringify(buildContractStudyPlanRequest(packet))),'b'.repeat(64)),fallback=studySupplementQueries(question,c,bind());
+ const sub=(subject:string)=>({requirementId:'r0',scope:{...unknown,subject},sourceIds:[packet.input.allowedSourceIds[0]],clusterIds:[],status:'missing' as const,reason:'REASON_MUST_NOT_BECOME_QUERY'});
+ p.sourceSubscopes=[sub('First corpus')];assert.deepEqual(studySupplementQueries(question,c,bind()),fallback);
+ p.sourceSubscopes.push(structuredClone(p.sourceSubscopes[0]));assert.deepEqual(studySupplementQueries(question,c,bind()),fallback);
+ p.sourceSubscopes.push(sub('Second corpus'));const queries=studySupplementQueries(question,c,bind());
+ assert.deepEqual(queries.map(q=>q.origin),['plan-source-subscope','plan-source-subscope']);assert.deepEqual(queries.map(q=>q.sourceSubscopeIndex),[0,2]);
+ assert.deepEqual(queries.map(q=>q.query),[c.requirements[0].aspect+' First corpus',c.requirements[0].aspect+' Second corpus']);
+ assert.ok(queries.every(q=>q.originalQuery===q.query&&q.queryPolicy==='parallel-source-subscopes-v1'&&!q.query.includes('REASON_MUST_NOT_BECOME_QUERY')));
+ const empty={...ctx,anchors:[],parents:[],images:[]},combined=preparePlannedStudyGeneration(question,ctx,[empty,empty],c,bind(),queries);
+ assert.equal(combined.receipt.version,'contract-supplement-answer-v4');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
+ p.missing=[{requirementId:'r0',reason:'Actual gap.',supplementQuery:'explicit missing relation'}];
+ const bounded=studySupplementQueries(question,c,bind());assert.equal(bounded.length,2);assert.equal(bounded[0].origin,'plan-missing');assert.equal(bounded[1].sourceSubscopeIndex,0);
+ p.missing=[];p.sourceSubscopes[0].scope.configuration='Original Study 0';
+ const resolved={status:'resolved' as const,scope:'selected-title-scoped' as const,selectedDocumentTitle:'Original Study 0',document:{documentId:'study0',title:'Original Study 0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}},
+  focused=studySupplementQueries(question,c,bind(),resolved);
+ assert.ok(focused[0].originalQuery?.includes('Original Study 0'));assert.ok(!focused[0].query.includes('Original Study 0'));
+});
+
 test('visual units keep exact caption members with their original image; legacy q-only answers and outside evidence stay separate',()=>{
  const ctx=context(),caption='Table 1: Results for the original study.',poison='UNSELECTED_VISUAL_CAPTION_POISON',
   outside=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');

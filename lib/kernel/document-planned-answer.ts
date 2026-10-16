@@ -6,10 +6,10 @@ import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanR
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v3';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v4';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
-export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'question-contract';query:string;
- originalQuery?:string;focusPolicy?:'resolved-exact-title-scope-value-v1'};
+export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
+ originalQuery?:string;focusPolicy?:'resolved-exact-title-scope-value-v1';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
 export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt&{claimIndex?:number}>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:StudyAnswerPlanAttempt['phase'];claimIndex?:number}>)=>Promise<void>;
@@ -29,16 +29,29 @@ export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPo
  * the fallible source plan asserts sufficient; no expected document IDs enter. */
 export function studySupplementQueries(question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,resolvedSource?:SupplementalSource):StudySupplementQuery[]{
  validateStudyQuestionContract(question,contract);const out:StudySupplementQuery[]=[],used=new Set([question.normalize('NFKC').replace(/\s+/gu,' ').trim().toLowerCase()]);
- const add=(requirementId:string,origin:StudySupplementQuery['origin'],query:string,focused=query)=>{
+ const focus=(values:(string|null)[])=>values.filter((v):v is string=>v!==null&&(!resolvedSource||
+  v.normalize('NFKC')!==resolvedSource.selectedDocumentTitle.normalize('NFKC')));
+ const add=(requirementId:string,origin:StudySupplementQuery['origin'],query:string,focused=query,sourceSubscopeIndex?:number)=>{
   const normalized=focused.normalize('NFKC').replace(/\s+/gu,' ').trim();
   if(out.length<2&&normalized&&!used.has(normalized.toLowerCase())){if(Array.from(normalized).length>4000)throw Error('Complete supplemental query exceeds limit');
    used.add(normalized.toLowerCase());out.push({requirementId,origin,query:normalized,
-    ...(resolvedSource?{originalQuery:query,focusPolicy:'resolved-exact-title-scope-value-v1' as const}:{})});}
+    ...(resolvedSource||sourceSubscopeIndex!==undefined?{originalQuery:query}:{}),
+    ...(resolvedSource?{focusPolicy:'resolved-exact-title-scope-value-v1' as const}:{}),
+    ...(sourceSubscopeIndex!==undefined?{sourceSubscopeIndex,queryPolicy:'parallel-source-subscopes-v1' as const}:{})});}
  };
  for(const gap of binding.plan.missing)if(gap.supplementQuery)add(gap.requirementId,'plan-missing',gap.supplementQuery);
+ for(const r of contract.requirements){
+  const distinct=new Map<string,{index:number;scope:typeof r.requestedScope}>();
+  for(const [index,s]of binding.plan.sourceSubscopes.entries())if(s.requirementId===r.id){
+   const key=JSON.stringify(Object.entries(s.scope).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,v?.normalize('NFKC').replace(/\s+/gu,' ').trim().toLowerCase()??null]));
+   if(!distinct.has(key))distinct.set(key,{index,scope:s.scope});
+  }
+  if(distinct.size<2)continue; // A single or repeated scope keeps the original fallback behavior.
+  for(const {index,scope}of distinct.values()){const values=Object.values(scope);
+   add(r.id,'plan-source-subscope',[r.aspect,...values.filter(v=>v!==null)].join(' '),[r.aspect,...focus(values)].join(' '),index);}
+ }
  for(const r of contract.requirements){const values=Object.values(r.requestedScope).filter(v=>v!==null);
-  add(r.id,'question-contract',[r.aspect,...values].join(' '),[r.aspect,...values.filter(v=>!resolvedSource||
-   v.normalize('NFKC')!==resolvedSource.selectedDocumentTitle.normalize('NFKC'))].join(' '));}
+  add(r.id,'question-contract',[r.aspect,...values].join(' '),[r.aspect,...focus(values)].join(' '));}
  return out;
 }
 function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContext[]){
