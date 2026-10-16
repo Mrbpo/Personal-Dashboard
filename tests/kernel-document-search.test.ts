@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {kernel} from '../lib/kernel/service.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
-import {documentSearchText} from '../lib/kernel/document-search.ts';
+import {documentSearchText,documentSearchTerms,type DocumentSearchOptions} from '../lib/kernel/document-search.ts';
 
 test('PDF search copy normalizes ligatures, line-wrap hyphens, Unicode math and LaTeX',()=>{
   assert.match(documentSearchText('co-\nvariance ﬁnite ∫ α \\frac{x}{y}'),/covariance finite int integral alpha frac fraction x y/);
@@ -28,6 +30,52 @@ test('strict short formula and numeric queries find current indexed pages withou
   const stored=await kernelPool().query<{search_text:string}>(
     'SELECT p.search_text FROM document_text_pages p JOIN document_texts d ON d.current_version_id=p.version_id WHERE d.id=$1 ORDER BY p.page_number',[id]);
   assert.deepEqual(stored.rows.map(row=>row.search_text),texts.map(documentSearchText));
+});
+
+test('indexed page ranking preserves legacy scores, snippets and current visible scopes before limiting bodies',async()=>{
+  await migrateKernel();
+  // Frozen pre-optimization SQL from9a1f6b3, with trailing spaces removed. It is executed
+  // only over this small synthetic fixture, never against the timed-out corpus.
+  const legacy=readFileSync(new URL('./fixtures/document-search-legacy.sql',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.equal(createHash('sha256').update(legacy).digest('hex'),'ea7e598b9b1ab90a2fb618c062b55b8fcbd837064048cad391fc732d130d84ba');
+  const tag=randomUUID(),owner=`ranking-${tag}`,course=`ranking-course-${tag}`,otherCourse=`ranking-other-${tag}`;
+  await kernel.upsertCourse({id:course,name:'Ranking regression',course_code:'RANK-'+tag});
+  await kernel.upsertCourse({id:otherCourse,name:'Other ranking course',course_code:'OTHER-'+tag});
+  const add=async(suffix:string,texts:string[],extras:Record<string,string>={})=>{
+    const document={id:`ranking-${tag}-${suffix}`,ownerId:owner,courseId:course,name:suffix+'.pdf',hash:tag+'-'+suffix,
+      mime:'application/pdf',origin:'upload',originKey:suffix,...extras};
+    await kernel.ingestParsedDocument(document,texts.map((text,index)=>({pageNumber:index+1,locator:`Page ${index+1}`,text})),
+      {parserVersion:'ranking-test',expectedPages:texts.length});
+    return document;
+  };
+  const main=await add('main',['quartz quartz quartz orbit','nonmatching long collection context '.repeat(35)]);
+  await add('second',['quartz orbit orbit transit orbit']);
+  await add('third',['quartz solitary']);
+  await add('other-course',['quartz orbit transit quartz orbit extra'],{courseId:otherCourse});
+  await add('other-owner',['quartz orbit '.repeat(20)],{ownerId:'other-'+owner});
+  const hidden=await add('hidden',['quartz orbit '.repeat(15)]);await kernel.hideParsedDocument(owner,hidden.id);
+  const changed=await add('changed',['obsolete quartz orbit '.repeat(10)]);
+  await kernel.ingestParsedDocument(changed,[{pageNumber:1,locator:'Page 1',text:'current quartz orbit orbit signal'}],{parserVersion:'ranking-current',expectedPages:1});
+  const originKey=`same-origin-${tag}`,createdAt='2026-01-01T00:00:00.000Z';
+  await add('duplicate-a',['quartz orbit '.repeat(9)],{originKey,createdAt});
+  await add('duplicate-z',['quartz orbit corpus distinct words'],{originKey,createdAt});
+  await kernelPool().query('DELETE FROM document_text_chunks WHERE version_id=(SELECT current_version_id FROM document_texts WHERE id=$1)',[main.id]);
+  const compare=async(query:string,options:DocumentSearchOptions)=>{
+    const {normalized,words}=documentSearchTerms(query),args:unknown[]=[owner,options.strict?normalized:words.join(' '),
+      words.map(word=>`"${word}"`).join(' OR '),options.limit??14,words];
+    const filters=[options.courseId?`AND d.course_id=$${args.push(options.courseId)}`:'',options.documentId?`AND d.id=$${args.push(options.documentId)}`:''].join(' ');
+    let sql=legacy.replace('d.hidden=false','d.hidden=false '+filters);
+    if(options.strict)sql=sql.replace('c.search_vector @@ q.broad','c.search_vector @@ q.exact');
+    const expected=(await kernelPool().query(sql,args)).rows.map(row=>({...row,score:Number(row.score),lexical_support:Number(row.lexical_support),retrieval_mode:'keyword'}));
+    const actual=await kernel.searchDocumentText(owner,query,{semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,...options});
+    assert.deepEqual(actual,expected,'original IDs, exact floating scores/support, body and order must agree');
+    assert.ok(actual.every(hit=>hit.document_id!==hidden.id&&!hit.body.includes('obsolete')&&!hit.document_id.endsWith('duplicate-a')));
+    return actual;
+  };
+  for(const options of [{limit:2},{limit:14},{strict:true,limit:14},{courseId:course,limit:14},
+    {documentId:main.id,limit:14},{courseId:'missing-course',limit:14}])await compare('quartz orbit',options);
+  await compare('quartz \\deg orbit',{limit:14});
+  assert.equal((await compare('quartz orbit',{documentId:main.id,limit:1}))[0].body,'quartz quartz quartz orbit','missing snippet falls back to the original page body');
 });
 
 test('full PDF text beyond evidence excerpt is searchable, scoped, versioned and rebuildable',async()=>{
