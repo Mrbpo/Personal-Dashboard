@@ -27,6 +27,9 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
  evidence_id:`evidence${n}`,parser_version:'fixture',score:1,evidence_body:'full-page'})),images:[{
  attachmentId:'image',assetId:sha(image),captionEvidenceId:'unread-caption-evidence',sha256:sha(image),byteLength:image.length,width:1,height:1,
  mime:'image/png',bytes:image,source:{documentId:'study0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}}]};}
+function emptyTitleOutline(kernel:KernelService){kernel.readDocumentOutline=async(_owner,source)=>({
+ source:{documentId:source.documentId,currentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,sourceHash:source.sourceHash},
+ manifestSha256:'a'.repeat(64),parents:[],nodes:[],sourceContentIsUntrusted:true});}
 const unknown={subject:null,attribute:null,unit:null,population:null,stage:null,configuration:null,time:null};
 function plan():StudyAnswerPlan{
  const units=prepareStudyAnswerPlan(question,context()).prepared.quoteUnits;
@@ -321,6 +324,8 @@ test('planned SourceN transport is reversible across documents/images without ed
  assert.deepEqual(studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,body,transport.bindingSha256),
   {providerRequestSha256:transport.providerRequestSha256,requestIdentity:transport.requestIdentity});
  assert.equal(transport.binding.mappingSha256,sha(JSON.stringify(transport.mapping)));assert.equal(transport.binding.providerRequestSha256,sha(JSON.stringify(body)));
+ assert.equal(body.reasoning.effort,'medium');assert.ok(String(body.input[0].content).includes('initial retrieval before supplementation'));
+ assert.ok(String(body.input[0].content).includes('counted object, unit, processing stage'));
 });
 
 test('planned SourceN decoding rejects unknown, duplicate, incomplete, stale and replayed mappings or canonical answers',()=>{
@@ -400,7 +405,7 @@ test('Kernel learning entry creates and journals the real contract before the ex
   kernel=new KernelService(),j=journal(),states:Record<string,unknown>[]=[],reads:unknown[]=[],
   policy:PlannedStudyAnswerPolicy={...j.policy,recordState:async state=>{states.push(structuredClone(state));}};
  p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
- kernel.resolveDocumentSource=async()=>structuredClone(selected);
+ kernel.resolveDocumentSource=async()=>structuredClone(selected);emptyTitleOutline(kernel);
  (kernel as unknown as {studyAnswerContextReader:(owner:string,q:string,o:Record<string,unknown>)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,_q,o)=>{
   reads.push(structuredClone(o));return async()=>o.sourceHint?{...ctx,anchors:[ctx.anchors[0]],images:[]}:ctx;};
  const local={claimId:'c0',judgment:'supported',reason:'Actual selected text supports the claim.',citationFindings:{r0:{judgment:'supports',reason:'Original source text.'}},
@@ -408,6 +413,7 @@ test('Kernel learning entry creates and journals the real contract before the ex
  let calls=0;
  try{await development(async()=>{
   globalThis.fetch=async(_url,init)=>{const body=JSON.parse(String(init?.body)),phase=j.attempts.at(-1)!.phase;calls++;
+   assert.equal(body.reasoning.effort,phase==='generation'?'medium':'low');
    Object.assign(options,{courseId:'mutated',documentId:'oracle'});options.sourceHint.selectedDocumentTitle='mutated';
    if(phase==='question-contract'){assert.deepEqual(JSON.parse(body.input[1].content[0].text),{question:query});return response({requirements:p.requirements});}
    assert.equal(states[0].event,'question-contract');assert.equal((states[0].result as {contract:{question:string}}).contract.question,query);
@@ -438,6 +444,59 @@ test('Kernel learning entry creates and journals the real contract before the ex
  });}finally{globalThis.fetch=savedFetch;}
 });
 
+test('explicit title brings all14 original caption images outside global text hits into the actual initial/gen/local chain; over-cap and changed manifests stop',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,query=`For "${title}", explain the original table.`,
+  source={documentId:'study0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'},kernel=new KernelService(),j=journal(),states:Record<string,unknown>[]=[],
+  policy:PlannedStudyAnswerPolicy={...j.policy,recordState:async state=>{states.push(structuredClone(state));}};
+ ctx.anchors.push(...Array.from({length:12},(_,i)=>({...ctx.anchors[1],id:`pg:v1:${i+2}`,page_number:i+2,evidence_id:`global-${i}`,body:`Protected original text${i}.`})));
+ const {score:_score,...anchor}=ctx.anchors[0],captionHits=Array.from({length:15},(_,i)=>({...anchor,id:`pg:v0:${i+21}`,page_number:i+21,
+  evidence_id:`caption-${i}`,body:`Original caption ${i+1}.`,evidence_body:'full-page' as const,reader_selection:'evidence-node-ids' as const,retrieval_mode:'reader-selection' as const}));
+ let count=14,outlineReads=0,drift=false,nodeReads=0,calls=0;
+ kernel.resolveDocumentSource=async()=>({scope:'selected-title-scoped',selectedDocumentTitle:title,status:'resolved',document:{...source,title}});
+ kernel.readDocumentOutline=async()=>({source,manifestSha256:(drift&&++outlineReads>1?'b':'a').repeat(64),parents:[],sourceContentIsUntrusted:true,
+  nodes:captionHits.slice(0,count).map((h,i)=>({documentId:'study0',documentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0',evidenceId:h.evidence_id,
+   locator:h.locator,ordinal:i+20,kind:'caption',bodySha256:sha(h.body),bodyCodepoints:h.body.length,caption:h.body}))});
+ kernel.readDocumentNodes=async(_owner,expected,ids)=>{nodeReads++;assert.deepEqual(expected,source);return ids.map(id=>captionHits.find(h=>h.evidence_id===id)!);};
+ kernel.readDocumentParents=async(_owner,hits,_options,budget)=>{
+  assert.ok(budget);const images=hits.flatMap((h,i)=>{const im={...ctx.images[0],attachmentId:`caption-image-${i}`,captionEvidenceId:h.evidence_id,
+   originalReference:`Table${i+1}.png`,provenance:{sourceUrl:'https://example.invalid/fixture',revision:'fixture'}};return budget.include(im,15+i)?[im]:[];});
+  return {anchors:hits,images,parents:hits.map((h,i)=>({parentId:'caption-parent-'+i,kind:'single-node',source,manifestSha256:'a'.repeat(64),
+   firstAnchorRank:i+1,anchorRanks:[i+1],status:'available',sourceNodeCount:1,sourceBodyCodepoints:h.body.length,
+   nodeManifest:[{evidenceId:h.evidence_id,locator:h.locator,bodySha256:sha(h.body)}],nodes:[{documentId:'study0',documentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0',
+    evidenceId:h.evidence_id,locator:h.locator,ordinal:i+20,kind:'caption',body:h.body,bodySha256:sha(h.body)}]})),
+   imageSelection:budget.snapshot(),accounting:{anchorCount:hits.length,parentCount:hits.length,contextNodeCount:hits.length,contextBodyCodepoints:0,imageCount:images.length,imageBytes:0},sourceContentIsUntrusted:true};
+ };
+ (kernel as unknown as {studyAnswerContextReader:(_owner:string,q:string)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,q)=>async()=>q===query?ctx:{...context(),anchors:[],images:[]};
+ const p=contractPlan(ctx);p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
+ try{await development(async()=>{
+  globalThis.fetch=async(_url,init)=>{calls++;const body=JSON.parse(String(init?.body)),phase=j.attempts.at(-1)!.phase;
+   if(phase==='question-contract')return response({requirements:p.requirements});
+   if(phase==='contract-plan'){const input=JSON.parse(body.input[1].content[0].text);assert.equal(input.sourceCaptionProof.totalCaptions,14);
+    assert.equal(body.input[1].content.filter((x:{type:string})=>x.type==='input_image').length,15);return response(rawContractPlan(p));}
+   if(phase==='generation'){assert.equal(body.reasoning.effort,'medium');const labels=body.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum;
+    return response({status:'answered',message:'',claims:[{text:'Original table statement.',citations:[{id:labels.at(-1)}]}]});}
+   assert.equal(phase,'claim-audit');const wire=JSON.stringify(body);assert.ok(wire.includes('Original caption 14.'));assert.ok(!wire.includes('Original caption 1.'));
+   return response({claimId:'c0',judgment:'supported',reason:'Synthetic image-boundary check.',citationFindings:{r0:{judgment:'supports',reason:'Selected original visual fixture.'}},objectUnitScope:{claim:'fixture',evidence:'fixture',alignment:'same'}});
+  };
+  const result=await kernel.answerLearningContent('owner',query,{sourceHint:{selectedDocumentTitle:title}},policy);
+  assert.equal(calls,4);if(result.status!=='generated-awaiting-independent-review'||!('selectedUnits'in result))throw Error('Expected generated');
+  assert.equal(ctx.anchors.length,14);assert.deepEqual(result.receipt.originalQuoteIds.slice(0,14),prepareDocumentAnswer(query,ctx).quoteUnits.map(q=>q.id));
+  assert.equal(result.receipt.sourceCaptionProof?.totalCaptions,14);assert.equal(result.selectedUnits[0].selectionId,'i14');
+  assert.equal(result.selectedUnits[0].evidence.captionMembers?.[0].text,'Original caption 14.');
+  const preparedInput=JSON.parse((result.generation.sourceLabels.request.input[1].content as {text:string}[])[0].text);
+  assert.equal(preparedInput.sourceCaptionProof.captions.length,14);
+  const proofContext={...ctx,imageAnchors:captionHits.slice(0,3)};
+  assert.throws(()=>prepareDocumentAnswer(query,proofContext),/anchor limit/,'Unproved default cap2 stays intact.');
+  assert.throws(()=>prepareDocumentAnswer(query,{...proofContext,sourceCaptionProof:{...result.receipt.sourceCaptionProof!,source:{...source,sourceHash:'wrong'}}}),/caption proof/);
+  count=15;const before=calls,reads=nodeReads,c=freezeStudyQuestionContract(query,{requirements:p.requirements},'a'.repeat(64));
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:title}},policy),/caption capacity/);
+  assert.equal(calls,before);assert.equal(nodeReads,reads);const capacity=states.at(-1)!;
+  assert.equal(capacity.status,'capacity-exceeded');assert.equal((capacity.proof as {captions:unknown[]}).captions.length,15);
+  count=14;drift=true;outlineReads=0;
+  await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:title}},policy),/changed|no longer current/);assert.equal(calls,before);
+ });}finally{globalThis.fetch=savedFetch;}
+});
+
 test('explicit complete user title scopes supplements only, freezes source identity and rejects unresolved or changed sources',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();const savedFetch=globalThis.fetch,ctx=context(),title=ctx.anchors[0].name,
   query=`For "${title}", where did its labels come from?`,c=freezeStudyQuestionContract(query,{requirements:[{...plan().requirements[0],requestedScope:{...unknown,subject:title}}]},'a'.repeat(64)),
@@ -446,7 +505,7 @@ test('explicit complete user title scopes supplements only, freezes source ident
  p.clusters=p.clusters.slice(0,1);p.sourceSubscopes=[];
  const kernel=new KernelService(),reads:Record<string,unknown>[]=[],options={sourceHint:{selectedDocumentTitle:title}},states:Record<string,unknown>[]=[],j=journal(),
   policy:PlannedStudyAnswerPolicy={...j.policy,recordState:async state=>{states.push(structuredClone(state));}};
- let resolutions=0,calls=0;kernel.resolveDocumentSource=async()=>{resolutions++;return structuredClone(selected);};
+ let resolutions=0,calls=0;kernel.resolveDocumentSource=async()=>{resolutions++;return structuredClone(selected);};emptyTitleOutline(kernel);
  (kernel as unknown as {studyAnswerContextReader:(owner:string,q:string,o:Record<string,unknown>)=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async(_owner,_q,o)=>{
   reads.push(structuredClone(o));return async()=>o.sourceHint?{...ctx,anchors:[ctx.anchors[0]],images:[]}:ctx;};
  try{await development(async()=>{
@@ -457,7 +516,7 @@ test('explicit complete user title scopes supplements only, freezes source ident
   assert.equal(result.receipt.initialRetrievalScope,'whole-library-query');assert.equal(result.receipt.supplemental[0].retrievalScope,'selected-title-scoped');
   assert.deepEqual(result.receipt.supplemental[0].sourceSelection,selected);
   assert.equal(result.receipt.supplemental[0].query,c.requirements[0].aspect);assert.ok(result.receipt.supplemental[0].originalQuery?.includes(title));
-  assert.equal(result.receipt.supplemental[0].focusPolicy,'resolved-exact-title-scope-value-v1');
+  assert.equal(result.receipt.supplemental[0].focusPolicy,'resolved-exact-title-query-v2');
   const globalQueries=studySupplementQueries(query,c,result.plan.binding);assert.ok(globalQueries[0].query.includes(title));assert.equal(globalQueries[0].originalQuery,undefined);
   const before=calls,readCount=reads.length;
   await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:'Absent title'}},policy),/original question/);
@@ -486,13 +545,19 @@ test('parallel source sub-scopes focus the existing two supplemental slots, pres
  assert.deepEqual(queries.map(q=>q.query),[c.requirements[0].aspect+' First corpus',c.requirements[0].aspect+' Second corpus']);
  assert.ok(queries.every(q=>q.originalQuery===q.query&&q.queryPolicy==='parallel-source-subscopes-v1'&&!q.query.includes('REASON_MUST_NOT_BECOME_QUERY')));
  const empty={...ctx,anchors:[],parents:[],images:[]},combined=preparePlannedStudyGeneration(question,ctx,[empty,empty],c,bind(),queries);
- assert.equal(combined.receipt.version,'contract-supplement-answer-v5');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
+ assert.equal(combined.receipt.version,'contract-supplement-answer-v6');assert.deepEqual(combined.receipt.supplemental.map(q=>q.sourceSubscopeIndex),[0,2]);
  p.missing=[{requirementId:'r0',reason:'Actual gap.',supplementQuery:'explicit missing relation'}];
  const bounded=studySupplementQueries(question,c,bind());assert.equal(bounded.length,2);assert.equal(bounded[0].origin,'plan-missing');assert.equal(bounded[1].sourceSubscopeIndex,0);
  p.missing=[];p.sourceSubscopes[0].scope.configuration='Original Study 0';
  const resolved={status:'resolved' as const,scope:'selected-title-scoped' as const,selectedDocumentTitle:'Original Study 0',document:{documentId:'study0',title:'Original Study 0',currentVersionId:'v0',sourceVersionId:'s0',sourceHash:'sha0'}},
-  focused=studySupplementQueries(question,c,bind(),resolved);
+  focusQuestion=question+' Original Study 0',focusContract=freezeStudyQuestionContract(focusQuestion,{requirements:c.requirements},'a'.repeat(64)),
+  focused=studySupplementQueries(focusQuestion,focusContract,bind(),resolved);
  assert.ok(focused[0].originalQuery?.includes('Original Study 0'));assert.ok(!focused[0].query.includes('Original Study 0'));
+ p.missing=[{requirementId:'r0',reason:'Actual gap.',supplementQuery:'For Original Study 0 compare Original Study 0 methods'}];
+ const allOrigins=studySupplementQueries(focusQuestion,focusContract,bind(),resolved);
+ assert.equal(allOrigins[0].query,'For compare methods');assert.equal(allOrigins[0].originalQuery,p.missing[0].supplementQuery);
+ assert.equal(allOrigins[0].focusPolicy,'resolved-exact-title-query-v2');
+ assert.throws(()=>studySupplementQueries(question,c,bind(),resolved),/complete question/);
 });
 
 test('visual units keep exact caption members with their original image; legacy q-only answers and outside evidence stay separate',()=>{

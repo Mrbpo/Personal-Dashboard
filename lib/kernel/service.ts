@@ -4,10 +4,10 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint} from './document-source.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -952,8 +952,8 @@ export class KernelService {
     return readDocumentOutline(kernelPool(),owner,source);
   }
 
-  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={}){
-    return readDocumentParents(kernelPool(),owner,anchors,options);
+  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
+    return readDocumentParents(kernelPool(),owner,anchors,options,imageBudget);
   }
 
   readDocumentImages(owner:string,source:DocumentContextSource,captionEvidenceIds:string[]){
@@ -1206,13 +1206,47 @@ export class KernelService {
     return {questionContract,...await this.answerPlannedStudyContent(owner,question,questionContract.contract,scope,boundPolicy)};
   }
 
+  private async resolvedTitleCaptionContext(owner:string,context:DocumentAnswerContext,
+    selected:Extract<DocumentSourceResolution,{status:'resolved'}>,policy:PlannedStudyAnswerPolicy):Promise<DocumentAnswerContext>{
+    const outline=await this.readDocumentOutline(owner,selected.document),captions=outline.nodes.filter(n=>n.kind==='caption').sort((a,b)=>a.ordinal-b.ordinal),
+      proof={policy:'resolved-title-caption-images-v1' as const,selectedDocumentTitle:selected.selectedDocumentTitle,source:outline.source,
+        manifestSha256:outline.manifestSha256,totalCaptions:captions.length,captions:captions.map(n=>({evidenceId:n.evidenceId,ordinal:n.ordinal}))};
+    if(captions.length>14){
+      await policy.recordState({event:'source-caption-context',status:'capacity-exceeded',reason:'caption-count-limit',limit:14,proof});
+      throw new DocumentContextError('DOCUMENT_CONTEXT_INVALID','Resolved title caption capacity exceeded; no caption subset was selected');
+    }
+    const budget=createDocumentImageBudget();for(const [i,image]of context.images.entries())if(!budget.include(image,i+1))
+      throw new DocumentContextError('DOCUMENT_CONTEXT_INVALID','Original images exceeded the shared budget');
+    const anchors=captions.length?await this.readDocumentNodes(owner,outline.source,captions.map(n=>n.evidenceId)):[],
+      added=anchors.length?await this.readDocumentParents(owner,anchors,{includeImages:true},budget):null;
+    if(added?.parents.some(p=>p.status!=='available')){
+      await policy.recordState({event:'source-caption-context',status:'capacity-exceeded',reason:'caption-parent-size',proof,parents:added.parents});
+      throw new DocumentContextError('DOCUMENT_CONTEXT_INVALID','Resolved title caption parent context exceeds its reader limit');
+    }
+    const parents=new Map(context.parents.map(p=>[p.parentId,p]));
+    for(const parent of added?.parents??[]){const old=parents.get(parent.parentId);
+      if(old&&JSON.stringify([old.status,old.nodes])!==JSON.stringify([parent.status,parent.nodes]))throw new DocumentEvidenceChangedError();
+      if(!old)parents.set(parent.parentId,parent);
+    }
+    const images=[...new Map([...context.images,...added?.images??[]].map(image=>[image.attachmentId,image])).values()],selection=budget.snapshot(),
+      imageAnchors=[...new Map([...context.imageAnchors??[],...anchors].map(a=>[a.evidence_id,a])).values()],
+      imageSelection={...selection,omitted:[...context.imageSelection?.omitted??[],...selection.omitted]};
+    const current=await this.readDocumentOutline(owner,selected.document);
+    if(current.manifestSha256!==outline.manifestSha256||JSON.stringify(current.source)!==JSON.stringify(outline.source))throw new DocumentEvidenceChangedError();
+    await policy.recordState({event:'source-caption-context',status:'read',proof,imageSelection});
+    return {...context,parents:[...parents.values()],images,imageAnchors,imageSelection,sourceCaptionProof:proof};
+  }
+
   async answerPlannedStudyContent(owner:string,question:string,contract:StudyQuestionContract,options:{courseId?:string;sourceHint?:DocumentSourceHint},policy:PlannedStudyAnswerPolicy){
     const {sourceHint,...courseContext}=this.plannedStudyScope(question,options);
     await assertPlannedStudyAnswerPolicy(policy);
     const selected=sourceHint?await this.resolveDocumentSource(owner,sourceHint,{courseId:courseContext.courseId}):undefined;
     if(selected)requireResolvedDocumentSource(selected);
-    const read=await this.contractStudyContext(owner,question,courseContext,{scope:policy.scope,dailyLimit:policy.dailyLimit,
+    const readInitial=await this.contractStudyContext(owner,question,courseContext,{scope:policy.scope,dailyLimit:policy.dailyLimit,
       beforeAttempt:policy.beforeAttempt,recordResponse:raw=>policy.recordResponse({...raw,phase:'contract-plan'})});
+    const read=async()=>{
+      const context=await readInitial();return selected?.status==='resolved'?this.resolvedTitleCaptionContext(owner,context,selected,policy):context;
+    };
     return answerPlannedStudyQuestion(question,read,async query=>{
       const supplement=await this.studyAnswerContextReader(owner,query,{...courseContext,...(sourceHint?{sourceHint}:{}),limit:4,
         semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},false);

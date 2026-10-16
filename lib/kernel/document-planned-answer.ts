@@ -6,11 +6,11 @@ import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanR
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v5';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v6';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
- originalQuery?:string;focusPolicy?:'resolved-exact-title-scope-value-v1';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
+ originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
 export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt&{claimIndex?:number}>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:StudyAnswerPlanAttempt['phase'];claimIndex?:number}>)=>Promise<void>;
@@ -30,14 +30,16 @@ export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPo
  * the fallible source plan asserts sufficient; no expected document IDs enter. */
 export function studySupplementQueries(question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,resolvedSource?:SupplementalSource):StudySupplementQuery[]{
  validateStudyQuestionContract(question,contract);const out:StudySupplementQuery[]=[],used=new Set([question.normalize('NFKC').replace(/\s+/gu,' ').trim().toLowerCase()]);
+ const title=resolvedSource?.selectedDocumentTitle.normalize('NFKC');
+ if(title&&!question.normalize('NFKC').includes(title))throw Error('Resolved supplemental title must occur in the complete question');
  const focus=(values:(string|null)[])=>values.filter((v):v is string=>v!==null&&(!resolvedSource||
   v.normalize('NFKC')!==resolvedSource.selectedDocumentTitle.normalize('NFKC')));
  const add=(requirementId:string,origin:StudySupplementQuery['origin'],query:string,focused=query,sourceSubscopeIndex?:number)=>{
-  const normalized=focused.normalize('NFKC').replace(/\s+/gu,' ').trim();
+  const normalized=(title?focused.normalize('NFKC').split(title).join(' '):focused.normalize('NFKC')).replace(/\s+/gu,' ').trim();
   if(out.length<2&&normalized&&!used.has(normalized.toLowerCase())){if(Array.from(normalized).length>4000)throw Error('Complete supplemental query exceeds limit');
    used.add(normalized.toLowerCase());out.push({requirementId,origin,query:normalized,
     ...(resolvedSource||sourceSubscopeIndex!==undefined?{originalQuery:query}:{}),
-    ...(resolvedSource?{focusPolicy:'resolved-exact-title-scope-value-v1' as const}:{}),
+    ...(resolvedSource?{focusPolicy:'resolved-exact-title-query-v2' as const}:{}),
     ...(sourceSubscopeIndex!==undefined?{sourceSubscopeIndex,queryPolicy:'parallel-source-subscopes-v1' as const}:{})});}
  };
  for(const gap of binding.plan.missing)if(gap.supplementQuery)add(gap.requirementId,'plan-missing',gap.supplementQuery);
@@ -56,7 +58,7 @@ export function studySupplementQueries(question:string,contract:StudyQuestionCon
  return out;
 }
 function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContext[]){
- if(initial.anchors.length>14||extras.length>2||extras.some(c=>c.anchors.length>4||(c.imageAnchors?.length??0)>0))throw Error('Invalid bounded supplemental context');
+ if(initial.anchors.length>14||extras.length>2||extras.some(c=>c.anchors.length>4||(c.imageAnchors?.length??0)>0||c.sourceCaptionProof))throw Error('Invalid bounded supplemental context');
  const contexts=[initial,...extras],anchors=new Map<string,DocumentAnswerContext['anchors'][number]>(),parents=new Map<string,DocumentAnswerContext['parents'][number]>();
  const anchorIdentity=(h:DocumentAnswerContext['anchors'][number])=>[h.id,h.document_id,h.course_id,h.name,h.origin,h.origin_key,h.source_hash,h.source_version_id,h.evidence_id,h.locator,h.parser_version,h.parser_warnings??[],h.body];
  const parentIdentity=(p:DocumentAnswerContext['parents'][number])=>[p.status,p.sourceNodeCount,p.sourceBodyCodepoints,p.headingMetadata,p.structureProvenance,p.nodes];
@@ -71,6 +73,7 @@ function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContex
  const omitted=new Map([...contexts.flatMap(c=>c.imageSelection?.omitted??[]),...selection.omitted]
   .filter(i=>!included.has(i.attachmentId)).map(i=>[i.attachmentId,i]));
  return {anchors:[...anchors.values()],parents:[...parents.values()],images,imageAnchors:initial.imageAnchors??[],
+  ...(initial.sourceCaptionProof?{sourceCaptionProof:initial.sourceCaptionProof}:{}),
   sourceContentIsUntrusted:true as const,imageSelection:{...selection,omitted:[...omitted.values()]}};
 }
 
@@ -107,7 +110,7 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
  const receipt={version:PLANNED_STUDY_ANSWER_VERSION,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,contractSha256:contract.contractSha256,originalPlanSha256:binding.planSha256,
   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256,
   originalInputFingerprint:binding.inputFingerprint,inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
-  supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,
+  supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,sourceCaptionProof:initial.sourceCaptionProof??null,
   initialRetrievalScope:'whole-library-query',originalTextSelection:'all-original-selectable-v1',
   originalQuoteIds:original.prepared.quoteUnits.map(u=>u.id),selectedSourceIds:[...actualIds],
   imageIds:prepared.supports.filter(s=>s.kind==='image').map(s=>({id:s.id,sha256:s.sha256,sourceVersionId:s.sourceVersionId})),
@@ -117,9 +120,11 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
  return {context,prepared,selectedPrepared,receipt,bindingSha256:digest(receipt)};
 }
 function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlannedStudyGeneration>['selectedPrepared']){
- const body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000});
+ const body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'medium',maxOutputTokens:4000});
  body.input[0].content+=' The complete original question, question-contract aspects and requested scope must all remain in force; the contract itself is fallible. '+
-  'The evidence plan is an unverified proposal, not factual evidence. Use only actual quote units and images to establish an answer. '+
+  'The evidence plan describes initial retrieval before supplementation. Its covered/missing statuses are historical unverified proposals, not factual evidence. '+
+  'Reassess every requested aspect and comparison family using all actual final quote units and images, including supplemental evidence; initial-plan gaps do not establish final absence. '+
+  'Preserve the source-stated counted object, unit, processing stage and qualifications in each quantity. Keep executed comparison settings, proposed methods, prior work and future work distinct. '+
   'Answer every requested parallel subject/configuration and preserve same-context genuine conflicts; do not substitute a subset for an explicit total. '+
   'Return at most six final atomic claims without dropping material requirements to meet that limit. If capacity or evidence prevents a complete answer, do not claim completeness. '+
   'This response will receive only citation-local support checks; those cannot certify complete coverage.';

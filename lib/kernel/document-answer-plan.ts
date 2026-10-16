@@ -139,7 +139,7 @@ export function studyPlanningRequestIdentity(version:string,request:StudyPlannin
 export async function executeStudyPlanningRequest(version:string,phase:StudyAnswerPlanAttempt['phase'],request:StudyPlanningRequest,
  bindingSha256:string,budget:ReturnType<typeof studyAnswerPlanRequestBudget>,policy:StudyAnswerPlanPolicy,recheck:()=>Promise<void>){
  await assertStudyAnswerPlanPolicy(policy);
- if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!=='low'||request.max_output_tokens!==4000||budget.maxOutputTokens!==4000)
+ if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!==(phase==='generation'?'medium':'low')||request.max_output_tokens!==4000||budget.maxOutputTokens!==4000)
   throw new Error('Planning phase settings must remain fixed');
  const {providerRequestSha256,requestIdentity}=studyPlanningRequestIdentity(version,request,bindingSha256);
  await policy.beforeAttempt(Object.freeze({phase,requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();
