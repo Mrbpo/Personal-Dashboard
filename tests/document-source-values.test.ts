@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {prepareSourceValueCatalog,deriveSourceValueAnswer,sourceDecimalDifference,type SourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,buildSelectedDocumentAnswerRequest,buildDocumentEvidenceSelectionRequest,
  synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {resolveSourceValueEvidenceSelection,validateDocumentEvidenceSelection} from '../lib/kernel/document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS} from '../lib/kernel/document-context.ts';
 import {decodeDerivedDoclingResult} from '../lib/kernel/docling-batches.ts';
@@ -125,4 +126,51 @@ test('source values: new raw persists before invalid operations, valid mixed sta
   const audit=buildDocumentCitationAuditRequest(local.packet);assert.equal(JSON.stringify(audit).includes('tableObservations'),false);
   assert.equal((audit.input.at(-1)!.content as any[]).filter((x:any)=>x.type==='input_image').length,1);
  }finally{globalThis.fetch=saved;}
+});
+
+test('table retention: legal duplicate suggestions remain distinct from current bound-table retention and actual generator input',async()=>{
+ const f=await fixture(),base=f.context.anchors[0];
+ f.context.anchors.push(...[2,3].map(i=>({...base,id:`pg:other-version-${i}:1`,document_id:`other-source-${i}`,source_version_id:`other-sv-${i}`,
+  source_hash:sha('other-'+i),body:`Other original source statement ${i}.`,evidence_id:`other-evidence-${i}`})));
+ const p=prepareDocumentAnswerForPolicy('A table question?',f.context,off),q=p.quoteUnits.filter(u=>u.selectable).map(u=>u.id),
+  value={referenceIds:[q[0],q[1],q[2],q[0],q[0],q[0]]},before=JSON.stringify(value);
+ const resolution=resolveSourceValueEvidenceSelection(value,p);
+ assert.deepEqual(resolution.providerReferenceIds,value.referenceIds);assert.deepEqual(resolution.normalizedProviderReferenceIds,q);
+ assert.deepEqual(resolution.systemRetainedReferenceIds,['i0']);assert.deepEqual(resolution.referenceIds,[...q,'i0']);assert.equal(JSON.stringify(value),before);
+ assert.equal(resolution.retentionPolicy,'source-value-retain-bound-table-images-v1');
+ assert.throws(()=>validateDocumentEvidenceSelection(value,p),'the default strict validator still rejects duplicate suggestions');
+ assert.equal(JSON.stringify(buildDocumentEvidenceSelectionRequest(p,settings,off)),JSON.stringify(buildDocumentEvidenceSelectionRequest(p,settings,policy)));
+ const saved=globalThis.fetch;let calls=0,actualGenerator:any;
+ try{
+  globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+   if(calls===2)actualGenerator=request;
+   return Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:1,output_tokens:1},
+    output_text:JSON.stringify(calls===1?value:{status:'answered',message:'',claims:[{kind:'statement',text:p.quoteUnits[0].text,citations:[{id:q[0]}]}]})});
+  };
+  const result=await synthesizeDocumentAnswer('A table question?',async()=>f.context,{...policy,recordSourceValueRawResponse:async()=>{},recordSourceValueDerivation:async()=>{}});
+  assert.equal(calls,2);assert.ok('evidenceSelection' in result);const selection=result.evidenceSelection;
+  assert.deepEqual(selection?.providerReferenceIds,value.referenceIds);
+  assert.deepEqual(selection?.normalizedProviderReferenceIds,q);assert.deepEqual(selection?.systemRetainedReferenceIds,['i0']);
+  assert.deepEqual(selection?.referenceIds,[...q,'i0']);assert.equal(selection?.outcome,'provided-with-system-retention');
+  const content=actualGenerator.input.at(-1).content,packet=JSON.parse(content[0].text);
+  assert.equal(content.filter((part:any)=>part.type==='input_image').length,1);assert.equal(packet.sourceValueCatalog.tables[0].imageId,'i0');
+  assert.deepEqual(result.selectedUnits.map(unit=>unit.selectionId),[q[0]],'retaining a table never silently adds it to a statement citation');
+ }finally{globalThis.fetch=saved;}
+});
+
+test('table retention: unknown and original/effective capacity remain strict; empty advice retains only available current table images',async()=>{
+ const f=await fixture(),p=prepareDocumentAnswerForPolicy('A table question?',f.context,off),q=p.quoteUnits[0].id;
+ for(const value of [{referenceIds:[q,'outside-context']},{referenceIds:[q,1]},{referenceIds:Array(65).fill(q)},
+  {referenceIds:[q],extra:true},{referenceIds:'not-array'},{}])assert.throws(()=>resolveSourceValueEvidenceSelection(value,p));
+ assert.deepEqual(resolveSourceValueEvidenceSelection({referenceIds:[]},p).referenceIds,['i0']);
+ assert.deepEqual(resolveSourceValueEvidenceSelection({referenceIds:['i0']},p).systemRetainedReferenceIds,[],'already suggested image is not falsely attributed as a system addition');
+ const plainContext={...f.context,images:[{...f.image,tableObservations:undefined}]},plain=prepareDocumentAnswerForPolicy('A table question?',plainContext,off);
+ assert.deepEqual(resolveSourceValueEvidenceSelection({referenceIds:[]},plain).referenceIds,[]);
+ assert.deepEqual(validateDocumentEvidenceSelection({referenceIds:[]},plain),[],'no table leaves the existing neutral insufficient-evidence path intact');
+ const unavailable=structuredClone(p);for(const s of unavailable.supports)for(const o of s.tableObservations??[])o.status='unavailable';
+ assert.deepEqual(resolveSourceValueEvidenceSelection({referenceIds:[]},unavailable).referenceIds,[],'an unavailable observation is never promoted by the resolver');
+ const large=structuredClone(f.context);large.anchors[0].body='word '.repeat(16000);
+ const full=prepareDocumentAnswerForPolicy('A table question?',large,off),sixtyFour=full.quoteUnits.filter(u=>u.selectable).slice(0,64).map(u=>u.id);
+ assert.equal(sixtyFour.length,64);assert.equal(validateDocumentEvidenceSelection({referenceIds:sixtyFour},full).length,64);
+ assert.throws(()=>resolveSourceValueEvidenceSelection({referenceIds:sixtyFour},full),/64-reference limit/,'65 effective references reject rather than dropping sources');
 });

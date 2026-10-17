@@ -417,9 +417,13 @@ export function buildDocumentAnswerRuntimeRequest(prepared:ReturnType<typeof pre
 }
 
 export const DOCUMENT_EVIDENCE_SELECTION_VERSION='select-original-evidence-v1';
+export const DOCUMENT_TABLE_RETENTION_POLICY='source-value-retain-bound-table-images-v1';
+export type SourceValueEvidenceSelection={retentionPolicy:typeof DOCUMENT_TABLE_RETENTION_POLICY;providerReferenceIds:string[];
+ normalizedProviderReferenceIds:string[];systemRetainedReferenceIds:string[];referenceIds:string[]};
 export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_SELECTION_VERSION;coverage:'unassessed';referenceIds:string[];
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
- sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
+ sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected'|'provided-with-system-retention';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY}&
+ Partial<Omit<SourceValueEvidenceSelection,'referenceIds'>>;
 type PreparedAnswer=ReturnType<typeof prepareDocumentAnswer>;
 const selectableIds=(prepared:PreparedAnswer)=>[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
  ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
@@ -448,6 +452,34 @@ export function validateDocumentEvidenceSelection(value:unknown,prepared:Prepare
  if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id))||new Set(ids).size!==ids.length)
   throw new Error('Invalid original evidence selection');
  return [...ids];
+}
+
+/** Explicit source-value lane only. Suggestions cannot delete already retrieved
+ * bound table PNGs. This does not rank tables or certify their contents. */
+export function resolveSourceValueEvidenceSelection(value:unknown,prepared:PreparedAnswer):SourceValueEvidenceSelection{
+ if(!exactKeys(value,['referenceIds']))throw new Error('Invalid original evidence selection');
+ const ids=(value as {referenceIds:unknown}).referenceIds,allowed=new Set(selectableIds(prepared));
+ if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id)))throw new Error('Invalid original evidence selection');
+ const normalizedProviderReferenceIds=[...new Set(ids as string[])],retained:string[]=[];
+ for(const support of prepared.supports){
+  if(support.kind!=='image'||!support.image)continue;
+  const available=support.tableObservations?.filter(observation=>observation.status==='available')??[];
+  if(!available.length)continue;
+  for(const observation of available){
+   if(observation.version==='docling-native-observation-v1'){
+    if(!('kind' in support.image))throw new Error('Retained native table requires its original PDF image');
+    assertNativeTableObservation(observation,support.image);
+   }else{
+    if('kind' in support.image)throw new Error('Retained author table requires its original caption image');
+    assertAuthorImageTableObservation(observation,support.image);
+   }
+  }
+  if(!normalizedProviderReferenceIds.includes(support.id))retained.push(support.id);
+ }
+ const referenceIds=[...normalizedProviderReferenceIds,...new Set(retained)];
+ if(referenceIds.length>64)throw new Error('Retained original evidence exceeds the 64-reference limit');
+ return {retentionPolicy:DOCUMENT_TABLE_RETENTION_POLICY,providerReferenceIds:[...ids] as string[],normalizedProviderReferenceIds,
+  systemRetainedReferenceIds:[...new Set(retained)],referenceIds};
 }
 
 /** The generator sees only these selected original units/images. Full-context
@@ -576,12 +608,14 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   const request=buildDocumentEvidenceSelectionRequest(prepared,settings,policy),providerRequestSha256=sha(JSON.stringify(request));
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
-  referenceIds=validateDocumentEvidenceSelection(decoded,prepared);
+  const sourceValueSelection=policy.sourceValueContract==='difference-v1'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
+  referenceIds=sourceValueSelection?.referenceIds??validateDocumentEvidenceSelection(decoded,prepared);
   if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
    throw new Error('Document evidence changed during evidence selection');
   selectionReceipt={version:DOCUMENT_EVIDENCE_SELECTION_VERSION,coverage:'unassessed',referenceIds,
    requestedModel:model,model:actualModel,providerRequestSha256,providerResponseId:payload.id??null,usage:payload.usage??null,
-   sourceInputFingerprint:prepared.fingerprint,outcome:referenceIds.length?'selected':'no-evidence-selected',
+   sourceInputFingerprint:prepared.fingerprint,outcome:sourceValueSelection?.systemRetainedReferenceIds.length?'provided-with-system-retention':referenceIds.length?'selected':'no-evidence-selected',
+   ...(sourceValueSelection??{}),
    ...(prepared.input.unitPolicy?{unitPolicy:prepared.input.unitPolicy}:{})};
   if(!referenceIds.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
    citationRepairs:[] as DocumentCitationRepair[],providerSelections:null,selectedUnits:[] as DocumentUnitSelection[],

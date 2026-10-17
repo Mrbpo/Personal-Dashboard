@@ -7,8 +7,26 @@ revision loop, parser, index or canonical fact is added.
 
 ## Scope of the changed contract
 
-The selector and its original request are unchanged. Only the actually selected
-generator may use `prepareSelectedSourceValueGeneration`. Its complete cell
+The selector and its original request are unchanged. On the explicit new
+contract only, `resolveSourceValueEvidenceSelection` treats legal suggestions
+as an exact set and retains the original image IDs of available bound table
+observations already in the prepared context. It reads no new source or image.
+Original suggestions must still contain at most 64 legal string IDs; unknown
+IDs, extra fields and malformed arrays reject before deduplication. More than
+64 effective references after retention reject without discarding sources.
+The old strict validator/default-off path still rejects duplicates.
+
+The receipt separates `providerReferenceIds` (including repetitions),
+`normalizedProviderReferenceIds`, `systemRetainedReferenceIds`, effective
+`referenceIds` and `retentionPolicy=source-value-retain-bound-table-images-v1`.
+System additions are never reported as provider-selected images. Empty advice
+with a bound available table may proceed with that original image; empty advice
+without one keeps the existing neutral insufficient-evidence path. Unavailable
+observations are not promoted. Retention is not a relevance, content or
+semantic certificate and does not add an image citation to a statement.
+
+Only this effective original-evidence generator may use
+`prepareSelectedSourceValueGeneration`. Its complete cell
 catalog uses the existing current original-PNG observations: author
 `visible_table_grid_v1` and Docling native tables retain their own identities.
 Cell IDs bind the source/version, evidence, PNG, attachment, candidate artifact,
@@ -80,5 +98,9 @@ check verifies an operation/arithmetical construction, not that a model chose
 the comparison or that the original question/answer passed. The old wrong
 free-claim result is retained and rejected as the new typed protocol.
 Native fixture coverage reuses saved parser output without new conversion.
+The two additional retention targets use a component prepared context. They do
+not replay the full original 35b packet or claim that the previously failed
+question has now succeeded; the original six-ID failed run remains unchanged.
+Its real full-packet offline check is separate from these committed targets.
 Local targeted checks mock all model transport and do not write PostgreSQL or
 claim fresh-current validation. No previous score or independent cohort changes.
