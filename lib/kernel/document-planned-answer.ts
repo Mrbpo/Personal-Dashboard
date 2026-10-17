@@ -3,7 +3,8 @@ import {isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
 import {validateCompleteStudySource} from './document-study-source.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,buildCompleteStudyCoverageReviewRequest,
- validateCompleteStudyCoverageReview,validateDocumentCitationAudit,DOCUMENT_CITATION_AUDIT_VERSION,COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
+ validateCompleteStudyCoverageReview,validateDocumentCitationAudit,documentCitationAuditRequestIdentity,evidenceAuditSettings,
+ DOCUMENT_CITATION_AUDIT_VERSION,COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,type DocumentCitationAuditResponse,type EvidenceAuditProfile} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,studyAnswerModelInput,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -24,7 +25,7 @@ export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'pl
  originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
 type PlannedPhase=StudyAnswerPlanAttempt['phase']|DocumentCitationRevisionAttempt['phase'];
 export type PlannedStudyAnswerAttempt=Omit<StudyAnswerPlanAttempt,'phase'>&{phase:PlannedPhase;claimIndex?:number};
-export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';sourceLabelPolicy?:SourceLabelPolicy;
+export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';sourceLabelPolicy?:SourceLabelPolicy;
  beforeAttempt:(attempt:Readonly<PlannedStudyAnswerAttempt>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:PlannedPhase;claimIndex?:number}>)=>Promise<void>;
  recordState:(state:Readonly<Record<string,unknown>>)=>Promise<void>};
@@ -33,13 +34,15 @@ const journal=(policy:PlannedStudyAnswerPolicy,phase:StudyAnswerPlanAttempt['pha
  beforeAttempt:async attempt=>policy.beforeAttempt(Object.freeze({...attempt,phase,...(claimIndex!==undefined?{claimIndex}:{})})),
  recordResponse:async raw=>policy.recordResponse({...raw,phase,...(claimIndex!==undefined?{claimIndex}:{})})});
 export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPolicy){
- if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','citationRevision','completeSourceReview','sourceLabelPolicy','beforeAttempt','recordResponse','recordState'].includes(k))||
+ if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','auditProfile','citationRevision','completeSourceReview','sourceLabelPolicy','beforeAttempt','recordResponse','recordState'].includes(k))||
   (policy.sourceLabelPolicy!==undefined&&policy.sourceLabelPolicy!=='caption-alias-v2')||
   (policy.citationRevision!==undefined&&typeof policy.citationRevision!=='boolean')||
   (policy.completeSourceReview!==undefined&&!['diagnostic','one-content-revision'].includes(policy.completeSourceReview))||
   (policy.completeSourceReview!==undefined&&policy.citationRevision===true)||
   typeof policy.recordState!=='function'||typeof policy.beforeAttempt!=='function'||typeof policy.recordResponse!=='function')
   throw Error('Planned answers require durable development state/attempt/raw journals');
+ evidenceAuditSettings(policy.auditProfile);
+ if(policy.auditProfile!==undefined&&policy.citationRevision===true)throw Error('Reasoned evidence auditing cannot enable the legacy citation-only revision protocol');
  await assertStudyAnswerPlanPolicy(journal(policy,'contract-plan'));
 }
 
@@ -289,18 +292,18 @@ export async function revisePlannedStudyCitation(question:string,readPacket:()=>
 async function auditStudySelections(question:string,packet:ReturnType<typeof preparePlannedStudyGeneration>,selections:DocumentAnswerSelections,
  readContext:()=>Promise<DocumentAnswerContext>,policy:PlannedStudyAnswerPolicy,phase:'claim-audit'|'revised-claim-audit'='claim-audit',
  captureRaw?:(claimIndex:number,raw:DocumentCitationAuditResponse)=>void){
- const audits=[];
+ const audits=[],settings=evidenceAuditSettings(policy.auditProfile);
  for(let claimIndex=0;claimIndex<selections.claims.length;claimIndex++){
   const binding={inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,
    providerSelections:selections,claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY} as const,
-   local=prepareDocumentCitationAudit(question,packet.context,binding),request=buildDocumentCitationAuditRequest(local.packet),
-   images=local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[]),bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:images}},1000),
+   local=prepareDocumentCitationAudit(question,packet.context,binding),request=buildDocumentCitationAuditRequest(local.packet,policy.auditProfile),
+   images=local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[]),bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:images}},settings.maxOutputTokens),
    p=journal(policy,phase,claimIndex),requestSha=digest(request);
-  const result=await auditDocumentCitationClaim(question,readContext,binding,{scope:'development',dailyLimit:policy.dailyLimit,
-   beforeAttempt:async requestIdentity=>p.beforeAttempt({phase,requestIdentity,providerRequestSha256:requestSha,...bound}),
+  const result=await auditDocumentCitationClaim(question,readContext,binding,{scope:'development',dailyLimit:policy.dailyLimit,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),
+   beforeAttempt:async requestIdentity=>p.beforeAttempt({phase,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),requestIdentity,providerRequestSha256:requestSha,...bound}),
    recordResponse:async raw=>{await p.recordResponse(raw);const payload=JSON.parse(raw.rawBody);
     if(payload?.status!=='completed'||!Number.isSafeInteger(payload.usage?.input_tokens)||!Number.isSafeInteger(payload.usage?.output_tokens)||
-     payload.usage.input_tokens<0||payload.usage.output_tokens<0||payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>1000)throw Error('Local audit incomplete/unknown usage');
+     payload.usage.input_tokens<0||payload.usage.output_tokens<0||payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>settings.maxOutputTokens)throw Error('Local audit incomplete/unknown usage');
     captureRaw?.(claimIndex,structuredClone(raw));}});
   const d=result.diagnostics,supported=d.judgment==='supported'&&Object.values(d.citationFindings).some(f=>f.judgment==='supports')&&
    !Object.values(d.citationFindings).some(f=>f.judgment==='contradicts')&&!['different','not-established'].includes(d.objectUnitScope.alignment);
@@ -315,6 +318,7 @@ async function auditStudySelections(question:string,packet:ReturnType<typeof pre
  * canonical selections. No full-source finding upgrades a selected citation. */
 export async function reviewCompletePlannedStudyAnswer(question:string,readPacket:()=>Promise<ReturnType<typeof preparePlannedStudyGeneration>>,
  artifact:PlannedStudyAnswerReviewArtifact,policy:PlannedStudyAnswerPolicy){
+ policy={...policy};
  await assertPlannedStudyAnswerPolicy(policy);
  if(policy.citationRevision===true)throw Error('Content review and citation-only revision are mutually exclusive');
  const original=structuredClone(artifact),mode=policy.completeSourceReview??'diagnostic';
@@ -344,10 +348,11 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
   const selectedReferenceFindings=localAudits.map(a=>{
    if(!Number.isInteger(a.claimIndex)||a.claimIndex<0||a.claimIndex>=decoded.claims.length||seen.has(a.claimIndex))throw Error('Invalid original selected-only claim index');
    seen.add(a.claimIndex);
-   const local=prepareDocumentCitationAudit(question,current.context,{inputFingerprint:full.fingerprint,quoteUnitManifestSha256:full.quoteUnitManifestSha256,
-    providerSelections:decoded,claimIndex:a.claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY}),request=buildDocumentCitationAuditRequest(local.packet),
-    requestSha=digest(request),identity=digest({version:DOCUMENT_CITATION_AUDIT_VERSION,providerRequestSha256:requestSha,bindingSha256:local.bindingSha256}),
-    raw=a.originalRaw,result=a.result,bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[])}},1000);
+   const result=a.result,settings=evidenceAuditSettings(result.auditProfile),
+    local=prepareDocumentCitationAudit(question,current.context,{inputFingerprint:full.fingerprint,quoteUnitManifestSha256:full.quoteUnitManifestSha256,
+    providerSelections:decoded,claimIndex:a.claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY}),request=buildDocumentCitationAuditRequest(local.packet,result.auditProfile),
+    {providerRequestSha256:requestSha,requestIdentity:identity}=documentCitationAuditRequestIdentity(request,local.bindingSha256,result.auditProfile),
+    raw=a.originalRaw,bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[])}},settings.maxOutputTokens);
    if(result.version!==DOCUMENT_CITATION_AUDIT_VERSION||digest(result.binding)!==digest(local.binding)||result.bindingSha256!==local.bindingSha256||
     result.providerRequestSha256!==requestSha||result.requestIdentity!==identity||result.requestedModel!==request.model||
     raw.providerRequestSha256!==requestSha||raw.requestIdentity!==identity||raw.rawSha256!==sha(raw.rawBody)||result.rawResponseSha256!==raw.rawSha256||
@@ -355,12 +360,12 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
    const payload=JSON.parse(raw.rawBody);
    if(payload?.status!=='completed'||payload.error||!isGpt54MiniProviderModel(payload.model)||result.model!==payload.model||
     ![payload.usage?.input_tokens,payload.usage?.output_tokens].every(n=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0)||
-    payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>1000)throw Error('Original selected-only audit raw is incomplete or unverified');
+    payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>settings.maxOutputTokens)throw Error('Original selected-only audit raw is incomplete or unverified');
    const text=payload.output_text||(payload.output??[]).filter((p:{type:string})=>p.type==='message').flatMap((p:{content?:{type:string;text:string}[]})=>p.content??[])
     .filter((p:{type:string})=>p.type==='output_text').map((p:{text:string})=>p.text).join(''),
     diagnostics=validateDocumentCitationAudit(JSON.parse(text),local.packet.references.map(r=>r.refId));
    if(digest(diagnostics)!==digest(result.diagnostics))throw Error('Original selected-only audit diagnostics differ from raw');
-   return {claimId:`c${a.claimIndex}`,claimIndex:a.claimIndex,diagnostics,selectedReferences:local.binding.citations,
+   return {claimId:`c${a.claimIndex}`,claimIndex:a.claimIndex,...(result.auditProfile?{auditProfile:result.auditProfile}:{}),diagnostics,selectedReferences:local.binding.citations,
     providerRequestSha256:requestSha,requestIdentity:identity,rawResponseSha256:raw.rawSha256,bindingSha256:local.bindingSha256};
   }),binding={sourceManifestSha256:proof.manifest.manifestSha256,
    inputFingerprint:full.fingerprint,quoteUnitManifestSha256:full.quoteUnitManifestSha256,contractSha256:contract.contractSha256,
@@ -376,14 +381,14 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
  const checked=async()=>{const current=await restore();if(digest(current.binding)!==bindingSha256)throw Error('Complete review source/answer changed');return current;};
  const readContext=async()=>(await checked()).packet.context;
  try{
-  const prepared=buildCompleteStudyCoverageReviewRequest(initial.transport.request,initial.alias),requestSha=digest(prepared.request),
+  const prepared=buildCompleteStudyCoverageReviewRequest(initial.transport.request,initial.alias,policy.auditProfile),requestSha=digest(prepared.request),
    budget=studyAnswerPlanRequestBudget(prepared.request,{prepared:initial.packet.selectedPrepared});
-  await policy.recordState({event:'coverage-review-request',version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,binding:initial.binding,request:prepared.request});
+  await policy.recordState({event:'coverage-review-request',version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),binding:initial.binding,request:prepared.request});
   const {value,...execution}=await executeStudyPlanningRequest(COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,'coverage-review',prepared.request,bindingSha256,budget,
-   journal(policy,'coverage-review'),async()=>{await checked();if(digest(prepared.request)!==requestSha)throw Error('Coverage request changed');}),
+   journal(policy,'coverage-review'),async()=>{await checked();if(digest(prepared.request)!==requestSha)throw Error('Coverage request changed');},policy.auditProfile),
    aliasDiagnostics=validateCompleteStudyCoverageReview(value,prepared.choices),byLabel=new Map(initial.transport.mapping.entries.map(e=>[e.label,e.canonicalId])),
    diagnostics={...aliasDiagnostics,issues:aliasDiagnostics.issues.map(i=>({...i,sourceIds:i.sourceIds.map(id=>byLabel.get(id)!)}))},
-   review={version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,status:'diagnosed-awaiting-independent-review',binding:initial.binding,bindingSha256,
+   review={version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),status:'diagnosed-awaiting-independent-review',binding:initial.binding,bindingSha256,
     ...execution,aliasDiagnostics,diagnostics,localSupportUnassessed:true,semanticVerified:false,wholeAnswerVerified:false,
     questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
   await policy.recordState({event:'complete-source-review',review});
@@ -442,6 +447,7 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
 export async function answerPlannedStudyQuestion(question:string,readInitial:()=>Promise<DocumentAnswerContext>,
  readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy,supplementalSource?:SupplementalSource,
  completeRoute?:CompleteStudyEvidenceRouteBinding){
+ policy={...policy};
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract);
  if(policy.completeSourceReview&&!completeRoute)throw Error('Integrated coverage review requires the verified complete-source route');
  if(policy.sourceLabelPolicy&&!completeRoute)throw Error('Caption aliases require the verified complete single-source evidence route');

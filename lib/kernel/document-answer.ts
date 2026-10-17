@@ -46,7 +46,7 @@ export type DocumentCitationRepair={claimIndex:number;citationIndex:number;origi
  quoteSha256:string;reason:'unique-exact-text-match'};
 export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
 export type DocumentAnswerPolicy={scope?:'development';model?:DocumentAnswerModel;
- dailyLimit?:number;reasoningEffort?:'low'|'high';maxOutputTokens?:number;timeoutMs?:number;
+ dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';maxOutputTokens?:number;timeoutMs?:number;
  beforeAttempt?:(identity:string)=>Promise<void>};
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const whitespace=(value:string)=>value.replace(/\s+/gu,' ').trim();
@@ -367,7 +367,7 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  const model=policy.model??'gpt-5-mini',dailyLimit=policy.dailyLimit??200,
   effort=policy.reasoningEffort??'low',maxOutput=policy.maxOutputTokens??4000,timeout=policy.timeoutMs??30000;
- if(!['gpt-5-mini','gpt-5.4-mini','gpt-6-astra'].includes(model)||!['low','high'].includes(effort)||
+ if(!['gpt-5-mini','gpt-5.4-mini','gpt-6-astra'].includes(model)||!['low','medium','high'].includes(effort)||
   !Number.isInteger(dailyLimit)||dailyLimit<1||dailyLimit>1000||!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>32768||
   !Number.isInteger(timeout)||timeout<1000||timeout>180000)throw new Error('Invalid internal document answer policy');
  if(policy.scope==='development'){

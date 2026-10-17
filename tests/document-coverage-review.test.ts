@@ -11,6 +11,7 @@ import {buildCompleteStudyCoverageReviewRequest,validateCompleteStudyCoverageRev
 import {preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,decodePlannedStudyGenerationSelections,
  reviewCompletePlannedStudyAnswer,answerPlannedStudyQuestion,type PlannedStudyAnswerReviewArtifact,type PlannedStudyAnswerPolicy,type PlannedStudyAnswerAttempt} from '../lib/kernel/document-planned-answer.ts';
 import {DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from '../lib/kernel/document-answer.ts';
+import {executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity} from '../lib/kernel/document-answer-plan.ts';
 
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='dummy-coverage-never-sent';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'coverage-empty-'+randomUUID());process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='5';
@@ -73,6 +74,59 @@ function savedLocal(f:ReturnType<typeof fixture>,diagnostics=localUnsupported){
    rawResponseSha256:originalRaw.rawSha256,binding:local.binding,bindingSha256:local.bindingSha256};
  return {claimIndex:0,result,originalRaw};
 }
+
+test('reasoned-v1 coverage preserves all source bytes and only its exact explicit phase permits medium',async()=>{
+ const f=fixture(),legacy=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias),
+  next=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,'reasoned-v1');
+ assert.equal(JSON.stringify(buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined)),JSON.stringify(legacy));
+ assert.deepEqual(next,{...legacy,request:{...legacy.request,reasoning:{effort:'medium'}}});
+ const identity=studyPlanningRequestIdentity('review',next.request,'binding','reasoned-v1');
+ assert.notEqual(identity.requestIdentity,studyPlanningRequestIdentity('review',next.request,'binding').requestIdentity);
+ assert.equal(studyPlanningRequestIdentity('review',legacy.request,'binding').requestIdentity,
+  digest({version:'review',providerRequestSha256:digest(legacy.request),bindingSha256:'binding'}));
+ const saved=globalThis.fetch;let calls=0,attempts=0;
+ try{await development(async()=>{
+  globalThis.fetch=async()=>{calls++;throw Error('No HTTP allowed');};
+  const p={scope:'development' as const,beforeAttempt:async()=>{attempts++;},recordResponse:async()=>{}},
+   bound=studyAnswerPlanRequestBudget(next.request,{prepared:f.packet.selectedPrepared});
+  for(const [phase,profile,request]of [
+   ['coverage-review',undefined,next.request],['contract-plan','reasoned-v1',next.request],['generation','reasoned-v1',next.request],
+   ['coverage-review','reasoned-v1',legacy.request],['coverage-review','other',next.request]
+  ]as const)await assert.rejects(()=>executeStudyPlanningRequest('review',phase,request,'binding',bound,p,async()=>{},profile as 'reasoned-v1'|undefined),/settings|profile/);
+  await assert.rejects(()=>reviewCompletePlannedStudyAnswer(f.question,async()=>{throw Error('No source read');},f.artifact,
+   {...journal().policy,completeSourceReview:undefined,auditProfile:'reasoned-v1',citationRevision:true}),/legacy citation-only/);
+  assert.equal(attempts,0);assert.equal(calls,0);
+ });}finally{globalThis.fetch=saved;}
+});
+
+test('reasoned-v1 reuses untouched old low raw and only newly reviewed or revised evidence uses medium4000',async()=>{
+ const f=fixture(),old=savedLocal(f),artifact={...f.artifact,originalLocalAudits:[old]},before=JSON.stringify(artifact),j=journal('one-content-revision'),
+  proposal={...f.alias,claims:[{text:'The authors used one fixed configuration.',citations:[{id:'Source1'}]},f.alias.claims[1]]},
+  supported={...localUnsupported,judgment:'supported',citationFindings:{r0:{judgment:'supports',reason:'The actual selected statement establishes this claim.'}},
+   objectUnitScope:{claim:'selected claim',evidence:'selected statement',alignment:'same'}},saved=globalThis.fetch,wires:Record<string,unknown>[]=[];
+ try{await development(async()=>{
+  globalThis.fetch=async(_url,init)=>{const body=JSON.parse(String(init?.body));wires.push(body);
+   assert.equal(body.reasoning.effort,'medium');assert.equal(body.max_output_tokens,4000);
+   const value=[diagnostic(),proposal,supported,supported][wires.length-1];if(!value)throw Error('Unexpected extra HTTP');
+   return response(value);};
+  const result=await reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,artifact,{...j.policy,auditProfile:'reasoned-v1'});
+  assert.equal(wires.length,4);assert.deepEqual(j.attempts.map(a=>a.phase),['coverage-review','content-revision','revised-claim-audit','revised-claim-audit']);
+  assert.deepEqual(j.attempts.map(a=>a.auditProfile),['reasoned-v1',undefined,'reasoned-v1','reasoned-v1']);
+  assert.ok(j.attempts.every(a=>a.maxOutputTokens===4000&&a.fundingUpperUSD>=a.reservationUSD&&a.fundingUpperUSD>=a.usageUpperUSD));
+  assert.equal(result.review.auditProfile,'reasoned-v1');assert.equal(result.review.wholeAnswerVerified,false);
+  assert.equal(result.original.selectedReferenceFindings[0].requestIdentity,old.result.requestIdentity);
+  assert.equal(result.original.selectedReferenceFindings[0].rawResponseSha256,old.originalRaw.rawSha256);
+  assert.equal(result.original.selectedReferenceFindings[0].auditProfile,undefined);
+  assert.ok(result.revisionCandidate&&'audits'in result.revisionCandidate);if(!result.revisionCandidate||!('audits'in result.revisionCandidate))throw Error('Missing candidate');
+  assert.ok(result.revisionCandidate.audits.every(a=>a.result.auditProfile==='reasoned-v1'));
+  const local=JSON.stringify(wires[2]);assert.ok(!local.includes('SECOND_ORIGINAL_FACT'));assert.ok(!local.includes(image.toString('base64')));
+  assert.ok(JSON.stringify(wires[0]).includes('SECOND_ORIGINAL_FACT'));assert.ok(JSON.stringify(wires[0]).includes(image.toString('base64')));
+  assert.equal(JSON.stringify(artifact),before);
+  const mislabeled={...artifact,originalLocalAudits:[{...old,result:{...old.result,auditProfile:'reasoned-v1' as const}}]};
+  await assert.rejects(()=>reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,mislabeled,{...j.policy,auditProfile:'reasoned-v1'}),/raw\/source binding changed/);
+  assert.equal(wires.length,4,'Relabeling archived low raw cannot make a new medium execution');
+ });}finally{globalThis.fetch=saved;}
+});
 
 test('coverage diagnostic keeps complete source input and requires real source/claim/question bindings without local-support judgments',()=>{
  const f=fixture(),before=JSON.stringify(f.transport),built=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias),

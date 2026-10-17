@@ -4,7 +4,7 @@ import {serviceValue} from '../service-vault.ts';
 import {prepareDocumentAnswer,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerContext} from './document-answer.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS} from './document-context.ts';
-import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
+import type {DocumentCitationAuditResponse,EvidenceAuditProfile} from './document-citation-audit.ts';
 
 export const STUDY_ANSWER_PLAN_VERSION='retrieved-study-answer-plan-v1';
 export const STUDY_ANSWER_PLAN_METHOD=Object.freeze({retrieval:'keyword-related-v1',limit:14,semantic:false,hybrid:false,
@@ -16,7 +16,7 @@ export type StudyAnswerPlan={requirements:{id:string;aspect:string;requestedScop
  conflicts:{leftClusterId:string;rightClusterId:string;comparability:'same-context'|'different-context'|'unresolved';
   leftSourceIds:string[];rightSourceIds:string[];reason:string}[];
  missing:{requirementId:string;reason:string;supplementQuery:string|null}[]};
-export type StudyAnswerPlanAttempt={phase:'plan'|'question-contract'|'contract-plan'|'cluster-check'|'generation'|'claim-audit'|'coverage-review'|'content-revision'|'revised-claim-audit';requestIdentity:string;providerRequestSha256:string;
+export type StudyAnswerPlanAttempt={phase:'plan'|'question-contract'|'contract-plan'|'cluster-check'|'generation'|'claim-audit'|'coverage-review'|'content-revision'|'revised-claim-audit';auditProfile?:EvidenceAuditProfile;requestIdentity:string;providerRequestSha256:string;
  inputTokenUpper:number;imageInputTokenUpper:number;nonImageBodyUtf8Bytes:number;maxOutputTokens:1000|4000;
  reservationUSD:number;usageUpperUSD:number;fundingUpperUSD:number};
 export type StudyAnswerPlanPolicy={scope:'development';dailyLimit?:number;
@@ -149,17 +149,19 @@ export async function assertStudyAnswerPlanPolicy(policy:StudyAnswerPlanPolicy){
 
 /** Shared single-request boundary for explicit development planning phases.
  * Callers still own durable attempt/raw journals and per-batch authorization. */
-export function studyPlanningRequestIdentity(version:string,request:StudyPlanningRequest,bindingSha256:string){
+export function studyPlanningRequestIdentity(version:string,request:StudyPlanningRequest,bindingSha256:string,auditProfile?:EvidenceAuditProfile){
+ if(auditProfile!==undefined&&auditProfile!=='reasoned-v1')throw Error('Invalid evidence audit profile');
  const providerRequestSha256=sha(JSON.stringify(request));
- return {providerRequestSha256,requestIdentity:sha(JSON.stringify({version,providerRequestSha256,bindingSha256}))};
+ return {providerRequestSha256,requestIdentity:sha(JSON.stringify({version,providerRequestSha256,bindingSha256,...(auditProfile?{auditProfile}:{})}))};
 }
 export async function executeStudyPlanningRequest(version:string,phase:StudyAnswerPlanAttempt['phase'],request:StudyPlanningRequest,
- bindingSha256:string,budget:ReturnType<typeof studyAnswerPlanRequestBudget>,policy:StudyAnswerPlanPolicy,recheck:()=>Promise<void>){
+ bindingSha256:string,budget:ReturnType<typeof studyAnswerPlanRequestBudget>,policy:StudyAnswerPlanPolicy,recheck:()=>Promise<void>,auditProfile?:EvidenceAuditProfile){
  await assertStudyAnswerPlanPolicy(policy);
- if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!==(['generation','content-revision'].includes(phase)?'medium':'low')||request.max_output_tokens!==4000||budget.maxOutputTokens!==4000)
+ if(auditProfile!==undefined&&(auditProfile!=='reasoned-v1'||phase!=='coverage-review'))throw Error('Evidence audit profile requires the coverage-review phase');
+ if(request.model!=='gpt-5.4-mini'||request.store!==false||request.reasoning.effort!==(['generation','content-revision'].includes(phase)||auditProfile==='reasoned-v1'?'medium':'low')||request.max_output_tokens!==4000||budget.maxOutputTokens!==4000)
   throw new Error('Planning phase settings must remain fixed');
- const {providerRequestSha256,requestIdentity}=studyPlanningRequestIdentity(version,request,bindingSha256);
- await policy.beforeAttempt(Object.freeze({phase,requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();
+ const {providerRequestSha256,requestIdentity}=studyPlanningRequestIdentity(version,request,bindingSha256,auditProfile);
+ await policy.beforeAttempt(Object.freeze({phase,...(auditProfile?{auditProfile}:{}),requestIdentity,providerRequestSha256,...budget}));await recheck();assertBilling();
  const response=await paidOpenAI('responses',request,AbortSignal.timeout(30000),{kind:'document-answer',dailyLimit:policy.dailyLimit??200}),
   rawBody=await response.text(),rawSha256=sha(rawBody);
  await policy.recordResponse({requestIdentity,providerRequestSha256,httpStatus:response.status,rawBody,rawSha256});await recheck();

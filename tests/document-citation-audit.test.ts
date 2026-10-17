@@ -6,9 +6,9 @@ import {tmpdir} from 'node:os';
 import {database} from '../lib/database.ts';
 import {KernelService} from '../lib/kernel/service.ts';
 import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
-import {prepareDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceRead} from '../lib/kernel/document-context.ts';
-import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,validateDocumentCitationAudit,
+import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,validateDocumentCitationAudit,documentCitationAuditRequestIdentity,
  type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
 
 const postgresUrl=process.env.KERNEL_DATABASE_URL;
@@ -55,6 +55,42 @@ async function development<T>(work:()=>Promise<T>){
 }
 const policy=(raw:DocumentCitationAuditResponse[],beforeAttempt:DocumentCitationAuditPolicy['beforeAttempt']=async()=>{}):DocumentCitationAuditPolicy=>({
  scope:'development',beforeAttempt,recordResponse:async value=>{raw.push(value);}});
+
+test('reasoned-v1 local profile changes only execution settings and binds them without changing default bytes',async()=>{
+ const local=prepareDocumentCitationAudit(question,context(),binding()),legacy=buildDocumentCitationAuditRequest(local.packet),
+  request=buildDocumentCitationAuditRequest(local.packet,'reasoned-v1');
+ assert.equal(JSON.stringify(buildDocumentCitationAuditRequest(local.packet,undefined)),JSON.stringify(legacy));
+ assert.deepEqual(request,{...legacy,reasoning:{effort:'medium'},max_output_tokens:4000});
+ const old=documentCitationAuditRequestIdentity(legacy,local.bindingSha256),next=documentCitationAuditRequestIdentity(request,local.bindingSha256,'reasoned-v1');
+ assert.equal(old.requestIdentity,hash(JSON.stringify({version:'citation-local-audit-v2',providerRequestSha256:old.providerRequestSha256,bindingSha256:local.bindingSha256})));
+ assert.notEqual(old.providerRequestSha256,next.providerRequestSha256);assert.notEqual(old.requestIdentity,next.requestIdentity);
+ assert.throws(()=>documentCitationAuditRequestIdentity(legacy,local.bindingSha256,'reasoned-v1'),/settings changed/);
+ assert.throws(()=>buildDocumentCitationAuditRequest(local.packet,'other' as 'reasoned-v1'),/profile/);
+ await assert.rejects(()=>documentAnswerSettings({reasoningEffort:'medium'}),/isolated development/);
+ await development(async()=>assert.equal((await documentAnswerSettings({scope:'development',model:'gpt-5.4-mini',reasoningEffort:'medium',
+  beforeAttempt:async()=>{}})).effort,'medium'));
+});
+
+test('reasoned-v1 reaches the current-source Kernel audit with original selected PNG and durable medium identity',async()=>{
+ await database.prepare('SELECT count(*) n FROM ai_ledger').first();
+ const kernel=new KernelService(),raw:DocumentCitationAuditResponse[]=[],saved=globalThis.fetch;let calls=0,reads=0;
+ kernel.readCompleteDocumentSource=async()=>{reads++;return complete();};
+ globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+  assert.equal(request.model,'gpt-5.4-mini');assert.equal(request.reasoning.effort,'medium');assert.equal(request.max_output_tokens,4000);
+  const content=request.input[1].content;assert.equal(content.find((p:{type:string})=>p.type==='input_image').image_url,'data:image/png;base64,'+bytes.toString('base64'));
+  assert.deepEqual(JSON.parse(content[0].text).references,[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]);
+  return Response.json({...response(),usage:{input_tokens:100,output_tokens:1500}});};
+ try{await development(async()=>{
+  await assert.rejects(()=>kernel.auditSelectedStudySourceClaim('owner',question,source,binding(),{...policy(raw),auditProfile:'other'} as unknown as DocumentCitationAuditPolicy),/profile/);
+  assert.equal(reads,0);assert.equal(calls,0);
+  const result=await kernel.auditSelectedStudySourceClaim('owner',question,source,binding(),{...policy(raw),auditProfile:'reasoned-v1'});
+  assert.equal(result.status,'available');if(result.status!=='available')throw Error('Missing audit');
+  assert.equal(result.result.auditProfile,'reasoned-v1');assert.equal(calls,1);assert.equal(raw.length,1);
+  assert.equal(result.result.requestIdentity,raw[0].requestIdentity);assert.equal(result.result.rawResponseSha256,hash(raw[0].rawBody));
+  const local=prepareDocumentCitationAudit(question,context(),binding());
+  assert.equal(result.result.requestIdentity,documentCitationAuditRequestIdentity(buildDocumentCitationAuditRequest(local.packet,'reasoned-v1'),local.bindingSha256,'reasoned-v1').requestIdentity);
+ });}finally{globalThis.fetch=saved;}
+});
 
 test('audit restores the entire original selection object and only its actual selected references',()=>{
  const c=context(),original=binding(c),snapshot=JSON.stringify(original),prepared=prepareDocumentCitationAudit(question,c,original);
