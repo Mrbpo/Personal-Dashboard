@@ -6,14 +6,18 @@ import type {DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {readPdfVisualEvidence,PdfVisualEvidenceError,type PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import {createDocumentImageBudget,type DocumentImageBudget,type DocumentImageSelection} from './document-image-budget.ts';
+import {assertDoclingMathProvenance,assertPreparedDoclingSourceMath,doclingMathForPage,
+ type DoclingMathProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
 export type DocumentStructureInput={rawSourceHash:string;parserVersion:string;
  parents:Array<{id:string;parentId?:string|null;heading:string}>;
- nodes:Array<{evidenceId:string;locator:string;ordinal:number;kind:DocumentNodeKind;parentId?:string|null;bodySha256:string}>};
+ nodes:Array<{evidenceId:string;locator:string;ordinal:number;kind:DocumentNodeKind;parentId?:string|null;bodySha256:string}>;
+ sourceMath?:DoclingMathProvenance};
 export type DocumentEvidenceNode={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
- evidenceId:string;locator:string;ordinal:number;kind:DocumentNodeKind;parentId?:string|null;body:string;bodySha256:string};
+ evidenceId:string;locator:string;ordinal:number;kind:DocumentNodeKind;parentId?:string|null;body:string;bodySha256:string;
+ sourceMath?:ReturnType<typeof doclingMathForPage>};
 export type DocumentImageProvenance={sourceUrl:string;revision:string;archiveSha256?:string;archiveMember?:string;license?:string;attribution?:string};
 export type DocumentImageInput={captionEvidenceId:string;originalReference:string;provenance:DocumentImageProvenance;bytes:Uint8Array};
 export type DocumentImageEvidence={attachmentId:string;assetId:string;captionEvidenceId:string;source:DocumentContextSource;
@@ -108,7 +112,9 @@ function validateStructure(input:DocumentStructureInput,current:SourceRow,pages:
  if(!input||!isSha(input.rawSourceHash)||input.rawSourceHash!==current.rawSourceHash||input.rawSourceHash!==current.sourceHash
   ||!bounded(input.parserVersion,200)||!Array.isArray(input.parents)||!Array.isArray(input.nodes)
   ||input.parents.length>10000||input.nodes.length!==pages.length)invalid('Structure must cover the complete original source');
- if(Object.keys(input).some(key=>!['rawSourceHash','parserVersion','parents','nodes'].includes(key)))invalid('Unknown structure fields');
+ if(Object.keys(input).some(key=>!['rawSourceHash','parserVersion','parents','nodes','sourceMath'].includes(key)))invalid('Unknown structure fields');
+ if(input.sourceMath)assertDoclingMathProvenance(input.sourceMath,current.documentId,current.sourceHash,
+  pages.map(page=>({pageNumber:page.page_number,body:page.body})));
  const parents=new Map(input.parents.map(parent=>[parent.id,parent]));
  if(parents.size!==input.parents.length)invalid('Parent IDs must be unique');
  for(const parent of input.parents){
@@ -128,8 +134,12 @@ function validateStructure(input:DocumentStructureInput,current:SourceRow,pages:
   ids.add(node.evidenceId);
  }
 }
-export async function registerDocumentStructure(db:Queryable,owner:string,source:DocumentContextSource,input:DocumentStructureInput){
+export async function registerDocumentStructure(db:Queryable,owner:string,source:DocumentContextSource,input:DocumentStructureInput,sourceMath?:PreparedDoclingSourceMath){
  const current=await currentSource(db,owner,source,true),pages=await sourcePages(db,current);validateStructure(input,current,pages);
+ if(input.sourceMath){
+  if(!sourceMath||canonical(sourceMath.provenance)!==canonical(input.sourceMath))invalid('Source math requires verified raw staging');
+  assertPreparedDoclingSourceMath(sourceMath!,owner,current.documentId,current.sourceHash,pages.map(page=>({pageNumber:page.page_number,text:page.body})));
+ }
  const manifest=canonical(input),sha=hash(manifest);
  await db.query(`INSERT INTO document_structures(version_id,source_version_id,source_hash,raw_source_hash,parser_version,manifest_sha256,manifest)
  VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT(version_id) DO NOTHING`,
@@ -157,7 +167,8 @@ async function structuredSource(db:Queryable,owner:string,source:DocumentContext
  const manifestSha256=record?.manifest_sha256??hash(canonical(structure));
  const structureProvenance:FlatTextStructureProvenance|undefined=flat?{method:'flat-persisted-text-v1',manifestSha256,
   originalHierarchyVerified:false,originalFileCompletenessVerified:false}:undefined;
- return {current,structure,manifestSha256,structureProvenance,nodes:pages.map((page,index)=>evidenceNode(current,page,structure.nodes[index]))};
+ return {current,structure,manifestSha256,structureProvenance,nodes:pages.map((page,index)=>({...evidenceNode(current,page,structure.nodes[index]),
+  ...(structure.sourceMath?{sourceMath:doclingMathForPage(structure.sourceMath,page.page_number)}:{})}))};
 }
 export async function readDocumentOutline(db:Queryable,owner:string,source:DocumentContextSource){
  const data=await structuredSource(db,owner,source);await currentSource(db,owner,identity(data.current));

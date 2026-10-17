@@ -23,11 +23,16 @@ const queryStopWords=new Set(('a an the and or of to in on at for from with by a
 
 /** The original transcription remains unchanged; this copy is only for search. */
 export function documentSearchText(value:string):string {
-  const formulae=[...value.matchAll(/\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)/gu)].map(([formula])=>formula);
-  if(!formulae.length&&value.length<400&&/[\\^_=]/u.test(value))formulae.push(value);
+  // Only the source-math serializer's exact paired script tags. Remove the
+  // real tags before decoding their fixed entities once: a literal encoded
+  // '<sup>' inside a script must not become another tag to strip.
+  const searchValue=value.replace(/<(sub|sup)>([^<>]*)<\/\1>/g,(_all,_tag,body:string)=>
+    body.replace(/&(?:amp|lt|gt);/g,entity=>entity==='&amp;'?'&':entity==='&lt;'?'<':'>'));
+  const formulae=[...searchValue.matchAll(/\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)/gu)].map(([formula])=>formula);
+  if(!formulae.length&&searchValue.length<400&&/[\\^_=]/u.test(searchValue))formulae.push(searchValue);
   const atoms=[...new Set(formulae.flatMap(formula=>
     [...formula.replace(/\\[a-z]+/giu,' ').toLowerCase().matchAll(/[a-z]/gu)].map(([letter])=>`math${letter}`)))];
-  const text=value.normalize('NFKC').toLowerCase()
+  const text=searchValue.normalize('NFKC').toLowerCase()
     .replace(/([\p{L}])-\s*\r?\n\s*([\p{L}])/gu,'$1$2')
     .replace(/[∫∑∏√∞αβγδεζηθικλμνξοπρσςτυφχψω∩⋅≤≥]/gu,symbol=>symbolNames[symbol])
     .replace(/\\(?:left|right|mathrm|mathbf|operatorname|text)\b/gu,' ')

@@ -26,6 +26,7 @@ import {createDocumentImageBudget} from './document-image-budget.ts';
 import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
  searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
  type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
+import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
 
 type Json = Record<string, unknown>;
 type CandidateInput = {
@@ -800,7 +801,7 @@ export class KernelService {
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
-      nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence}={}) {
+      nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence;sourceMath?:PreparedDoclingSourceMath}={}) {
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -822,6 +823,11 @@ export class KernelService {
       const expectedCurrentVersion=options.expectedCurrentVersion!==undefined?options.expectedCurrentVersion:
         options.pdfVisuals?await this.documentIngestionHead(owner,document.id,document.hash):undefined;
     if(options.nativeTables)assertPreparedNativeTableCandidates(options.nativeTables,owner,document.id,document.hash);
+    if(options.sourceMath){
+      if(document.mime!=='application/pdf')throw Error('Docling source math requires an actual PDF source');
+      assertPreparedDoclingSourceMath(options.sourceMath,owner,document.id,document.hash,pages);
+    }
+    const batchProvenance=options.sourceMath?doclingMathBatchProvenance(options.sourceMath,options.batchProvenance):options.batchProvenance;
     if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
       throw new Error('Document quality warnings are invalid');
     const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
@@ -830,6 +836,7 @@ export class KernelService {
     // same. Normalize stable metadata; acquisition times and remote task IDs
     // intentionally remain outside identity so a replay stays idempotent.
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
       ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
         pageNumber:page.pageNumber,extractionMethod:page.extractionMethod,parserVersion:page.parserVersion,
@@ -871,7 +878,8 @@ export class KernelService {
         externalId:document.id,courseId:document.courseId||null,
         contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
           originKey:document.originKey,parser,extractionMethod,warnings,
-          ...(options.batchProvenance?{batchProvenance:options.batchProvenance}:{}),
+          ...(batchProvenance?{batchProvenance}:{}),
+          ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
           ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
           ...(options.recording?{recording:options.recording}:{}),
           ...(options.pageProvenance?{pageProvenance:options.pageProvenance}:{}),
@@ -896,6 +904,8 @@ export class KernelService {
           [evidenceId,version,`document:${document.origin}`,sourceItemId,acquiredAt,page.text.slice(0,4000),
             JSON.stringify({textLength:page.text.length,parser,extractionMethod:options.pageProvenance?.[index].extractionMethod||extractionMethod,
               ...(options.pageProvenance?{pageProvenance:options.pageProvenance[index]}:{}),documentVersion:parsedVersion,
+              ...(options.sourceMath?{sourceMath:{policy:options.sourceMath.provenance.policy,provenanceSha256:options.sourceMath.sha256,
+                formulaRelationsVerified:false}}:{}),
               pageNumber:page.pageNumber,contentKind:page.contentKind||'page',startMs:page.startMs??null,endMs:page.endMs??null}),options.evidenceConfidence??0.9,page.locator]);
         await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text,content_kind,start_ms,end_ms)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(version_id,page_number) DO NOTHING`,
@@ -908,11 +918,13 @@ export class KernelService {
         }
       }
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
-      if(options.pdfVisuals){
+      if(options.pdfVisuals||options.sourceMath){
         const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
-        await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
-        await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,parserVersion:'pdf-physical-pages-v1',parents:[],
-          nodes:pages.map((page,index)=>({evidenceId:pageEvidenceIds[index],locator:page.locator,ordinal:index,kind:'page',bodySha256:createHash('sha256').update(page.text).digest('hex')}))});
+        if(options.pdfVisuals)await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
+        await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,
+          parserVersion:options.sourceMath?'pdf-docling-source-math-v1':'pdf-physical-pages-v1',parents:[],
+          ...(options.sourceMath?{sourceMath:options.sourceMath.provenance}:{}),
+          nodes:pages.map((page,index)=>({evidenceId:pageEvidenceIds[index],locator:page.locator,ordinal:index,kind:'page',bodySha256:createHash('sha256').update(page.text).digest('hex')}))},options.sourceMath);
       }
       // Bind only after the same-version real PDF manifest has been published.
       if(options.nativeTables){

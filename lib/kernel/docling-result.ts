@@ -1,4 +1,5 @@
 import {assessPdfFormulaPreservation} from '../pdf-formulas.ts';
+import {DOCLING_SOURCE_MATH_VERSION,doclingMathRaw,type DoclingMathNode,type DoclingSourceMath} from './docling-source-math.ts';
 /** Decode Docling's document tree, whose references carry reading order and PDF provenance. */
 export const DOCLING_PARSER_VERSION = 'docling-v3-source-preserved-search';
 export const DOCLING_TEXT_PARSER_VERSION = 'docling-v3-source-preserved-text-search';
@@ -32,7 +33,7 @@ function nodeContent(node: Json): string {
   return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
 }
 
-export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[];visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[]} {
+export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[];visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[];sourceMath?:DoclingSourceMath[]} {
   const response = object(result);
   if (response?.status !== 'success') throw new Error(`Docling conversion is incomplete (${response?.status || 'missing status'})`);
   if (list(response.errors).length) throw new Error('Docling reported conversion errors');
@@ -75,6 +76,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   }
   const formulaPageNumbers=new Set<number>();
   const nativeTables:DoclingNativeTable[]=[];
+  const mathNodes=new Map<string,DoclingMathNode>();
   if(options.formulaEnriched === false) warnings.push('公式增强未启用；正文可检索，公式须核对原 PDF');
   const verifiedBlankPages = new Set(options.verifiedBlankPages || []);
   const regions:DoclingRegion[]=[];
@@ -133,16 +135,66 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     else if(text(node.text))for(const location of locations)warnings.push(`第 ${location.page_no} 页机器公式未核验符号和上下标，请核对原 PDF`);
   }
 
+  const script=(node:Json)=>object(node.formatting)?.script;
+  const isInline=(node:Json)=>node.label==='inline';
+  const escape=(value:string)=>value.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  function noteMath(ref:string,node:Json,ancestors:Set<string>,role:DoclingMathNode['role'],numbers:number[]){
+    if(node.self_ref!==undefined&&node.self_ref!==ref)throw Error('Docling math self reference differs');
+    mathNodes.set(ref,{reference:ref,path:[...ancestors,ref],role,raw:doclingMathRaw(node),
+      derivedPageNumbers:[...new Set(numbers)],pageNumbers:[...new Set(numbers)]});
+    if(mathNodes.size>10000)throw Error('Docling source math exceeds node limit');
+  }
+  // Only an explicit native InlineGroup permits inline concatenation. Do not
+  // infer a base or a math mode from proximity, font size or flattened strings.
+  function inline(reference:unknown,ancestors:Set<string>):Map<number,string>{
+    const {ref,node}=resolve(reference);
+    if(ancestors.has(ref)||ancestors.size>=128||visited.has(ref))throw Error('Docling inline order is cyclic or shared');
+    visited.add(ref);const next=new Set([...ancestors,ref]),output=new Map<number,string>();
+    if(ref.startsWith('#/groups/')&&isInline(node)){
+      if(content(node).trim())throw Error('Docling inline container has ambiguous own text');
+      for(const child of list(node.children))for(const [page,value]of inline(child,next))output.set(page,(output.get(page)||'')+value);
+      noteMath(ref,node,ancestors,'inline-group',[...output.keys()]);return output;
+    }
+    if(!ref.startsWith('#/texts/'))throw Error('Unsupported Docling inline child; original raw retained');
+    const children=list(node.children);
+    if(children.length){
+      if(content(node).trim()||children.length!==1||!isInline(resolve(children[0]).node))throw Error('Docling inline parent content is ambiguous');
+      const nested=inline(children[0],next);noteMath(ref,node,ancestors,'inline-text',[...nested.keys()]);return nested;
+    }
+    const locations=provenance(node),numbers=[...new Set(locations.map(p=>p.page_no as number))];
+    if(numbers.length!==1)throw Error('Docling inline span has ambiguous page boundaries');
+    noteFormula(node);const formula=node.label==='formula',fallback=(!text(node.text)||sourceFallback.has(node))&&Boolean(text(node.orig));
+    let value=content(node);
+    // Reuse orig fallback for empty/blank normalized text, then retain literal
+    // whitespace only when neither field contains readable source content.
+    if(!formula&&!value)value=typeof node.text==='string'&&node.text.length?node.text:typeof node.orig==='string'?node.orig:'';
+    if(formula&&!value.trim()&&options.formulaEnriched!==false)throw Error('Docling inline formula has no readable LaTeX');
+    if(formula&&value&&!fallback&&options.formulaEnriched!==false)value=`\\(${value}\\)`;
+    const position=script(node);
+    if(position==='sub'||position==='super')value=`<${position==='sub'?'sub':'sup'}>${escape(value)}</${position==='sub'?'sub':'sup'}>`;
+    else if(position!==undefined&&position!==null&&position!=='baseline')warnings.push('行内脚本角色未知；保留原字符串，未推断上下标');
+    for(const number of numbers)occupied.add(number);
+    output.set(numbers[0],value);noteMath(ref,node,ancestors,formula?'inline-formula':position==='sub'||position==='super'?'script':'inline-text',numbers);
+    return output;
+  }
+
   function cellText(cell: Json, ancestors: Set<string>, tablePages: Set<unknown>): string {
     if (!cell.ref) return content(cell);
     const collect = (reference: unknown, stack: Set<string>): string => {
       const {ref, node} = resolve(reference);
       if (stack.has(ref)) throw new Error('Docling document references contain a cycle');
+      if(ref.startsWith('#/groups/')&&isInline(node)){
+        const output=inline(reference,stack);
+        if([...output.keys()].some(page=>!tablePages.has(page)))throw Error('Docling rich inline cell page is ambiguous');
+        return [...output.values()].join(' ');
+      }
       visited.add(ref);
       const next = new Set([...stack, ref]);
       if (!ref.startsWith('#/groups/')) {
         if (provenance(node).some(location => !tablePages.has(location.page_no))) throw new Error('Docling rich table cell has ambiguous page provenance');
         noteFormula(node);
+        if(node.label==='formula'||script(node)==='sub'||script(node)==='super')noteMath(ref,node,stack,
+          node.label==='formula'?'unscoped-formula':'script',provenance(node).map(p=>p.page_no as number));
       }
       return [content(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
     };
@@ -193,6 +245,11 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     const {ref, node} = resolve(reference);
     if (ancestors.has(ref)) throw new Error('Docling document references contain a cycle');
     if (visited.has(ref)) return;
+    if(ref.startsWith('#/groups/')&&isInline(node)){
+      for(const [page,value]of inline(reference,ancestors))parts.get(page)!.push(value);
+      for(const child of [...list(node.captions),...list(node.footnotes),...list(node.references)])visit(child,new Set([...ancestors,ref]));
+      return;
+    }
     visited.add(ref);
     const next = new Set([...ancestors, ref]);
     if (ref.startsWith('#/tables/')) add(node, tableText(node, next,ref));
@@ -218,8 +275,13 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       }
     } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
       const value = content(node);
+      if(value.trim()&&list(node.children).some(child=>isInline(resolve(child).node)))throw Error('Docling inline parent content is ambiguous');
       const originalFallback = (!text(node.text)||sourceFallback.has(node)) && Boolean(text(node.orig));
       noteFormula(node);
+      if(node.label==='formula'||script(node)==='sub'||script(node)==='super'){
+        noteMath(ref,node,ancestors,node.label==='formula'?'block-formula':'script',provenance(node).map(p=>p.page_no as number));
+        if(node.label!=='formula')warnings.push('非行内分组的脚本保留原位置和字符串；未推断所属基符号');
+      }
       if (node.label === 'formula' && !value.trim()) {
         if(options.formulaEnriched !== false)throw new Error('Docling formula has no readable LaTeX');
         warnings.push(`第 ${provenance(node)[0].page_no} 页有公式尚未转写，请核对原 PDF`);
@@ -251,7 +313,9 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const pageSizes=pageNumbers.flatMap(pageNumber=>{const size=object(object(manifest?.[String(pageNumber)])?.size);
     return size&&[size.width,size.height].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)?
       [{pageNumber,width:size.width as number,height:size.height as number}]:[];});
-  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],nativeTables,
+  const sourceMath=mathNodes.size?[{policy:DOCLING_SOURCE_MATH_VERSION,nodes:[...mathNodes.values()]}]:undefined;
+  if(sourceMath&&Buffer.byteLength(JSON.stringify(sourceMath))>8*1024*1024)throw Error('Docling source math exceeds byte limit');
+  return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],nativeTables,...(sourceMath?{sourceMath}:{}),
     visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',regions,pageSizes,
       ...(unavailablePictures.length?{unavailablePictures,reason:'Docling picture geometry unavailable; original text retained'}:
         pageSizes.length===pageNumbers.length?{}:{reason:'Docling page sizes unavailable'})}};
