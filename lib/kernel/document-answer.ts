@@ -6,6 +6,7 @@ import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
+import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -48,6 +49,8 @@ export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
  dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';maxOutputTokens?:number;timeoutMs?:number;
  evidenceSelection?:'select-then-answer';
+ citationCheck?:{mode:'selected-once';beforeAttempt:(identity:string)=>Promise<void>;
+  recordResponse:(response:Readonly<DocumentCitationAuditResponse>)=>Promise<void>};
  conversation?:Array<{role:'user'|'assistant';text:string}>;
  onStage?:(stage:'evidence-selection'|'generation'|'citation-validation')=>void;
  beforeAttempt?:(identity:string)=>Promise<void>};
@@ -463,6 +466,10 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
   !Number.isInteger(timeout)||timeout<1000||timeout>180000)throw new Error('Invalid internal document answer policy');
  if(policy.evidenceSelection!==undefined&&(policy.evidenceSelection!=='select-then-answer'||policy.scope!=='application'))
   throw new Error('Invalid application evidence selection policy');
+ if(policy.citationCheck!==undefined&&(policy.scope!=='application'||
+  !exactKeys(policy.citationCheck,['mode','beforeAttempt','recordResponse'])||policy.citationCheck.mode!=='selected-once'||
+  typeof policy.citationCheck.beforeAttempt!=='function'||typeof policy.citationCheck.recordResponse!=='function'))
+  throw new Error('Invalid application citation check policy');
  if(policy.scope==='development'){
   await withDocumentRerankRunPolicy({scope:'development',dailyLimit,maxAttempts:1,beforeAttempt:policy.beforeAttempt},async()=>{});
  }else if(policy.scope==='application'){

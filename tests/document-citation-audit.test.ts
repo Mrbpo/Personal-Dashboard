@@ -46,6 +46,12 @@ const diagnostics=()=>({claimId:'c0',judgment:'supported',reason:'The cited text
  objectUnitScope:{claim:'two samples',evidence:'two samples',alignment:'same'}});
 const response=(value=diagnostics())=>({status:'completed',model:'gpt-5.4-mini-2026-03-17',
  usage:{input_tokens:100,output_tokens:50},output_text:JSON.stringify(value)});
+test('local diagnostics reject explicit contradictions while retaining complementary references',()=>{
+ const v=diagnostics();assert.equal(validateDocumentCitationAudit(v,['r0','r1']).judgment,'supported');
+ assert.throws(()=>validateDocumentCitationAudit({...v,citationFindings:{...v.citationFindings,r1:{judgment:'contradicts',reason:'Explicit opposite.'}}},['r0','r1']),/diagnostics/);
+ assert.throws(()=>validateDocumentCitationAudit({...v,objectUnitScope:{...v.objectUnitScope,alignment:'different'}},['r0','r1']),/diagnostics/);
+ assert.equal(validateDocumentCitationAudit({...v,judgment:'unsupported',objectUnitScope:{...v.objectUnitScope,alignment:'different'}},['r0','r1']).judgment,'unsupported');
+});
 async function development<T>(work:()=>Promise<T>){
  const names=['DATABASE_URL','KERNEL_DATABASE_URL','KERNEL_ADMIN_DEVELOPMENT_RUN'] as const;
  const saved=Object.fromEntries(names.map(name=>[name,process.env[name]]));

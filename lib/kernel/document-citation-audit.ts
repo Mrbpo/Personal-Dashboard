@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
-import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
+import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy} from './document-answer.ts';
 
 export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v2';
 export type EvidenceAuditProfile='reasoned-v1';
@@ -16,7 +16,8 @@ const exact=(value:unknown,keys:string[])=>value!==null&&typeof value==='object'
  Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
 export type DocumentCitationAuditBinding={inputFingerprint:string;quoteUnitManifestSha256:string;
  providerSelections:DocumentAnswerSelections;claimIndex:number;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
-export type DocumentCitationAuditResponse={requestIdentity:string;providerRequestSha256:string;httpStatus:number;rawBody:string;rawSha256:string};
+export type DocumentCitationAuditResponse={requestIdentity:string;providerRequestSha256:string;httpStatus:number;rawBody:string;rawSha256:string;
+ binding?:ReturnType<typeof prepareDocumentCitationAudit>['binding'];bindingSha256?:string};
 export type DocumentCitationAuditPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;beforeAttempt:(identity:string)=>Promise<void>;
  recordResponse:(response:Readonly<DocumentCitationAuditResponse>)=>Promise<void>};
 type Image=DocumentAnswerContext['images'][number];
@@ -100,6 +101,10 @@ export function validateDocumentCitationAudit(value:unknown,referenceIds:readonl
   if(!exact(finding,['judgment','reason'])||!['supports','does-not-establish','contradicts','unclear'].includes(finding.judgment)||!text(finding.reason))return invalid();}
  if(!exact(result.objectUnitScope,['claim','evidence','alignment'])||!text(result.objectUnitScope.claim)||!text(result.objectUnitScope.evidence)||
   !['same','different','not-established','not-applicable'].includes(result.objectUnitScope.alignment))return invalid();
+ // Mixed supporting/unclear references can collectively establish a claim.
+ // Explicit contradiction or a different object/scope cannot certify support.
+ if(result.judgment==='supported'&&(result.objectUnitScope.alignment==='different'||
+  referenceIds.some(id=>result.citationFindings[id].judgment==='contradicts')))return invalid();
  return result;
 }
 
@@ -126,15 +131,24 @@ export function documentCitationAuditRequestIdentity(request:ReturnType<typeof b
 export async function auditDocumentCitationClaim(question:string,readContext:()=>Promise<DocumentAnswerContext>,
  binding:DocumentCitationAuditBinding,policy:DocumentCitationAuditPolicy){
  policy={...policy};
- await assertDocumentCitationAuditPolicy(policy);const original=structuredClone(binding);
+ await assertDocumentCitationAuditPolicy(policy);
+ return executeCitationAudit(question,readContext,binding,policy);
+}
+
+/** Shared execution does not grant authority; both callers validate their own
+ * policy first. The administrator entry above keeps its development guard. */
+async function executeCitationAudit(question:string,readContext:()=>Promise<DocumentAnswerContext>,
+ binding:DocumentCitationAuditBinding,policy:Pick<DocumentCitationAuditPolicy,'dailyLimit'|'auditProfile'|'beforeAttempt'|'recordResponse'>,timeoutMs=30000){
+ const original=structuredClone(binding);
  const prepared=prepareDocumentCitationAudit(question,await readContext(),original),request=buildDocumentCitationAuditRequest(prepared.packet,policy.auditProfile);
  const {providerRequestSha256,requestIdentity}=documentCitationAuditRequestIdentity(request,prepared.bindingSha256,policy.auditProfile);
  const recheck=async()=>{if(prepareDocumentCitationAudit(question,await readContext(),original).bindingSha256!==prepared.bindingSha256)
   throw new Error('Citation-local source changed during audit');};
  await policy.beforeAttempt(requestIdentity);await recheck();
- const response=await paidOpenAI('responses',request,AbortSignal.timeout(30000),{kind:'document-answer',dailyLimit:policy.dailyLimit??200});
+ const response=await paidOpenAI('responses',request,AbortSignal.timeout(timeoutMs),{kind:'document-answer',dailyLimit:policy.dailyLimit??200});
  const rawBody=await response.text(),rawSha256=sha(rawBody);
- await policy.recordResponse({requestIdentity,providerRequestSha256,httpStatus:response.status,rawBody,rawSha256});
+ await policy.recordResponse({requestIdentity,providerRequestSha256,httpStatus:response.status,rawBody,rawSha256,
+  binding:prepared.binding,bindingSha256:prepared.bindingSha256});
  await recheck();
  if(!response.ok)throw new Error(`Citation-local audit request failed (${response.status})`);
  const payload=JSON.parse(rawBody);
@@ -145,7 +159,39 @@ export async function auditDocumentCitationClaim(question:string,readContext:()=
   .map((item:{text:string})=>item.text).join('');
  const diagnostics=validateDocumentCitationAudit(JSON.parse(raw),prepared.packet.references.map(ref=>ref.refId));
  return {version:DOCUMENT_CITATION_AUDIT_VERSION,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),diagnostics,requestedModel:request.model,model:payload.model,
-  providerRequestSha256,requestIdentity,rawResponseSha256:rawSha256,binding:prepared.binding,bindingSha256:prepared.bindingSha256};
+  providerRequestSha256,requestIdentity,rawResponseSha256:rawSha256,binding:prepared.binding,bindingSha256:prepared.bindingSha256,
+  ...(typeof payload.id==='string'?{providerResponseId:payload.id}:{}),...(payload.usage?{usage:payload.usage as unknown}:{})};
+}
+
+export class DocumentCitationCheckError extends Error{
+ readonly code:'citation-support-not-established'|'citation-check-incomplete';
+ constructor(code:DocumentCitationCheckError['code'],options?:ErrorOptions){super(code,options);this.name='DocumentCitationCheckError';this.code=code;}
+}
+
+/** Application-only, once per original claim. No full-source model review,
+ * citation swapping, partial-answer deletion, revision or retry. */
+export async function checkApplicationDocumentCitations(question:string,readContext:()=>Promise<DocumentAnswerContext>,
+ binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy){
+ await documentAnswerSettings(policy);
+ if(policy.scope!=='application'||policy.citationCheck?.mode!=='selected-once')throw new Error('Explicit application citation check policy required');
+ const check=policy.citationCheck,deadline=Date.now()+55000,audits=[];
+ const selections=structuredClone(binding.providerSelections);
+ if(!Array.isArray(selections.claims)||selections.claims.length>30)throw new DocumentCitationCheckError('citation-check-incomplete');
+ for(let claimIndex=0;claimIndex<selections.claims.length;claimIndex++){
+  try{
+   const remaining=deadline-Date.now();if(remaining<1000)throw new Error('Citation check deadline reached');
+   const audit=await executeCitationAudit(question,readContext,{...binding,providerSelections:selections,claimIndex},
+    {dailyLimit:policy.dailyLimit,beforeAttempt:check.beforeAttempt,recordResponse:check.recordResponse},Math.min(30000,remaining));
+   if(Date.now()>deadline)throw new Error('Citation check deadline reached');
+   audits.push(audit);
+   if(audit.diagnostics.judgment!=='supported')throw new DocumentCitationCheckError('citation-support-not-established');
+  }catch(error){
+   if(error instanceof DocumentCitationCheckError)throw error;
+   throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});
+  }
+ }
+ return {mode:'selected-once' as const,version:DOCUMENT_CITATION_AUDIT_VERSION,claimCount:selections.claims.length,
+  status:'all-supported' as const,independentlyVerified:false as const,audits};
 }
 
 export const COMPLETE_STUDY_COVERAGE_REVIEW_VERSION='complete-study-coverage-review-v1';

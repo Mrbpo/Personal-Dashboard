@@ -8,7 +8,7 @@ import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocume
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
-import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
+import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareCompleteStudyEvidenceRoute,
@@ -1221,7 +1221,15 @@ export class KernelService {
         };
       }
     }
-    const result=await synthesizeDocumentAnswer(question,read,policy);return {...result,contextExpansion};
+    const result=await synthesizeDocumentAnswer(question,read,policy);
+    let citationCheck:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>|undefined;
+    if(policy.citationCheck&&result.providerSelections?.claims.length){
+      policy.onStage?.('citation-validation');
+      citationCheck=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
+        quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:result.providerSelections,
+        ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
+    }
+    return {...result,contextExpansion,...(citationCheck?{citationCheck}:{})};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,studyEvidenceSelection,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 
@@ -12,11 +12,31 @@ test('legacy is the default, invalid configuration fails closed and application 
  assert.throws(()=>studyAnswerBackend('typo'),StudyAnswerError);
  assert.equal(studyEvidenceSelection('single-pass'),undefined);assert.equal(studyEvidenceSelection('select-then-answer'),'select-then-answer');
  assert.throws(()=>studyEvidenceSelection('typo'),StudyAnswerError);
+ assert.equal(studyCitationCheck('off'),undefined);assert.equal(studyCitationCheck('selected-once'),'selected-once');
+ assert.throws(()=>studyCitationCheck('typo'),StudyAnswerError);
  await assert.rejects(documentAnswerSettings({scope:'application',model:'gpt-6-astra'}),/bounded mini/);
  await assert.rejects(documentAnswerSettings({scope:'application',maxOutputTokens:9000}),/bounded mini/);
  assert.equal((await documentAnswerSettings({scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000})).model,'gpt-5.4-mini');
 });
 
+test('application trace retains a failed check and maps it to a non-answer error',async()=>{
+ const {DocumentCitationCheckError}=await import('../lib/kernel/document-citation-audit.ts');
+ const {randomUUID}=await import('node:crypto'),{readdir,readFile}=await import('node:fs/promises'),{join}=await import('node:path');
+ const names=['STUDY_CITATION_CHECK','STUDY_CITATION_TRACE_DIR','OPENAI_MODEL'] as const;
+ const env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved=kernel.answerStudyContent;
+ process.env.STUDY_CITATION_CHECK='selected-once';process.env.OPENAI_MODEL='gpt-5.4-mini';delete process.env.STUDY_CITATION_TRACE_DIR;
+ let calls=0;
+ kernel.answerStudyContent=async(_o,_q,_s,policy)=>{calls++;await policy!.citationCheck!.beforeAttempt('a'.repeat(64));
+  await policy!.citationCheck!.recordResponse({requestIdentity:'a'.repeat(64),providerRequestSha256:'b'.repeat(64),httpStatus:200,rawBody:'saved-fixture',rawSha256:'fixture'});
+  throw new DocumentCitationCheckError('citation-support-not-established');};
+ try{await assert.rejects(answerKernelStudy('alice','Question','course',[]),(e:any)=>e.code==='citation-trace-required');assert.equal(calls,0);
+  const directory=join(process.cwd(),'data','citation-trace-unit-'+randomUUID());process.env.STUDY_CITATION_TRACE_DIR=directory;
+  await assert.rejects(answerKernelStudy('alice','Question','course',[]),(e:any)=>e.stage==='citation-validation'&&e.code==='citation-support-not-established');
+  const files=await readdir(directory);assert.equal(files.length,2);
+  const receipt=JSON.parse(await readFile(join(directory,files.find(f=>f.endsWith('.response.json'))!),'utf8'));
+  assert.equal(receipt.owner,'alice');assert.equal(receipt.record.rawBody,'saved-fixture');assert.equal(calls,1);
+ }finally{kernel.answerStudyContent=saved;for(const n of names){if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}}
+});
 test('kernel tutor shares current-source references, preserves ownership and request idempotency without legacy calls',async()=>{
  const saved={backend:process.env.STUDY_ANSWER_BACKEND,model:process.env.OPENAI_MODEL},answer=kernel.answerStudyContent,courses=kernel.listCourses,fetch=globalThis.fetch;
  process.env.STUDY_ANSWER_BACKEND='kernel';process.env.OPENAI_MODEL='gpt-5.4-mini';
