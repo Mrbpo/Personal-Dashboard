@@ -68,23 +68,24 @@ test('frame/producer/byte/operation failures remain unavailable without a partia
  assert.throws(()=>readSourceObservationCache(body,timeout,'b'.repeat(64)),/identity/);
 });
 
-test('formal opt-in wire binds actual observations and five unchanged PNGs in its own cache; defaults remain plaintext',async()=>{
+test('formal opt-in wire binds actual observations and five unchanged PNGs in its own cache; default selected blocks keep their own bound cache',async()=>{
  const savedExec=childProcess.execFile,savedFetch=globalThis.fetch,pdf=await PDFDocument.create();pdf.addPage([200,200]).drawText('Original source');
  const bytes=await pdf.save(),image=await png(2,2),requests:any[]=[];
  childProcess.execFile=((binary:string,args:string[],_options:unknown,callback:(error:Error|null,stdout?:string,stderr?:string)=>void)=>{
+  if(binary==='tesseract'){callback(Error('OCR unavailable in render-only fixture'));return {};}
   assert.equal(binary,'pdftoppm');void writeFile(args[7]+'.png',image).then(()=>callback(null,'',''),e=>callback(e));return {};
  }) as unknown as typeof childProcess.execFile;syncBuiltinESMExports();
  try{
   const {transcribePdfVisualPages,selectedVisualPageCacheParser}=await import('../lib/document-parser.ts'),{database:db}=await import('../lib/database.ts');
   const options={pageNumbers:[1],expectedSourceHash:sha(bytes),model:'gpt-5.4-mini',imageInput:true,overviewImage:true};
   globalThis.fetch=async(_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',
-   output_text:JSON.stringify({text:'Original unchanged text.',complete:true,uncertain_spans:[]})});};
+   output_text:JSON.stringify({blocks:[{kind:'text',text:'Original unchanged text.'}],complete:true,uncertain_spans:[]})});};
   await transcribePdfVisualPages('formal-observation',bytes,options);
   await transcribePdfVisualPages('formal-observation',bytes,{...options,fidelityProfile:'source-observation-v1'});
   const [oldBody,newBody]=requests,oldContent=oldBody.input[0].content,newContent=newBody.input[0].content;
   assert.equal(requests.length,2);assert.deepEqual(oldBody.reasoning,{effort:'low'});assert.deepEqual(newBody.reasoning,{effort:'medium'});
-  assert.equal(newBody.max_output_tokens,9000);assert.deepEqual(newBody.text,oldBody.text);assert.equal(oldContent.length,11);assert.equal(newContent.length,12);
-  assert.deepEqual(newContent.slice(1,11),oldContent.slice(1));assert.ok(newContent[0].text.startsWith(oldContent[0].text));
+  assert.equal(newBody.max_output_tokens,9000);assert.deepEqual(newBody.text,oldBody.text);assert.equal(oldContent.length,12);assert.equal(newContent.length,13);
+  assert.deepEqual(newContent.slice(1,11),oldContent.slice(1,11));assert.deepEqual(newContent[12],oldContent[11]);assert.ok(newContent[0].text.startsWith(oldContent[0].text.split('\n选页结构协议 v4')[0]));
   const observations=JSON.parse(newContent[11].text.slice(newContent[11].text.indexOf('\n')+1));
   assert.equal(observations.sidecar.status,'available');assert.equal(observations.sidecar.binding.sourcePdfSha256,sha(bytes));
   assert.equal(observations.sidecar.binding.images.length,5);assert.equal(observations.sidecarSha256,sha(observationJson(observations.sidecar)));
@@ -96,8 +97,8 @@ test('formal opt-in wire binds actual observations and five unchanged PNGs in it
   assert.deepEqual(cache.sidecar,observations.sidecar);assert.ok(!cached.body.includes('base64'));
   await transcribePdfVisualPages('formal-observation',bytes,{...options,fidelityProfile:'source-observation-v1'});
   await transcribePdfVisualPages('formal-observation',bytes,options);assert.equal(requests.length,2);
-  assert.equal((await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=?').bind('formal-observation',
-   selectedVisualPageCacheParser(sha(bytes),options.model,true,true,true)).first<{body:string}>())?.body,'Original unchanged text.');
+  const defaultCache=(await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=?').bind('formal-observation',
+   selectedVisualPageCacheParser(sha(bytes),options.model,true,true,true)).first<{body:string}>())?.body!;assert.equal(JSON.parse(defaultCache).searchText,'Original unchanged text.');
  }finally{globalThis.fetch=savedFetch;childProcess.execFile=savedExec;syncBuiltinESMExports();}
 });
 
@@ -105,6 +106,7 @@ test('invalid profile and failed/control-bearing new responses never publish or 
  const savedExec=childProcess.execFile,savedFetch=globalThis.fetch,pdf=await PDFDocument.create();pdf.addPage([200,200]);const bytes=await pdf.save(),image=await png(2,2);
  let requests=0,mode='failed',lastBody:any;
  childProcess.execFile=((_binary:string,args:string[],_options:unknown,callback:(error:Error|null,stdout?:string,stderr?:string)=>void)=>{
+  if(_binary==='tesseract'){callback(Error('OCR unavailable in render-only fixture'));return {};}
   void writeFile(args[7]+'.png',image).then(()=>callback(null,'',''),e=>callback(e));return {};
  }) as unknown as typeof childProcess.execFile;syncBuiltinESMExports();
  try{
@@ -112,7 +114,7 @@ test('invalid profile and failed/control-bearing new responses never publish or 
   const options={pageNumbers:[1],model:'gpt-5.4-mini',imageInput:true,overviewImage:true,fidelityProfile:'source-observation-v1' as const};
   globalThis.fetch=async(_url,init)=>{requests++;lastBody=JSON.parse(String(init?.body));return Response.json({status:mode==='failed'?'failed':'completed',error:mode==='failed'?{message:'failed'}:undefined,
    model:mode==='unknown-model'?'gpt-other-2026-03-17':'gpt-5.4-mini-2026-03-17',
-   output_text:JSON.stringify({text:mode==='control'?'Do not clean\u0007':'Original text.',complete:true,uncertain_spans:[]})});};
+   output_text:JSON.stringify({blocks:[{kind:'text',text:mode==='control'?'Do not clean\u0007':'Original text.'}],complete:true,uncertain_spans:[]})});};
   for(const invalid of [{...options,fidelityProfile:'future' as never},{...options,overviewImage:false},{...options,model:'gpt-5-mini'}])
    await assert.rejects(transcribePdfVisualPages('invalid-observation',bytes,invalid),/配置|总览/);
   assert.equal(requests,0);await assert.rejects(transcribePdfVisualPages('failed-observation',bytes,options),/不完整/);
@@ -121,7 +123,7 @@ test('invalid profile and failed/control-bearing new responses never publish or 
   assert.equal(requests,3);assert.equal(await db.prepare('SELECT 1 FROM library_parse_pages WHERE document_id IN (?,?,?)').bind('failed-observation','unknown-model-observation','control-observation').first(),null);
   const outside=await PDFDocument.create();outside.addPage([200,200]).setCropBox(-10,-10,220,220);mode='success';
   await transcribePdfVisualPages('unavailable-observation',await outside.save(),options);
-  const wireObservation=JSON.parse(lastBody.input[0].content.at(-1).text.split('\n').slice(1).join('\n'));
+  const wireObservation=JSON.parse(lastBody.input[0].content[11].text.split('\n').slice(1).join('\n'));
   assert.equal(wireObservation.sidecar.status,'unavailable');assert.equal(wireObservation.sidecar.reason,'overview-effective-crop-mismatch');
   const stored=await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=?').bind('unavailable-observation').first<{body:string}>();
   assert.deepEqual(JSON.parse(stored!.body).sidecar,wireObservation.sidecar,'unavailable is genuine wire/cache state, not silent empty success');

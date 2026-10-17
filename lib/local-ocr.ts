@@ -3,8 +3,28 @@ import {promisify} from 'node:util';
 import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash} from 'node:crypto';
 const execute=promisify(execFile);
 export const PDF_PAGE_IMAGE_MAX_EDGE=2500;
+type OcrImage={sha256:string;width:number;height:number};
+export type LocalImageOcrObservation={status:'available';image:OcrImage;tsv:string;tsvSha256:string;engine:'tesseract';language:'eng+chi_sim'}|
+ {status:'unavailable';image:OcrImage|null;reason:string};
+/** Reuse the already rendered full-page PNG. Raw observations are never corrected or treated as source truth. */
+export async function localImageOcrTsv(bytes:Uint8Array|null):Promise<LocalImageOcrObservation>{
+ const png=bytes?Buffer.from(bytes):null,sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex');
+ const image=png&&png.length>=24&&png.subarray(0,8).toString('hex')==='89504e470d0a1a0a'?
+  {sha256:sha(png),width:png.readUInt32BE(16),height:png.readUInt32BE(20)}:null;
+ const unavailable=(reason:string):LocalImageOcrObservation=>({status:'unavailable',image,reason});
+ if(process.env.LOCAL_OCR!=='true')return unavailable('local-ocr-disabled');
+ if(!image||image.width<1||image.height<1||Math.max(image.width,image.height)>PDF_PAGE_IMAGE_MAX_EDGE)return unavailable('full-page-png-unavailable');
+ const directory=await mkdtemp(join(tmpdir(),'study-image-tsv-'));
+ try{
+  const input=join(directory,'page.png');await writeFile(input,png!,{mode:0o600});
+  const {stdout}=await execute('tesseract',[input,'stdout','-l','eng+chi_sim','tsv'],{timeout:45000,maxBuffer:256*1024});
+  if(!stdout.startsWith('level\tpage_num\t')||Buffer.byteLength(stdout)>256*1024)return unavailable('invalid-or-oversize-tsv');
+  return {status:'available',image,tsv:stdout,tsvSha256:sha(stdout),engine:'tesseract',language:'eng+chi_sim'};
+ }catch{return unavailable('tesseract-unavailable');}finally{await rm(directory,{recursive:true,force:true});}
+}
 export async function localPdfPageImage(bytes:Uint8Array):Promise<Buffer|null>{
  if(process.env.LOCAL_OCR!=='true')return null;
  const directory=await mkdtemp(join(tmpdir(),'study-pdf-image-'));

@@ -8,6 +8,7 @@ import {budgetStatus} from './ai-budget.ts';
 import {serviceValue} from './service-vault.ts';
 import {selectedVisualPageCacheParser,transcribePdfVisualPages,PDF_VISUAL_PAGES_PER_UTC_DAY,SELECTED_VISUAL_PARSER_VERSION} from './document-parser.ts';
 import {assertVisualCacheStructure} from './pdf-visual-structure.ts';
+import {readVisualBlockCache} from './pdf-visual-blocks.ts';
 import {preparePdfVisualEvidence,readPdfVisualEvidence} from './kernel/pdf-visual-evidence.ts';
 
 export const PAGE_REPAIR_MODEL='gpt-5-mini';
@@ -93,7 +94,8 @@ export async function applyPageRepair(owner:string,target:PageRepairTarget,resul
   if(!page||!page.text?.trim()||page.locator!==`第 ${pageNumber} 页`||page.textHash!==digest(page.text))throw new Error('Repair staged original page/hash mismatch');
   const cached=await database.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?')
    .bind(target.documentId,cacheParser,pageNumber-1).first<{body:string}>();
-  if(cached?.body!==page.text)throw new Error('Repair must use the validated recognition cache; hand-edited staged text is not accepted');
+  if(!cached||readVisualBlockCache(cached.body,{sourceHash:target.sourceHash,physicalPage:pageNumber,model:PAGE_REPAIR_MODEL,parser:cacheParser}).text!==page.text)
+   throw new Error('Repair must use the validated recognition cache; hand-edited staged text is not accepted');
   assertVisualCacheStructure(page.text,pageNumber);
  }
  // Read the verified whole layout without selecting image inputs. This keeps

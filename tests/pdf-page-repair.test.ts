@@ -9,6 +9,7 @@ import childProcess from 'node:child_process';
 import {syncBuiltinESMExports} from 'node:module';
 import {readFile,writeFile} from 'node:fs/promises';
 import sharp from 'sharp';
+import {encodeVisualBlockCache} from '../lib/pdf-visual-blocks.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'page-repair-tests-'));
 process.env.DATABASE_URL=':memory:';
@@ -75,6 +76,9 @@ test('page repair atomically retains all original PNG/region evidence beyond ans
  const text='Faithful visual second page \\(\\psi\\)';
  const result={documentId:id,sourceHash:doc.hash,expectedVersion:original,model:'gpt-5-mini',parserVersion:SELECTED_VISUAL_PARSER_VERSION,
   pages:[{pageNumber:2,locator:'第 2 页',text,textHash:digest(text)}]};
+ const recognitionCache=(value:string,pageNumber:number)=>encodeVisualBlockCache({sourceHash:doc.hash,physicalPage:pageNumber,model:'gpt-5-mini',
+  parser:selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true)},'a'.repeat(64),{status:'unavailable',image:null,reason:'fixture'},
+  JSON.stringify({complete:true,uncertain_spans:[],blocks:[{kind:'text',text:value}]}));
  await assert.rejects(applyPageRepair(owner,target,result),/validated recognition cache/);
  const publish=t.mock.method(kernel,'ingestParsedDocument',async()=>{throw new Error('Invalid visual cache must not be published');});
  try{
@@ -88,7 +92,7 @@ test('page repair atomically retains all original PNG/region evidence beyond ans
    assert.equal((await database.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=1').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true)).first<{body:string}>())?.body,body);
   }
  }finally{publish.mock.restore();}
- await database.prepare('INSERT OR REPLACE INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),1,text).run();
+ await database.prepare('INSERT OR REPLACE INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),1,recognitionCache(text,2)).run();
  const published=await applyPageRepair(owner,target,result);
  assert.notEqual(published.currentVersion,original);
  assert.equal(renderCalls,2,'verified existing original pages/regions must use the staging cache without rerendering');
@@ -126,7 +130,7 @@ test('page repair atomically retains all original PNG/region evidence beyond ans
  const nextText='Second bounded repair of the first page';
  const nextTarget={...target,expectedVersion:published.currentVersion,pageNumbers:[1]};
  const nextResult={...result,expectedVersion:published.currentVersion,pages:[{pageNumber:1,locator:'第 1 页',text:nextText,textHash:digest(nextText)}]};
- await database.prepare('INSERT INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),0,nextText).run();
+ await database.prepare('INSERT INTO library_parse_pages VALUES(?,?,?,?)').bind(id,selectedVisualPageCacheParser(doc.hash,'gpt-5-mini',true),0,recognitionCache(nextText,1)).run();
  const next=await applyPageRepair(owner,nextTarget,nextResult);
  const preserved=(await kernelPool().query(`SELECT e.parsed_value FROM document_text_pages p JOIN evidence e ON e.id=p.evidence_id
   WHERE p.version_id=$1 AND p.page_number=2`,[next.currentVersion])).rows[0].parsed_value;
