@@ -99,3 +99,54 @@ route, historical transport and ranked short-chain checks were also run selectiv
 No real provider, PostgreSQL, new PDF parse, deployment or production switch was used.
 Structural/mock success does not establish complete-answer accuracy or three independent
 acceptance groups; the coordinator controls later real diagnostic pilots.
+
+### Explicit question-scope witnesses (Issue181)
+
+`scopeWitnessPolicy: 'question-scope-v1'` opts the existing complete-source review and
+one-content-revision exchange into a new semantic protocol. It requires explicit
+`completeSourceReview` and rejects legacy `citationRevision`. It is independent of the
+execution-only `auditProfile`; absent the new policy, old request bytes and identities
+remain unchanged. No phase, model, output allowance, contract-v1 field or database table
+is added. Coverage and proposal schemas/identities use
+`complete-study-scope-witness-v1` and `complete-study-scope-revision-v1` respectively.
+
+For each fixed rN, coverage returns a compact `scopeWitness`: answer kind (positive
+existence, enumeration, other or unclear), exact question span, relevant qualification
+spans and only the relevant mN members. Each member records eligible/excluded/unclear,
+actual source witnesses and original cN claim bindings. A witness binds a question span
+to a supplied source ID, an exact original text quote (or null for actual input pixels)
+and a fallible supports/contradicts/unclear judgment. There is no mandatory tool/role
+table. For example, experimental use and component provenance are separate predicates;
+unknown provenance cannot become exclusion merely because a system is a baseline.
+Exclusion requires a contradictory witness, never silence. IDs, spans, text identity
+and pixel identity are validated; these checks do **not** validate semantic entailment
+or prove that the model discovered every relevant member.
+
+The one existing proposal returns `{answer, discharges, unresolvedMemberIds}`. Each
+discharge binds an existing mN to new cN claims and reuses or replaces its source witnesses.
+All typed witness source aliases, including pixel aliases, are restored and validated;
+old claim bindings are cleared. No citation is added implicitly. At least one mapped
+claim must actually select the member-identity witness and witnesses for every required
+qualification. Citations from different claims cannot be pooled to pass that check.
+Enumeration requires every relevant member to be accounted for; unclear members remain
+incomplete. Positive existence needs one qualifying selected witness and does not demand
+an unrelated inventory. Negative existence and all-excluded inventories are conservatively
+incomplete in this version. This mechanism is not a universal semantic verifier.
+
+Missing/unclear bindings, explicit unresolved members or `complete: false` retain a
+separate `incomplete-scope-witness` candidate with `questionCoverage: 'incomplete'`.
+It cannot be upgraded by a generic selected-only `supported` result; new local audits
+are skipped for that incomplete branch. Accounted candidates still receive only the
+existing physically selected-reference checks and await independent review. Capacity
+must be reported explicitly; malformed/over-limit results retain raw and fail without
+truncation, retries or inventing additional members. The original answer/raw, source,
+question, contract and historical accuracy scores remain separate and unchanged.
+
+Necessary synthetic protocol regressions cover default wire compatibility, distinct
+identity, enumeration versus positive existence, unresolved/excluded handling, exact
+question/text/image bindings, alias restoration, cross-claim citation isolation, reuse
+of historical local raw and the incomplete branch. They do not establish semantic
+improvement. A later authorized real pilot must independently check the complete
+question's qualifications against original source and actual selected references;
+role confusion, an omitted eligible member or unsupported exclusion falsifies success
+even if the ledger says accounted or every local check says supported.

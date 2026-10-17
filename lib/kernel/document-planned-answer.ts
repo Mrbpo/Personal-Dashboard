@@ -4,7 +4,8 @@ import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSe
 import {validateCompleteStudySource} from './document-study-source.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,buildCompleteStudyCoverageReviewRequest,
  validateCompleteStudyCoverageReview,validateDocumentCitationAudit,documentCitationAuditRequestIdentity,evidenceAuditSettings,
- DOCUMENT_CITATION_AUDIT_VERSION,COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,type DocumentCitationAuditResponse,type EvidenceAuditProfile} from './document-citation-audit.ts';
+ assertQuestionScopeWitnessPolicy,validateQuestionScopeWitness,assessQuestionScopeWitness,mapQuestionScopeWitness,questionScopeRevisionSchema,restoreQuestionScopeDischarges,QUESTION_SCOPE_REVIEW_VERSION,
+ DOCUMENT_CITATION_AUDIT_VERSION,COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,type DocumentCitationAuditResponse,type EvidenceAuditProfile,type QuestionScopeWitnessPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,studyAnswerModelInput,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -15,6 +16,7 @@ import type {DocumentSourceResolution} from './document-source.ts';
 export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
 export const COMPLETE_SOURCE_STUDY_ANSWER_VERSION='complete-source-evidence-answer-v1';
 export const STUDY_CONTENT_REVISION_VERSION='complete-study-content-revision-v1';
+export const QUESTION_SCOPE_REVISION_VERSION='complete-study-scope-revision-v1';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 export const CAPTION_ALIAS_SOURCE_LABEL_VERSION='request-local-caption-alias-v2';
 type SourceLabelPolicy='caption-alias-v2';
@@ -25,7 +27,7 @@ export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'pl
  originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
 type PlannedPhase=StudyAnswerPlanAttempt['phase']|DocumentCitationRevisionAttempt['phase'];
 export type PlannedStudyAnswerAttempt=Omit<StudyAnswerPlanAttempt,'phase'>&{phase:PlannedPhase;claimIndex?:number};
-export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';sourceLabelPolicy?:SourceLabelPolicy;
+export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;scopeWitnessPolicy?:QuestionScopeWitnessPolicy;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';sourceLabelPolicy?:SourceLabelPolicy;
  beforeAttempt:(attempt:Readonly<PlannedStudyAnswerAttempt>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:PlannedPhase;claimIndex?:number}>)=>Promise<void>;
  recordState:(state:Readonly<Record<string,unknown>>)=>Promise<void>};
@@ -34,7 +36,7 @@ const journal=(policy:PlannedStudyAnswerPolicy,phase:StudyAnswerPlanAttempt['pha
  beforeAttempt:async attempt=>policy.beforeAttempt(Object.freeze({...attempt,phase,...(claimIndex!==undefined?{claimIndex}:{})})),
  recordResponse:async raw=>policy.recordResponse({...raw,phase,...(claimIndex!==undefined?{claimIndex}:{})})});
 export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPolicy){
- if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','auditProfile','citationRevision','completeSourceReview','sourceLabelPolicy','beforeAttempt','recordResponse','recordState'].includes(k))||
+ if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','auditProfile','scopeWitnessPolicy','citationRevision','completeSourceReview','sourceLabelPolicy','beforeAttempt','recordResponse','recordState'].includes(k))||
   (policy.sourceLabelPolicy!==undefined&&policy.sourceLabelPolicy!=='caption-alias-v2')||
   (policy.citationRevision!==undefined&&typeof policy.citationRevision!=='boolean')||
   (policy.completeSourceReview!==undefined&&!['diagnostic','one-content-revision'].includes(policy.completeSourceReview))||
@@ -42,6 +44,9 @@ export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPo
   typeof policy.recordState!=='function'||typeof policy.beforeAttempt!=='function'||typeof policy.recordResponse!=='function')
   throw Error('Planned answers require durable development state/attempt/raw journals');
  evidenceAuditSettings(policy.auditProfile);
+ assertQuestionScopeWitnessPolicy(policy.scopeWitnessPolicy);
+ if(policy.scopeWitnessPolicy&&!policy.completeSourceReview)throw Error('Scope witnesses require explicit complete-source review');
+ if(policy.scopeWitnessPolicy&&policy.citationRevision===true)throw Error('Scope witnesses cannot enable the legacy citation-only revision protocol');
  if(policy.auditProfile!==undefined&&policy.citationRevision===true)throw Error('Reasoned evidence auditing cannot enable the legacy citation-only revision protocol');
  await assertStudyAnswerPlanPolicy(journal(policy,'contract-plan'));
 }
@@ -381,19 +386,26 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
  const checked=async()=>{const current=await restore();if(digest(current.binding)!==bindingSha256)throw Error('Complete review source/answer changed');return current;};
  const readContext=async()=>(await checked()).packet.context;
  try{
-  const prepared=buildCompleteStudyCoverageReviewRequest(initial.transport.request,initial.alias,policy.auditProfile),requestSha=digest(prepared.request),
+  const prepared=buildCompleteStudyCoverageReviewRequest(initial.transport.request,initial.alias,policy.auditProfile,policy.scopeWitnessPolicy),requestSha=digest(prepared.request),
+   reviewVersion=policy.scopeWitnessPolicy?QUESTION_SCOPE_REVIEW_VERSION:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,
    budget=studyAnswerPlanRequestBudget(prepared.request,{prepared:initial.packet.selectedPrepared});
-  await policy.recordState({event:'coverage-review-request',version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),binding:initial.binding,request:prepared.request});
-  const {value,...execution}=await executeStudyPlanningRequest(COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,'coverage-review',prepared.request,bindingSha256,budget,
+  await policy.recordState({event:'coverage-review-request',version:reviewVersion,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),...(policy.scopeWitnessPolicy?{scopeWitnessPolicy:policy.scopeWitnessPolicy}:{}),binding:initial.binding,request:prepared.request});
+  const {value,...execution}=await executeStudyPlanningRequest(reviewVersion,'coverage-review',prepared.request,bindingSha256,budget,
    journal(policy,'coverage-review'),async()=>{await checked();if(digest(prepared.request)!==requestSha)throw Error('Coverage request changed');},policy.auditProfile),
    aliasDiagnostics=validateCompleteStudyCoverageReview(value,prepared.choices),byLabel=new Map(initial.transport.mapping.entries.map(e=>[e.label,e.canonicalId])),
-   diagnostics={...aliasDiagnostics,issues:aliasDiagnostics.issues.map(i=>({...i,sourceIds:i.sourceIds.map(id=>byLabel.get(id)!)}))},
-   review={version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),status:'diagnosed-awaiting-independent-review',binding:initial.binding,bindingSha256,
+   canonicalId=(id:string)=>{const mapped=byLabel.get(id);if(!mapped)throw Error('Unknown scope source alias');return mapped;},
+   scopeChoices=prepared.choices.scopeWitness?{...prepared.choices,sourceIds:prepared.choices.sourceIds.map(canonicalId),scopeWitness:{
+    textById:Object.fromEntries(Object.entries(prepared.choices.scopeWitness.textById).map(([id,text])=>[canonicalId(id),text])),
+    imageIds:prepared.choices.scopeWitness.imageIds.map(canonicalId),claims:original.providerSelections.claims}}:undefined,
+   scopeWitness=aliasDiagnostics.scopeWitness&&scopeChoices?validateQuestionScopeWitness(mapQuestionScopeWitness(aliasDiagnostics.scopeWitness,canonicalId),scopeChoices):undefined,
+   scopeAssessment=scopeWitness?assessQuestionScopeWitness(scopeWitness,original.providerSelections.claims):undefined,
+   diagnostics={...aliasDiagnostics,issues:aliasDiagnostics.issues.map(i=>({...i,sourceIds:i.sourceIds.map(id=>byLabel.get(id)!)})),...(scopeWitness?{scopeWitness}:{})},
+   review={version:reviewVersion,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),...(policy.scopeWitnessPolicy?{scopeWitnessPolicy:policy.scopeWitnessPolicy,scopeAssessment}:{}),status:'diagnosed-awaiting-independent-review',binding:initial.binding,bindingSha256,
     ...execution,aliasDiagnostics,diagnostics,localSupportUnassessed:true,semanticVerified:false,wholeAnswerVerified:false,
     questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
   await policy.recordState({event:'complete-source-review',review});
   const localUnsupported=initial.selectedReferenceFindings.filter(f=>f.diagnostics.judgment==='unsupported');
-  if(mode!=='one-content-revision'||!diagnostics.issues.length&&!localUnsupported.length)return {original:originalRecord,review,revisionCandidate:null};
+  if(mode!=='one-content-revision'||!diagnostics.issues.length&&!localUnsupported.length&&scopeAssessment?.status!=='incomplete')return {original:originalRecord,review,revisionCandidate:null};
   // A source-grounded model concern is still fallible. One proposal is a new
   // answer branch, never a verified correction or an overwrite of the old one.
   const base=initial.transport.request,user=base.input[1],content=user.content;
@@ -402,7 +414,8 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
   const toLabel=new Map(initial.transport.mapping.entries.map(e=>[e.canonicalId,e.label])),originalSelectedReferenceFindings=localUnsupported.map(f=>({
    claimId:f.claimId,diagnostics:f.diagnostics,references:f.selectedReferences.map(r=>({refId:r.refId,sourceId:toLabel.get(r.selectionId)!})),
    providerRequestSha256:f.providerRequestSha256,rawResponseSha256:f.rawResponseSha256,bindingSha256:f.bindingSha256}));
-  const revisionBinding={version:STUDY_CONTENT_REVISION_VERSION,parent:initial.binding,coverageReviewRequestSha256:execution.providerRequestSha256,
+   const revisionVersion=policy.scopeWitnessPolicy?QUESTION_SCOPE_REVISION_VERSION:STUDY_CONTENT_REVISION_VERSION,
+    revisionBinding={version:revisionVersion,parent:initial.binding,coverageReviewRequestSha256:execution.providerRequestSha256,
    coverageReviewRawSha256:execution.rawResponseSha256,coverageDiagnosticsSha256:digest(aliasDiagnostics),
    originalUnsupportedClaimIds:localUnsupported.map(f=>f.claimId)},revisionBindingSha256=digest(revisionBinding),
    request={...base,input:[{...base.input[0],content:base.input[0].content+
@@ -419,21 +432,34 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
      originalAnswer:initial.alias,coverageReview:{version:review.version,diagnostics:aliasDiagnostics,fallible:true},
      originalSelectedReferenceFindings:{version:DOCUMENT_CITATION_AUDIT_VERSION,findings:originalSelectedReferenceFindings,fallible:true},
      parentAnswerSha256:initial.binding.originalAnswerSha256})})}]},
-   revisionRequestSha=digest(request),revisionBudget=studyAnswerPlanRequestBudget(request,{prepared:initial.packet.selectedPrepared});
-  await policy.recordState({event:'content-revision-request',binding:revisionBinding,request});
-  const {value:aliasSelections,...revisionExecution}=await executeStudyPlanningRequest(STUDY_CONTENT_REVISION_VERSION,'content-revision',request,revisionBindingSha256,revisionBudget,
-   journal(policy,'content-revision'),async()=>{await checked();if(digest(request)!==revisionRequestSha)throw Error('Content revision request changed');});
-  const identity=studyPlanningRequestIdentity(STUDY_CONTENT_REVISION_VERSION,request,revisionBindingSha256);
+    revisionRequest=scopeWitness?{...request,input:[{...request.input[0],content:request.input[0].content+
+     ' Return an answer plus compact discharges/unresolvedMemberIds for the supplied scopeWitness members. Each discharge uses the same mN and actual cN claim IDs. '+
+     'Keep original witness arrays empty to reuse them, or provide actual replacement source witnesses for a changed eligibility judgment. Unknown roles are not excluded. '+
+     'Selected citations of the mapped claim must contain the witnesses for every question qualification; do not add citations implicitly. '+
+     'Enumeration needs all relevant eligible members; a positive existence answer needs one true witness, not an unrelated inventory. '+
+     'If source, scope or output capacity is unresolved, preserve unresolvedMemberIds. Do not invent members or claim complete coverage.'},request.input[1]],
+     text:{format:{...request.text.format,name:'complete_study_scope_revision_v1',schema:questionScopeRevisionSchema(request.text.format.schema,aliasDiagnostics.scopeWitness!,prepared.choices.sourceIds)}}}:request,
+    revisionRequestSha=digest(revisionRequest),revisionBudget=studyAnswerPlanRequestBudget(revisionRequest,{prepared:initial.packet.selectedPrepared});
+   await policy.recordState({event:'content-revision-request',binding:revisionBinding,request:revisionRequest});
+   const {value:proposal,...revisionExecution}=await executeStudyPlanningRequest(revisionVersion,'content-revision',revisionRequest,revisionBindingSha256,revisionBudget,
+    journal(policy,'content-revision'),async()=>{await checked();if(digest(revisionRequest)!==revisionRequestSha)throw Error('Content revision request changed');});
+   const identity=studyPlanningRequestIdentity(revisionVersion,revisionRequest,revisionBindingSha256);
   if(revisionExecution.requestIdentity!==identity.requestIdentity||revisionExecution.providerRequestSha256!==identity.providerRequestSha256)throw Error('Content revision execution changed');
-  const selections=decodeStudySourceLabels(aliasSelections,initial.transport.mapping);
+   const aliasSelections=scopeWitness?(proposal as {answer:unknown})?.answer:proposal,
+    selections=decodeStudySourceLabels(aliasSelections,initial.transport.mapping);
   await policy.recordState({event:'content-revision-proposal',aliasSelections,providerSelections:selections,binding:revisionBinding,...revisionExecution});
   if(selections.claims.length>6){const revisionCandidate={status:'capacity-exceeded',untruncatedValue:selections,binding:revisionBinding,...revisionExecution,
    semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'unassessed'};
    await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};}
-  const revised=resolveDocumentAnswerSelections(selections,initial.packet.prepared.supports),
-   audits=await auditStudySelections(question,initial.packet,revised.providerSelections,readContext,policy,'revised-claim-audit');
+   const revised=resolveDocumentAnswerSelections(selections,initial.packet.prepared.supports),
+    scopeDischarges=scopeWitness&&scopeChoices?restoreQuestionScopeDischarges(proposal,scopeWitness,revised.providerSelections.claims,scopeChoices,canonicalId):undefined,
+    incompleteScope=scopeDischarges?.assessment.status==='incomplete';
+   if(incompleteScope){const revisionCandidate={status:'incomplete-scope-witness',...revised,binding:revisionBinding,...revisionExecution,scopeDischarges,
+     semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'incomplete',fullSourceCoverage:'unassessed'};
+    await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};}
+   const audits=await auditStudySelections(question,initial.packet,revised.providerSelections,readContext,policy,'revised-claim-audit');
   await checked();
-  const revisionCandidate={status:'revised-awaiting-independent-review',...revised,binding:revisionBinding,...revisionExecution,audits,
+   const revisionCandidate={status:'revised-awaiting-independent-review',...revised,binding:revisionBinding,...revisionExecution,audits,...(scopeDischarges?{scopeDischarges}:{}),
    localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),coverageReview:'not-performed-for-revised-candidate',
    semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
   await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};
@@ -450,6 +476,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  policy={...policy};
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract);
  if(policy.completeSourceReview&&!completeRoute)throw Error('Integrated coverage review requires the verified complete-source route');
+  if(policy.scopeWitnessPolicy&&(!completeRoute||!policy.completeSourceReview))throw Error('Scope witnesses require the explicit complete-source review route');
  if(policy.sourceLabelPolicy&&!completeRoute)throw Error('Caption aliases require the verified complete single-source evidence route');
  let plan:Omit<ReturnType<typeof restoreCompleteStudyEvidenceRoute>,'prepared'>|Awaited<ReturnType<typeof planContractStudyAnswer>>;
  if(completeRoute){const {prepared:_prepared,...receipt}=restoreCompleteStudyEvidenceRoute(question,await readInitial(),checked,completeRoute);plan=receipt;}
