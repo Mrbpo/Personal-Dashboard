@@ -5,7 +5,7 @@ import {resolve,join,relative} from 'node:path';
 import type {Pool} from 'pg';
 import {decodeDoclingResult,indexDoclingPageRegions,DOCLING_PAGE_REGION_LIMITS} from '../lib/kernel/docling-result.ts';
 import {doclingPageResultReferences,readDoclingPageRegions} from '../lib/kernel/docling-source-regions.ts';
-import {registerDocumentStructure,readDocumentPageRegions,readDocumentPageRegionsForImages,bindStudyPdfPageRegions,
+import {registerDocumentStructure,readDocumentPageRegions,readDocumentPageRegionsForImages,bindStudyPdfPageRegions,unavailableStudyPdfPageRegions,
  STUDY_PDF_PAGE_REGION_LIMITS,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError} from '../lib/kernel/document-context.ts';
 import {readPdfVisualEvidence,pdfVisualCanonical} from '../lib/kernel/pdf-visual-evidence.ts';
 import {prepareDocumentAnswerForPolicy,buildDocumentEvidenceSelectionRequest,buildSelectedDocumentAnswerRequest,pdfPageRegionTransport,
@@ -113,6 +113,47 @@ test('missing Docling/PNG and ambiguous layouts remain unavailable; corrupt bind
  await assert.rejects(readDocumentPageRegions(db.db(),f.owner,f.source,1),changed);
  const source={owner:f.owner,documentId:f.source.documentId,sourceHash:f.source.sourceHash,pageCount:1,physicalPage:1};
  assert.throws(()=>doclingPageResultReferences({...source,pageCount:2},undefined,{...f.layout,resultReferences:[f.reference,{...f.reference,resultBlobSha256:fixtureSha('other result')}]}),/Multiple saved results/);
+});
+
+test('PDF region context budget keeps whole first-fit observations, later small items and existing unavailable reasons',async()=>{
+ const owner='regions-budget-owner',dbs:FixtureDb[]=[],images:Awaited<ReturnType<typeof readPdfVisualEvidence>>['images']=[];
+ for(const [i,padding]of [14000,14000,22000,0,40000].entries()){
+  const sourceHash=sourcePageRegionsFixture().source.sourceHash,source={documentId:`budget-doc-${i}`,currentVersionId:`budget-version-${i}`,
+   sourceVersionId:`budget-source-${i}`,sourceHash,courseId:''},f=sourcePageRegionsFixture(source,owner,{pageEvidenceId:`budget-evidence-${i}`});
+  // Synthetic producer text makes whole observations different sizes. It is
+  // never used to rewrite the registered body or claim transcription fidelity.
+  f.result.document.json_content.texts[1].orig='x'.repeat(padding)||'small orig';
+  f.raw=Buffer.from(JSON.stringify({identity:f.identity,result:f.result}));f.rawHash=fixtureSha(f.raw);
+  f.reference.resultBlobSha256=f.rawHash;f.progress.batches[0].resultHash=f.rawHash;
+  f.visual.manifest_sha256=fixtureSha(pdfVisualCanonical(f.visual.manifest));
+  f.visual.content_sha256=fixtureSha(pdfVisualCanonical(f.visual.manifest.content));
+  f.casBlobs=[{sha256:f.rawHash,bytes:f.raw},{sha256:f.pngSha,bytes:f.png}];
+  const db=new FixtureDb();Object.assign(db.f,f);db.version=source.currentVersionId;db.progress=f.progress;db.visual=f.visual;
+  await db.register();dbs.push(db);
+  images.push((await readPdfVisualEvidence(db.db(),owner,source,[f.evidenceId],undefined,{pageAssetsOnly:true})).images[0]);
+ }
+ const originals=await Promise.all(dbs.map(async(db,i)=>bindStudyPdfPageRegions(images[i],await readDocumentPageRegions(db.db(),owner,db.f.source,1)))),
+  canonical=(value:unknown)=>pdfVisualCanonical(value),size=(value:unknown)=>Buffer.byteLength(canonical(value)),
+  minimum=originals.map(o=>o.status==='available'?unavailableStudyPdfPageRegions(o,'context-observation-byte-limit'):o);
+ assert.deepEqual(originals.map(o=>o.status),['available','available','available','available','unavailable']);
+ assert.equal(originals[4].reason,'page-observation-byte-limit');
+ const afterFirstTwo=minimum.map((o,i)=>i<2?originals[i]:o);
+ assert.ok(size(afterFirstTwo)<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
+ assert.ok(size(afterFirstTwo.map((o,i)=>i===2?originals[i]:o))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
+ assert.ok(size(afterFirstTwo.map((o,i)=>i===3?originals[i]:o))<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
+ const inputSnapshot=images.map(image=>({...image,bytes:Buffer.from(image.bytes)})),bodies=dbs.map(db=>db.f.body),
+  router={query:async(sql:string,args:unknown[]=[])=>{const db=dbs.find(d=>args.some(a=>
+   a===d.f.source.documentId||a===d.f.source.currentVersionId||a===d.f.source.sourceVersionId));
+   if(!db)throw Error('Foreign budget fixture query');return db.query(sql,args);}} as unknown as Pick<Pool,'query'>,
+  result=await readDocumentPageRegionsForImages(router,owner,images),added=result.images.map(image=>image.pageRegions);
+ assert.deepEqual(added.map(o=>o?.status),['available','available','unavailable','available','unavailable']);
+ for(const i of [0,1,3])assert.deepEqual(added[i],originals[i],'whole available observation must remain byte-identical');
+ assert.equal(added[2]?.reason,'context-observation-byte-limit');assert.equal(added[2]?.payload,undefined);
+ assert.equal(added[2]?.originalObservationSha256,originals[2].originalObservationSha256);
+ assert.deepEqual(added[4],originals[4],'page-level unavailable reason/hash must remain intact');
+ assert.equal(result.pdfPageRegionReads[4].reason,'page-observation-byte-limit');assert.ok(size(added)<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
+ assert.deepEqual(result.images.map(({pageRegions:unused,...image})=>{void unused;return image;}),inputSnapshot);
+ assert.deepEqual(images,inputSnapshot);assert.deepEqual(dbs.map(db=>db.f.body),bodies);
 });
 
 test('PDF regions study input: bound full observations survive actual builders; optional bytes never displace original evidence or enter local support',async()=>{

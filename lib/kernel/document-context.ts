@@ -169,7 +169,8 @@ export type StudyPdfPageRegionObservation={version:'study-pdf-page-regions-v1';s
   visualManifestSha256:string;frameSha256:string;width:number;height:number};
  originalObservationSha256:string;originalObservationByteLength:number;result?:DoclingRegionResultReference;
  payload?:PageRegionRead;observationSha256:string};
-export type StudyPdfPageRegionRead={attachmentId:string;status:'available'|'unavailable';reason:string|null;originalObservationSha256?:string};
+export type StudyPdfPageRegionRead={attachmentId:string;status:'available'|'unavailable';reason:string|null;originalObservationSha256?:string;
+ metadataOmissionReason?:'context-observation-byte-limit'};
 export type StudyPdfPageImage=PdfVisualImageEvidence&{pageRegions?:StudyPdfPageRegionObservation};
 const pageRegionBinding=(image:PdfVisualImageEvidence)=>({source:{...image.source},physicalPage:image.physicalPage,
  anchorEvidenceId:image.anchorEvidenceId,attachmentId:image.attachmentId,imageSha256:image.sha256,
@@ -234,10 +235,26 @@ export async function readDocumentPageRegionsForImages<T extends Pick<DocumentIm
  }
  const added=enriched.flatMap(image=>image.pageRegions?[image.pageRegions]:[]);
  if(Buffer.byteLength(canonical(added))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes){
-  for(const image of enriched)if(image.pageRegions)image.pageRegions=unavailableStudyPdfPageRegions(image.pageRegions,'context-observation-byte-limit');
-  if(Buffer.byteLength(canonical(enriched.flatMap(image=>image.pageRegions?[image.pageRegions]:[])))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes)
-   for(const image of enriched)delete image.pageRegions;
-  for(const read of reads)if(read.originalObservationSha256){read.status='unavailable';read.reason='context-observation-byte-limit';}
+  const candidates:Array<{image:typeof enriched[number];read:StudyPdfPageRegionRead;original:StudyPdfPageRegionObservation}>=[];let readIndex=0;
+  for(const image of enriched){
+   if(!('kind'in image)||image.kind!=='pdf-page')continue;
+   const read=reads[readIndex++];if(!image.pageRegions)continue;
+   candidates.push({image,read,original:image.pageRegions});delete image.pageRegions;
+  }
+  const fits=()=>Buffer.byteLength(canonical(enriched.flatMap(image=>image.pageRegions?[image.pageRegions]:[])))<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes;
+  // Reserve whole unavailable wrappers first. Even when a later full item does
+  // not fit, subsequent smaller items can still use the remaining capacity.
+  for(const {image,read,original}of candidates){
+   const stub=original.status==='available'?unavailableStudyPdfPageRegions(original,'context-observation-byte-limit'):original;
+   image.pageRegions=stub;read.status=stub.status;read.reason=stub.reason;
+   if(!fits()){delete image.pageRegions;read.metadataOmissionReason='context-observation-byte-limit';}
+  }
+  for(const {image,read,original}of candidates){
+   if(original.status!=='available'||!image.pageRegions)continue;
+   const stub=image.pageRegions;image.pageRegions=original;
+   if(fits()){read.status=original.status;read.reason=original.reason;}
+   else image.pageRegions=stub;
+  }
  }
  return {images:enriched,pdfPageRegionReads:reads};
 }

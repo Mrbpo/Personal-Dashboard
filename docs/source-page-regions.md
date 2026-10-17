@@ -86,6 +86,12 @@ original text, quote IDs and PNGs keep priority. Oversize observations remain
 explicitly unavailable; no prefix is represented as complete. Full source
 fingerprints remain distinct from actual transmitted-request digests.
 
+Within the unchanged 64 KiB context bound, whole observations use original-image
+order first-fit with complete unavailable wrappers reserved; later smaller items
+can still fit, existing unavailable reasons stay intact, and only a wrapper that
+itself cannot fit is omitted with `metadataOmissionReason` in the read receipt—
+never by truncating observations, clearing every page, or changing text/PNG/IDs.
+
 The former 16 KiB page limit omitted a real 19799-byte PDF19 observation despite
 valid source/PNG bindings. This capacity correction preserves that earlier
 unavailable result and all historical semantic failures; no new parse, rendering
