@@ -7,7 +7,7 @@ import {database} from '../lib/database.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceManifest} from '../lib/kernel/document-context.ts';
 import {freezeStudyQuestionContract,prepareCompleteStudyEvidenceRoute} from '../lib/kernel/document-study-contract.ts';
 import {buildCompleteStudyCoverageReviewRequest,validateCompleteStudyCoverageReview,prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,
- assessQuestionScopeWitness,validateQuestionScopeWitness,mapQuestionScopeWitness,restoreQuestionScopeDischarges,questionScopeRevisionSchema,QUESTION_SCOPE_REVIEW_VERSION,
+ assessQuestionScopeWitness,validateQuestionScopeWitness,mapQuestionScopeWitness,restoreQuestionScopeBindings,restoreQuestionScopeDischarges,questionScopeRevisionSchema,QUESTION_SCOPE_REVIEW_VERSION,
  DOCUMENT_CITATION_AUDIT_VERSION,type QuestionScopeWitness,type DocumentCitationAuditResponse,type DocumentCitationAuditDiagnostics} from '../lib/kernel/document-citation-audit.ts';
 import {preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,decodePlannedStudyGenerationSelections,
  reviewCompletePlannedStudyAnswer,answerPlannedStudyQuestion,type PlannedStudyAnswerReviewArtifact,type PlannedStudyAnswerPolicy,type PlannedStudyAnswerAttempt} from '../lib/kernel/document-planned-answer.ts';
@@ -76,72 +76,96 @@ function savedLocal(f:ReturnType<typeof fixture>,diagnostics=localUnsupported){
  return {claimIndex:0,result,originalRaw};
 }
 
-// Synthetic protocol bindings only: quoted identity is not semantic verification.
-function scopeLedger():QuestionScopeWitness{return {complete:true,requirements:{r0:{answerKind:'enumeration',questionSpan:'configuration',qualifiers:['metrics'],
- members:[{id:'m0',label:'configuration',status:'eligible',claimIds:[],witnesses:[
-  {sourceId:'Source1',questionSpan:'configuration',quote:'The authors used one fixed configuration.',judgment:'supports'},
-  {sourceId:'Source2',questionSpan:'metrics',quote:'The experiment reports precision and recall, with SECOND_ORIGINAL_FACT retained.',judgment:'supports'}]}]}}};}
+// Synthetic ID bindings, never an expected semantic answer or entity inventory.
+function scopeLedger():QuestionScopeWitness{return {complete:true,requirements:{r0:{findings:[{
+ aspectIds:['r0.aspect'],sourceIds:['Source1','Source2'],claimIds:[],judgment:'supports'}]}}};}
+function canonicalScope(f:ReturnType<typeof fixture>){
+ const built=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),
+  map=(id:string)=>{const entry=f.transport.mapping.entries.find(e=>e.label===id);if(!entry)throw Error('Unknown scope source alias');return entry.canonicalId;},
+  data=built.choices.scopeWitness!,choices={...built.choices,sourceIds:built.choices.sourceIds.map(map),scopeWitness:{...data,
+   textById:Object.fromEntries(Object.entries(data.textById).map(([id,text])=>[map(id),text])),imageIds:data.imageIds.map(map)}};
+ return {built,map,choices};
+}
 
-test('question-scope-v1 opt-in preserves old wire, complete source bytes and settings while binding a distinct semantic identity',()=>{
+test('ID-only scope protocol keeps default wire and full source, freezes contract aspects and rejects old copied witnesses',()=>{
  const f=fixture(),old=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias),
   unchanged=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,undefined),
   next=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),
-  input=(r:typeof old.request)=>JSON.parse((r.input[1].content as {text:string}[])[0].text);
- assert.equal(JSON.stringify(old),JSON.stringify(unchanged));assert.deepEqual(next.request.input[1],old.request.input[1]);
- assert.deepEqual(input(next.request).questionContract,f.contract);assert.equal(next.request.max_output_tokens,old.request.max_output_tokens);
- assert.deepEqual(next.request.reasoning,old.request.reasoning);assert.equal(next.request.text.format.name,'complete_study_scope_witness_v1');
+  oldInput=JSON.parse((old.request.input[1].content as {text:string}[])[0].text),input=JSON.parse((next.request.input[1].content as {text:string}[])[0].text);
+ assert.equal(JSON.stringify(old),JSON.stringify(unchanged));
+ const {scopeBindingRegistry,...retained}=input;assert.deepEqual(retained,oldInput);
+ assert.deepEqual(next.request.input[1].content.slice(1),old.request.input[1].content.slice(1));
+ assert.deepEqual(scopeBindingRegistry.aspects,[{id:'r0.aspect',requirementId:'r0',field:'aspect',text:'Configuration and metrics'}]);
+ assert.equal(scopeBindingRegistry.sha256,digest(scopeBindingRegistry.aspects));assert.deepEqual(input.questionContract,f.contract);
+ assert.equal(next.request.max_output_tokens,old.request.max_output_tokens);assert.deepEqual(next.request.reasoning,old.request.reasoning);
+ assert.equal(next.request.text.format.name,'complete_study_scope_id_bindings_v2');
  assert.notEqual(studyPlanningRequestIdentity(QUESTION_SCOPE_REVIEW_VERSION,next.request,'binding').requestIdentity,
   studyPlanningRequestIdentity('complete-study-coverage-review-v1',old.request,'binding').requestIdentity);
- assert.throws(()=>buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'bad' as 'question-scope-v1'),/Invalid question/);
+ const schema=next.request.text.format.schema as unknown as {$defs:Record<string,{properties:Record<string,unknown>}>};
+ assert.deepEqual(Object.keys(schema.$defs.scopeFinding.properties),['aspectIds','sourceIds','claimIds','judgment']);
+ assert.throws(()=>validateQuestionScopeWitness({complete:true,requirements:{r0:{answerKind:'enumeration',questionSpan:'configuration',qualifiers:[],members:[]}}},next.choices),/Invalid question scope ID/);
+ const request=structuredClone(f.transport.request),part=(request.input[1].content as {text:string}[])[0],changed=JSON.parse(part.text);
+ changed.questionContract.requirements[0].requestedScope.configuration='explicit fixed configuration';part.text=JSON.stringify(changed);
+ const qualified=buildCompleteStudyCoverageReviewRequest(request,f.alias,undefined,'question-scope-v1');
+ assert.equal(qualified.choices.scopeWitness!.aspects[1].id,'r0.configuration');
+ assert.notEqual(qualified.choices.scopeWitness!.registrySha256,next.choices.scopeWitness!.registrySha256);
 });
 
-test('question-scope-v1 enumeration, positive existence and selected qualification witnesses remain distinct',()=>{
- const f=fixture(),built=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),ledger=scopeLedger(),
-  claims=[{text:'One fixed configuration; precision and recall.',citations:[{id:'Source1'},{id:'Source2'}]}];
- ledger.requirements.r0.members[0].claimIds=['c0'];validateQuestionScopeWitness(ledger,built.choices);
- assert.equal(assessQuestionScopeWitness(ledger,claims).status,'accounted-awaiting-independent-review');
- assert.equal(assessQuestionScopeWitness(ledger,[{...claims[0],citations:[{id:'Source1'}]}]).status,'incomplete');
- // Two different claims cannot pool their citations to discharge one qualified assertion.
- ledger.requirements.r0.members[0].claimIds=['c0','c1'];
- assert.equal(assessQuestionScopeWitness(ledger,[{...claims[0],citations:[{id:'Source1'}]},{...claims[0],citations:[{id:'Source2'}]}]).status,'incomplete');
- ledger.requirements.r0.members.push({id:'m1',label:'precision',status:'unclear',claimIds:[],witnesses:[
-  {sourceId:'Source2',questionSpan:'metrics',quote:'precision and recall',judgment:'unclear'}]});
- assert.equal(assessQuestionScopeWitness(ledger,claims).status,'incomplete');
- ledger.requirements.r0.answerKind='existence';assert.equal(assessQuestionScopeWitness(ledger,claims).status,'accounted-awaiting-independent-review');
- ledger.complete=false;assert.equal(assessQuestionScopeWitness(ledger,claims).status,'incomplete');ledger.complete=true;
- ledger.requirements.r0.members[1].status='excluded';assert.throws(()=>validateQuestionScopeWitness(ledger,built.choices),/Invalid/);
- ledger.requirements.r0.members[1].witnesses[0].judgment='contradicts';validateQuestionScopeWitness(ledger,built.choices);
- ledger.requirements.r0.answerKind='enumeration';assert.equal(assessQuestionScopeWitness(ledger,claims,['m1']).status,'incomplete');
+test('ID-only binding restores exact selected text/image and never rescues a legal wrong source or treats IDs as semantics',()=>{
+ const f=fixture(),{built,map,choices}=canonicalScope(f),ledger=scopeLedger(),imageId=built.choices.scopeWitness!.imageIds[0];
+ ledger.requirements.r0.findings[0]={aspectIds:['r0.aspect'],sourceIds:['Source1',imageId],claimIds:['c0'],judgment:'supports'};
+ const canonical=mapQuestionScopeWitness(ledger,map),bound=restoreQuestionScopeBindings(canonical,choices,f.packet.selectedPrepared);
+ assert.equal(bound.bindingsValid,true);assert.equal(bound.semanticVerified,false);assert.equal(bound.findings[0].id,'f0');
+ assert.equal(bound.sources[0].kind,'text');assert.equal(bound.sources[0].unit?.text,'The authors used one fixed configuration.');
+ assert.equal(bound.sources[1].kind,'image');assert.equal(bound.sources[1].support?.image?.sha256,sha(image));
+ assert.equal(bound.sources[1].support?.captionMembers?.[0].text,'Figure: original diagram.');
+ const wrong=scopeLedger();wrong.requirements.r0.findings[0].sourceIds=['Source2'];wrong.requirements.r0.findings[0].claimIds=['c0'];
+ const restored=restoreQuestionScopeBindings(mapQuestionScopeWitness(wrong,map),choices,f.packet.selectedPrepared);
+ assert.equal(restored.sources[0].unit?.text,'The experiment reports precision and recall, with SECOND_ORIGINAL_FACT retained.');
+ assert.equal(restored.sources[0].sourceId,map('Source2'));assert.equal(restored.semanticVerified,false);
+ assert.equal(assessQuestionScopeWitness(wrong,[{text:'Any claim',citations:[{id:'Source2'}]}]).semanticVerified,false);
  for(const change of [
-  (v:QuestionScopeWitness)=>{v.requirements.r0.questionSpan='invented question qualifier';},
-  (v:QuestionScopeWitness)=>{v.requirements.r0.members[0].witnesses[0].sourceId='Source999';},
-  (v:QuestionScopeWitness)=>{v.requirements.r0.members[0].witnesses[0].quote='invented source quote';},
-  (v:QuestionScopeWitness)=>{v.requirements.r0.members[0].claimIds=['c99'];}
- ]){const wrong=structuredClone(ledger);change(wrong);assert.throws(()=>validateQuestionScopeWitness(wrong,built.choices),/Invalid/);}
+  (v:QuestionScopeWitness)=>{v.requirements.r0.findings[0].sourceIds=['Source999'];},
+  (v:QuestionScopeWitness)=>{v.requirements.r0.findings[0].aspectIds=['r9.aspect'];},
+  (v:QuestionScopeWitness)=>{v.requirements.r0.findings[0].claimIds=['c99'];}
+ ]){const bad=scopeLedger();change(bad);assert.throws(()=>validateQuestionScopeWitness(bad,built.choices),/Invalid question scope ID/);}
+ const stale=structuredClone(built.choices);stale.scopeWitness!.aspects[0].text='changed';
+ assert.throws(()=>validateQuestionScopeWitness(scopeLedger(),stale),/Invalid question scope ID/);
+ const sourceChanged=structuredClone(f.packet.selectedPrepared);sourceChanged.quoteUnits.find(q=>q.id===map('Source1'))!.text='different';
+ assert.throws(()=>restoreQuestionScopeBindings(canonical,choices,sourceChanged),/Scope text source changed/);
+ const diagnostic={...uncertain,scopeWitness:ledger,requirements:{r0:{status:'issue',reason:'Fixed and tuned differ.'}},
+  issues:[{kind:'configuration-role',aspectIds:['r0.aspect'],claimIds:['c0'],sourceIds:['Source1'],reason:'The chosen statement says fixed.'}]};
+ assert.deepEqual(validateCompleteStudyCoverageReview(diagnostic,built.choices).issues[0].requirementIds,['r0']);
 });
 
-test('question-scope-v1 restores every typed discharge text/image alias and never carries old claim IDs into a candidate',()=>{
- const f=fixture(),built=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),
-  toCanonical=(id:string)=>{const entry=f.transport.mapping.entries.find(e=>e.label===id);if(!entry)throw Error('Unknown scope source alias');return entry.canonicalId;},
-  ledger=scopeLedger(),imageId=built.choices.scopeWitness!.imageIds[0];
- ledger.requirements.r0.members[0].witnesses.push({sourceId:imageId,questionSpan:'metrics',quote:null,judgment:'supports'});
- const canonical=mapQuestionScopeWitness(ledger,toCanonical),data=built.choices.scopeWitness!,choices={...built.choices,
-  sourceIds:built.choices.sourceIds.map(toCanonical),scopeWitness:{...data,imageIds:data.imageIds.map(toCanonical),
-   textById:Object.fromEntries(Object.entries(data.textById).map(([id,body])=>[toCanonical(id),body]))}},
-  claims=[{text:'Configuration and metrics.',citations:[{id:toCanonical('Source1')},{id:toCanonical('Source2')},{id:toCanonical(imageId)}]}],
-  proposal={answer:{},discharges:[{memberId:'m0',status:'eligible',witnesses:ledger.requirements.r0.members[0].witnesses,claimIds:['c0']}],unresolvedMemberIds:[]};
- const restored=restoreQuestionScopeDischarges(proposal,canonical,claims,choices,toCanonical);
- assert.deepEqual(restored.witness.requirements.r0.members[0].witnesses.map(w=>w.sourceId),['Source1','Source2',imageId].map(toCanonical));
- assert.equal(restored.assessment.status,'accounted-awaiting-independent-review');
- assert.equal(restoreQuestionScopeDischarges({...proposal,discharges:[]},canonical,claims,choices,toCanonical).assessment.status,'incomplete');
- const invalid=structuredClone(proposal);invalid.discharges[0].witnesses[2].sourceId='Source999';
- assert.throws(()=>restoreQuestionScopeDischarges(invalid,canonical,claims,choices,toCanonical),/Unknown scope/);
+test('ID-only scope shares actual schema enums and preflights both complete phase schemas',()=>{
+ const f=fixture(),build=(n:number)=>{const request=structuredClone(f.transport.request),ids=Array.from({length:n},(_,i)=>`Source${i+1}`);
+  request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=ids;
+  const part=(request.input[1].content as {text:string}[])[0],input=JSON.parse(part.text);
+  input.quoteUnits=ids.map(id=>({...input.quoteUnits[0],id}));input.evidence=[];
+  input.questionContract.requirements=Array.from({length:10},(_,i)=>({...f.contract.requirements[0],id:`r${i}`}));part.text=JSON.stringify(input);
+  const coverage=buildCompleteStudyCoverageReviewRequest(request,f.alias,undefined,'question-scope-v1');
+  return {coverage,revision:()=>questionScopeRevisionSchema(request.text.format.schema,scopeLedger(),coverage.choices)};},
+  enums=(value:unknown):unknown[][]=>!value||typeof value!=='object'?[]:[...(!Array.isArray(value)&&Object.hasOwn(value,'enum')?[(value as {enum:unknown[]}).enum]:[]),...Object.values(value).flatMap(enums)],
+  wide=build(100);
+ const defs=(wide.coverage.request.text.format.schema as unknown as {$defs:{scopeRequirement:{properties:{findings:{maxItems:number}}};scopeFinding:{properties:Record<string,{minItems?:number;maxItems:number}>}}}).$defs;
+ assert.equal(defs.scopeRequirement.properties.findings.maxItems,3);
+ assert.equal(defs.scopeFinding.properties.sourceIds.minItems,1);assert.equal(defs.scopeFinding.properties.aspectIds.minItems,1);
+ assert.equal(defs.scopeFinding.properties.claimIds.maxItems,30);
+ const tooMany={complete:true,requirements:Object.fromEntries(wide.coverage.choices.requirementIds.map(id=>[id,{findings:id==='r0'?Array.from({length:4},()=>scopeLedger().requirements.r0.findings[0]):[]}]))};
+ assert.throws(()=>validateQuestionScopeWitness(tooMany,wide.coverage.choices),/Invalid question scope ID/);
+ for(const schema of [wide.coverage.request.text.format.schema,wide.revision()]){
+  const all=enums(schema);assert.equal(all.filter(e=>e.length===100).length,1);assert.ok(all.reduce((n,e)=>n+e.length,0)<200);
+ }
+ assert.throws(()=>build(1000),/enum count/);
+ const larger=structuredClone(wide.coverage.choices);larger.sourceIds=Array.from({length:1000},(_,i)=>`Source${i+1}`);
+ assert.throws(()=>questionScopeRevisionSchema(f.transport.request.text.format.schema,scopeLedger(),larger),/enum count/);
 });
 
-test('question-scope-v1 uses one existing revision, restores witnesses and audits only the actual selected candidate references',async()=>{
+test('ID-only scope reuses historical raw, binds one revision and audits only new actual selected references',async()=>{
  const f=fixture(),old=savedLocal(f),artifact={...f.artifact,originalLocalAudits:[old]},before=JSON.stringify(artifact),j=journal('one-content-revision'),
   ledger=scopeLedger(),proposal={answer:{status:'answered',message:'',claims:[{text:'The authors used one fixed configuration and report precision and recall.',citations:[{id:'Source1'},{id:'Source2'}]}]},
-   discharges:[{memberId:'m0',status:'eligible',witnesses:ledger.requirements.r0.members[0].witnesses,claimIds:['c0']}],unresolvedMemberIds:[]},
+   discharges:[{findingId:'f0',binding:{...ledger.requirements.r0.findings[0],claimIds:['c0']}}],unresolvedFindingIds:[]},
   supported={...localUnsupported,judgment:'supported',citationFindings:{r0:{judgment:'supports',reason:'Selected original statement.'},r1:{judgment:'supports',reason:'Selected original metrics.'}},
    objectUnitScope:{claim:'selected statement',evidence:'selected statements',alignment:'same'}},saved=globalThis.fetch,wires:Record<string,unknown>[]=[];
  try{await development(async()=>{
@@ -150,115 +174,32 @@ test('question-scope-v1 uses one existing revision, restores witnesses and audit
   const result=await reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,artifact,{...j.policy,scopeWitnessPolicy:'question-scope-v1'});
   assert.deepEqual(j.attempts.map(a=>a.phase),['coverage-review','content-revision','revised-claim-audit']);assert.equal(j.raw.length,3);
   assert.equal(result.original.selectedReferenceFindings[0].rawResponseSha256,old.originalRaw.rawSha256);assert.equal(JSON.stringify(artifact),before);
-  assert.equal(result.review.version,QUESTION_SCOPE_REVIEW_VERSION);assert.equal(result.review.scopeAssessment?.status,'incomplete');
+  assert.equal(result.review.version,QUESTION_SCOPE_REVIEW_VERSION);assert.equal(result.review.scopeBindings?.bindingsValid,true);
+  assert.equal(result.review.scopeBindings?.semanticVerified,false);assert.ok('scopeRegistrySha256'in result.review.binding);
+  assert.equal(result.review.binding.scopeRegistrySha256,result.review.scopeBindings?.registrySha256);
   const candidate=result.revisionCandidate;assert.ok(candidate&&'scopeDischarges'in candidate&&'audits'in candidate);
-  assert.equal(candidate.scopeDischarges?.assessment.status,'accounted-awaiting-independent-review');assert.equal(candidate.semanticVerified,false);
-  assert.ok(candidate.scopeDischarges?.witness.requirements.r0.members[0].witnesses.every(w=>!w.sourceId.startsWith('Source')));
+  assert.equal(candidate.scopeDischarges?.assessment.status,'bindings-linked-awaiting-independent-review');assert.equal(candidate.semanticVerified,false);
   const local=JSON.stringify(wires[2]);assert.ok(!local.includes('scopeWitness'));assert.ok(!local.includes(image.toString('base64')));
-  assert.equal((wires[1].text as {format:{name:string}}).format.name,'complete_study_scope_revision_v1');
+  assert.equal((wires[1].text as {format:{name:string}}).format.name,'complete_study_scope_id_revision_v2');
  });}finally{globalThis.fetch=saved;}
 });
 
-test('question-scope-v1 incomplete candidate cannot be upgraded by generic local support and invalid policies fail before source/provider',async()=>{
- const f=fixture(),j=journal('one-content-revision'),ledger=scopeLedger(),saved=globalThis.fetch;let calls=0;
- try{await development(async()=>{
-  globalThis.fetch=async()=>{calls++;return response(calls===1?{...uncertain,scopeWitness:ledger}:{answer:f.alias,
-   discharges:[{memberId:'m0',status:'eligible',witnesses:[],claimIds:['c0']}],unresolvedMemberIds:['m0']});};
+test('ID-only scope clears old claim links, preserves unresolved findings and rejects invalid policy before source/provider',async()=>{
+ const f=fixture(),{built,map,choices}=canonicalScope(f),ledger=scopeLedger(),canonical=mapQuestionScopeWitness(ledger,map),j=journal('one-content-revision'),saved=globalThis.fetch;
+ ledger.requirements.r0.findings[0].claimIds=['c0'];
+ assert.equal(restoreQuestionScopeDischarges({answer:{},discharges:[],unresolvedFindingIds:[]},canonical,f.artifact.providerSelections.claims,choices,map).assessment.status,'incomplete');
+ const changed={answer:{},discharges:[{findingId:'f0',binding:{...ledger.requirements.r0.findings[0],aspectIds:['r0.configuration']}}],unresolvedFindingIds:[]};
+ assert.throws(()=>restoreQuestionScopeDischarges(changed,canonical,f.artifact.providerSelections.claims,choices,map),/Invalid question scope discharge/);
+ let calls=0;try{await development(async()=>{
+  globalThis.fetch=async()=>{calls++;return response(calls===1?{...uncertain,scopeWitness:scopeLedger()}:{answer:f.alias,discharges:[],unresolvedFindingIds:['f0']});};
   const result=await reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,f.artifact,{...j.policy,scopeWitnessPolicy:'question-scope-v1'});
-  assert.equal(calls,2);assert.deepEqual(j.attempts.map(a=>a.phase),['coverage-review','content-revision']);
-  assert.equal(result.revisionCandidate?.status,'incomplete-scope-witness');assert.equal(result.revisionCandidate?.questionCoverage,'incomplete');
-  assert.ok(result.revisionCandidate&&!('audits'in result.revisionCandidate));
+  assert.equal(calls,2);assert.equal(result.revisionCandidate?.status,'incomplete-scope-witness');assert.ok(result.revisionCandidate&&!('audits'in result.revisionCandidate));
   for(const policy of [{...j.policy,scopeWitnessPolicy:'invalid'}, {...j.policy,scopeWitnessPolicy:'question-scope-v1',completeSourceReview:undefined},
    {...j.policy,scopeWitnessPolicy:'question-scope-v1',citationRevision:true}])
    await assert.rejects(()=>reviewCompletePlannedStudyAnswer(f.question,async()=>{throw Error('Must not read source');},f.artifact,policy as PlannedStudyAnswerPolicy),/scope witness|Scope witnesses|durable development/);
   assert.equal(calls,2);
  });}finally{globalThis.fetch=saved;}
-});
-
-test('question-scope-v1 uncertain original local evidence triggers the existing content revision despite no coverage gap',async()=>{
- const f=fixture(),j=journal('one-content-revision'),ledger=scopeLedger(),saved=globalThis.fetch,
-  old=savedLocal(f,{...localUnsupported,judgment:'uncertain',objectUnitScope:{claim:'tuning',evidence:'fixed setting',alignment:'not-established'}}),
-  artifact={...f.artifact,originalLocalAudits:[old]},wires:Record<string,unknown>[]=[];
- ledger.requirements.r0.qualifiers=[];ledger.requirements.r0.members[0].witnesses.splice(1);ledger.requirements.r0.members[0].claimIds=['c0'];
- try{await development(async()=>{
-  globalThis.fetch=async(_url,init)=>{wires.push(JSON.parse(String(init?.body)));return response(wires.length===1?{...uncertain,scopeWitness:ledger}:
-   {answer:f.alias,discharges:[],unresolvedMemberIds:['m0']});};
-  const result=await reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,artifact,{...j.policy,scopeWitnessPolicy:'question-scope-v1'});
-  assert.equal(result.review.scopeAssessment?.status,'accounted-awaiting-independent-review');assert.equal(result.review.diagnostics.issues.length,0);
-  assert.deepEqual(j.attempts.map(a=>a.phase),['coverage-review','content-revision']);assert.equal(wires.length,2);
-  const input=JSON.parse(((wires[1].input as {content:{text:string}[]}[])[1].content)[0].text);
-  assert.equal(input.originalSelectedReferenceFindings.findings[0].diagnostics.judgment,'uncertain');
-  assert.equal(input.originalSelectedReferenceFindings.findings[0].rawResponseSha256,old.originalRaw.rawSha256);
-  assert.equal(result.revisionCandidate?.status,'incomplete-scope-witness');
- });}finally{globalThis.fetch=saved;}
-});
-
-test('question-scope-v1 schema capacity shares source/claim definitions and preflights both actual phase schemas',()=>{
- const f=fixture(),members=scopeLedger(),ids=(n:number)=>Array.from({length:n},(_,i)=>`Source${i+1}`),
-  build=(sourceIds:string[],requirements=10)=>{const request=structuredClone(f.transport.request);
-   request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=sourceIds;
-   const part=(request.input[1].content as {text:string}[])[0],input=JSON.parse(part.text);
-   input.quoteUnits=sourceIds.map(id=>({...input.quoteUnits[0],id}));input.evidence=[];
-   input.questionContract.requirements=Array.from({length:requirements},(_,i)=>({...f.contract.requirements[0],id:`r${i}`}));part.text=JSON.stringify(input);
-   return {request,coverage:()=>buildCompleteStudyCoverageReviewRequest(request,{...f.alias,claims:Array.from({length:6},()=>f.alias.claims[0])},undefined,'question-scope-v1'),
-    revision:()=>questionScopeRevisionSchema(request.text.format.schema,members,sourceIds,{textIds:sourceIds,imageIds:[]})};},
-  enums=(schema:unknown)=>{const values:unknown[][]=[];const visit=(v:unknown)=>{if(!v||typeof v!=='object')return;
-   if(!Array.isArray(v)&&Object.hasOwn(v,'enum'))values.push((v as {enum:unknown[]}).enum);for(const child of Object.values(v))visit(child);};visit(schema);return values;},
-  wide=build(ids(100)),coverage=wide.coverage().request.text.format.schema,revision=wide.revision();
- for(const schema of [coverage,revision]){const actual=enums(schema);assert.equal(actual.filter(e=>JSON.stringify(e)===JSON.stringify(ids(100))).length,1);
-  assert.ok(actual.reduce((n,e)=>n+e.length,0)<200);}
- assert.equal(enums(coverage).filter(e=>JSON.stringify(e)===JSON.stringify(['c0','c1','c2','c3','c4','c5'])).length,1);
- // Repeated rN and source references do not multiply the enum; actual provider gates still apply.
- for(const rejected of [build(ids(1000)),build(['Source1','Source2',...Array.from({length:249},(_,i)=>`Long${i}${'x'.repeat(70)}`)]),
-  build(['Source1','Source2',...Array.from({length:248},(_,i)=>`Long${i}${'x'.repeat(500)}`)])])
-  for(const phase of [rejected.coverage,rejected.revision])assert.throws(phase,/enum count|enum string/);
- const allowed=build(['Source1','Source2',...Array.from({length:248},(_,i)=>`Long${i}${'x'.repeat(70)}`)]);
- allowed.coverage();allowed.revision();assert.deepEqual(wide.request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,ids(100));
-});
-
-type WitnessSchemaNode={type?:string;$ref?:string;anyOf?:WitnessSchemaNode[];enum?:string[];properties?:Record<string,WitnessSchemaNode>;required?:string[];additionalProperties?:boolean};
-function witnessBranches(schema:unknown){
- const defs=(schema as {$defs:Record<string,WitnessSchemaNode>}).$defs,
-  deref=(n:WitnessSchemaNode):WitnessSchemaNode=>n.$ref?deref(defs[n.$ref.split('/').at(-1)!]):n,root=deref(defs.scopeWitness);
- return (root.anyOf??[root]).map(ref=>{const branch=deref(ref);assert.equal(branch.type,'object');assert.equal(branch.additionalProperties,false);
-  assert.deepEqual(branch.required,['sourceId','questionSpan','quote','judgment']);
-  return {ids:deref(branch.properties!.sourceId).enum!,quoteType:branch.properties!.quote.type};});
-}
-
-test('typed scope witness shape pairs actual text/image IDs with string/null in both phases without repairing invalid raw',()=>{
- const f=fixture(),built=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),data=built.choices.scopeWitness!,
-  kinds={textIds:Object.keys(data.textById),imageIds:data.imageIds},ledger=scopeLedger(),imageId=kinds.imageIds[0],
-  revision=questionScopeRevisionSchema(f.transport.request.text.format.schema,ledger,built.choices.sourceIds,kinds),
-  expected=[{ids:kinds.textIds,quoteType:'string'},{ids:kinds.imageIds,quoteType:'null'}];
- assert.deepEqual(witnessBranches(built.request.text.format.schema),expected);assert.deepEqual(witnessBranches(revision),expected);
- ledger.requirements.r0.members[0].witnesses.push({sourceId:imageId,questionSpan:'metrics',quote:'invented image transcription',judgment:'supports'});
- const raw=JSON.stringify(ledger);assert.throws(()=>validateQuestionScopeWitness(ledger,built.choices),/Invalid/);assert.equal(JSON.stringify(ledger),raw);
- const proposal={answer:f.alias,discharges:[{memberId:'m0',status:'eligible',claimIds:['c0'],witnesses:ledger.requirements.r0.members[0].witnesses}],unresolvedMemberIds:[]};
- assert.throws(()=>restoreQuestionScopeDischarges(proposal,scopeLedger(),f.alias.claims,built.choices,id=>id),/Invalid/);
- ledger.requirements.r0.members[0].witnesses.at(-1)!.quote=null;validateQuestionScopeWitness(ledger,built.choices);
- ledger.requirements.r0.members[0].witnesses[0].quote=null;assert.throws(()=>validateQuestionScopeWitness(ledger,built.choices),/Invalid/);
- const prompt=built.request.input[0].content;assert.ok(typeof prompt==='string');assert.ok(prompt.includes('complete source before mapping'));assert.ok(prompt.includes('full r.questionSpan and each qualifier'));
-});
-
-test('typed scope witness shape omits empty kinds and rejects incomplete or overlapping actual kind partitions',()=>{
- const f=fixture(),complete=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),data=complete.choices.scopeWitness!,
-  allText=Object.keys(data.textById),allImages=data.imageIds;
- for(const [textIds,imageIds]of [[allText,[]],[[],allImages]]){
-  const ids=[...textIds,...imageIds],request=structuredClone(f.transport.request),part=(request.input[1].content as {text:string}[])[0],input=JSON.parse(part.text);
-  request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=ids;
-  input.quoteUnits=input.quoteUnits.filter((q:{id:string})=>textIds.includes(q.id));
-  input.evidence=input.evidence.filter((e:{id:string;kind:string})=>e.kind==='image'&&imageIds.includes(e.id));part.text=JSON.stringify(input);
-  const coverage=buildCompleteStudyCoverageReviewRequest(request,{status:'insufficient-evidence',message:'Unknown.',claims:[]},undefined,'question-scope-v1'),
-   revision=questionScopeRevisionSchema(request.text.format.schema,scopeLedger(),ids,{textIds,imageIds}),
-   expected=[{ids,quoteType:textIds.length?'string':'null'}];
-  assert.deepEqual(witnessBranches(coverage.request.text.format.schema),expected);assert.deepEqual(witnessBranches(revision),expected);
-  for(const schema of [coverage.request.text.format.schema,revision]){
-   const defs=(schema as {$defs:Record<string,unknown>}).$defs;assert.equal(Object.hasOwn(defs,textIds.length?'imageWitness':'textWitness'),false);
-   assert.ok(!JSON.stringify(schema).includes('"enum":[]'));
-  }
- }
- for(const kinds of [{textIds:allText,imageIds:[]},{textIds:[...allText,...allImages],imageIds:allImages}])
-  assert.throws(()=>questionScopeRevisionSchema(f.transport.request.text.format.schema,scopeLedger(),complete.choices.sourceIds,kinds),/Invalid scope source kinds/);
+ assert.throws(()=>validateQuestionScopeWitness({complete:true,requirements:{r0:{findings:[{aspectIds:['r0.aspect'],sourceIds:['Source1'],claimIds:['c0'],judgment:'supports',quote:'copied'}]}}},built.choices),/Invalid question scope ID/);
 });
 
 test('reasoned-v1 coverage preserves all source bytes and only its exact explicit phase permits medium',async()=>{

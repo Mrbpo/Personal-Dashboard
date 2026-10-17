@@ -4,7 +4,7 @@ import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSe
 import {validateCompleteStudySource} from './document-study-source.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,buildCompleteStudyCoverageReviewRequest,
  validateCompleteStudyCoverageReview,validateDocumentCitationAudit,documentCitationAuditRequestIdentity,evidenceAuditSettings,
- assertQuestionScopeWitnessPolicy,validateQuestionScopeWitness,assessQuestionScopeWitness,mapQuestionScopeWitness,questionScopeRevisionSchema,restoreQuestionScopeDischarges,QUESTION_SCOPE_REVIEW_VERSION,
+ assertQuestionScopeWitnessPolicy,validateQuestionScopeWitness,assessQuestionScopeWitness,mapQuestionScopeWitness,restoreQuestionScopeBindings,questionScopeRevisionSchema,restoreQuestionScopeDischarges,QUESTION_SCOPE_REVIEW_VERSION,
  DOCUMENT_CITATION_AUDIT_VERSION,COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,type DocumentCitationAuditResponse,type EvidenceAuditProfile,type QuestionScopeWitnessPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
@@ -16,7 +16,7 @@ import type {DocumentSourceResolution} from './document-source.ts';
 export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
 export const COMPLETE_SOURCE_STUDY_ANSWER_VERSION='complete-source-evidence-answer-v1';
 export const STUDY_CONTENT_REVISION_VERSION='complete-study-content-revision-v1';
-export const QUESTION_SCOPE_REVISION_VERSION='complete-study-scope-revision-v1';
+export const QUESTION_SCOPE_REVISION_VERSION='complete-study-scope-id-revision-v2';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 export const CAPTION_ALIAS_SOURCE_LABEL_VERSION='request-local-caption-alias-v2';
 type SourceLabelPolicy='caption-alias-v2';
@@ -388,19 +388,21 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
  try{
   const prepared=buildCompleteStudyCoverageReviewRequest(initial.transport.request,initial.alias,policy.auditProfile,policy.scopeWitnessPolicy),requestSha=digest(prepared.request),
    reviewVersion=policy.scopeWitnessPolicy?QUESTION_SCOPE_REVIEW_VERSION:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,
-   budget=studyAnswerPlanRequestBudget(prepared.request,{prepared:initial.packet.selectedPrepared});
-  await policy.recordState({event:'coverage-review-request',version:reviewVersion,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),...(policy.scopeWitnessPolicy?{scopeWitnessPolicy:policy.scopeWitnessPolicy}:{}),binding:initial.binding,request:prepared.request});
-  const {value,...execution}=await executeStudyPlanningRequest(reviewVersion,'coverage-review',prepared.request,bindingSha256,budget,
+   reviewBinding=prepared.choices.scopeWitness?{...initial.binding,scopeRegistrySha256:prepared.choices.scopeWitness.registrySha256}:initial.binding,
+   reviewBindingSha256=digest(reviewBinding),budget=studyAnswerPlanRequestBudget(prepared.request,{prepared:initial.packet.selectedPrepared});
+  await policy.recordState({event:'coverage-review-request',version:reviewVersion,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),...(policy.scopeWitnessPolicy?{scopeWitnessPolicy:policy.scopeWitnessPolicy}:{}),binding:reviewBinding,request:prepared.request});
+  const {value,...execution}=await executeStudyPlanningRequest(reviewVersion,'coverage-review',prepared.request,reviewBindingSha256,budget,
    journal(policy,'coverage-review'),async()=>{await checked();if(digest(prepared.request)!==requestSha)throw Error('Coverage request changed');},policy.auditProfile),
    aliasDiagnostics=validateCompleteStudyCoverageReview(value,prepared.choices),byLabel=new Map(initial.transport.mapping.entries.map(e=>[e.label,e.canonicalId])),
    canonicalId=(id:string)=>{const mapped=byLabel.get(id);if(!mapped)throw Error('Unknown scope source alias');return mapped;},
-   scopeChoices=prepared.choices.scopeWitness?{...prepared.choices,sourceIds:prepared.choices.sourceIds.map(canonicalId),scopeWitness:{
+   scopeChoices=prepared.choices.scopeWitness?{...prepared.choices,sourceIds:prepared.choices.sourceIds.map(canonicalId),scopeWitness:{...prepared.choices.scopeWitness,
     textById:Object.fromEntries(Object.entries(prepared.choices.scopeWitness.textById).map(([id,text])=>[canonicalId(id),text])),
     imageIds:prepared.choices.scopeWitness.imageIds.map(canonicalId),claims:original.providerSelections.claims}}:undefined,
    scopeWitness=aliasDiagnostics.scopeWitness&&scopeChoices?validateQuestionScopeWitness(mapQuestionScopeWitness(aliasDiagnostics.scopeWitness,canonicalId),scopeChoices):undefined,
    scopeAssessment=scopeWitness?assessQuestionScopeWitness(scopeWitness,original.providerSelections.claims):undefined,
+   scopeBindings=scopeWitness&&scopeChoices?restoreQuestionScopeBindings(scopeWitness,scopeChoices,initial.packet.selectedPrepared):undefined,
    diagnostics={...aliasDiagnostics,issues:aliasDiagnostics.issues.map(i=>({...i,sourceIds:i.sourceIds.map(id=>byLabel.get(id)!)})),...(scopeWitness?{scopeWitness}:{})},
-   review={version:reviewVersion,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),...(policy.scopeWitnessPolicy?{scopeWitnessPolicy:policy.scopeWitnessPolicy,scopeAssessment}:{}),status:'diagnosed-awaiting-independent-review',binding:initial.binding,bindingSha256,
+   review={version:reviewVersion,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),...(policy.scopeWitnessPolicy?{scopeWitnessPolicy:policy.scopeWitnessPolicy,scopeAssessment,scopeBindings}:{}),status:'diagnosed-awaiting-independent-review',binding:reviewBinding,bindingSha256:reviewBindingSha256,
     ...execution,aliasDiagnostics,diagnostics,localSupportUnassessed:true,semanticVerified:false,wholeAnswerVerified:false,
     questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
   await policy.recordState({event:'complete-source-review',review});
@@ -419,7 +421,7 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
    const revisionVersion=policy.scopeWitnessPolicy?QUESTION_SCOPE_REVISION_VERSION:STUDY_CONTENT_REVISION_VERSION,
     concernBinding:{originalConcernClaimIds?:string[];originalUnsupportedClaimIds?:string[]}=policy.scopeWitnessPolicy?
      {originalConcernClaimIds:localConcerns.map(f=>f.claimId)}:{originalUnsupportedClaimIds:localConcerns.map(f=>f.claimId)},
-    revisionBinding={version:revisionVersion,parent:initial.binding,coverageReviewRequestSha256:execution.providerRequestSha256,
+    revisionBinding={version:revisionVersion,parent:reviewBinding,coverageReviewRequestSha256:execution.providerRequestSha256,
    coverageReviewRawSha256:execution.rawResponseSha256,coverageDiagnosticsSha256:digest(aliasDiagnostics),
    ...concernBinding},revisionBindingSha256=digest(revisionBinding),
    request={...base,input:[{...base.input[0],content:base.input[0].content+
@@ -437,13 +439,15 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
      originalSelectedReferenceFindings:{version:DOCUMENT_CITATION_AUDIT_VERSION,findings:originalSelectedReferenceFindings,fallible:true},
      parentAnswerSha256:initial.binding.originalAnswerSha256})})}]},
     revisionRequest=scopeWitness?{...request,input:[{...request.input[0],content:request.input[0].content+
-     ' Return an answer plus compact discharges/unresolvedMemberIds for the supplied scopeWitness members. Each discharge uses the same mN and actual cN claim IDs. '+
-     'Keep original witness arrays empty to reuse them, or provide actual replacement source witnesses for a changed eligibility judgment. Unknown roles are not excluded. '+
-     'For each eligible member, supports witnesses must cover the full r.questionSpan and every qualifier; the same mapped cN claim must actually select all these witnesses. If unestablished, retain unclear/incomplete; do not invent support or add citations implicitly. '+
-     'Enumeration needs all relevant eligible members; a positive existence answer needs one true witness, not an unrelated inventory. '+
-     'If source, scope or output capacity is unresolved, preserve unresolvedMemberIds. Do not invent members or claim complete coverage.'},request.input[1]],
-     text:{format:{...request.text.format,name:'complete_study_scope_revision_v1',schema:questionScopeRevisionSchema(request.text.format.schema,aliasDiagnostics.scopeWitness!,prepared.choices.sourceIds,
-      {textIds:Object.keys(prepared.choices.scopeWitness!.textById),imageIds:prepared.choices.scopeWitness!.imageIds})}}}:request,
+     ' Return an answer plus discharges/unresolvedFindingIds for program-assigned fN findings in coverageReview.scopeBindings. '+
+     'Each discharge contains findingId and a binding with exactly the original aspectIds, actual sourceIds, new cN claimIds and fallible judgment. '+
+     'Select IDs only, never copy quotes, labels or question spans. Cite the actual supporting source IDs in the answer itself; no citation is added by a discharge. '+
+     'Retain unresolved finding IDs when scope, evidence or capacity remains unclear. Neither valid bindings nor linked citations establish semantic coverage.'},
+      {...request.input[1],content:content.map((part,i)=>i?part:{...part,text:JSON.stringify({...JSON.parse((request.input[1].content as {text:string}[])[0].text),
+       coverageReview:{version:review.version,diagnostics:aliasDiagnostics,scopeBindings:aliasDiagnostics.scopeWitness?{
+        registrySha256:prepared.choices.scopeWitness!.registrySha256,
+        findings:Object.entries(aliasDiagnostics.scopeWitness.requirements).flatMap(([requirementId,r])=>r.findings.map(f=>({requirementId,...f}))).map((f,i)=>({id:`f${i}`,...f}))}:undefined,fallible:true}})})}],
+     text:{format:{...request.text.format,name:'complete_study_scope_id_revision_v2',schema:questionScopeRevisionSchema(request.text.format.schema,aliasDiagnostics.scopeWitness!,prepared.choices)}}}:request,
     revisionRequestSha=digest(revisionRequest),revisionBudget=studyAnswerPlanRequestBudget(revisionRequest,{prepared:initial.packet.selectedPrepared});
    await policy.recordState({event:'content-revision-request',binding:revisionBinding,request:revisionRequest});
    const {value:proposal,...revisionExecution}=await executeStudyPlanningRequest(revisionVersion,'content-revision',revisionRequest,revisionBindingSha256,revisionBudget,
@@ -458,13 +462,14 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
    await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};}
    const revised=resolveDocumentAnswerSelections(selections,initial.packet.prepared.supports),
     scopeDischarges=scopeWitness&&scopeChoices?restoreQuestionScopeDischarges(proposal,scopeWitness,revised.providerSelections.claims,scopeChoices,canonicalId):undefined,
+    revisedScopeBindings=scopeDischarges&&scopeChoices?restoreQuestionScopeBindings(scopeDischarges.witness,{...scopeChoices,claimIds:revised.providerSelections.claims.map((_,i)=>`c${i}`)},initial.packet.selectedPrepared):undefined,
     incompleteScope=scopeDischarges?.assessment.status==='incomplete';
-   if(incompleteScope){const revisionCandidate={status:'incomplete-scope-witness',...revised,binding:revisionBinding,...revisionExecution,scopeDischarges,
+   if(incompleteScope){const revisionCandidate={status:'incomplete-scope-witness',...revised,binding:revisionBinding,...revisionExecution,scopeDischarges,scopeBindings:revisedScopeBindings,
      semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'incomplete',fullSourceCoverage:'unassessed'};
     await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};}
    const audits=await auditStudySelections(question,initial.packet,revised.providerSelections,readContext,policy,'revised-claim-audit');
   await checked();
-   const revisionCandidate={status:'revised-awaiting-independent-review',...revised,binding:revisionBinding,...revisionExecution,audits,...(scopeDischarges?{scopeDischarges}:{}),
+   const revisionCandidate={status:'revised-awaiting-independent-review',...revised,binding:revisionBinding,...revisionExecution,audits,...(scopeDischarges?{scopeDischarges,scopeBindings:revisedScopeBindings}:{}),
    localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),coverageReview:'not-performed-for-revised-candidate',
    semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
   await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};

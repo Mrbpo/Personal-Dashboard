@@ -100,74 +100,65 @@ No real provider, PostgreSQL, new PDF parse, deployment or production switch was
 Structural/mock success does not establish complete-answer accuracy or three independent
 acceptance groups; the coordinator controls later real diagnostic pilots.
 
-### Explicit question-scope witnesses (Issue181)
+### Explicit question-scope ID bindings (Issue181)
 
-`scopeWitnessPolicy: 'question-scope-v1'` opts the existing complete-source review and
-one-content-revision exchange into a new semantic protocol. It requires explicit
-`completeSourceReview` and rejects legacy `citationRevision`. It is independent of the
-execution-only `auditProfile`; absent the new policy, old request bytes and identities
-remain unchanged. No phase, model, output allowance, contract-v1 field or database table
-is added. Coverage and proposal schemas/identities use
-`complete-study-scope-witness-v1` and `complete-study-scope-revision-v1` respectively.
-Both new schemas share source/claim/member enums with `$defs`/`$ref` rather than
-repeating source inventories per requirement. Before reservation, the final schema is
-checked for actual enum totals (1000), per-enum string size (15000 when over 250 values)
-and total property/definition/enum/constant string size (120000). No source is discarded
-to satisfy a schema limit; capacity failures retain the complete input.
-In this opt-in lane, an existing selected-only finding that fails the normal local
-support predicate (including uncertain/not-established) also triggers that same single
-proposal and is passed through with its original raw identity. No-gap coverage cannot
-suppress it; the legacy lane keeps its original explicit-unsupported trigger.
+`scopeWitnessPolicy: 'question-scope-v1'` opts the existing coverage/revision
+exchange into `complete-study-scope-id-bindings-v2` and
+`complete-study-scope-id-revision-v2`. It still requires explicit
+`completeSourceReview` and rejects `citationRevision`. No model, phase, output
+allowance, contract-v1 field or database table is added. Absent this policy,
+the previous default request bytes, identities and behavior remain unchanged.
+The independent `auditProfile` still controls only its existing execution settings.
 
-For each fixed rN, coverage returns a compact `scopeWitness`: answer kind (positive
-existence, enumeration, other or unclear), exact question span, relevant qualification
-spans and only the relevant mN members. Each member records eligible/excluded/unclear,
-actual source witnesses and original cN claim bindings. A witness binds a question span
-to a supplied source ID, an exact original text quote (or null for actual input pixels)
-and a fallible supports/contradicts/unclear judgment. There is no mandatory tool/role
-table. For example, experimental use and component provenance are separate predicates;
-unknown provenance cannot become exclusion merely because a system is a baseline.
-Exclusion requires a contradictory witness, never silence. IDs, spans, text identity
-and pixel identity are validated; these checks do **not** validate semantic entailment
-or prove that the model discovered every relevant member.
+The request freezes a `scopeBindingRegistry` and its SHA from the actual question
+contract: each rN has an `rN.aspect`, plus IDs such as `rN.configuration` for its
+non-null scope fields. Their original strings are supplied by the program; the
+model does not retype question spans, source quotes, labels or qualifications.
+The full original question remains present. The contract and its aspect registry
+are fallible: a qualification absent from the contract remains part of the user's
+question, and this registry cannot prove question completeness.
 
-The opt-in coverage and discharge schemas share source-kind-aware witness branches:
-actual text IDs require string quotes; actual image IDs require null quotes. Their
-disjoint allowlists come from the current Kernel request, and empty kinds have no
-branch or empty enum. Source/claim enums remain shared and capacity checked. This
-uses nested `anyOf`/`$defs` supported by [official OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
-The strict validator remains unchanged and never repairs the provider raw. Prompts
-also make existing assessment requirements explicit: construct relevant candidates
-from complete source before mapping the old answer, preserve absent eligible/unclear
-candidates, and witness the full requirement span and each qualifier through one
-mapped claim's actual selected references. Missing support stays unclear/incomplete.
-JSON schema cannot prove semantic adequacy or that a model chose all material spans.
+Each rN returns `findings` with only `aspectIds`, actual `sourceIds`, original
+`claimIds` and a fallible `supports`/`contradicts`/`unclear` judgment. Issues similarly
+select aspect IDs; the program preserves them and derives their parent rN IDs.
+Sources and aspects use shared schema enums; the final serialized coverage and
+revision schemas are checked before reservation against the existing 1000 enum,
+15000 per-enum string (when over 250 values) and 120000 total string limits.
+No source is truncated to satisfy capacity. Unknown IDs, wrong requirement/aspect
+bindings, duplicate IDs and stale registry identities fail, retaining the raw.
+Binding arrays are bounded at 30; source/aspect arrays require at least one ID.
+Each rN gets a uniform `floor(30 / requirementCount)` findings allowance in both
+schema and validator, keeping the whole response within the existing 30-finding
+limit. This is an output capacity bound, never a count of real entities. Cases
+that do not fit must remain incomplete rather than claim exhaustive coverage.
 
-The one existing proposal returns `{answer, discharges, unresolvedMemberIds}`. Each
-discharge binds an existing mN to new cN claims and reuses or replaces its source witnesses.
-All typed witness source aliases, including pixel aliases, are restored and validated;
-old claim bindings are cleared. No citation is added implicitly. At least one mapped
-claim must actually select the member-identity witness and witnesses for every required
-qualification. Citations from different claims cannot be pooled to pass that check.
-Enumeration requires every relevant member to be accounted for; unclear members remain
-incomplete. Positive existence needs one qualifying selected witness and does not demand
-an unrelated inventory. Negative existence and all-excluded inventories are conservatively
-incomplete in this version. This mechanism is not a universal semantic verifier.
+After the existing fresh Kernel source/answer checks, the program restores each
+selected original paragraph or image with its actual caption members and source
+identity. A valid but irrelevant source ID stays that exact source: there is no
+quote search, neighboring-source substitution or automatic citation addition.
+`bindingsValid: true` certifies this mechanical restoration only;
+`semanticVerified: false`, `questionCoverage: 'unassessed'` and the separate original
+selected-reference findings remain. Fixed versus tuned, provenance versus use,
+entity inventories and exhaustive coverage still require independent assessment.
+Quote units are not counted as semantic entities.
 
-Missing/unclear bindings, explicit unresolved members or `complete: false` retain a
-separate `incomplete-scope-witness` candidate with `questionCoverage: 'incomplete'`.
-It cannot be upgraded by a generic selected-only `supported` result; new local audits
-are skipped for that incomplete branch. Accounted candidates still receive only the
-existing physically selected-reference checks and await independent review. Capacity
-must be reported explicitly; malformed/over-limit results retain raw and fail without
-truncation, retries or inventing additional members. The original answer/raw, source,
-question, contract and historical accuracy scores remain separate and unchanged.
+Program-assigned fN IDs identify those fallible findings for the one existing
+optional revision. It returns `{answer, discharges, unresolvedFindingIds}`. A
+discharge selects the same original aspect IDs, actual source IDs and new cN IDs.
+Old claim links are cleared; a candidate claim must itself select its witnesses,
+and different claims cannot pool citations to pass the mechanical linkage check.
+Missing links, unresolved findings or `complete: false` retain the existing
+`incomplete-scope-witness` branch without spending new local-audit calls. Linked
+bindings are only `bindings-linked-awaiting-independent-review`; they are never
+"accounted entities" or a coverage PASS. Eligible candidates still receive the
+existing physically selected-only audits, without full-source rescue.
 
-Necessary synthetic protocol regressions cover default wire compatibility, distinct
-identity, enumeration versus positive existence, unresolved/excluded handling, exact
-question/text/image bindings, alias restoration, cross-claim citation isolation, reuse
-of historical local raw and the incomplete branch. They do not establish semantic
-improvement. A later authorized real pilot must independently check the complete
-question's qualifications against original source and actual selected references;
-role confusion, an omitted eligible member or unsupported exclusion falsifies success
-even if the ledger says accounted or every local check says supported.
+Original generation and low-profile local raw are restored under their own actual
+wire identities. Historical v1 copied-witness scope responses are preserved but
+are rejected by the new v2 shape; they are not relabeled or silently repaired.
+Raw-before-parse, current-source rechecks, ordinary ledger, no retry, capacity
+failures and the six-claim limit remain unchanged. Synthetic focused checks cover
+ID restoration (including a legal wrong source), original PNG/caption members,
+unknown/stale bindings, default compatibility, historical local reuse, capacity
+and the one-revision selected-only boundary. They establish no semantic improvement
+and change no old answers, source bytes, raw logs or benchmark scores.
