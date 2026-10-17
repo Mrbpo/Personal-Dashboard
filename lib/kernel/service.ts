@@ -11,9 +11,9 @@ import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerReques
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
-import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareContractStudyPlan,buildContractStudyPlanRequest,
+import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareCompleteStudyEvidenceRoute,
  type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
-import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
+import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
@@ -1280,9 +1280,11 @@ export class KernelService {
         if(complete.status==='available'){
           const proof={policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:selected.selectedDocumentTitle,manifest:complete.manifest},
             initial={...complete.context,completeSourceProof:proof};
+          let evidenceRoute:ReturnType<typeof prepareCompleteStudyEvidenceRoute>|undefined;
           try{
-            const packet=prepareContractStudyPlan(question,initial,contract);
-            studyAnswerPlanRequestBudget(buildContractStudyPlanRequest(packet),packet);
+            evidenceRoute=prepareCompleteStudyEvidenceRoute(question,initial,contract);
+            const packet=preparePlannedStudyGeneration(question,initial,[],contract,evidenceRoute.binding,[]),transport=preparePlannedStudyGenerationTransport(packet);
+            studyAnswerPlanRequestBudget(transport.request,{prepared:packet.selectedPrepared});
           }catch(error){if(!isStudyRequestCapacityError(error))throw error;
             initialEvidence={...initialEvidence,reason:'request-capacity',capacityReason:(error as Error).message};
           }
@@ -1296,7 +1298,7 @@ export class KernelService {
               if(current.status!=='available'||current.manifest.manifestSha256!==complete.manifest.manifestSha256)throw new DocumentEvidenceChangedError();
               return {...current.context,completeSourceProof:{...proof,manifest:current.manifest}};
             };
-            try{return {...await answerPlannedStudyQuestion(question,read,async()=>{throw Error('Complete source does not execute supplemental queries');},contract,policy,selected),initialEvidence};}
+            try{return {...await answerPlannedStudyQuestion(question,read,async()=>{throw Error('Complete source does not execute supplemental queries');},contract,policy,selected,evidenceRoute!.binding),initialEvidence};}
             catch(error){if(!isStudyRequestCapacityError(error))throw error;
               const capacity={status:'capacity-exceeded' as const,initialEvidence,reason:(error as Error).message,wholeAnswerVerified:false as const};
               await policy.recordState({event:'initial-source-capacity',...capacity});return capacity;

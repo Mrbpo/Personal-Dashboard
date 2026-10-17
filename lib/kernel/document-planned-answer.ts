@@ -5,11 +5,15 @@ import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocu
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,studyAnswerModelInput,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
-import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
+import {planContractStudyAnswer,restoreContractStudyPlan,restoreCompleteStudyEvidenceRoute,isCompleteStudyEvidenceRoute,validateStudyQuestionContract,
+ type StudyQuestionContract,type StudyContractPlanBinding,type CompleteStudyEvidenceRouteBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
 export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
+export const COMPLETE_SOURCE_STUDY_ANSWER_VERSION='complete-source-evidence-answer-v1';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
+type PlanningProvenance={originalPlanSha256?:string;originalPlanRequestSha256?:string;originalPlanRawSha256?:string;
+ evidenceRoute?:CompleteStudyEvidenceRouteBinding};
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
  originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
@@ -91,8 +95,10 @@ function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContex
  * Supplemental text remains actual retrieved evidence. q IDs are source-stable;
  * original image order is retained. The extension is not a new model plan. */
 export function preparePlannedStudyGeneration(question:string,initial:DocumentAnswerContext,extras:DocumentAnswerContext[],contract:StudyQuestionContract,
- binding:StudyContractPlanBinding,queries:StudySupplementQuery[],supplementalSource?:SupplementalSource){
- const original=restoreContractStudyPlan(question,initial,contract,binding),context=mergeContexts(initial,extras),prepared=prepareDocumentAnswer(question,context,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
+ binding:StudyContractPlanBinding|CompleteStudyEvidenceRouteBinding,queries:StudySupplementQuery[],supplementalSource?:SupplementalSource){
+ const deterministic=isCompleteStudyEvidenceRoute(binding),original=deterministic?restoreCompleteStudyEvidenceRoute(question,initial,contract,binding):restoreContractStudyPlan(question,initial,contract,binding),
+  context=mergeContexts(initial,extras),prepared=prepareDocumentAnswer(question,context,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
+ if(deterministic&&(queries.length||extras.length))throw Error('Complete evidence route cannot import supplemental contexts');
  if(queries.length!==extras.length)throw Error('Supplemental query/context mismatch');
  if(supplementalSource&&extras.some(c=>c.anchors.some(h=>h.document_id!==supplementalSource.document.documentId||
   h.source_hash!==supplementalSource.document.sourceHash||h.source_version_id!==supplementalSource.document.sourceVersionId||
@@ -117,8 +123,9 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
   retrievalScope:supplementalSource?.scope??'whole-library-query',sourceSelection:supplementalSource??null,
   selections:c.anchors.map((h,rank)=>({rank:rank+1,id:h.id,documentId:h.document_id,sourceVersionId:h.source_version_id,sourceHash:h.source_hash,evidenceId:h.evidence_id,bodySha256:sha(h.body)})),
   imageSelection:c.imageSelection??null}));
- const receipt={version:PLANNED_STUDY_ANSWER_VERSION,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,contractSha256:contract.contractSha256,originalPlanSha256:binding.planSha256,
-  originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256,
+ const provenance:PlanningProvenance=deterministic?{evidenceRoute:binding}:{originalPlanSha256:binding.planSha256,
+  originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256};
+ const receipt={version:deterministic?COMPLETE_SOURCE_STUDY_ANSWER_VERSION:PLANNED_STUDY_ANSWER_VERSION,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,contractSha256:contract.contractSha256,...provenance,
   originalInputFingerprint:binding.inputFingerprint,inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,sourceCaptionProof:initial.sourceCaptionProof??null,
   initialRetrievalScope:initial.completeSourceProof?'selected-complete-source':'whole-library-query',
@@ -130,8 +137,7 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
  // Full planning/retrieval receipts stay journaled and bound; generation receives
  // their opaque identities and actual final sources, not coverage judgments.
  const selectedPrepared={...prepared,quoteUnits,supports,input:{...prepared.input,quoteUnits,evidence:prepared.input.evidence.filter(s=>supports.some(p=>p.id===s.id)),
-  questionContract:original.contract,planningProvenance:{originalPlanSha256:binding.planSha256,
-   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256}}};
+  questionContract:original.contract,planningProvenance:provenance}};
  return {context,prepared,selectedPrepared,receipt,bindingSha256:digest(receipt)};
 }
 function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlannedStudyGeneration>['selectedPrepared'],modelView:boolean){
@@ -155,8 +161,10 @@ function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlann
  * Source text, semantic metadata, nonselectable caption members, image bytes
  * and order stay intact. Canonical q/i identities remain bound in the packet. */
 export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof preparePlannedStudyGeneration>){
- if(!['contract-supplement-answer-v7','contract-supplement-answer-v8',PLANNED_STUDY_ANSWER_VERSION].includes(packet.receipt.version))
+ if(!['contract-supplement-answer-v7','contract-supplement-answer-v8',PLANNED_STUDY_ANSWER_VERSION,COMPLETE_SOURCE_STUDY_ANSWER_VERSION].includes(packet.receipt.version))
   throw Error('Unsupported planned source version');
+ if(Boolean(packet.receipt.evidenceRoute)!==(packet.receipt.version===COMPLETE_SOURCE_STUDY_ANSWER_VERSION))
+  throw Error('Evidence route cannot be relabeled as a historical AI plan');
  const prepared=packet.selectedPrepared,ids=[...prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),
   ...prepared.supports.filter(s=>s.kind==='image').map(s=>s.id)];
  if(!ids.length||new Set(ids).size!==ids.length||digest(ids)!==digest(packet.receipt.selectedSourceIds))throw Error('Invalid planned source labels');
@@ -169,11 +177,12 @@ export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof 
   input={...prepared.input,quoteUnits,evidence:prepared.input.evidence.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s)},
   // Historical revisions compare their original unprojected body. New v9
   // generation projects only after the typed SourceN mapping above.
-  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input},packet.receipt.version===PLANNED_STUDY_ANSWER_VERSION),mappingSha256=digest(mapping),
+  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input},[PLANNED_STUDY_ANSWER_VERSION,COMPLETE_SOURCE_STUDY_ANSWER_VERSION].includes(packet.receipt.version)),mappingSha256=digest(mapping),
   binding={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalBindingSha256:packet.bindingSha256,
    canonicalInputFingerprint:packet.prepared.fingerprint,canonicalPacketSha256,mappingSha256,providerRequestSha256:digest(request)},
   bindingSha256=digest(binding);
- return {request,mapping,binding,bindingSha256,...studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,request,bindingSha256)};
+ return {request,mapping,binding,bindingSha256,...studyPlanningRequestIdentity(
+  packet.receipt.version===COMPLETE_SOURCE_STUDY_ANSWER_VERSION?COMPLETE_SOURCE_STUDY_ANSWER_VERSION:PLANNED_STUDY_ANSWER_VERSION,request,bindingSha256)};
 }
 export function buildPlannedStudyGenerationRequest(packet:ReturnType<typeof preparePlannedStudyGeneration>){
  return preparePlannedStudyGenerationTransport(packet).request;
@@ -219,7 +228,7 @@ export async function revisePlannedStudyCitation(question:string,readPacket:()=>
   const packet=await readPacket(),receipt=original.receipt;
   // A historical version stays historical. Compare its original receipt and
   // actual body, without predicting an old runtime request identity.
-  if(!['contract-supplement-answer-v7','contract-supplement-answer-v8',PLANNED_STUDY_ANSWER_VERSION].includes(receipt.version)||
+  if(!['contract-supplement-answer-v7','contract-supplement-answer-v8',PLANNED_STUDY_ANSWER_VERSION,COMPLETE_SOURCE_STUDY_ANSWER_VERSION].includes(receipt.version)||
    digest({...packet.receipt,version:receipt.version})!==digest(receipt))throw Error('Planned revision final source changed');
   const current=preparePlannedStudyGenerationTransport({...packet,receipt,bindingSha256:digest(receipt)}),sent=original.generation.sourceLabels;
   if(digest(current.request)!==digest(sent.request)||digest(current.mapping)!==digest(sent.mapping)||digest(current.binding)!==digest(sent.binding)||
@@ -240,24 +249,30 @@ export async function revisePlannedStudyCitation(question:string,readPacket:()=>
  {claimIndex:failed.claimIndex,selectedSourceIds:packet.receipt.selectedSourceIds,originalAudit:failed.result});
 }
 
-/** One plan, lexical batch, generation and at most six original claim audits.
- * Explicit opt-in may add one citation-only proposal and one final audit. */
+/** A complete selected source uses deterministic input routing; the ranked
+ * lane retains its AI plan and lexical batch. Both keep generation and at most
+ * six original claim audits, with optional citation-only revision. */
 export async function answerPlannedStudyQuestion(question:string,readInitial:()=>Promise<DocumentAnswerContext>,
- readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy,supplementalSource?:SupplementalSource){
- await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract),plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
- await policy.recordState({event:'plan',result:plan});
+ readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy,supplementalSource?:SupplementalSource,
+ completeRoute?:CompleteStudyEvidenceRouteBinding){
+ await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract);
+ let plan:Omit<ReturnType<typeof restoreCompleteStudyEvidenceRoute>,'prepared'>|Awaited<ReturnType<typeof planContractStudyAnswer>>;
+ if(completeRoute){const {prepared:_prepared,...receipt}=restoreCompleteStudyEvidenceRoute(question,await readInitial(),checked,completeRoute);plan=receipt;}
+ else plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
+ await policy.recordState({event:completeRoute?'evidence-route':'plan',result:plan});
  if(plan.completion==='capacity-exceeded')return {status:'capacity-exceeded',plan,wholeAnswerVerified:false};
- const queries=plan.completeSourceProof?[]:studySupplementQueries(question,checked,plan.binding,supplementalSource),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
+ const queries='kind'in plan||plan.completeSourceProof?[]:studySupplementQueries(question,checked,plan.binding,supplementalSource),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
  for(const q of queries)readers.push(await readSupplement(q.query));
  const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource);};
  const packet=await read();await policy.recordState({event:'supplement',receipt:packet.receipt});
  if(!packet.selectedPrepared.supports.length)return {status:'unavailable',plan,receipt:packet.receipt,wholeAnswerVerified:false};
  const transport=preparePlannedStudyGenerationTransport(packet),body=transport.request,budget=studyAnswerPlanRequestBudget(body,{prepared:packet.selectedPrepared});
- await policy.recordState({event:'generation-request',version:PLANNED_STUDY_ANSWER_VERSION,transport});
+ const generationVersion=packet.receipt.version===COMPLETE_SOURCE_STUDY_ANSWER_VERSION?COMPLETE_SOURCE_STUDY_ANSWER_VERSION:PLANNED_STUDY_ANSWER_VERSION;
+ await policy.recordState({event:'generation-request',version:generationVersion,transport});
  const checkedRead=async()=>{const current=await read();if(current.bindingSha256!==packet.bindingSha256||
    digest(preparePlannedStudyGenerationTransport(current))!==digest(transport))throw Error('Planned answer composite source changed');return current.context;},
   recheck=async()=>{await checkedRead();},
-  {value:aliasSelections,...execution}=await executeStudyPlanningRequest(PLANNED_STUDY_ANSWER_VERSION,'generation',body,transport.bindingSha256,budget,journal(policy,'generation'),recheck),
+  {value:aliasSelections,...execution}=await executeStudyPlanningRequest(generationVersion,'generation',body,transport.bindingSha256,budget,journal(policy,'generation'),recheck),
   value=decodePlannedStudyGenerationSelections(aliasSelections,packet,transport,execution),generation={...execution,sourceLabels:transport};
  await policy.recordState({event:'generation',value,aliasSelections,...generation,receipt:packet.receipt});
  if(value&&typeof value==='object'&&Array.isArray((value as DocumentAnswerSelections).claims)&&(value as DocumentAnswerSelections).claims.length>6)
@@ -282,7 +297,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  await recheck();const original={plan,generation,...restored,audits,receipt:packet.receipt},
   citationRevision=policy.citationRevision===true?await revisePlannedStudyCitation(question,read,original,policy):undefined,
   result={status:'generated-awaiting-independent-review',...original,...(citationRevision?{citationRevision}:{}),
-  unassessedPlanningGaps:plan.plan.missing,localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),
+  ...('kind'in plan?{planningGapsAssessment:'unassessed' as const}:{unassessedPlanningGaps:plan.plan.missing}),localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),
   semanticVerified:false,wholeAnswerVerified:false,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
  await policy.recordState({event:'result',...result});return result;
 }

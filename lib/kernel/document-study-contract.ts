@@ -1,11 +1,13 @@
 import {createHash} from 'node:crypto';
 import {prepareDocumentCitationAudit} from './document-citation-audit.ts';
 import type {DocumentAnswerContext} from './document-answer.ts';
+import {validateCompleteStudySource} from './document-study-source.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,studyAnswerPlanRequestBudget,studyAnswerModelInput,
  assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 
 export const STUDY_QUESTION_CONTRACT_VERSION='study-question-contract-v1';
 export const STUDY_CONTRACT_PLAN_VERSION='contract-study-plan-v4';
+export const COMPLETE_STUDY_EVIDENCE_ROUTE_VERSION='selected-complete-evidence-route-v1';
 export const STUDY_CLUSTER_CHECK_VERSION='selected-study-cluster-check-v1';
 const sha=(x:string)=>createHash('sha256').update(x).digest('hex'),digest=(x:unknown)=>sha(JSON.stringify(x));
 const exact=(x:unknown,keys:string[])=>x!==null&&typeof x==='object'&&!Array.isArray(x)&&Object.keys(x).length===keys.length&&keys.every(k=>Object.hasOwn(x,k));
@@ -112,6 +114,36 @@ export function validateContractStudyPlan(value:unknown,contract:StudyQuestionCo
 }
 export type StudyContractPlanBinding={contractSha256:string;inputFingerprint:string;quoteUnitManifestSha256:string;plan:ContractStudyPlan;
  planSha256:string;providerRequestSha256:string;rawResponseSha256:string};
+
+export type CompleteStudyEvidenceRouteBinding={kind:'deterministic-complete-source';version:typeof COMPLETE_STUDY_EVIDENCE_ROUTE_VERSION;
+ contractSha256:string;inputFingerprint:string;quoteUnitManifestSha256:string;manifestSha256:string;
+ evidenceSelection:'all-original-selectable-v1';modelExecuted:false;semanticPlanning:'not-performed';
+ selectedSourceInputCoverage:'complete';questionCoverage:'unassessed';fullSourceCoverage:'unassessed';conflictExhaustiveness:'unassessed';receiptSha256:string};
+
+/** Input coverage only. No clusters, semantic gap findings, provider attempt or
+ * synthetic request/raw identity are created by this deterministic route. */
+export function prepareCompleteStudyEvidenceRoute(question:string,context:DocumentAnswerContext,contract:StudyQuestionContract){
+ const checked=validateStudyQuestionContract(question,contract),proof=validateCompleteStudySource(context),packet=prepareStudyAnswerPlan(question,context),
+  identity={kind:'deterministic-complete-source' as const,version:COMPLETE_STUDY_EVIDENCE_ROUTE_VERSION,contractSha256:checked.contractSha256,
+   inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,manifestSha256:proof.manifest.manifestSha256,
+   evidenceSelection:'all-original-selectable-v1' as const,modelExecuted:false as const,semanticPlanning:'not-performed' as const,
+   selectedSourceInputCoverage:'complete' as const,questionCoverage:'unassessed' as const,fullSourceCoverage:'unassessed' as const,conflictExhaustiveness:'unassessed' as const} as const,
+  binding:CompleteStudyEvidenceRouteBinding={...identity,receiptSha256:digest(identity)};
+ return {kind:identity.kind,version:identity.version,completion:'input-ready-for-generation' as const,contract:checked,binding,
+  prepared:packet.prepared,completeSourceProof:proof,parentMetadata:packet.prepared.input.parentMetadata,warnings:packet.prepared.warnings,
+  imageSelection:packet.prepared.input.imageSelection??null,unavailableParents:packet.prepared.unavailableParents,
+  modelExecuted:false as const,semanticPlanning:'not-performed' as const,planningGapsAssessment:'unassessed' as const,
+  semanticVerified:false as const,wholeAnswerVerified:false as const,fullSourceCoverage:'unassessed' as const,conflictExhaustiveness:'unassessed' as const};
+}
+export function restoreCompleteStudyEvidenceRoute(question:string,context:DocumentAnswerContext,contract:StudyQuestionContract,binding:CompleteStudyEvidenceRouteBinding){
+ const packet=prepareCompleteStudyEvidenceRoute(question,context,contract);
+ if(digest(binding)!==digest(packet.binding))throw Error('Complete evidence route/contract/current source binding changed');
+ return packet;
+}
+export function isCompleteStudyEvidenceRoute(binding:StudyContractPlanBinding|CompleteStudyEvidenceRouteBinding):binding is CompleteStudyEvidenceRouteBinding{
+ return 'kind'in binding&&binding.kind==='deterministic-complete-source';
+}
+
 export function bindContractStudyPlan(packet:ReturnType<typeof prepareContractStudyPlan>,plan:ContractStudyPlan,providerRequestSha256:string,rawResponseSha256:string):StudyContractPlanBinding{
  if(providerRequestSha256!==digest(buildContractStudyPlanRequest(packet))||!isSha(rawResponseSha256))throw new Error('Original plan request/raw identities differ');
  return {contractSha256:packet.contract.contractSha256,inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,
