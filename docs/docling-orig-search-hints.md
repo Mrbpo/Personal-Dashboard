@@ -57,6 +57,13 @@ final index SHA. Original body, snippets/quotes, evidence, confidence, warnings,
 PNG/manifest, facts and vectors are unchanged. No source version is created by
 refresh/rebuild. No-hint search hits gain no empty/undefined metadata key.
 
+The progress proof SHA ignores **only** `batches[].taskId`, a conversion-attempt
+identifier. Schema, source identity, options, batch size/ranges, input/result
+SHAs, copy maps and every other known or unknown field remain bound. A
+same-version replay with a new task ID can reuse its original persisted source
+raw without changing the index/body/evidence/PNG. Raw CAS and result references
+are still checked exactly; the historical source raw is not rewritten.
+
 Keyword hits expose `retrieval_hint` with provenance/hash/raw/ref pointers and
 fixed `unverified-retrieval-hint` authority, never as body or a new quotation.
 Full-page reading preserves that metadata and still verifies original source

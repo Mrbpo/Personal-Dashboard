@@ -29,7 +29,7 @@ test('registered orig recall hints update only page search, survive rebuild and 
     const needle='unseenorigneedle'+tag.replace(/[^a-z]/g,''),result=structuredClone(fixture.result);
     result.document.json_content.texts[1].orig=needle;
     const raw=Buffer.from(JSON.stringify({identity:fixture.identity,result})),rawHash=fixtureSha(raw),
-      progress={...fixture.progress,batches:[{...fixture.progress.batches[0],resultHash:rawHash}]},
+      progress={...fixture.progress,batches:[{...fixture.progress.batches[0],resultHash:rawHash,taskId:'first-conversion-attempt'}]},
       layout={...fixture.layout,resultReferences:[{...fixture.reference,resultBlobSha256:rawHash}]};
     await writeFile(join(directory,sourceHash),bytes);await writeFile(join(directory,rawHash),raw);await writeFile(join(directory,fixture.pngSha),fixture.png);
     const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout},async()=>fixture.png);
@@ -44,10 +44,11 @@ test('registered orig recall hints update only page search, survive rebuild and 
     const automatic=await search();assert.equal(automatic.length,1);assert.equal(automatic[0].body,fixture.body);
     assert.equal(automatic[0].retrieval_hint?.authority,'unverified-retrieval-hint');
     const immutable=async()=>(await kernelPool().query(`SELECT d.current_version_id,v.source_version_id,p.body,p.evidence_id,v.warnings,
-      e.parsed_value,e.confidence,pv.manifest,pv.manifest_sha256,
+      e.parsed_value,e.confidence,pv.manifest,pv.manifest_sha256,s.raw_value source_raw,s.raw_sha256 source_raw_sha256,
       (SELECT count(*)::int FROM document_page_embeddings WHERE version_id=v.id) vectors
       FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id
-      JOIN evidence e ON e.id=p.evidence_id JOIN document_pdf_visual_manifests pv ON pv.version_id=v.id WHERE d.owner_id=$1 AND d.id=$2`,[owner,id])).rows;
+      JOIN evidence e ON e.id=p.evidence_id JOIN source_item_versions s ON s.id=v.source_version_id
+      JOIN document_pdf_visual_manifests pv ON pv.version_id=v.id WHERE d.owner_id=$1 AND d.id=$2`,[owner,id])).rows;
     const original=await immutable(),index=async()=>(await kernelPool().query(`SELECT p.search_text,p.search_hint_provenance,
       (SELECT jsonb_agg(jsonb_build_array(c.id,c.body,c.search_text) ORDER BY c.position) FROM document_text_chunks c WHERE c.version_id=p.version_id) chunks
       FROM document_text_pages p WHERE p.version_id=$1 AND p.page_number=1`,[source.currentVersionId])).rows[0];
@@ -63,6 +64,12 @@ test('registered orig recall hints update only page search, survive rebuild and 
     await kernel.rebuildDocumentSearch(owner,id);assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
     // Same immutable source replay must not append the old hint again.
     await kernel.ingestParsedDocument(document,pages,options);assert.deepEqual(await index(),published);
+    // Only the runtime conversion ID changes. The immutable version and its
+    // original stored source raw remain exactly as first published.
+    await kernel.ingestParsedDocument(document,pages,{...options,batchProvenance:{...progress,
+      batches:[{...progress.batches[0],taskId:'second-conversion-attempt'}]}});
+    assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
+    assert.equal(original[0].source_raw.batchProvenance.batches[0].taskId,'first-conversion-attempt');
     await assert.rejects(kernel.refreshDocumentOrigSearchHints('foreign',source,1));
     await assert.rejects(kernel.refreshDocumentOrigSearchHints(owner,{...source,currentVersionId:'stale'},1));
     assert.deepEqual(await index(),published);

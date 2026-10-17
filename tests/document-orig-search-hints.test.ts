@@ -62,3 +62,20 @@ test('orig staging rejects fabricated/current drift, missing or changed CAS and 
  assert.deepEqual(ordinary,{searchText:documentSearchText(input.body),provenance:null});
  assert.equal(doclingOrigSearchHash({b:2,a:1}),doclingOrigSearchHash({a:1,b:2}));
 });
+
+test('orig progress binding ignores only batch taskId while keeping every other registered field strict',async()=>{
+ const {input}=await inputWithOrig(),base=input.progress as ReturnType<typeof sourcePageRegionsFixture>['progress'];
+ const progress={...base,taskId:'root-field-remains-bound',batches:[{...base.batches[0],taskId:'first-runtime-id',
+  other:{taskId:'nested-field-remains-bound'}}]};
+ const firstInput={...input,progress},before=JSON.stringify(firstInput),first=await prepareDoclingOrigSearchHints(firstInput);assert.ok(first);
+ const changedTask={...progress,batches:[{...progress.batches[0],taskId:'second-runtime-id'}]};
+ assert.doesNotThrow(()=>assertPreparedDoclingOrigSearchHints(first,{...input,progress:changedTask}));
+ const second=await prepareDoclingOrigSearchHints({...input,progress:changedTask});assert.deepEqual(second,first);
+ assert.equal(JSON.stringify(firstInput),before,'preparation must not mutate original registered progress');
+ const variants=[{...progress,schema:2},{...progress,identity:{...progress.identity,optionsHash:fixtureSha('other options')}},
+  {...progress,batchSize:2},{...progress,taskId:'root-field-changed'},{...progress,extra:'new-field'},
+  ...[{start:2},{end:2},{inputHash:fixtureSha('other input')},{copyIndices:[1]},{resultHash:fixtureSha('other raw')},
+   {other:{taskId:'nested-field-changed'}},{completedAt:'new-runtime-field-still-bound'}]
+   .map(delta=>({...progress,batches:[{...progress.batches[0],...delta}]}))];
+ for(const changed of variants)assert.throws(()=>assertPreparedDoclingOrigSearchHints(first,{...input,progress:changed}));
+});

@@ -121,6 +121,15 @@ export const DOCLING_ORIG_SEARCH_LIMITS=Object.freeze({items:256,textBytes:32768
 const canonical=(value:unknown):string=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?
  Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
 export const doclingOrigSearchHash=(value:unknown)=>sha(Buffer.from(canonical(value)));
+/** Only batches[].taskId identifies a conversion attempt rather than its
+ * immutable source/result. Preserve every other known or unknown field. */
+function stableOrigProgressHash(progress:unknown){
+ const value=object(progress);
+ return doclingOrigSearchHash(value&&Array.isArray(value.batches)?{...value,batches:value.batches.map(batch=>{
+  const item=object(batch);if(!item)return batch;
+  const {taskId:runtimeId,...bound}=item;void runtimeId;return bound;
+ })}:progress??null);
+}
 export type OrigSearchInput=DoclingRegionSource&{body:string;parserVersion:string;progress:unknown;layout?:DoclingVisualLayout|null};
 export type PreparedDoclingOrigSearchHints={policy:typeof DOCLING_ORIG_SEARCH_POLICY;source:DoclingRegionSource;
  bodySha256:string;parserVersion:string;progressSha256:string;references:DoclingRegionResultReference[];
@@ -147,7 +156,7 @@ export async function prepareDoclingOrigSearchHints(input:OrigSearchInput):Promi
  if(entries.length>DOCLING_ORIG_SEARCH_LIMITS.items||Buffer.byteLength(entries.map(e=>e.orig).join('\n'))>DOCLING_ORIG_SEARCH_LIMITS.textBytes)
   throw new DoclingPageRegionError('limit','Orig search hints exceed complete page limit');
  const value:PreparedDoclingOrigSearchHints={policy:DOCLING_ORIG_SEARCH_POLICY,source,bodySha256:sha(Buffer.from(input.body)),
-  parserVersion:input.parserVersion,progressSha256:doclingOrigSearchHash(input.progress??null),references:[index.result],
+  parserVersion:input.parserVersion,progressSha256:stableOrigProgressHash(input.progress),references:[index.result],
   producerDocument:index.producerDocument,derivedPage:index.derivedPage,entries,hintSha256:doclingOrigSearchHash(entries),
   sourceContentIsUntrusted:true,visibilityVerified:false,textFaithfulnessVerified:false,semanticRelationsVerified:false};
  if(Buffer.byteLength(canonical(value))>DOCLING_ORIG_SEARCH_LIMITS.provenanceBytes)
@@ -162,7 +171,7 @@ export function assertPreparedDoclingOrigSearchHints(value:PreparedDoclingOrigSe
   r.derivedInputSha256===value.references[i].derivedInputSha256&&isDeepStrictEqual(r.copyIndices,value.references[i].copyIndices)&&
   (r.optionsHash===null||r.optionsHash===value.references[i].optionsHash));
  if(!preparedOrig.has(value)||!isDeepStrictEqual(value.source,source)||value.bodySha256!==sha(Buffer.from(input.body))||
-  value.parserVersion!==input.parserVersion||value.progressSha256!==doclingOrigSearchHash(input.progress??null)||!sameRefs)
+  value.parserVersion!==input.parserVersion||value.progressSha256!==stableOrigProgressHash(input.progress)||!sameRefs)
   invalid('Orig search staging differs from current source/body/progress');
 }
 /** Persisted proofs can be checked without trusting a supplied hash alone.
