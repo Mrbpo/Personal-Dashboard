@@ -14,7 +14,7 @@ import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequ
 import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareCompleteStudyEvidenceRoute,
  type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
-import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
+import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentPageRegions,readDocumentPageRegionsForImages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
@@ -988,6 +988,10 @@ export class KernelService {
     return readDocumentSourcePages(kernelPool(),owner,source);
   }
 
+  readDocumentPageRegions(owner:string,source:DocumentContextSource,physicalPage:number){
+    return readDocumentPageRegions(kernelPool(),owner,source,physicalPage);
+  }
+
   readDocumentOutline(owner:string,source:DocumentContextSource){
     return readDocumentOutline(kernelPool(),owner,source);
   }
@@ -1258,7 +1262,14 @@ export class KernelService {
         };
       }
     }
+    if(policy.scope==='application'&&searchOptions.includeImages){
+      const readOriginal=read;
+      read=async()=>{const context=await readOriginal();return {...context,
+        ...await readDocumentPageRegionsForImages(kernelPool(),owner,context.images)};};
+    }
     const result=await synthesizeDocumentAnswer(question,read,policy);
+    if('pdfPageRegionTransport'in result&&result.pdfPageRegionTransport)
+      contextExpansion={...contextExpansion,pdfPageRegions:result.pdfPageRegionTransport};
     let citationCheck:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>|undefined;
     const auditSelections='sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
     if(policy.citationCheck&&auditSelections?.claims.length){
