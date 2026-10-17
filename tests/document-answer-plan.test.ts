@@ -12,7 +12,7 @@ import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,DOCUMENT_
  type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
 import type {DocumentCitationRevisionContinuation} from '../lib/kernel/document-citation-revision.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,planRetrievedStudyAnswer,
- studyPlanningRequestIdentity,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
+ studyPlanningRequestIdentity,studyAnswerPlanRequestBudget,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
  buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
  validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
@@ -121,6 +121,49 @@ test('complete-source binding rejects missing/foreign nodes, omitted images, alt
   original=prepareContractStudyPlan(f.question,f.ctx,contract),p={requirements:contract.requirements,clusters:[],conflicts:[],missing:[{requirementId:'r0',reason:'Unknown',supplementQuery:null}],sourceSubscopes:[]},
   binding=bindContractStudyPlan(original,p,sha(JSON.stringify(buildContractStudyPlanRequest(original))),'b'.repeat(64));
  assert.throws(()=>preparePlannedStudyGeneration(f.question,f.ctx,[],contract,binding,[]),/Invalid bounded supplemental/);
+});
+
+test('contract-plan model view omits duplicate hashes while retaining exact sources and canonical replay protection',()=>{
+ const f=completeInitialFixture(),first=f.ctx.anchors[0];
+ f.manifest.hierarchy=[{id:'section:0',heading:'Original section'}];f.manifest.nodes[0].parentId='section:0';
+ const {manifestSha256:_old,...unsigned}=f.manifest;
+ f.manifest.manifestSha256=sha(JSON.stringify(unsigned,(_k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v));
+ f.ctx.parents=[{parentId:'Original parent identity',status:'available',headingMetadata:{text:'Original section',originalSourceHash:f.source.sourceHash},
+  sourceNodeCount:1,sourceBodyCodepoints:Array.from(first.body).length,nodes:[{...f.manifest.nodes[0],body:first.body}]}];
+ const ctx={...f.ctx,completeSourceProof:{policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:f.title,manifest:f.manifest}},
+  c=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Original method',requestedScope:{...unknown}}]},'a'.repeat(64)),
+  packet=prepareContractStudyPlan(f.question,ctx,c),before=JSON.stringify(packet),body=buildContractStudyPlanRequest(packet),
+  content=body.input[1].content as {type:string;text?:string;image_url?:string;detail?:string}[],input=JSON.parse(content[0].text!);
+ assert.equal(JSON.stringify(packet),before,'The full canonical proof and fingerprint must not be mutated.');
+ assert.equal(validateCompleteStudySource(ctx),ctx.completeSourceProof);
+ assert.equal(input.question,f.question);assert.deepEqual(input.questionContract,c);
+ assert.deepEqual(input.quoteUnits.map((u:{id:string;text:string;supportId:string;selectable:boolean})=>[u.id,u.text,u.supportId,u.selectable]),
+  packet.input.quoteUnits.map(u=>[u.id,u.text,u.supportId,u.selectable]));
+ assert.deepEqual(input.allowedSourceIds,packet.input.allowedSourceIds);assert.deepEqual(body.text.format.schema.$defs.sourceId.enum,input.allowedSourceIds);
+ assert.deepEqual(input.parentMetadata,packet.input.parentMetadata);assert.deepEqual(input.documentMetadata,packet.input.documentMetadata);
+ assert.deepEqual(input.completeSourceProof.manifest.hierarchy,f.manifest.hierarchy);
+ assert.deepEqual(input.completeSourceProof.manifest.nodes.map((n:{evidenceId:string;locator:string;ordinal:number;kind:string;parentId?:string|null})=>
+  [n.evidenceId,n.locator,n.ordinal,n.kind,n.parentId]),f.manifest.nodes.map(n=>[n.evidenceId,n.locator,n.ordinal,n.kind,n.parentId]));
+ assert.deepEqual(input.completeSourceProof.manifest.images.map((i:{captionEvidenceId:string;width:number;height:number;byteLength:number})=>
+  [i.captionEvidenceId,i.width,i.height,i.byteLength]),f.manifest.images.map(i=>[i.captionEvidenceId,i.width,i.height,i.byteLength]));
+ assert.equal(input.completeSourceProof.manifest.manifestSha256,f.manifest.manifestSha256);
+ assert.ok(!Object.hasOwn(input.evidence[0],'sourceVersionId'));assert.ok(!Object.hasOwn(input.quoteUnits[0],'quoteSha256'));
+ assert.ok(!Object.hasOwn(input.completeSourceProof.manifest.nodes[0],'bodySha256'));
+ assert.equal(content.find(item=>item.type==='input_image')!.image_url,`data:image/png;base64,${image.toString('base64')}`);
+ assert.equal(content.find(item=>item.type==='input_image')!.detail,'original');
+ const legacyBody=structuredClone(body),legacyContent=legacyBody.input[1].content as {type:string;text:string}[];
+ legacyContent[0].text=JSON.stringify({...packet.input,questionContract:c});
+ assert.ok(studyAnswerPlanRequestBudget(body,packet).inputTokenUpper<studyAnswerPlanRequestBudget(legacyBody,packet).inputTokenUpper);
+ const p:ContractStudyPlan={requirements:c.requirements,clusters:[],conflicts:[],sourceSubscopes:[],missing:[{requirementId:'r0',reason:'Unverified',supplementQuery:null}]};
+ assert.throws(()=>bindContractStudyPlan(packet,p,sha(JSON.stringify(legacyBody)),'b'.repeat(64)),/request\/raw identities differ/);
+ const bound=bindContractStudyPlan(packet,p,sha(JSON.stringify(body)),'b'.repeat(64));
+ assert.equal(bound.inputFingerprint,packet.prepared.fingerprint);assert.equal(bound.providerRequestSha256,sha(JSON.stringify(body)));
+ // The same projection also retains distinct documents in the ranked lane.
+ const ranked=prepareContractStudyPlan(question,context(),contract()),rankedBody=buildContractStudyPlanRequest(ranked),
+  rankedInput=JSON.parse((rankedBody.input[1].content as {text:string}[])[0].text);
+ assert.deepEqual(rankedInput.evidence.map((e:{id:string;documentId:string;evidenceId:string;locator:string})=>[e.id,e.documentId,e.evidenceId,e.locator]),
+  ranked.input.evidence.map(e=>[e.id,e.documentId,e.evidenceId,e.locator]));
+ assert.equal(rankedInput.completeSourceProof,undefined);
 });
 
 test('complete-source unavailable/request capacity and another explicit current title journal honest fallbacks; no-hint keeps ranked scope',async()=>{
