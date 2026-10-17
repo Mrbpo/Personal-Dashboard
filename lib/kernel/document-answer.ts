@@ -4,10 +4,12 @@ import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
+import {COMPLETE_DOCUMENT_SOURCE_LIMITS} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
+import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,type SourceValueDerivation} from './document-source-values.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -49,7 +51,14 @@ export type DocumentCitationRepair={claimIndex:number;citationIndex:number;origi
  originalEvidence:Omit<Support,'text'|'image'>;resolvedEvidence:Omit<Support,'text'|'image'>;
  quoteSha256:string;reason:'unique-exact-text-match'};
 export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
+export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequestSha256:string;sourceInputFingerprint:string;
+ quoteUnitManifestSha256:string;selectedReferenceIds:string[];normalizedAnswer:GroundedDocumentAnswer};
+export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
+ quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
+ sourceValueContract?:'difference-v1';
+ recordSourceValueDerivation?:(receipt:Readonly<DocumentSourceValueDerivation>)=>Promise<void>;
+ recordSourceValueRawResponse?:(receipt:Readonly<DocumentSourceValueRawResponse>)=>Promise<void>;
  dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';maxOutputTokens?:number;timeoutMs?:number;
  evidenceSelection?:'select-then-answer';
  citationCheck?:{mode:'selected-once';beforeAttempt:(identity:string)=>Promise<void>;
@@ -465,6 +474,35 @@ export function buildSelectedDocumentAnswerRequest(prepared:PreparedAnswer,refer
  return request;
 }
 
+/** The selector is unchanged. Only its actually selected generator can opt in;
+ * no usable complete catalog means the original generation request is retained. */
+export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy){
+ if(policy.sourceValueContract!=='difference-v1'||policy.scope!=='application'||policy.evidenceSelection!=='select-then-answer'||
+  policy.citationCheck?.mode!=='selected-once')throw new Error('Source values require the application selector and selected-once check');
+ const originalRequest=buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy),ids=new Set(referenceIds);
+ const catalog=prepareSourceValueCatalog(prepared.supports.filter(s=>s.kind==='image'&&ids.has(s.id)));
+ if(catalog.status!=='available')return {request:originalRequest,catalog,applied:false as const,reason:catalog.reason};
+ const request=structuredClone(originalRequest);
+ const user=request.input.at(-1)!,part=user.content[0] as {type:string;text:string};
+ const input=JSON.parse(part.text);part.text=JSON.stringify({...input,sourceValueCatalog:catalog});
+ request.input[0].content+=' This generation uses source-value difference-v1. Return typed statement or difference claims. '+
+  'A statement keeps its own text and selected original references; never add an image merely because a table is available. '+
+  'For a difference return only the listed value/row-label/column-label cell IDs: left minus right. '+
+  'Do not write a result, unit, citation ID or extra assertion in a difference operation. '+
+  'Use only actually selected tables and explicit plain decimals from one table and one numeric column. '+
+  'Missing cells, dashes, scientific notation and units cannot become zero or be inferred. '+
+  'The server restores original labels and values, computes the decimal difference and cites that original PNG. '+
+  'Catalog observations, geometry and header roles are fallible source declarations, not verified semantic relationships. '+
+  'Ordinary statements and multi-source synthesis remain available; choose only what the question and sources support.';
+ const proposed={...request,text:{...request.text,format:{...request.text.format,name:'grounded_document_source_values_v1',
+  schema:sourceValueAnswerSchema(catalog,referenceIds)}}};
+ const nonImage=JSON.stringify(proposed,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
+ const imageTokens=prepared.supports.filter(s=>s.image&&ids.has(s.id)).reduce((sum,s)=>sum+2*Math.ceil(s.image!.width/32)*Math.ceil(s.image!.height/32)+1,0);
+ if(Buffer.byteLength(nonImage)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+imageTokens>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens)
+  return {request:originalRequest,catalog,applied:false as const,reason:'selected-request-input-limit' as const};
+ return {request:proposed,catalog,applied:true as const,reason:null};
+}
+
 async function documentModelPayload(response:Response,model:DocumentAnswerModel,policy:DocumentAnswerPolicy){
  if(!response.ok)throw new Error(`Document answer request failed (${response.status})`);
  const payload=await response.json();
@@ -475,11 +513,19 @@ async function documentModelPayload(response:Response,model:DocumentAnswerModel,
  if(policy.scope==='application'&&model==='gpt-5-mini'&&!(actualModel==='gpt-5-mini'||/^gpt-5-mini-\d{4}-\d{2}-\d{2}$/.test(actualModel??'')))
   throw new Error('Document answer provider returned a different or unverified model');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content??[]).map((item:{text?:string})=>item.text??'').join('');
- return {payload,actualModel,decoded:JSON.parse(raw??'')};
+ return {payload,actualModel,decoded:JSON.parse(raw??''),rawOutputText:raw as string};
 }
 
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
+ if(policy.sourceValueContract!==undefined&&(policy.sourceValueContract!=='difference-v1'||policy.scope!=='application'||
+  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||
+  typeof policy.recordSourceValueDerivation!=='function'||typeof policy.recordSourceValueRawResponse!=='function'))
+  throw new Error('Source values require application/select-then-answer/selected-once');
+ if(policy.recordSourceValueDerivation!==undefined&&(policy.sourceValueContract!=='difference-v1'||typeof policy.recordSourceValueDerivation!=='function'))
+  throw new Error('Source value recording requires its explicit contract');
+ if(policy.recordSourceValueRawResponse!==undefined&&(policy.sourceValueContract!=='difference-v1'||typeof policy.recordSourceValueRawResponse!=='function'))
+  throw new Error('Source value raw recording requires its explicit contract');
  const model=policy.model??'gpt-5-mini',dailyLimit=policy.dailyLimit??200,
   effort=policy.reasoningEffort??'low',maxOutput=policy.maxOutputTokens??4000,timeout=policy.timeoutMs??30000;
  if(!['gpt-5-mini','gpt-5.4-mini','gpt-6-astra'].includes(model)||!['low','medium','high'].includes(effort)||
@@ -523,7 +569,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  if(!prepared.quoteUnits.some(unit=>unit.selectable)&&!prepared.supports.some(support=>support.kind==='image'))return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
   citationRepairs:[] as DocumentCitationRepair[],providerSelections:null,selectedUnits:[] as DocumentUnitSelection[],
   model:null,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
-  promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
+  promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt,...(policy.sourceValueContract?{sourceValueContract:{policy:policy.sourceValueContract,
+   newContractApplied:false,reason:'no-selected-evidence',catalogSha256:null}}:{})};
  const settings={model,reasoningEffort:effort,maxOutputTokens:maxOutput};
  if(policy.evidenceSelection==='select-then-answer'){
   const request=buildDocumentEvidenceSelectionRequest(prepared,settings,policy),providerRequestSha256=sha(JSON.stringify(request));
@@ -539,24 +586,42 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   if(!referenceIds.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
    citationRepairs:[] as DocumentCitationRepair[],providerSelections:null,selectedUnits:[] as DocumentUnitSelection[],
    model:null,requestedModel:model,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
-   promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt,evidenceSelection:selectionReceipt};
+   promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt,evidenceSelection:selectionReceipt,
+   ...(policy.sourceValueContract?{sourceValueContract:{policy:policy.sourceValueContract,newContractApplied:false,reason:'no-selected-evidence',catalogSha256:null}}:{})};
  }
- const request=referenceIds?buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy);
+ const sourceValueGeneration=policy.sourceValueContract&&referenceIds?prepareSelectedSourceValueGeneration(prepared,referenceIds,settings,policy):undefined;
+ const request=sourceValueGeneration?.request??(referenceIds?buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy));
  const providerRequestSha256=sha(JSON.stringify(request));
  const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,
   quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,fingerprint:prepared.fingerprint}));
  await policy.beforeAttempt?.(identity);
  policy.onStage?.('generation');
  const response=await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit});
- const {payload,actualModel,decoded}=await documentModelPayload(response,model,policy);
+ if(sourceValueGeneration?.applied){
+  const rawBody=await response.clone().text();
+  await policy.recordSourceValueRawResponse?.({method:'source-value-response-v1',providerRequestSha256,sourceInputFingerprint:prepared.fingerprint,
+   quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,catalogSha256:sourceValueGeneration.catalog.catalogSha256,
+   httpStatus:response.status,rawBody,rawSha256:sha(rawBody)});
+ }
+ const {payload,actualModel,decoded,rawOutputText}=await documentModelPayload(response,model,policy);
  policy.onStage?.('citation-validation');
- const {answer,providerSelections,selectedUnits}=resolveDocumentAnswerSelections(decoded,prepared.supports);
+ const sourceValueDerivation:SourceValueDerivation|undefined=sourceValueGeneration?.applied?
+  deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!):undefined;
+ const {answer,providerSelections:normalizedSelections,selectedUnits}=resolveDocumentAnswerSelections(sourceValueDerivation?.normalizedSelections??decoded,prepared.supports);
+ const providerSelections=sourceValueDerivation?null:normalizedSelections;
  if(referenceIds&&selectedUnits.some(unit=>!referenceIds.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
  policy.onStage?.('evidence-selection');
  if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
   throw new Error('Document evidence changed during answer generation');
+ const boundSourceValueDerivation:DocumentSourceValueDerivation|undefined=sourceValueDerivation?{...sourceValueDerivation,providerRequestSha256,
+  sourceInputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
+  selectedReferenceIds:[...referenceIds!],normalizedAnswer:structuredClone(answer)}:undefined;
+ if(boundSourceValueDerivation)await policy.recordSourceValueDerivation?.(boundSourceValueDerivation);
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
   sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,
+  ...(sourceValueGeneration?{sourceValueContract:{policy:'difference-v1' as const,newContractApplied:sourceValueGeneration.applied,
+   reason:sourceValueGeneration.reason,catalogSha256:sourceValueGeneration.catalog.catalogSha256},
+   ...(boundSourceValueDerivation?{sourceValueDerivation:boundSourceValueDerivation}:{})}:{}),
   ...(selectionReceipt?{evidenceSelection:selectionReceipt}:{})};
 }

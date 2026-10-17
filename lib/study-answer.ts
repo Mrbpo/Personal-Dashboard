@@ -25,6 +25,10 @@ export function studyCitationCheck(value=process.env.STUDY_CITATION_CHECK??'off'
  if(value!=='off'&&value!=='selected-once')throw new StudyAnswerError('configuration','invalid-citation-check','引用核对配置无效');
  return value==='off'?undefined:value;
 }
+export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
+ if(value!=='off'&&value!=='difference-v1')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
+ return value==='off'?undefined:value;
+}
 function citationRecorder(owner:string,question:string){
  const directory=process.env.STUDY_CITATION_TRACE_DIR;
  if(!directory||!isAbsolute(directory))throw new StudyAnswerError('configuration','citation-trace-required','引用核对需要配置私有诊断记录目录');
@@ -35,15 +39,20 @@ function citationRecorder(owner:string,question:string){
   const file=await open(join(directory,`${runId}-${identity}.${kind}.json`),'wx',0o600);
   try{await file.writeFile(JSON.stringify({runId,owner,questionSha256,at:new Date().toISOString(),record:value})+'\n');await file.sync();}finally{await file.close();}
  };
- return {mode:'selected-once' as const,beforeAttempt:async(identity:string)=>save(identity,'attempt',{requestIdentity:identity}),
-  recordResponse:async(response:Readonly<import('./kernel/document-citation-audit.ts').DocumentCitationAuditResponse>)=>save(response.requestIdentity,'response',response)};
+ return {check:{mode:'selected-once' as const,beforeAttempt:async(identity:string)=>save(identity,'attempt',{requestIdentity:identity}),
+  recordResponse:async(response:Readonly<import('./kernel/document-citation-audit.ts').DocumentCitationAuditResponse>)=>save(response.requestIdentity,'response',response)},
+  recordSourceValueRaw:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueRawResponse>)=>save(receipt.providerRequestSha256,'source-values.raw-response',receipt),
+  recordSourceValues:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueDerivation>)=>save(receipt.providerRequestSha256,'source-values',receipt)};
 }
 export function studyFailure(error:unknown){
  return error instanceof StudyAnswerError?{stage:error.stage,code:error.code}:undefined;
 }
 export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>){
  const evidenceSelection=studyEvidenceSelection();
- const citationCheck=studyCitationCheck()?citationRecorder(owner,question):undefined;
+ const sourceValueContract=studySourceValues();
+ if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
+  throw new StudyAnswerError('configuration','source-values-require-selection-check','来源值需要内核、证据选择和原图引用核对');
+ const recorder=studyCitationCheck()?citationRecorder(owner,question):undefined,citationCheck=recorder?.check;
  const model=serviceValue('OPENAI_MODEL')||'gpt-5-mini';
  if(!['gpt-5-mini','gpt-5.4-mini'].includes(model))throw new StudyAnswerError('configuration','unsupported-model','内核问答仅支持已配置的 mini 模型');
  const prior=history.slice(-24).map(m=>({role:m.role as 'user'|'assistant',text:m.body.slice(0,2500)}));
@@ -57,6 +66,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
     conversation:prior,onStage:next=>{stage=next;}});
   const selected=result.selectedUnits,refs=new Map<string,string>();
   for(const unit of selected){const key=JSON.stringify(unit.evidence);if(!refs.has(key))refs.set(key,`S${refs.size+1}`);}
@@ -82,6 +92,10 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     contextExpansion:result.contextExpansion,
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
+    ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
+    ...('sourceValueDerivation' in result&&result.sourceValueDerivation?{sourceValueDerivation:result.sourceValueDerivation,answerContract:'difference-v1',
+     claimOrigins:result.answer.claims.map((_claim,index)=>result.sourceValueDerivation!.operations.some(op=>op.claimIndex===index)?
+      'program-rendered-difference':'provider-statement')}:{}),
     promptVersion:result.promptVersion,referencePolicyVersion:result.referencePolicyVersion,
     selectedUnits:result.selectedUnits,evidence:result.evidence,warnings:result.warnings,
     semanticVerified:false,wholeAnswerVerified:false}}};

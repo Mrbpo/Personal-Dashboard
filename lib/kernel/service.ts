@@ -1260,10 +1260,11 @@ export class KernelService {
     }
     const result=await synthesizeDocumentAnswer(question,read,policy);
     let citationCheck:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>|undefined;
-    if(policy.citationCheck&&result.providerSelections?.claims.length){
+    const auditSelections='sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
+    if(policy.citationCheck&&auditSelections?.claims.length){
       policy.onStage?.('citation-validation');
       citationCheck=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
-        quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:result.providerSelections,
+        quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
         ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
     }
     return {...result,contextExpansion,...(citationCheck?{citationCheck}:{})};
