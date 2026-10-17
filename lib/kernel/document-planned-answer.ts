@@ -1,7 +1,9 @@
 import {createHash} from 'node:crypto';
+import {isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,resolveDocumentAnswerSelections,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentAnswerContext,type DocumentAnswerSelections} from './document-answer.ts';
 import {validateCompleteStudySource} from './document-study-source.ts';
-import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
+import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,buildCompleteStudyCoverageReviewRequest,
+ validateCompleteStudyCoverageReview,validateDocumentCitationAudit,DOCUMENT_CITATION_AUDIT_VERSION,COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,studyAnswerModelInput,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -11,6 +13,7 @@ import type {DocumentSourceResolution} from './document-source.ts';
 
 export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
 export const COMPLETE_SOURCE_STUDY_ANSWER_VERSION='complete-source-evidence-answer-v1';
+export const STUDY_CONTENT_REVISION_VERSION='complete-study-content-revision-v1';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 type PlanningProvenance={originalPlanSha256?:string;originalPlanRequestSha256?:string;originalPlanRawSha256?:string;
  evidenceRoute?:CompleteStudyEvidenceRouteBinding};
@@ -19,7 +22,7 @@ export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'pl
  originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
 type PlannedPhase=StudyAnswerPlanAttempt['phase']|DocumentCitationRevisionAttempt['phase'];
 export type PlannedStudyAnswerAttempt=Omit<StudyAnswerPlanAttempt,'phase'>&{phase:PlannedPhase;claimIndex?:number};
-export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;citationRevision?:boolean;
+export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';
  beforeAttempt:(attempt:Readonly<PlannedStudyAnswerAttempt>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:PlannedPhase;claimIndex?:number}>)=>Promise<void>;
  recordState:(state:Readonly<Record<string,unknown>>)=>Promise<void>};
@@ -28,8 +31,10 @@ const journal=(policy:PlannedStudyAnswerPolicy,phase:StudyAnswerPlanAttempt['pha
  beforeAttempt:async attempt=>policy.beforeAttempt(Object.freeze({...attempt,phase,...(claimIndex!==undefined?{claimIndex}:{})})),
  recordResponse:async raw=>policy.recordResponse({...raw,phase,...(claimIndex!==undefined?{claimIndex}:{})})});
 export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPolicy){
- if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','citationRevision','beforeAttempt','recordResponse','recordState'].includes(k))||
+ if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','citationRevision','completeSourceReview','beforeAttempt','recordResponse','recordState'].includes(k))||
   (policy.citationRevision!==undefined&&typeof policy.citationRevision!=='boolean')||
+  (policy.completeSourceReview!==undefined&&!['diagnostic','one-content-revision'].includes(policy.completeSourceReview))||
+  (policy.completeSourceReview!==undefined&&policy.citationRevision===true)||
   typeof policy.recordState!=='function'||typeof policy.beforeAttempt!=='function'||typeof policy.recordResponse!=='function')
   throw Error('Planned answers require durable development state/attempt/raw journals');
  await assertStudyAnswerPlanPolicy(journal(policy,'contract-plan'));
@@ -196,9 +201,12 @@ export function decodePlannedStudyGenerationSelections(value:unknown,packet:Retu
  const current=preparePlannedStudyGenerationTransport(packet);
  if(digest(transport)!==digest(current)||execution.providerRequestSha256!==current.providerRequestSha256||execution.requestIdentity!==current.requestIdentity)
   throw Error('Planned source label binding changed');
+ return decodeStudySourceLabels(value,transport.mapping);
+}
+function decodeStudySourceLabels(value:unknown,mapping:{entries:{label:string;canonicalId:string}[]}){
  const exact=(v:unknown,keys:string[])=>v!==null&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===keys.length&&keys.every(k=>Object.hasOwn(v,k));
  if(!exact(value,['status','message','claims'])||!Array.isArray((value as DocumentAnswerSelections).claims))throw Error('Invalid planned source label response');
- const selections=value as DocumentAnswerSelections,byLabel=new Map(transport.mapping.entries.map(e=>[e.label,e.canonicalId]));
+ const selections=value as DocumentAnswerSelections,byLabel=new Map(mapping.entries.map(e=>[e.label,e.canonicalId]));
  return {...selections,claims:selections.claims.map(claim=>{
   if(!exact(claim,['text','citations'])||!Array.isArray(claim.citations))throw Error('Invalid planned source label response');
   const seen=new Set<string>();return {...claim,citations:claim.citations.map(ref=>{
@@ -212,6 +220,8 @@ type PlannedCitationOriginal={receipt:ReturnType<typeof preparePlannedStudyGener
  providerSelections:DocumentAnswerSelections;generation:{providerRequestSha256:string;rawResponseSha256:string;requestIdentity:string;
   sourceLabels:ReturnType<typeof preparePlannedStudyGenerationTransport>};
  audits:{claimIndex:number;localSupported:boolean;result:Awaited<ReturnType<typeof auditDocumentCitationClaim>>}[]};
+export type PlannedStudyAnswerReviewArtifact=Omit<PlannedCitationOriginal,'audits'>&{originalRaw:DocumentCitationAuditResponse;
+ originalLocalAudits?:{claimIndex:number;result:Awaited<ReturnType<typeof auditDocumentCitationClaim>>;originalRaw:DocumentCitationAuditResponse}[]};
 
 /** Resume only citation selection. The reader must reconstruct the same final
  * Kernel packet; archived wire JSON is a comparison artifact, never a reader. */
@@ -249,6 +259,154 @@ export async function revisePlannedStudyCitation(question:string,readPacket:()=>
  {claimIndex:failed.claimIndex,selectedSourceIds:packet.receipt.selectedSourceIds,originalAudit:failed.result});
 }
 
+/** Reuse the existing physically selected-only checker for final claims. */
+async function auditStudySelections(question:string,packet:ReturnType<typeof preparePlannedStudyGeneration>,selections:DocumentAnswerSelections,
+ readContext:()=>Promise<DocumentAnswerContext>,policy:PlannedStudyAnswerPolicy,phase:'claim-audit'|'revised-claim-audit'='claim-audit',
+ captureRaw?:(claimIndex:number,raw:DocumentCitationAuditResponse)=>void){
+ const audits=[];
+ for(let claimIndex=0;claimIndex<selections.claims.length;claimIndex++){
+  const binding={inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,
+   providerSelections:selections,claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY} as const,
+   local=prepareDocumentCitationAudit(question,packet.context,binding),request=buildDocumentCitationAuditRequest(local.packet),
+   images=local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[]),bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:images}},1000),
+   p=journal(policy,phase,claimIndex),requestSha=digest(request);
+  const result=await auditDocumentCitationClaim(question,readContext,binding,{scope:'development',dailyLimit:policy.dailyLimit,
+   beforeAttempt:async requestIdentity=>p.beforeAttempt({phase,requestIdentity,providerRequestSha256:requestSha,...bound}),
+   recordResponse:async raw=>{await p.recordResponse(raw);const payload=JSON.parse(raw.rawBody);
+    if(payload?.status!=='completed'||!Number.isSafeInteger(payload.usage?.input_tokens)||!Number.isSafeInteger(payload.usage?.output_tokens)||
+     payload.usage.input_tokens<0||payload.usage.output_tokens<0||payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>1000)throw Error('Local audit incomplete/unknown usage');
+    captureRaw?.(claimIndex,structuredClone(raw));}});
+  const d=result.diagnostics,supported=d.judgment==='supported'&&Object.values(d.citationFindings).some(f=>f.judgment==='supports')&&
+   !Object.values(d.citationFindings).some(f=>f.judgment==='contradicts')&&!['different','not-established'].includes(d.objectUnitScope.alignment);
+  audits.push({claimIndex,localSupported:supported,result});await policy.recordState({event:phase,claimIndex,localSupported:supported,result});
+ }
+ return audits;
+}
+
+/** Diagnose an already-generated answer without generating a new baseline.
+ * readPacket must reconstruct current Kernel evidence; an archived wire is not
+ * a reader. The supplied actual original raw is checked against its wire and
+ * canonical selections. No full-source finding upgrades a selected citation. */
+export async function reviewCompletePlannedStudyAnswer(question:string,readPacket:()=>Promise<ReturnType<typeof preparePlannedStudyGeneration>>,
+ artifact:PlannedStudyAnswerReviewArtifact,policy:PlannedStudyAnswerPolicy){
+ await assertPlannedStudyAnswerPolicy(policy);
+ if(policy.citationRevision===true)throw Error('Content review and citation-only revision are mutually exclusive');
+ const original=structuredClone(artifact),mode=policy.completeSourceReview??'diagnostic';
+ const restore=async()=>{
+  const current=await readPacket(),proof=validateCompleteStudySource(current.context),contract=validateStudyQuestionContract(question,current.selectedPrepared.input.questionContract);
+  if(current.receipt.initialRetrievalScope!=='selected-complete-source'||digest({...current.receipt,version:original.receipt.version})!==digest(original.receipt))
+   throw Error('Complete review original receipt/current source changed');
+  const packet={...current,receipt:original.receipt,bindingSha256:digest(original.receipt)},transport=preparePlannedStudyGenerationTransport(packet),sent=original.generation.sourceLabels;
+  if(digest(transport)!==digest(sent)||original.generation.providerRequestSha256!==transport.providerRequestSha256||
+   original.generation.requestIdentity!==transport.requestIdentity)throw Error('Complete review original generation wire changed');
+  const full=prepareDocumentAnswer(question,current.context,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY),allIds=[...full.quoteUnits.filter(q=>q.selectable).map(q=>q.id),...full.supports.filter(s=>s.kind==='image').map(s=>s.id)];
+  if(full.fingerprint!==current.prepared.fingerprint||digest(allIds)!==digest(current.receipt.selectedSourceIds))throw Error('Complete review cannot shrink source evidence');
+  const raw=original.originalRaw;
+  if(raw.rawSha256!==sha(raw.rawBody)||raw.rawSha256!==original.generation.rawResponseSha256||raw.providerRequestSha256!==transport.providerRequestSha256||
+   raw.requestIdentity!==transport.requestIdentity||!Number.isInteger(raw.httpStatus)||raw.httpStatus<200||raw.httpStatus>=300)throw Error('Complete review original raw binding changed');
+  const payload=JSON.parse(raw.rawBody),budget=studyAnswerPlanRequestBudget(transport.request,{prepared:packet.selectedPrepared});
+  if(payload?.status!=='completed'||payload.error||!isGpt54MiniProviderModel(payload.model)||
+   ![payload.usage?.input_tokens,payload.usage?.output_tokens].every(n=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0)||
+   payload.usage.input_tokens>budget.inputTokenUpper||payload.usage.output_tokens>4000)throw Error('Complete review original raw is incomplete or unverified');
+  const text=payload.output_text||(payload.output??[]).filter((p:{type:string})=>p.type==='message').flatMap((p:{content?:{type:string;text:string}[]})=>p.content??[])
+   .filter((p:{type:string})=>p.type==='output_text').map((p:{text:string})=>p.text).join(''),alias=JSON.parse(text),
+   decoded=decodePlannedStudyGenerationSelections(alias,packet,transport,original.generation);
+  if(digest(decoded)!==digest(original.providerSelections))throw Error('Complete review answer does not match original provider raw');
+  const restored=resolveDocumentAnswerSelections(decoded,packet.prepared.supports),localAudits=original.originalLocalAudits??[],seen=new Set<number>();
+  if(!Array.isArray(localAudits)||localAudits.length>decoded.claims.length)throw Error('Invalid original selected-only audit sequence');
+  const selectedReferenceFindings=localAudits.map(a=>{
+   if(!Number.isInteger(a.claimIndex)||a.claimIndex<0||a.claimIndex>=decoded.claims.length||seen.has(a.claimIndex))throw Error('Invalid original selected-only claim index');
+   seen.add(a.claimIndex);
+   const local=prepareDocumentCitationAudit(question,current.context,{inputFingerprint:full.fingerprint,quoteUnitManifestSha256:full.quoteUnitManifestSha256,
+    providerSelections:decoded,claimIndex:a.claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY}),request=buildDocumentCitationAuditRequest(local.packet),
+    requestSha=digest(request),identity=digest({version:DOCUMENT_CITATION_AUDIT_VERSION,providerRequestSha256:requestSha,bindingSha256:local.bindingSha256}),
+    raw=a.originalRaw,result=a.result,bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[])}},1000);
+   if(result.version!==DOCUMENT_CITATION_AUDIT_VERSION||digest(result.binding)!==digest(local.binding)||result.bindingSha256!==local.bindingSha256||
+    result.providerRequestSha256!==requestSha||result.requestIdentity!==identity||result.requestedModel!==request.model||
+    raw.providerRequestSha256!==requestSha||raw.requestIdentity!==identity||raw.rawSha256!==sha(raw.rawBody)||result.rawResponseSha256!==raw.rawSha256||
+    !Number.isInteger(raw.httpStatus)||raw.httpStatus<200||raw.httpStatus>=300)throw Error('Original selected-only audit raw/source binding changed');
+   const payload=JSON.parse(raw.rawBody);
+   if(payload?.status!=='completed'||payload.error||!isGpt54MiniProviderModel(payload.model)||result.model!==payload.model||
+    ![payload.usage?.input_tokens,payload.usage?.output_tokens].every(n=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0)||
+    payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>1000)throw Error('Original selected-only audit raw is incomplete or unverified');
+   const text=payload.output_text||(payload.output??[]).filter((p:{type:string})=>p.type==='message').flatMap((p:{content?:{type:string;text:string}[]})=>p.content??[])
+    .filter((p:{type:string})=>p.type==='output_text').map((p:{text:string})=>p.text).join(''),
+    diagnostics=validateDocumentCitationAudit(JSON.parse(text),local.packet.references.map(r=>r.refId));
+   if(digest(diagnostics)!==digest(result.diagnostics))throw Error('Original selected-only audit diagnostics differ from raw');
+   return {claimId:`c${a.claimIndex}`,claimIndex:a.claimIndex,diagnostics,selectedReferences:local.binding.citations,
+    providerRequestSha256:requestSha,requestIdentity:identity,rawResponseSha256:raw.rawSha256,bindingSha256:local.bindingSha256};
+  }),binding={sourceManifestSha256:proof.manifest.manifestSha256,
+   inputFingerprint:full.fingerprint,quoteUnitManifestSha256:full.quoteUnitManifestSha256,contractSha256:contract.contractSha256,
+   originalAnswerSha256:digest({...restored.answer,message:decoded.message}),originalSelectionsSha256:digest(decoded),
+   originalGenerationRequestSha256:transport.providerRequestSha256,originalGenerationRawSha256:raw.rawSha256,originalGenerationIdentity:transport.requestIdentity,
+   originalSelectedReferenceFindingsSha256:digest(selectedReferenceFindings)};
+  return {packet,transport,alias:alias as DocumentAnswerSelections,restored,binding,selectedReferenceFindings};
+ };
+ const initial=await restore(),bindingSha256=digest(initial.binding),originalRecord={...initial.binding,receipt:original.receipt,
+  originalAnswer:{...initial.restored.answer,message:original.providerSelections.message},providerSelections:original.providerSelections,
+  selectedReferenceFindings:initial.selectedReferenceFindings};
+ await policy.recordState({event:'complete-review-original',...structuredClone(originalRecord)});
+ const checked=async()=>{const current=await restore();if(digest(current.binding)!==bindingSha256)throw Error('Complete review source/answer changed');return current;};
+ const readContext=async()=>(await checked()).packet.context;
+ try{
+  const prepared=buildCompleteStudyCoverageReviewRequest(initial.transport.request,initial.alias),requestSha=digest(prepared.request),
+   budget=studyAnswerPlanRequestBudget(prepared.request,{prepared:initial.packet.selectedPrepared});
+  await policy.recordState({event:'coverage-review-request',version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,binding:initial.binding,request:prepared.request});
+  const {value,...execution}=await executeStudyPlanningRequest(COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,'coverage-review',prepared.request,bindingSha256,budget,
+   journal(policy,'coverage-review'),async()=>{await checked();if(digest(prepared.request)!==requestSha)throw Error('Coverage request changed');}),
+   aliasDiagnostics=validateCompleteStudyCoverageReview(value,prepared.choices),byLabel=new Map(initial.transport.mapping.entries.map(e=>[e.label,e.canonicalId])),
+   diagnostics={...aliasDiagnostics,issues:aliasDiagnostics.issues.map(i=>({...i,sourceIds:i.sourceIds.map(id=>byLabel.get(id)!)}))},
+   review={version:COMPLETE_STUDY_COVERAGE_REVIEW_VERSION,status:'diagnosed-awaiting-independent-review',binding:initial.binding,bindingSha256,
+    ...execution,aliasDiagnostics,diagnostics,localSupportUnassessed:true,semanticVerified:false,wholeAnswerVerified:false,
+    questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
+  await policy.recordState({event:'complete-source-review',review});
+  const localUnsupported=initial.selectedReferenceFindings.filter(f=>f.diagnostics.judgment==='unsupported');
+  if(mode!=='one-content-revision'||!diagnostics.issues.length&&!localUnsupported.length)return {original:originalRecord,review,revisionCandidate:null};
+  // A source-grounded model concern is still fallible. One proposal is a new
+  // answer branch, never a verified correction or an overwrite of the old one.
+  const base=initial.transport.request,user=base.input[1],content=user.content;
+  if(!Array.isArray(content)||content[0]?.type!=='input_text'||typeof content[0].text!=='string')throw Error('Missing content revision source input');
+  const sourceInputText=content[0].text;
+  const toLabel=new Map(initial.transport.mapping.entries.map(e=>[e.canonicalId,e.label])),originalSelectedReferenceFindings=localUnsupported.map(f=>({
+   claimId:f.claimId,diagnostics:f.diagnostics,references:f.selectedReferences.map(r=>({refId:r.refId,sourceId:toLabel.get(r.selectionId)!})),
+   providerRequestSha256:f.providerRequestSha256,rawResponseSha256:f.rawResponseSha256,bindingSha256:f.bindingSha256}));
+  const revisionBinding={version:STUDY_CONTENT_REVISION_VERSION,parent:initial.binding,coverageReviewRequestSha256:execution.providerRequestSha256,
+   coverageReviewRawSha256:execution.rawResponseSha256,coverageDiagnosticsSha256:digest(aliasDiagnostics),
+   originalUnsupportedClaimIds:localUnsupported.map(f=>f.claimId)},revisionBindingSha256=digest(revisionBinding),
+   request={...base,input:[{...base.input[0],content:base.input[0].content+
+    ' This is one content revision of the supplied original answer, not a citation-only edit. Treat reviewer findings as fallible source-bound concerns. '+
+    'Address actual omissions or errors using all the original question, fixed question contract, supplied source text and original images. '+
+    'The separate original selected-reference findings concern only the references each original claim actually selected; unsupported does not prove a claim false in the full source. '+
+    'Do not use the full-source diagnostic to excuse wrong selected references. A proposed claim must select its own actual supporting references and will receive a new selected-only audit. '+
+    'Preserve correct useful facts, qualifications and material requested items. Do not delete them merely to obtain a favorable judgment or fit six claims. '+
+    'Do not add outside facts, unasked counts, experiments or negative conclusions. Preserve genuine source ambiguity and conflicting roles or values. '+
+    'Return only the normal status/message/claims with the same actual SourceN selections. No new question plan or unsupported explanation.'},
+    {...user,content:content.map((part,i)=>i?part:{...part,text:JSON.stringify({...JSON.parse(sourceInputText),
+     originalAnswer:initial.alias,coverageReview:{version:review.version,diagnostics:aliasDiagnostics,fallible:true},
+     originalSelectedReferenceFindings:{version:DOCUMENT_CITATION_AUDIT_VERSION,findings:originalSelectedReferenceFindings,fallible:true},
+     parentAnswerSha256:initial.binding.originalAnswerSha256})})}]},
+   revisionRequestSha=digest(request),revisionBudget=studyAnswerPlanRequestBudget(request,{prepared:initial.packet.selectedPrepared});
+  await policy.recordState({event:'content-revision-request',binding:revisionBinding,request});
+  const {value:aliasSelections,...revisionExecution}=await executeStudyPlanningRequest(STUDY_CONTENT_REVISION_VERSION,'content-revision',request,revisionBindingSha256,revisionBudget,
+   journal(policy,'content-revision'),async()=>{await checked();if(digest(request)!==revisionRequestSha)throw Error('Content revision request changed');});
+  const identity=studyPlanningRequestIdentity(STUDY_CONTENT_REVISION_VERSION,request,revisionBindingSha256);
+  if(revisionExecution.requestIdentity!==identity.requestIdentity||revisionExecution.providerRequestSha256!==identity.providerRequestSha256)throw Error('Content revision execution changed');
+  const selections=decodeStudySourceLabels(aliasSelections,initial.transport.mapping);
+  await policy.recordState({event:'content-revision-proposal',aliasSelections,providerSelections:selections,binding:revisionBinding,...revisionExecution});
+  if(selections.claims.length>6){const revisionCandidate={status:'capacity-exceeded',untruncatedValue:selections,binding:revisionBinding,...revisionExecution,
+   semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'unassessed'};
+   await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};}
+  const revised=resolveDocumentAnswerSelections(selections,initial.packet.prepared.supports),
+   audits=await auditStudySelections(question,initial.packet,revised.providerSelections,readContext,policy,'revised-claim-audit');
+  await checked();
+  const revisionCandidate={status:'revised-awaiting-independent-review',...revised,binding:revisionBinding,...revisionExecution,audits,
+   localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),coverageReview:'not-performed-for-revised-candidate',
+   semanticVerified:false,wholeAnswerVerified:false,questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
+  await policy.recordState({event:'content-revision-result',revisionCandidate});return {original:originalRecord,review,revisionCandidate};
+ }catch(error){await policy.recordState({event:'complete-review-failed',original:originalRecord,error:error instanceof Error?error.message:String(error),
+  noAutomaticRetry:true,wholeAnswerVerified:false});throw error;}
+}
+
 /** A complete selected source uses deterministic input routing; the ranked
  * lane retains its AI plan and lexical batch. Both keep generation and at most
  * six original claim audits, with optional citation-only revision. */
@@ -256,6 +414,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  readSupplement:(query:string)=>Promise<()=>Promise<DocumentAnswerContext>>,contract:StudyQuestionContract,policy:PlannedStudyAnswerPolicy,supplementalSource?:SupplementalSource,
  completeRoute?:CompleteStudyEvidenceRouteBinding){
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract);
+ if(policy.completeSourceReview&&!completeRoute)throw Error('Integrated coverage review requires the verified complete-source route');
  let plan:Omit<ReturnType<typeof restoreCompleteStudyEvidenceRoute>,'prepared'>|Awaited<ReturnType<typeof planContractStudyAnswer>>;
  if(completeRoute){const {prepared:_prepared,...receipt}=restoreCompleteStudyEvidenceRoute(question,await readInitial(),checked,completeRoute);plan=receipt;}
  else plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
@@ -269,34 +428,28 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  const transport=preparePlannedStudyGenerationTransport(packet),body=transport.request,budget=studyAnswerPlanRequestBudget(body,{prepared:packet.selectedPrepared});
  const generationVersion=packet.receipt.version===COMPLETE_SOURCE_STUDY_ANSWER_VERSION?COMPLETE_SOURCE_STUDY_ANSWER_VERSION:PLANNED_STUDY_ANSWER_VERSION;
  await policy.recordState({event:'generation-request',version:generationVersion,transport});
+ let generationRaw:DocumentCitationAuditResponse|undefined;
+ const generationJournal=journal(policy,'generation'),captureGeneration={...generationJournal,
+  recordResponse:async(raw:DocumentCitationAuditResponse)=>{await generationJournal.recordResponse(raw);generationRaw=structuredClone(raw);}};
  const checkedRead=async()=>{const current=await read();if(current.bindingSha256!==packet.bindingSha256||
    digest(preparePlannedStudyGenerationTransport(current))!==digest(transport))throw Error('Planned answer composite source changed');return current.context;},
   recheck=async()=>{await checkedRead();},
-  {value:aliasSelections,...execution}=await executeStudyPlanningRequest(generationVersion,'generation',body,transport.bindingSha256,budget,journal(policy,'generation'),recheck),
+  {value:aliasSelections,...execution}=await executeStudyPlanningRequest(generationVersion,'generation',body,transport.bindingSha256,budget,captureGeneration,recheck),
   value=decodePlannedStudyGenerationSelections(aliasSelections,packet,transport,execution),generation={...execution,sourceLabels:transport};
  await policy.recordState({event:'generation',value,aliasSelections,...generation,receipt:packet.receipt});
  if(value&&typeof value==='object'&&Array.isArray((value as DocumentAnswerSelections).claims)&&(value as DocumentAnswerSelections).claims.length>6)
   return {status:'capacity-exceeded',plan,generation,untruncatedValue:value,receipt:packet.receipt,wholeAnswerVerified:false};
  const restored=resolveDocumentAnswerSelections(value,packet.prepared.supports),allowed=new Set(packet.receipt.selectedSourceIds);
  if(restored.providerSelections.claims.some(c=>c.citations.some(ref=>!allowed.has(ref.id))))throw Error('Answer used an unselected source');
- const audits=[];
- for(let claimIndex=0;claimIndex<restored.providerSelections.claims.length;claimIndex++){
-  const binding={inputFingerprint:packet.prepared.fingerprint,quoteUnitManifestSha256:packet.prepared.quoteUnitManifestSha256,providerSelections:restored.providerSelections,claimIndex,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY} as const,
-   local=prepareDocumentCitationAudit(question,packet.context,binding),request=buildDocumentCitationAuditRequest(local.packet),
-   images=local.packet.references.flatMap(r=>r.kind==='image'?[{image:r.image}]:[]),bound=studyAnswerPlanRequestBudget(request,{prepared:{supports:images}},1000),
-   p=journal(policy,'claim-audit',claimIndex),requestSha=digest(request);
-  const result=await auditDocumentCitationClaim(question,checkedRead,binding,{scope:'development',dailyLimit:policy.dailyLimit,
-   beforeAttempt:async requestIdentity=>p.beforeAttempt({phase:'claim-audit',requestIdentity,providerRequestSha256:requestSha,...bound}),
-   recordResponse:async raw=>{await p.recordResponse(raw);const payload=JSON.parse(raw.rawBody);
-    if(payload?.status!=='completed'||!Number.isSafeInteger(payload.usage?.input_tokens)||!Number.isSafeInteger(payload.usage?.output_tokens)||
-     payload.usage.input_tokens<0||payload.usage.output_tokens<0||payload.usage.input_tokens>bound.inputTokenUpper||payload.usage.output_tokens>1000)throw Error('Local audit incomplete/unknown usage');}});
-  const d=result.diagnostics,supported=d.judgment==='supported'&&Object.values(d.citationFindings).some(f=>f.judgment==='supports')&&
-   !Object.values(d.citationFindings).some(f=>f.judgment==='contradicts')&&!['different','not-established'].includes(d.objectUnitScope.alignment);
-  audits.push({claimIndex,localSupported:supported,result});await policy.recordState({event:'claim-audit',claimIndex,localSupported:supported,result});
- }
+ const originalLocalRaw=new Map<number,DocumentCitationAuditResponse>(),audits=await auditStudySelections(question,packet,restored.providerSelections,checkedRead,policy,'claim-audit',
+  policy.completeSourceReview?(index,raw)=>{originalLocalRaw.set(index,raw);}:undefined);
  await recheck();const original={plan,generation,...restored,audits,receipt:packet.receipt},
   citationRevision=policy.citationRevision===true?await revisePlannedStudyCitation(question,read,original,policy):undefined,
+  completeSourceReview=policy.completeSourceReview?await reviewCompletePlannedStudyAnswer(question,read,
+   {receipt:packet.receipt,providerSelections:restored.providerSelections,generation,originalRaw:generationRaw!,
+    originalLocalAudits:audits.map(a=>({claimIndex:a.claimIndex,result:a.result,originalRaw:originalLocalRaw.get(a.claimIndex)!}))},policy):undefined,
   result={status:'generated-awaiting-independent-review',...original,...(citationRevision?{citationRevision}:{}),
+  ...(completeSourceReview?{completeSourceReview}:{}),
   ...('kind'in plan?{planningGapsAssessment:'unassessed' as const}:{unassessedPlanningGaps:plan.plan.missing}),localUnsupportedClaims:audits.filter(a=>!a.localSupported).map(a=>a.claimIndex),
   semanticVerified:false,wholeAnswerVerified:false,fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
  await policy.recordState({event:'result',...result});return result;
