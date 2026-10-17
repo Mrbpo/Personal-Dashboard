@@ -109,6 +109,11 @@ execution-only `auditProfile`; absent the new policy, old request bytes and iden
 remain unchanged. No phase, model, output allowance, contract-v1 field or database table
 is added. Coverage and proposal schemas/identities use
 `complete-study-scope-witness-v1` and `complete-study-scope-revision-v1` respectively.
+Both new schemas share source/claim/member enums with `$defs`/`$ref` rather than
+repeating source inventories per requirement. Before reservation, the final schema is
+checked for actual enum totals (1000), per-enum string size (15000 when over 250 values)
+and total property/definition/enum/constant string size (120000). No source is discarded
+to satisfy a schema limit; capacity failures retain the complete input.
 In this opt-in lane, an existing selected-only finding that fails the normal local
 support predicate (including uncertain/not-established) also triggers that same single
 proposal and is passed through with its original raw identity. No-gap coverage cannot

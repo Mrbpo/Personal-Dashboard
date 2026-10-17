@@ -7,7 +7,7 @@ import {database} from '../lib/database.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceManifest} from '../lib/kernel/document-context.ts';
 import {freezeStudyQuestionContract,prepareCompleteStudyEvidenceRoute} from '../lib/kernel/document-study-contract.ts';
 import {buildCompleteStudyCoverageReviewRequest,validateCompleteStudyCoverageReview,prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,
- assessQuestionScopeWitness,validateQuestionScopeWitness,mapQuestionScopeWitness,restoreQuestionScopeDischarges,QUESTION_SCOPE_REVIEW_VERSION,
+ assessQuestionScopeWitness,validateQuestionScopeWitness,mapQuestionScopeWitness,restoreQuestionScopeDischarges,questionScopeRevisionSchema,QUESTION_SCOPE_REVIEW_VERSION,
  DOCUMENT_CITATION_AUDIT_VERSION,type QuestionScopeWitness,type DocumentCitationAuditResponse,type DocumentCitationAuditDiagnostics} from '../lib/kernel/document-citation-audit.ts';
 import {preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,decodePlannedStudyGenerationSelections,
  reviewCompletePlannedStudyAnswer,answerPlannedStudyQuestion,type PlannedStudyAnswerReviewArtifact,type PlannedStudyAnswerPolicy,type PlannedStudyAnswerAttempt} from '../lib/kernel/document-planned-answer.ts';
@@ -191,6 +191,28 @@ test('question-scope-v1 uncertain original local evidence triggers the existing 
   assert.equal(input.originalSelectedReferenceFindings.findings[0].rawResponseSha256,old.originalRaw.rawSha256);
   assert.equal(result.revisionCandidate?.status,'incomplete-scope-witness');
  });}finally{globalThis.fetch=saved;}
+});
+
+test('question-scope-v1 schema capacity shares source/claim definitions and preflights both actual phase schemas',()=>{
+ const f=fixture(),members=scopeLedger(),ids=(n:number)=>Array.from({length:n},(_,i)=>`Source${i+1}`),
+  build=(sourceIds:string[],requirements=10)=>{const request=structuredClone(f.transport.request);
+   request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=sourceIds;
+   const part=(request.input[1].content as {text:string}[])[0],input=JSON.parse(part.text);
+   input.questionContract.requirements=Array.from({length:requirements},(_,i)=>({...f.contract.requirements[0],id:`r${i}`}));part.text=JSON.stringify(input);
+   return {request,coverage:()=>buildCompleteStudyCoverageReviewRequest(request,{...f.alias,claims:Array.from({length:6},()=>f.alias.claims[0])},undefined,'question-scope-v1'),
+    revision:()=>questionScopeRevisionSchema(request.text.format.schema,members,sourceIds)};},
+  enums=(schema:unknown)=>{const values:unknown[][]=[];const visit=(v:unknown)=>{if(!v||typeof v!=='object')return;
+   if(!Array.isArray(v)&&Object.hasOwn(v,'enum'))values.push((v as {enum:unknown[]}).enum);for(const child of Object.values(v))visit(child);};visit(schema);return values;},
+  wide=build(ids(100)),coverage=wide.coverage().request.text.format.schema,revision=wide.revision();
+ for(const schema of [coverage,revision]){const actual=enums(schema);assert.equal(actual.filter(e=>JSON.stringify(e)===JSON.stringify(ids(100))).length,1);
+  assert.ok(actual.reduce((n,e)=>n+e.length,0)<200);}
+ assert.equal(enums(coverage).filter(e=>JSON.stringify(e)===JSON.stringify(['c0','c1','c2','c3','c4','c5'])).length,1);
+ // Repeated rN and source references do not multiply the enum; actual provider gates still apply.
+ for(const rejected of [build(ids(1000)),build(['Source1','Source2',...Array.from({length:249},(_,i)=>`Long${i}${'x'.repeat(70)}`)]),
+  build(['Source1','Source2',...Array.from({length:248},(_,i)=>`Long${i}${'x'.repeat(500)}`)])])
+  for(const phase of [rejected.coverage,rejected.revision])assert.throws(phase,/enum count|enum string/);
+ const allowed=build(['Source1','Source2',...Array.from({length:248},(_,i)=>`Long${i}${'x'.repeat(70)}`)]);
+ allowed.coverage();allowed.revision();assert.deepEqual(wide.request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,ids(100));
 });
 
 test('reasoned-v1 coverage preserves all source bytes and only its exact explicit phase permits medium',async()=>{

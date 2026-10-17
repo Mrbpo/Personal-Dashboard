@@ -158,12 +158,28 @@ export type QuestionScopeWitness={complete:boolean;requirements:Record<string,{a
 const scopeObject=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)}),
  scopeArray=(items:unknown)=>({type:'array',items}),scopeEnum=(values:string[])=>values.length?{type:'string',enum:values}:{type:'string'},
  memberStates=['eligible','excluded','unclear'],scopeText={type:'string'};
-function witnessSchema(sourceIds:string[]){return scopeObject({sourceId:scopeEnum(sourceIds),questionSpan:scopeText,
+const scopeRef=(name:string)=>({$ref:`#/$defs/${name}`});
+function witnessSchema(){return scopeObject({sourceId:scopeRef('sourceId'),questionSpan:scopeText,
  quote:{type:['string','null']},judgment:scopeEnum(['supports','contradicts','unclear'])});}
-function questionScopeSchema(requirementIds:string[],claimIds:string[],sourceIds:string[]){
- return scopeObject({complete:{type:'boolean'},requirements:scopeObject(Object.fromEntries(requirementIds.map(id=>[id,scopeObject({
-  answerKind:scopeEnum(['existence','enumeration','other','unclear']),questionSpan:scopeText,qualifiers:scopeArray(scopeText),
-  members:scopeArray(scopeObject({id:scopeText,label:scopeText,status:scopeEnum(memberStates),witnesses:scopeArray(witnessSchema(sourceIds)),claimIds:scopeArray(scopeEnum(claimIds))}))})])))});
+function questionScopeSchema(requirementIds:string[]){
+ return scopeObject({complete:{type:'boolean'},requirements:scopeObject(Object.fromEntries(requirementIds.map(id=>[id,scopeRef('scopeRequirement')])))});
+}
+function questionScopeDefinitions(claimIds:string[]){return {scopeWitness:witnessSchema(),scopeState:scopeEnum(memberStates),
+ scopeRequirement:scopeObject({answerKind:scopeEnum(['existence','enumeration','other','unclear']),questionSpan:scopeText,qualifiers:scopeArray(scopeText),
+  members:scopeArray(scopeObject({id:scopeText,label:scopeText,status:scopeRef('scopeState'),witnesses:scopeArray(scopeRef('scopeWitness')),
+   claimIds:scopeArray(claimIds.length?scopeRef('claimId'):scopeText)}))})};
+}
+/** Count the final serialized schema's definitions once, not each use of a $ref. */
+export function assertQuestionScopeSchemaCapacity(schema:unknown){
+ let count=0,characters=0;const visit=(v:unknown)=>{if(!v||typeof v!=='object')return;
+  if(!Array.isArray(v)&&Object.hasOwn(v,'enum')){const values=(v as {enum:unknown[]}).enum;count+=values.length;
+   const size=values.reduce<number>((n,x)=>n+(typeof x==='string'?x.length:0),0);characters+=size;
+   if(values.length>250&&size>15000)throw new DocumentAnswerRequestLimitError('enum-string');}
+  for(const [key,child]of Object.entries(v))if((key==='properties'||key==='$defs')&&child&&typeof child==='object')characters+=Object.keys(child).join('').length;
+   else if(key==='const'&&typeof child==='string')characters+=child.length;
+  for(const child of Object.values(v))visit(child);
+ };visit(schema);if(count>1000)throw new DocumentAnswerRequestLimitError('enum-count');
+ if(characters>120000)throw new DocumentAnswerRequestLimitError('enum-string');
 }
 export function assertQuestionScopeWitnessPolicy(value?:QuestionScopeWitnessPolicy){
  if(value!==undefined&&value!=='question-scope-v1')throw Error('Invalid question scope witness policy');
@@ -211,10 +227,15 @@ export function mapQuestionScopeWitness(value:QuestionScopeWitness,map:(sourceId
  return {...value,requirements:Object.fromEntries(Object.entries(value.requirements).map(([id,r])=>[id,{...r,members:r.members.map(m=>({...m,
   witnesses:m.witnesses.map(w=>({...w,sourceId:map(w.sourceId)}))}))}]))};
 }
-export function questionScopeRevisionSchema(answerSchema:unknown,value:QuestionScopeWitness,sourceIds:string[]){
- const members=Object.values(value.requirements).flatMap(r=>r.members.map(m=>m.id));
- return scopeObject({answer:answerSchema,discharges:scopeArray(scopeObject({memberId:scopeEnum(members),status:scopeEnum(memberStates),
-  witnesses:scopeArray(witnessSchema(sourceIds)),claimIds:scopeArray(scopeEnum(Array.from({length:6},(_,i)=>`c${i}`)))})),unresolvedMemberIds:scopeArray(scopeEnum(members))});
+export function questionScopeRevisionSchema(answerSchema:ReturnType<typeof buildDocumentAnswerRequest>['text']['format']['schema'],value:QuestionScopeWitness,sourceIds:string[]){
+ const members=Object.values(value.requirements).flatMap(r=>r.members.map(m=>m.id)),claims=answerSchema.properties.claims,citations=claims.items.properties.citations,
+  answer={...answerSchema,properties:{...answerSchema.properties,claims:{...claims,items:{...claims.items,properties:{...claims.items.properties,
+   citations:{...citations,items:{...citations.items,properties:{...citations.items.properties,id:scopeRef('sourceId')}}}}}}}},
+  schema={...scopeObject({answer,discharges:scopeArray(scopeObject({memberId:scopeRef('memberId'),status:scopeRef('scopeState'),
+   witnesses:scopeArray(scopeRef('scopeWitness')),claimIds:scopeArray(scopeRef('claimId'))})),unresolvedMemberIds:scopeArray(scopeRef('memberId'))}),
+   $defs:{sourceId:scopeEnum(sourceIds),memberId:scopeEnum(members),scopeState:scopeEnum(memberStates),scopeWitness:witnessSchema(),
+    claimId:scopeEnum(Array.from({length:6},(_,i)=>`c${i}`))}};
+ assertQuestionScopeSchemaCapacity(schema);return schema;
 }
 /** Restore the proposal's typed source fields before any selected-only audit. No citation is added. */
 export function restoreQuestionScopeDischarges(value:unknown,original:QuestionScopeWitness,claims:DocumentAnswerSelections['claims'],choices:CoverageChoices,map:(id:string)=>string){
@@ -251,9 +272,9 @@ export function buildCompleteStudyCoverageReviewRequest(source:ReturnType<typeof
  if(!input.completeSourceProof||input.questionContract?.question!==input.question||!Array.isArray(requirementIds)||!requirementIds.length||
   new Set(requirementIds).size!==requirementIds.length||!sourceIds.length||new Set(sourceIds).size!==sourceIds.length||
   originalAnswer.claims.some(c=>c.citations.some(r=>!sourceIds.includes(r.id))))throw Error('Invalid complete review input');
- if(sourceIds.length+requirementIds.length+claimIds.length+18>1000)throw new DocumentAnswerRequestLimitError('enum-count');
+ if(!scopeWitnessPolicy&&sourceIds.length+requirementIds.length+claimIds.length+18>1000)throw new DocumentAnswerRequestLimitError('enum-count');
  const allIds=[...sourceIds,...requirementIds,...claimIds];
- if(allIds.length>250&&allIds.reduce((n,id)=>n+id.length,0)>15000)throw new DocumentAnswerRequestLimitError('enum-string');
+ if(!scopeWitnessPolicy&&allIds.length>250&&allIds.reduce((n,id)=>n+id.length,0)>15000)throw new DocumentAnswerRequestLimitError('enum-string');
  const object=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)}),
   string={type:'string'},array=(items:unknown)=>({type:'array',items}),enumeration=(values:readonly string[])=>({type:'string',enum:values}),
   schema={...object({requirements:object(Object.fromEntries(requirementIds.map(id=>[id,{$ref:'#/$defs/finding'}]))),issues:array(object({
@@ -278,7 +299,9 @@ export function buildCompleteStudyCoverageReviewRequest(source:ReturnType<typeof
   {...user,content:content.map((part,i)=>i?part:{...part,text:JSON.stringify({...input,originalAnswer,
    originalClaims:originalAnswer.claims.map((claim,i)=>({id:`c${i}`,...claim})),allowedSourceIds:sourceIds})})}],
    text:{format:{type:'json_schema',name:scopeWitnessPolicy?'complete_study_scope_witness_v1':'complete_study_coverage_review_v1',strict:true,schema:scopeWitnessPolicy?
-    {...schema,properties:{...schema.properties,scopeWitness:questionScopeSchema(requirementIds,claimIds,sourceIds)},required:[...schema.required,'scopeWitness']}:schema}}};
+    {...schema,properties:{...schema.properties,scopeWitness:questionScopeSchema(requirementIds)},required:[...schema.required,'scopeWitness'],
+     $defs:{...schema.$defs,...questionScopeDefinitions(claimIds)}}:schema}}};
+ if(scopeWitnessPolicy)assertQuestionScopeSchemaCapacity(request.text.format.schema);
  if(scopeWitnessPolicy)request.input[0].content+=' Also provide compact scopeWitness accounting for each fixed rN, using exact question spans for its subject/relation and material qualifiers. '+
   'Distinguish positive existence (one genuine qualifying witness is enough) from enumeration (account for relevant members); use other/unclear where needed. '+
   'Only list question-relevant members; do not produce a universal role table. Bind each material qualification separately to actual source IDs and short original text quotes, or null quotes for actual images. '+

@@ -417,9 +417,11 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
    claimId:f.claimId,diagnostics:f.diagnostics,references:f.selectedReferences.map(r=>({refId:r.refId,sourceId:toLabel.get(r.selectionId)!})),
    providerRequestSha256:f.providerRequestSha256,rawResponseSha256:f.rawResponseSha256,bindingSha256:f.bindingSha256}));
    const revisionVersion=policy.scopeWitnessPolicy?QUESTION_SCOPE_REVISION_VERSION:STUDY_CONTENT_REVISION_VERSION,
+    concernBinding:{originalConcernClaimIds?:string[];originalUnsupportedClaimIds?:string[]}=policy.scopeWitnessPolicy?
+     {originalConcernClaimIds:localConcerns.map(f=>f.claimId)}:{originalUnsupportedClaimIds:localConcerns.map(f=>f.claimId)},
     revisionBinding={version:revisionVersion,parent:initial.binding,coverageReviewRequestSha256:execution.providerRequestSha256,
    coverageReviewRawSha256:execution.rawResponseSha256,coverageDiagnosticsSha256:digest(aliasDiagnostics),
-   ...(policy.scopeWitnessPolicy?{originalConcernClaimIds:localConcerns.map(f=>f.claimId)}:{originalUnsupportedClaimIds:localConcerns.map(f=>f.claimId)})},revisionBindingSha256=digest(revisionBinding),
+   ...concernBinding},revisionBindingSha256=digest(revisionBinding),
    request={...base,input:[{...base.input[0],content:base.input[0].content+
     ' This is one content revision of the supplied original answer, not a citation-only edit. Treat reviewer findings as fallible source-bound concerns. '+
     'Address actual omissions or errors using all the original question, fixed question contract, supplied source text and original images. '+
