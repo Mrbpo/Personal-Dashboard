@@ -90,9 +90,13 @@ function referenceCmap(text:string,options:{boundedSingleByte?:boolean}={}){
  }if(!entries.size)throw Error('Missing source CMap');return entries;
 }
 
+export type PdfSourceFontObservation={pageNumber:number;resourceKey:string;fontFileHash:string;
+ reason:'missing-type1-tounicode';declaredTargets:Array<{code:number;glyphName:string}>;
+ characterMapping:'unknown';glyphUsage:'unknown'};
 /** @internal Pure server-side input preparation; no I/O, OCR, model, CAS or publication. */
 export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[],references?:PdfFontReferenceDictionary,
- referencePolicy:typeof referenceVersion|typeof referenceCidVersion|typeof SOURCE_POST_AGL_POLICY=referenceVersion):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
+ referencePolicy:typeof referenceVersion|typeof referenceCidVersion|typeof SOURCE_POST_AGL_POLICY=referenceVersion):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof;observations?:PdfSourceFontObservation[]}>{
+ const observations:PdfSourceFontObservation[]=[];
  if(references)validateFontReferenceDictionary(references);
  const referenceHash=references?digest(JSON.stringify(references)):undefined,referenceIndex=new Map(references?.entries.map(e=>[e[0],e])??[]);
  const sourceHash=digest(bytes),original=await PDFDocument.load(bytes,{updateMetadata:false});
@@ -253,8 +257,20 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
    const declared=[...encoding[1].matchAll(/dup\s+(\d+)\s+\/([A-Za-z0-9_.]+)\s+put/g)];
    const targets=declared.filter(m=>Object.hasOwn(glyphUnicode,m[2]));
    if(!targets.length)continue;
-   const cmap=lookup(original,font.get(PDFName.of('ToUnicode'))),cmapBytes=cmap===undefined?undefined:decode(cmap);
-   if(!cmapBytes||cmapBytes.length>65536)encodingReview('missing/bounded ToUnicode');
+   const rawCmap=font.get(PDFName.of('ToUnicode'),true);
+   // ToUnicode is optional for simple fonts (PDF Reference 5.9.1). Its absence
+   // is not a contradictory mapping to repair. Keep the input byte-for-byte;
+   // record uncertainty instead of manufacturing a CMap or rejecting all prose.
+   if(rawCmap===undefined){
+    observations.push({pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file.data),
+     reason:'missing-type1-tounicode',declaredTargets:targets.map(m=>({code:Number(m[1]),glyphName:m[2]})),
+     characterMapping:'unknown',glyphUsage:'unknown'});
+    continue;
+   }
+   // Present null, dangling references and invalid objects are malformed, not
+   // absent optional entries. They must retain the original rejection path.
+   const cmapBytes=decode(lookup(original,rawCmap));
+   if(cmapBytes.length>65536)encodingReview('bounded ToUnicode');
    const cmapText=cmapBytes!.toString('latin1');
    const view=sourceCmapLexicalView(cmapText),ranged=/\bbeginbfrange\b/.test(view);
    let bounded:Map<number,string>|undefined;
@@ -320,7 +336,7 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
    }
   }
  }
- if(!plans.length&&selected===undefined)return {bytes};
+ if(!plans.length&&selected===undefined)return {bytes,...(observations.length?{observations}:{})};
  const includeDescendants=(referencePolicy===referenceCidVersion||referencePolicy===SOURCE_POST_AGL_POLICY)&&plans.some(p=>p.patch.reference);
  // Only a real derivative needs full-object preservation hashing. Unrelated PDFs
  // keep their original bytes without decoding large content or TrueType programs.
@@ -370,7 +386,7 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
  }
  const result=await derived.save();
  const referenceUsed=plans.some(p=>p.patch.reference);
- return {bytes:result,...(plans.length?{proof:{version:referenceUsed?referencePolicy:SOURCE_ENCODING_VERSION,sourceHash,copyIndices:indices,inputHash:digest(result),
+ return {bytes:result,...(observations.length?{observations}:{}),...(plans.length?{proof:{version:referenceUsed?referencePolicy:SOURCE_ENCODING_VERSION,sourceHash,copyIndices:indices,inputHash:digest(result),
   ...(referenceUsed?{referenceDictionarySha256:referenceHash}:{}),patches:plans.map(p=>p.patch),preserved}}:{})};
 }
 
@@ -431,6 +447,8 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   if(referencePolicy!==referenceCidVersion&&referencePolicy!==SOURCE_POST_AGL_POLICY)throw Error('Unknown configured source font reference policy');
   if(referencePolicy===SOURCE_POST_AGL_POLICY&&!references?.sourcePostAgl)throw Error('Source post/AGL v3 requires an explicit proven reference asset');
   const encoding=await prepareSourceFontInput(bytes,undefined,references,referencePolicy);
+  const sourceFontObservations=encoding.observations?.length?{policy:'type1-missing-tounicode-observations-v1',
+    sourceHash:document.hash,observations:encoding.observations}:undefined;
   if(encoding.proof&&(savedResult||legacyTaskId))encodingReview('legacy full-result input has no corrected-input identity');
   if(encoding.proof?.referenceDictionarySha256&&(!references||await storeDoclingResult(references)!==encoding.proof.referenceDictionarySha256))
     throw Error('Font reference CAS identity mismatch');
@@ -480,6 +498,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
       ...(sourceEncodingReceiptHash?{sourceEncodingReceiptHash}:{}),
       optionsHash:digest(JSON.stringify({transport:'docling-derived-v1',endpoint,parser:formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION,
         doOcr:true,doTableStructure:true,localFormula,formulaBackend,formulaPreset,scanBackend,
+        ...(sourceFontObservations?{sourceFontObservations}:{}),
         ...(sourceEncodingReceiptHash?{sourceEncodingReceiptHash,sourceEncodingVersion:encoding.proof!.version,textNormalization:'NFC'}:{} )}))},
       progress,verifiedBlankPages,formulaEnriched:localFormula,endpoint,headers,prepare,
       persist:async value=>{
@@ -487,6 +506,8 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
         currentProgress=structuredClone(value);
       }});
   let pages=decoded.pages,warnings=decoded.warnings;
+  if(sourceFontObservations)warnings=[...warnings,
+    `第 ${[...new Set(sourceFontObservations.observations.map(value=>value.pageNumber))].join('、')} 页的部分 Type1 字体没有 ToUnicode；保留原始字体和输入，不补造字符映射。字符映射、实际字形使用和公式关系未验证，请以原 PDF 页图为准`];
   if(sourceEncodingReceiptHash&&!visual)warnings=[...warnings,
     encoding.proof?.patches.some(p=>p.reference?.sourceMapping.policy==='symbolic-simple-tt-post2-agl-contradiction-v1')?
     '源字体显式 Unicode 映射矛盾已按嵌入字形名、官方 AGL 及独立精确轮廓证明修正；其余公式、上下标及页面结构未验证':
@@ -502,7 +523,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   // Canonical Unicode composition only: raw parser responses and glyph evidence
   // remain unchanged; no formula, layout or whitespace inference is performed.
   if(sourceEncodingReceiptHash&&!visual)pages=pages.map(page=>({...page,text:page.text.normalize('NFC')}));
-  const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceEncodingReceiptHash&&!visual?
+  const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceFontObservations?'-type1-unmapped-observations-v1':'')+(sourceEncodingReceiptHash&&!visual?
     encoding.proof?.referenceDictionarySha256?`-${encoding.proof.version}`:'-source-encoding-v1':'')+(decoded.sourceMath?.length?'-source-math-v1':'');
   const current=await getDocument(owner,id);
   if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');
@@ -526,8 +547,9 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     {parserVersion,expectedPages:totalPages,warnings,nativeTables,pdfVisuals,sourceMath,expectedCurrentVersion,
       ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,
       batchProvenance:currentProgress?{schema:currentProgress.schema,identity:currentProgress.identity,
-        batchSize:currentProgress.batchSize,batches:currentProgress.batches}:sourceEncodingReceiptHash&&!visual?
-        {sourceEncoding:{receiptHash:sourceEncodingReceiptHash,parserInputHash:encoding.proof!.inputHash,version:encoding.proof!.version,textNormalization:'NFC'}}:undefined,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
+        batchSize:currentProgress.batchSize,batches:currentProgress.batches,...(sourceFontObservations?{sourceFontObservations}:{})}:sourceEncodingReceiptHash&&!visual?
+        {sourceEncoding:{receiptHash:sourceEncodingReceiptHash,parserInputHash:encoding.proof!.inputHash,version:encoding.proof!.version,textNormalization:'NFC'},
+          ...(sourceFontObservations?{sourceFontObservations}:{})}:sourceFontObservations?{sourceFontObservations}:undefined,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
       (formulaEnriched?'native-text-plus-ai-formula':'native-text'):formulaEnriched?`docling-plus-${formulaBackend}-formula`:'docling-text'});
   const chunks=pages.flatMap(page=>splitText(page.text).map(body=>({locator:page.locator,body})));
   // Search chunks are a rebuildable cache. The original blob and provenance remain available.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {PDFDocument,PDFName,PDFDict,PDFArray,PDFRawStream,decodePDFRawStream} from 'pdf-lib';
+import {PDFDocument,PDFName,PDFDict,PDFArray,PDFRawStream,PDFRef,PDFNull,decodePDFRawStream} from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type {PdfFontReferenceDictionary} from '../lib/pdf-source-fidelity.ts';
 
@@ -35,6 +35,35 @@ async function cmap(bytes:Uint8Array,key:string){
  const stream=font.lookup(name('ToUnicode'));assert.ok(stream instanceof PDFRawStream);
  return Buffer.from(decodePDFRawStream(stream).decode()).toString();
 }
+
+test('missing optional Type1 ToUnicode retains original bytes and records unknown mappings without a repair proof',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ const pdf=await PDFDocument.load(await fixture()),font=pdf.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict);
+ font.delete(name('ToUnicode'));
+ const input=await pdf.save(),snapshot=Buffer.from(input),unchangedOtherMap=await cmap(input,'Z');
+ const result=await prepareSourceFontInput(input);
+ assert.equal(result.bytes,input);assert.deepEqual(Buffer.from(input),snapshot);assert.equal(result.proof,undefined);
+ assert.equal(result.observations?.length,1);
+ assert.deepEqual(result.observations?.[0],{pageNumber:1,resourceKey:'/P',
+  fontFileHash:result.observations![0].fontFileHash,reason:'missing-type1-tounicode',
+  declaredTargets:[{code:42,glyphName:'prime'},{code:54,glyphName:'negationslash'}],characterMapping:'unknown',glyphUsage:'unknown'});
+ assert.match(result.observations![0].fontFileHash,/^[a-f0-9]{64}$/);
+ const selected=await prepareSourceFontInput(input,[0]),copy=await PDFDocument.load(selected.bytes);
+ assert.equal(copy.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict).has(name('ToUnicode')),false);
+ assert.equal(await cmap(selected.bytes,'Z'),unchangedOtherMap);
+ assert.deepEqual(selected.observations,result.observations);assert.equal(selected.proof,undefined);
+});
+
+test('present malformed ToUnicode is still rejected rather than treated as absent',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ for(const mode of ['oversized','not-stream','dangling','null']){
+  const pdf=await PDFDocument.load(await fixture()),font=pdf.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict);
+  font.set(name('ToUnicode'),mode==='oversized'?pdf.context.register(pdf.context.flateStream(Buffer.alloc(65537,32))):
+   mode==='dangling'?PDFRef.of(900000):mode==='null'?PDFNull:name('InvalidCMap'));
+  const input=await pdf.save(),snapshot=Buffer.from(input);
+  await assert.rejects(prepareSourceFontInput(input),/needs review/,mode);assert.deepEqual(Buffer.from(input),snapshot);
+ }
+});
 
 async function singletonRangeFixture(mode='valid',glyph='prime',differenceMode?:string,sourceValue='FFFD'){
  const pdf=await PDFDocument.create(),page=pdf.addPage(),context=pdf.context,code=42;
