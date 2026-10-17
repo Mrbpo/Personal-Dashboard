@@ -6,7 +6,7 @@ import type {PdfSourceEncodingProof,PdfFontReferenceDictionary} from '../pdf-sou
 import {SOURCE_POST_AGL_POLICY,validateSourcePostAgl,sourcePostAglCandidate,sourceCmapLexicalView,replaceSingleCmapDestination,type SourcePostFont} from '../pdf-source-agl.ts';
 import { digest, getDocument, readBlob, splitText } from '../library.ts';
 import { kernel } from './service.ts';
-import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION } from './docling-result.ts';
+import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION, DOCLING_NUL_PROJECTION_VERSION } from './docling-result.ts';
 import {rememberDoclingTask,doclingJobPayload,rememberDoclingProgress} from './jobs.ts';
 import {convertDoclingBatches,requestDoclingResult,storeDoclingResult,type DoclingProgress,type DecodedDocling} from './docling-batches.ts';
 import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
@@ -523,7 +523,9 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   // Canonical Unicode composition only: raw parser responses and glyph evidence
   // remain unchanged; no formula, layout or whitespace inference is performed.
   if(sourceEncodingReceiptHash&&!visual)pages=pages.map(page=>({...page,text:page.text.normalize('NFC')}));
-  const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceFontObservations?'-type1-unmapped-observations-v1':'')+(sourceEncodingReceiptHash&&!visual?
+  const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+
+    (warnings.some(warning=>warning.includes(`[${DOCLING_NUL_PROJECTION_VERSION}]`))?`-${DOCLING_NUL_PROJECTION_VERSION}`:'')+
+    (sourceFontObservations?'-type1-unmapped-observations-v1':'')+(sourceEncodingReceiptHash&&!visual?
     encoding.proof?.referenceDictionarySha256?`-${encoding.proof.version}`:'-source-encoding-v1':'')+(decoded.sourceMath?.length?'-source-math-v1':'');
   const current=await getDocument(owner,id);
   if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeDoclingResult } from '../lib/kernel/docling-result.ts';
+import { decodeDoclingResult, DOCLING_NUL_PROJECTION_VERSION } from '../lib/kernel/docling-result.ts';
 
 const ref = (name: string) => ({$ref: `#/${name}`});
 const item = (content: string, page = 1, extra: Record<string, unknown> = {}) => ({text: content, prov: [{page_no: page}], ...extra});
@@ -12,6 +12,24 @@ function result(pages = 1) {
     groups: [] as Record<string, unknown>[], tables: [] as Record<string, unknown>[], pictures: [] as Record<string, unknown>[],
   }}};
 }
+
+test('NUL projection marks unknown body and picture characters without altering raw or unaffected pages',()=>{
+ const value=result(2),doc=value.document.json_content;
+ doc.texts=[item('before\0after',1,{orig:'before\0after'}),
+  item('axis\0label',1,{parent:ref('pictures/0'),orig:'axis\0label'}),item('Unchanged α + β.',2)];
+ doc.pictures=[{prov:[{page_no:1,bbox:{l:10,t:10,r:100,b:100,coord_origin:'TOPLEFT'}}],children:[ref('texts/1')]}];
+ doc.body.children=[ref('texts/0'),ref('pictures/0'),ref('texts/2')];
+ const raw=JSON.stringify(value),decoded=decodeDoclingResult(value,2,{formulaEnriched:false});
+ assert.equal(JSON.stringify(value),raw);
+ assert.equal(decoded.pages[0].text,'before�after\n\naxis�label');
+ assert.equal(decoded.pages[0].text.length,'before\0after\n\naxis\0label'.length);
+ assert.equal(decoded.pages[1].text,'Unchanged α + β.');
+ assert.equal(decoded.visualLayout.regions[0].textReferences[0].text,'axis�label');
+ assert.equal(decoded.visualLayout.regions[0].pictureRef,'#/pictures/0');
+ assert.equal(decoded.visualLayout.regions[0].pageNumber,1);
+ assert.equal(decoded.warnings.filter(w=>w.includes(DOCLING_NUL_PROJECTION_VERSION)).length,1);
+ assert.match(decoded.warnings.find(w=>w.includes(DOCLING_NUL_PROJECTION_VERSION))!,/第 1 页.*2 个 NUL/);
+});
 
 test('Docling source preservation keeps original formula strings in body, table and picture references even in text mode',()=>{
  const value=result(),doc=value.document.json_content;

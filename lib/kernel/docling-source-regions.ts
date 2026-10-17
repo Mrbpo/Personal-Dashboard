@@ -153,6 +153,11 @@ export async function prepareDoclingOrigSearchHints(input:OrigSearchInput):Promi
  const entries=index.nodes.filter(n=>n.membership==='declared-provenance'&&n.textScope==='single-page'&&
   n.physicalPageNumbers[0]===source.physicalPage&&typeof n.raw.orig==='string'&&n.raw.orig.trim())
   .map(n=>({reference:n.reference,orig:n.raw.orig as string}));
+ // Orig is verbatim provenance, not a repaired text projection. PostgreSQL
+ // jsonb cannot represent NUL; leave this optional hint unavailable rather
+ // than mutate raw orig or let it invalidate an otherwise publishable page.
+ if(entries.some(entry=>entry.orig.includes('\0')))
+  throw new DoclingPageRegionError('unavailable','Orig search hints contain NUL; verbatim observations remain in the bound raw result');
  if(entries.length>DOCLING_ORIG_SEARCH_LIMITS.items||Buffer.byteLength(entries.map(e=>e.orig).join('\n'))>DOCLING_ORIG_SEARCH_LIMITS.textBytes)
   throw new DoclingPageRegionError('limit','Orig search hints exceed complete page limit');
  const value:PreparedDoclingOrigSearchHints={policy:DOCLING_ORIG_SEARCH_POLICY,source,bodySha256:sha(Buffer.from(input.body)),

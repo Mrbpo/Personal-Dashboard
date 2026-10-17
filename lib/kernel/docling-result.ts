@@ -3,6 +3,7 @@ import {DOCLING_SOURCE_MATH_VERSION,doclingMathRaw,type DoclingMathNode,type Doc
 /** Decode Docling's document tree, whose references carry reading order and PDF provenance. */
 export const DOCLING_PARSER_VERSION = 'docling-v3-source-preserved-search';
 export const DOCLING_TEXT_PARSER_VERSION = 'docling-v3-source-preserved-text-search';
+export const DOCLING_NUL_PROJECTION_VERSION = 'nul-unknown-v1';
 export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
 }
@@ -309,7 +310,11 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (!content && occupied.has(pageNumber)) throw new Error(`Docling page ${pageNumber} has content but no readable transcription`);
     if (!content && !verifiedBlankPages.has(pageNumber)) throw new Error(`Docling page ${pageNumber} is blank_or_unreadable; original blank page was not verified`);
     if (!content) warnings.push(`第 ${pageNumber} 页已核验原始 PDF 无页面内容，保留为空白页`);
-    return {pageNumber, locator: `第 ${pageNumber} 页`, text: content};
+    const nulCount=content.split('\0').length-1;
+    if(nulCount)warnings.push(`第 ${pageNumber} 页 [${DOCLING_NUL_PROJECTION_VERSION}] 解析文本含 ${nulCount} 个 NUL(U+0000)；检索投影以 � 标记未知字符，原始值保留在解析结果中，请核对原 PDF`);
+    // PostgreSQL text cannot contain NUL. Keep the immutable raw result and
+    // preserve UTF-16 offsets; a replacement is unknown, never a guessed glyph.
+    return {pageNumber, locator: `第 ${pageNumber} 页`, text: content.replaceAll('\0','\uFFFD')};
   });
   if (!pages.some(page => page.text)&&!options.pageRange) throw new Error('Docling returned no readable text');
   const pageSizes=pageNumbers.flatMap(pageNumber=>{const size=object(object(manifest?.[String(pageNumber)])?.size);
@@ -318,7 +323,8 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const sourceMath=mathNodes.size?[{policy:DOCLING_SOURCE_MATH_VERSION,nodes:[...mathNodes.values()]}]:undefined;
   if(sourceMath&&Buffer.byteLength(JSON.stringify(sourceMath))>8*1024*1024)throw Error('Docling source math exceeds byte limit');
   return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],nativeTables,...(sourceMath?{sourceMath}:{}),
-    visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',regions,pageSizes,
+    visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',
+      regions:regions.map(region=>({...region,textReferences:region.textReferences.map(ref=>({...ref,text:ref.text.replaceAll('\0','\uFFFD')}))})),pageSizes,
       ...(unavailablePictures.length?{unavailablePictures,reason:'Docling picture geometry unavailable; original text retained'}:
         pageSizes.length===pageNumbers.length?{}:{reason:'Docling page sizes unavailable'})}};
 }

@@ -44,6 +44,15 @@ test('orig hints bind registered CAS and body without becoming evidence; project
  assert.throws(()=>documentOrigSearchMetadata(first.provenance,binding,fixtureSha(input.body),fixtureSha('wrong index')),/index checksum/);
 });
 
+test('NUL in verbatim orig leaves optional hints unavailable and raw CAS unchanged',async()=>{
+ const {input,raw,hash}=await inputWithOrig('unknown\0glyph');
+ await assert.rejects(prepareDoclingOrigSearchHints(input),{name:'DoclingPageRegionError',code:'unavailable',
+  message:'Orig search hints contain NUL; verbatim observations remain in the bound raw result'});
+ const {readFile}=await import('node:fs/promises');
+ assert.deepEqual(await readFile(join(directory,hash)),raw);
+ assert.equal(fixtureSha(raw),hash);
+});
+
 test('orig staging rejects fabricated/current drift, missing or changed CAS and whole-page limits; no registered ref leaves ordinary projection unchanged',async()=>{
  const {input,hash}=await inputWithOrig(),prepared=await prepareDoclingOrigSearchHints(input);assert.ok(prepared);
  assert.throws(()=>assertPreparedDoclingOrigSearchHints(structuredClone(prepared),input),/staging/);
