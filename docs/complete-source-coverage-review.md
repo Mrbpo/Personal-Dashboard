@@ -131,6 +131,18 @@ Exclusion requires a contradictory witness, never silence. IDs, spans, text iden
 and pixel identity are validated; these checks do **not** validate semantic entailment
 or prove that the model discovered every relevant member.
 
+The opt-in coverage and discharge schemas share source-kind-aware witness branches:
+actual text IDs require string quotes; actual image IDs require null quotes. Their
+disjoint allowlists come from the current Kernel request, and empty kinds have no
+branch or empty enum. Source/claim enums remain shared and capacity checked. This
+uses nested `anyOf`/`$defs` supported by [official OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses).
+The strict validator remains unchanged and never repairs the provider raw. Prompts
+also make existing assessment requirements explicit: construct relevant candidates
+from complete source before mapping the old answer, preserve absent eligible/unclear
+candidates, and witness the full requirement span and each qualifier through one
+mapped claim's actual selected references. Missing support stays unclear/incomplete.
+JSON schema cannot prove semantic adequacy or that a model chose all material spans.
+
 The one existing proposal returns `{answer, discharges, unresolvedMemberIds}`. Each
 discharge binds an existing mN to new cN claims and reuses or replaces its source witnesses.
 All typed witness source aliases, including pixel aliases, are restored and validated;

@@ -439,10 +439,11 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
     revisionRequest=scopeWitness?{...request,input:[{...request.input[0],content:request.input[0].content+
      ' Return an answer plus compact discharges/unresolvedMemberIds for the supplied scopeWitness members. Each discharge uses the same mN and actual cN claim IDs. '+
      'Keep original witness arrays empty to reuse them, or provide actual replacement source witnesses for a changed eligibility judgment. Unknown roles are not excluded. '+
-     'Selected citations of the mapped claim must contain the witnesses for every question qualification; do not add citations implicitly. '+
+     'For each eligible member, supports witnesses must cover the full r.questionSpan and every qualifier; the same mapped cN claim must actually select all these witnesses. If unestablished, retain unclear/incomplete; do not invent support or add citations implicitly. '+
      'Enumeration needs all relevant eligible members; a positive existence answer needs one true witness, not an unrelated inventory. '+
      'If source, scope or output capacity is unresolved, preserve unresolvedMemberIds. Do not invent members or claim complete coverage.'},request.input[1]],
-     text:{format:{...request.text.format,name:'complete_study_scope_revision_v1',schema:questionScopeRevisionSchema(request.text.format.schema,aliasDiagnostics.scopeWitness!,prepared.choices.sourceIds)}}}:request,
+     text:{format:{...request.text.format,name:'complete_study_scope_revision_v1',schema:questionScopeRevisionSchema(request.text.format.schema,aliasDiagnostics.scopeWitness!,prepared.choices.sourceIds,
+      {textIds:Object.keys(prepared.choices.scopeWitness!.textById),imageIds:prepared.choices.scopeWitness!.imageIds})}}}:request,
     revisionRequestSha=digest(revisionRequest),revisionBudget=studyAnswerPlanRequestBudget(revisionRequest,{prepared:initial.packet.selectedPrepared});
    await policy.recordState({event:'content-revision-request',binding:revisionBinding,request:revisionRequest});
    const {value:proposal,...revisionExecution}=await executeStudyPlanningRequest(revisionVersion,'content-revision',revisionRequest,revisionBindingSha256,revisionBudget,

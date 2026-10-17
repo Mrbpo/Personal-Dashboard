@@ -198,9 +198,10 @@ test('question-scope-v1 schema capacity shares source/claim definitions and pref
   build=(sourceIds:string[],requirements=10)=>{const request=structuredClone(f.transport.request);
    request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=sourceIds;
    const part=(request.input[1].content as {text:string}[])[0],input=JSON.parse(part.text);
+   input.quoteUnits=sourceIds.map(id=>({...input.quoteUnits[0],id}));input.evidence=[];
    input.questionContract.requirements=Array.from({length:requirements},(_,i)=>({...f.contract.requirements[0],id:`r${i}`}));part.text=JSON.stringify(input);
    return {request,coverage:()=>buildCompleteStudyCoverageReviewRequest(request,{...f.alias,claims:Array.from({length:6},()=>f.alias.claims[0])},undefined,'question-scope-v1'),
-    revision:()=>questionScopeRevisionSchema(request.text.format.schema,members,sourceIds)};},
+    revision:()=>questionScopeRevisionSchema(request.text.format.schema,members,sourceIds,{textIds:sourceIds,imageIds:[]})};},
   enums=(schema:unknown)=>{const values:unknown[][]=[];const visit=(v:unknown)=>{if(!v||typeof v!=='object')return;
    if(!Array.isArray(v)&&Object.hasOwn(v,'enum'))values.push((v as {enum:unknown[]}).enum);for(const child of Object.values(v))visit(child);};visit(schema);return values;},
   wide=build(ids(100)),coverage=wide.coverage().request.text.format.schema,revision=wide.revision();
@@ -213,6 +214,51 @@ test('question-scope-v1 schema capacity shares source/claim definitions and pref
   for(const phase of [rejected.coverage,rejected.revision])assert.throws(phase,/enum count|enum string/);
  const allowed=build(['Source1','Source2',...Array.from({length:248},(_,i)=>`Long${i}${'x'.repeat(70)}`)]);
  allowed.coverage();allowed.revision();assert.deepEqual(wide.request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,ids(100));
+});
+
+type WitnessSchemaNode={type?:string;$ref?:string;anyOf?:WitnessSchemaNode[];enum?:string[];properties?:Record<string,WitnessSchemaNode>;required?:string[];additionalProperties?:boolean};
+function witnessBranches(schema:unknown){
+ const defs=(schema as {$defs:Record<string,WitnessSchemaNode>}).$defs,
+  deref=(n:WitnessSchemaNode):WitnessSchemaNode=>n.$ref?deref(defs[n.$ref.split('/').at(-1)!]):n,root=deref(defs.scopeWitness);
+ return (root.anyOf??[root]).map(ref=>{const branch=deref(ref);assert.equal(branch.type,'object');assert.equal(branch.additionalProperties,false);
+  assert.deepEqual(branch.required,['sourceId','questionSpan','quote','judgment']);
+  return {ids:deref(branch.properties!.sourceId).enum!,quoteType:branch.properties!.quote.type};});
+}
+
+test('typed scope witness shape pairs actual text/image IDs with string/null in both phases without repairing invalid raw',()=>{
+ const f=fixture(),built=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),data=built.choices.scopeWitness!,
+  kinds={textIds:Object.keys(data.textById),imageIds:data.imageIds},ledger=scopeLedger(),imageId=kinds.imageIds[0],
+  revision=questionScopeRevisionSchema(f.transport.request.text.format.schema,ledger,built.choices.sourceIds,kinds),
+  expected=[{ids:kinds.textIds,quoteType:'string'},{ids:kinds.imageIds,quoteType:'null'}];
+ assert.deepEqual(witnessBranches(built.request.text.format.schema),expected);assert.deepEqual(witnessBranches(revision),expected);
+ ledger.requirements.r0.members[0].witnesses.push({sourceId:imageId,questionSpan:'metrics',quote:'invented image transcription',judgment:'supports'});
+ const raw=JSON.stringify(ledger);assert.throws(()=>validateQuestionScopeWitness(ledger,built.choices),/Invalid/);assert.equal(JSON.stringify(ledger),raw);
+ const proposal={answer:f.alias,discharges:[{memberId:'m0',status:'eligible',claimIds:['c0'],witnesses:ledger.requirements.r0.members[0].witnesses}],unresolvedMemberIds:[]};
+ assert.throws(()=>restoreQuestionScopeDischarges(proposal,scopeLedger(),f.alias.claims,built.choices,id=>id),/Invalid/);
+ ledger.requirements.r0.members[0].witnesses.at(-1)!.quote=null;validateQuestionScopeWitness(ledger,built.choices);
+ ledger.requirements.r0.members[0].witnesses[0].quote=null;assert.throws(()=>validateQuestionScopeWitness(ledger,built.choices),/Invalid/);
+ const prompt=built.request.input[0].content;assert.ok(typeof prompt==='string');assert.ok(prompt.includes('complete source before mapping'));assert.ok(prompt.includes('full r.questionSpan and each qualifier'));
+});
+
+test('typed scope witness shape omits empty kinds and rejects incomplete or overlapping actual kind partitions',()=>{
+ const f=fixture(),complete=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,undefined,'question-scope-v1'),data=complete.choices.scopeWitness!,
+  allText=Object.keys(data.textById),allImages=data.imageIds;
+ for(const [textIds,imageIds]of [[allText,[]],[[],allImages]]){
+  const ids=[...textIds,...imageIds],request=structuredClone(f.transport.request),part=(request.input[1].content as {text:string}[])[0],input=JSON.parse(part.text);
+  request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=ids;
+  input.quoteUnits=input.quoteUnits.filter((q:{id:string})=>textIds.includes(q.id));
+  input.evidence=input.evidence.filter((e:{id:string;kind:string})=>e.kind==='image'&&imageIds.includes(e.id));part.text=JSON.stringify(input);
+  const coverage=buildCompleteStudyCoverageReviewRequest(request,{status:'insufficient-evidence',message:'Unknown.',claims:[]},undefined,'question-scope-v1'),
+   revision=questionScopeRevisionSchema(request.text.format.schema,scopeLedger(),ids,{textIds,imageIds}),
+   expected=[{ids,quoteType:textIds.length?'string':'null'}];
+  assert.deepEqual(witnessBranches(coverage.request.text.format.schema),expected);assert.deepEqual(witnessBranches(revision),expected);
+  for(const schema of [coverage.request.text.format.schema,revision]){
+   const defs=(schema as {$defs:Record<string,unknown>}).$defs;assert.equal(Object.hasOwn(defs,textIds.length?'imageWitness':'textWitness'),false);
+   assert.ok(!JSON.stringify(schema).includes('"enum":[]'));
+  }
+ }
+ for(const kinds of [{textIds:allText,imageIds:[]},{textIds:[...allText,...allImages],imageIds:allImages}])
+  assert.throws(()=>questionScopeRevisionSchema(f.transport.request.text.format.schema,scopeLedger(),complete.choices.sourceIds,kinds),/Invalid scope source kinds/);
 });
 
 test('reasoned-v1 coverage preserves all source bytes and only its exact explicit phase permits medium',async()=>{
