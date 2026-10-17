@@ -7,7 +7,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {PDFDocument,degrees} from 'pdf-lib';
+import {PDFDocument,PDFArray,PDFRawStream,PDFName,PDFNumber,degrees,rgb,type PDFPage} from 'pdf-lib';
 
 const directory=mkdtempSync(join(tmpdir(),'pdf-tiled-image-tests-'));
 process.env.DATABASE_URL=':memory:';
@@ -27,9 +27,14 @@ const pngs=[
  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP8/5+BgYGBCUQwMAAAGRECAh1OODsAAAAASUVORK5CYII=',
 ];
 
-test('selected tiled PNGs preserve source geometry and identity in one request, with no request on render/rotation failure',async()=>{
+test('selected tiled PNGs preserve source geometry, orthogonal rotation and cache identity; failures never request',async()=>{
  const renderedBoxes:Array<{x:number;y:number;width:number;height:number}>=[];
- let renders=0,failAtRender=0,calls=0;
+ let renders=0,failAtRender=0,calls=0,expectedRotation=0;
+ let sourceContentHashes:string[]=[];
+ const contentHashes=(page:PDFPage)=>{
+  const contents=page.node.Contents(),streams=contents instanceof PDFArray?contents.asArray().map(ref=>page.doc.context.lookup(ref)):contents?[contents]:[];
+  return streams.map(stream=>{assert.ok(stream instanceof PDFRawStream);return createHash('sha256').update(stream.getContents()).digest('hex');});
+ };
  const originalFetch=globalThis.fetch;
  const originalExecFile=childProcess.execFile;
  // Direct replacement also removes execFile's built-in promisify.custom hook,
@@ -43,7 +48,8 @@ test('selected tiled PNGs preserve source geometry and identity in one request, 
    assert.equal(copy.getPageCount(),1,'each PNG is rendered from one view, not the first of a four-page PDF');
    const page=copy.getPage(0),box=page.getCropBox();
    assert.deepEqual(page.getMediaBox(),box);
-   assert.equal(page.getRotation().angle,0);
+   assert.equal(page.getRotation().angle,expectedRotation,'the source /Rotate is retained, not flattened');
+   assert.deepEqual(contentHashes(page),sourceContentHashes,'source content streams remain byte-identical');
    renderedBoxes.push(box);renders++;
    if(renders===failAtRender)throw new Error('controlled renderer failure');
    await writeFile(args[7]+'.png',Buffer.from(pngs[(renders-1)%4],'base64'));
@@ -58,13 +64,20 @@ test('selected tiled PNGs preserve source geometry and identity in one request, 
   const pdf=await PDFDocument.create();
   for(let index=0;index<30;index++)pdf.addPage([400+index,600]);
   pdf.getPage(28).setCropBox(10,20,400,560);
+  pdf.getPage(28).drawRectangle({x:10,y:20,width:200,height:280,color:rgb(1,0,0)});
   const bytes=await pdf.save(),sourceHash=createHash('sha256').update(bytes).digest('hex'),id='tiled-source-page-29';
+  sourceContentHashes=contentHashes((await PDFDocument.load(bytes)).getPage(28));
   const oldKey=(imageInput:boolean,tiled:boolean)=>'pdf-visual-selected-v3:'+createHash('sha256')
    .update(JSON.stringify({sourceHash,model:'gpt-5-mini',imageInput,tiled,promptVersion:3})).digest('hex');
   for(const [imageInput,tiled] of [[false,false],[false,true],[true,false]])
    assert.equal(selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',imageInput,tiled),oldKey(imageInput,tiled),'existing reachable mode keys stay byte-compatible');
   const singleKey=oldKey(true,false),fileKey=oldKey(false,true),newKey=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',true,true);
   assert.notEqual(newKey,oldKey(true,true),'combined mode explicitly adds the crop/render/prompt identity');
+  const {VISUAL_CROP_VIEWS}=await import('../lib/pdf-visual-tiles.ts');
+  const previousPngKey='pdf-visual-selected-v3:'+createHash('sha256').update(JSON.stringify({sourceHash,model:'gpt-5-mini',imageInput:true,tiled:true,promptVersion:3,
+   tiledPng:{mode:'four-overlapping-png-v1',promptVersion:1,renderMaxEdge:2500,views:VISUAL_CROP_VIEWS}})).digest('hex');
+  assert.notEqual(newKey,previousPngKey,'rotation-aware geometry has a new identity even for a zero-degree source');
+  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,previousPngKey,28,'old zero-only PNG tiles').run();
   for(const [key,body] of [[singleKey,'old single image'],[fileKey,'old four-page PDF']])
    await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,key,28,body).run();
   const originalText='Source typo competition; worksheet _____; original matrix \\(0\\).';
@@ -105,10 +118,29 @@ test('selected tiled PNGs preserve source geometry and identity in one request, 
   await assert.rejects(transcribePdfVisualPages('failed-crop',bytes,options),/左下视图渲染失败/);
   assert.equal(calls,1,'no provider request when one of the four crops fails');
   assert.equal(await db.prepare('SELECT 1 FROM library_parse_pages WHERE document_id=?').bind('failed-crop').first(),null);
+  const rotatedPositions={
+   90:[[10,20],[10,272],[190,20],[190,272]],
+   180:[[190,20],[10,20],[190,272],[10,272]],
+   270:[[190,272],[190,20],[10,272],[10,20]],
+  };
+  for(const angle of [90,180,270] as const){
+   renders=0;renderedBoxes.length=0;failAtRender=0;expectedRotation=angle;
+   pdf.getPage(28).setRotation(degrees(angle));
+   const rotatedBytes=await pdf.save(),rotatedHash=createHash('sha256').update(rotatedBytes).digest('hex');
+   assert.deepEqual(await transcribePdfVisualPages(`rotated-${angle}`,rotatedBytes,{...options,expectedSourceHash:rotatedHash}),result);
+   assert.equal(renders,4);
+   for(const [index,[x,y]] of rotatedPositions[angle].entries()){
+    const actual=renderedBoxes[index];
+    for(const [key,value] of Object.entries({x,y,width:220,height:308}))
+     assert.ok(Math.abs(actual[key as keyof typeof actual]-value)<1e-8,`${angle} ${index} ${key}`);
+   }
+   assert.equal(createHash('sha256').update(rotatedBytes).digest('hex'),rotatedHash,'input bytes are not modified');
+  }
+  assert.equal(calls,4,'each orthogonal page uses exactly one mocked request for its four views');
   const rendersBeforeRotation=renders;
-  pdf.getPage(29).setRotation(degrees(90));
-  await assert.rejects(transcribePdfVisualPages('rotated-selected',await pdf.save(),{...options,pageNumbers:[29,30],expectedSourceHash:undefined}),/暂不支持旋转页面/);
-  assert.equal(calls,1);assert.equal(renders,rendersBeforeRotation,'all selected rotations are checked before any earlier page can charge');
+  pdf.getPage(29).node.set(PDFName.of('Rotate'),PDFNumber.of(45));
+  await assert.rejects(transcribePdfVisualPages('unsupported-rotation',await pdf.save(),{...options,pageNumbers:[29,30],expectedSourceHash:undefined}),/仅支持 0\/90\/180\/270/);
+  assert.equal(calls,4);assert.equal(renders,rendersBeforeRotation,'all selected rotations are checked before any earlier page can charge');
  }finally{
   globalThis.fetch=originalFetch;childProcess.execFile=originalExecFile;syncBuiltinESMExports();
  }

@@ -7,6 +7,7 @@ import {localPageOcr,localPdfPageText,localPdfPageImage,PDF_PAGE_IMAGE_MAX_EDGE}
 import {appendPdfLatex,mayContainPdfMath,normalizePdfFormulae,PDF_FORMULA_PROMPT,PDF_FORMULA_SCHEMA,
  PDF_FORMULA_CACHE_VERSION,pdfFormulaCacheIdentity,pdfFormulaCacheParser,encodeCompletePdfFormulaCache,readCompletePdfFormulaCache} from './pdf-formulas.ts';
 import {assertVisualCacheStructure,PdfVisualStructureError,VISUAL_UNCERTAINTY_HEADER,visualMathStructureIssue,visualTextControlIssue} from './pdf-visual-structure.ts';
+import {VISUAL_CROP_VIEWS,visualTileCropBox,visualTileRotation} from './pdf-visual-tiles.ts';
 import mammoth from 'mammoth';
 export const PDF_PARSER_VERSION='pdf-page-v3-latex';
 export const PDF_FORMULA_PAGES_PER_DOCUMENT=24;
@@ -16,13 +17,7 @@ export const PDF_VISUAL_PAGES_PER_UTC_DAY=60;
 
 export type VisualPageOptions={pageNumbers?:number[];expectedSourceHash?:string;model?:string;imageInput?:boolean};
 export const SELECTED_VISUAL_PARSER_VERSION='pdf-visual-selected-v3';
-const VISUAL_CROP_VIEWS=[
- {label:'左上',left:0,bottom:.45,width:.55,height:.55},
- {label:'右上',left:.45,bottom:.45,width:.55,height:.55},
- {label:'左下',left:0,bottom:0,width:.55,height:.55},
- {label:'右下',left:.45,bottom:0,width:.55,height:.55},
-] as const;
-const TILED_PNG_IDENTITY={mode:'four-overlapping-png-v1',promptVersion:1,renderMaxEdge:PDF_PAGE_IMAGE_MAX_EDGE,views:VISUAL_CROP_VIEWS};
+const TILED_PNG_IDENTITY={mode:'four-overlapping-png-v2',rotationPolicy:'display-to-user-orthogonal-v1',promptVersion:1,renderMaxEdge:PDF_PAGE_IMAGE_MAX_EDGE,views:VISUAL_CROP_VIEWS};
 export function selectedVisualPageCacheParser(sourceHash:string,model:string,imageInput:boolean,tiled=false){
  return `${SELECTED_VISUAL_PARSER_VERSION}:${createHash('sha256').update(JSON.stringify({sourceHash,model,imageInput,tiled,promptVersion:3,
   ...(imageInput&&tiled?{tiledPng:TILED_PNG_IDENTITY}:{})})).digest('hex')}`;
@@ -40,10 +35,8 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
  const wantsTiles=process.env.PDF_VISUAL_TILED_INPUT==='true';
  const tiledImages=Boolean(options.pageNumbers)&&imageInput&&wantsTiles;
  const tiled=wantsTiles&&(!imageInput||tiledImages);
- // PDF crop coordinates describe unrotated user space. Reject this opt-in mode
- // before any request rather than mislabel visual quadrants on rotated pages.
- if(tiledImages&&selection.some(page=>pdf.getPage(page-1).getRotation().angle%360!==0))
-  throw new Error('四图 PNG 视觉转写暂不支持旋转页面；原件和已有转写保留');
+ // Validate all selected rotations before any earlier page can make a request.
+ if(tiledImages)for(const page of selection)visualTileRotation(pdf.getPage(page-1).getRotation().angle);
  // Selected-page repairs cannot reuse an unversioned, possibly differently
  // rendered full-document cache. Their original identity/config is explicit.
  const cacheParser=options.pageNumbers?selectedVisualPageCacheParser(sourceHash,model,imageInput,tiled):'pdf-visual-v1';
@@ -57,10 +50,10 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
   }
   const visualInputs:Array<{type:'input_text';text:string}|{type:'input_image';image_url:string;detail:string}|{type:'input_file';filename:string;file_data:string}>=[];
   if(tiledImages){
-   const box=pdf.getPage(page).getCropBox();
+   const original=pdf.getPage(page),box=original.getCropBox();
    for(const region of VISUAL_CROP_VIEWS){
     const one=await PDFDocument.create(),view=(await one.copyPages(pdf,[page]))[0];
-    const x=box.x+box.width*region.left,y=box.y+box.height*region.bottom,width=box.width*region.width,height=box.height*region.height;
+    const {x,y,width,height}=visualTileCropBox(box,original.getRotation().angle,region);
     view.setCropBox(x,y,width,height);view.setMediaBox(x,y,width,height);one.addPage(view);
     const rendered=await localPdfPageImage(await one.save());
     if(!rendered)throw new Error(`第 ${page+1} 页${region.label}视图渲染失败；未发送该页视觉请求`);
