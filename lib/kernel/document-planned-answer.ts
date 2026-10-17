@@ -15,6 +15,8 @@ export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
 export const COMPLETE_SOURCE_STUDY_ANSWER_VERSION='complete-source-evidence-answer-v1';
 export const STUDY_CONTENT_REVISION_VERSION='complete-study-content-revision-v1';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
+export const CAPTION_ALIAS_SOURCE_LABEL_VERSION='request-local-caption-alias-v2';
+type SourceLabelPolicy='caption-alias-v2';
 type PlanningProvenance={originalPlanSha256?:string;originalPlanRequestSha256?:string;originalPlanRawSha256?:string;
  evidenceRoute?:CompleteStudyEvidenceRouteBinding};
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
@@ -22,7 +24,7 @@ export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'pl
  originalQuery?:string;focusPolicy?:'resolved-exact-title-query-v2';sourceSubscopeIndex?:number;queryPolicy?:'parallel-source-subscopes-v1'};
 type PlannedPhase=StudyAnswerPlanAttempt['phase']|DocumentCitationRevisionAttempt['phase'];
 export type PlannedStudyAnswerAttempt=Omit<StudyAnswerPlanAttempt,'phase'>&{phase:PlannedPhase;claimIndex?:number};
-export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';
+export type PlannedStudyAnswerPolicy={scope:'development';dailyLimit?:number;citationRevision?:boolean;completeSourceReview?:'diagnostic'|'one-content-revision';sourceLabelPolicy?:SourceLabelPolicy;
  beforeAttempt:(attempt:Readonly<PlannedStudyAnswerAttempt>)=>Promise<void>;
  recordResponse:(raw:Readonly<DocumentCitationAuditResponse&{phase:PlannedPhase;claimIndex?:number}>)=>Promise<void>;
  recordState:(state:Readonly<Record<string,unknown>>)=>Promise<void>};
@@ -31,7 +33,8 @@ const journal=(policy:PlannedStudyAnswerPolicy,phase:StudyAnswerPlanAttempt['pha
  beforeAttempt:async attempt=>policy.beforeAttempt(Object.freeze({...attempt,phase,...(claimIndex!==undefined?{claimIndex}:{})})),
  recordResponse:async raw=>policy.recordResponse({...raw,phase,...(claimIndex!==undefined?{claimIndex}:{})})});
 export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPolicy){
- if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','citationRevision','completeSourceReview','beforeAttempt','recordResponse','recordState'].includes(k))||
+ if(!policy||Object.keys(policy).some(k=>!['scope','dailyLimit','citationRevision','completeSourceReview','sourceLabelPolicy','beforeAttempt','recordResponse','recordState'].includes(k))||
+  (policy.sourceLabelPolicy!==undefined&&policy.sourceLabelPolicy!=='caption-alias-v2')||
   (policy.citationRevision!==undefined&&typeof policy.citationRevision!=='boolean')||
   (policy.completeSourceReview!==undefined&&!['diagnostic','one-content-revision'].includes(policy.completeSourceReview))||
   (policy.completeSourceReview!==undefined&&policy.citationRevision===true)||
@@ -100,7 +103,9 @@ function mergeContexts(initial:DocumentAnswerContext,extras:DocumentAnswerContex
  * Supplemental text remains actual retrieved evidence. q IDs are source-stable;
  * original image order is retained. The extension is not a new model plan. */
 export function preparePlannedStudyGeneration(question:string,initial:DocumentAnswerContext,extras:DocumentAnswerContext[],contract:StudyQuestionContract,
- binding:StudyContractPlanBinding|CompleteStudyEvidenceRouteBinding,queries:StudySupplementQuery[],supplementalSource?:SupplementalSource){
+ binding:StudyContractPlanBinding|CompleteStudyEvidenceRouteBinding,queries:StudySupplementQuery[],supplementalSource?:SupplementalSource,sourceLabelPolicy?:SourceLabelPolicy){
+ if(sourceLabelPolicy!==undefined&&(sourceLabelPolicy!=='caption-alias-v2'||!isCompleteStudyEvidenceRoute(binding)||!initial.completeSourceProof))
+  throw Error('Caption aliases require the verified complete single-source evidence route');
  const deterministic=isCompleteStudyEvidenceRoute(binding),original=deterministic?restoreCompleteStudyEvidenceRoute(question,initial,contract,binding):restoreContractStudyPlan(question,initial,contract,binding),
   context=mergeContexts(initial,extras),prepared=prepareDocumentAnswer(question,context,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
  if(deterministic&&(queries.length||extras.length))throw Error('Complete evidence route cannot import supplemental contexts');
@@ -131,6 +136,7 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
  const provenance:PlanningProvenance=deterministic?{evidenceRoute:binding}:{originalPlanSha256:binding.planSha256,
   originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256};
  const receipt={version:deterministic?COMPLETE_SOURCE_STUDY_ANSWER_VERSION:PLANNED_STUDY_ANSWER_VERSION,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,contractSha256:contract.contractSha256,...provenance,
+  ...(sourceLabelPolicy?{sourceLabelPolicy}:{}),
   originalInputFingerprint:binding.inputFingerprint,inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
   supplemental,initialImageSelection:initial.imageSelection??null,imageSelection:prepared.input.imageSelection,sourceCaptionProof:initial.sourceCaptionProof??null,
   initialRetrievalScope:initial.completeSourceProof?'selected-complete-source':'whole-library-query',
@@ -170,11 +176,29 @@ export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof 
   throw Error('Unsupported planned source version');
  if(Boolean(packet.receipt.evidenceRoute)!==(packet.receipt.version===COMPLETE_SOURCE_STUDY_ANSWER_VERSION))
   throw Error('Evidence route cannot be relabeled as a historical AI plan');
+ const aliasPolicy=packet.receipt.sourceLabelPolicy;
+ if(aliasPolicy!==undefined&&(aliasPolicy!=='caption-alias-v2'||packet.receipt.version!==COMPLETE_SOURCE_STUDY_ANSWER_VERSION))throw Error('Invalid caption-alias receipt');
+ const aliases=new Map<string,string>();
+ if(aliasPolicy){
+  const proof=validateCompleteStudySource(packet.context),images=packet.selectedPrepared.supports.filter(s=>s.kind==='image'),
+   prefixes=images.map(s=>{
+    // Only the actual beginning of one verified author-caption visual unit.
+    // Do not infer a table number from filenames, questions, image order or values.
+    if(!s.captionMembers||s.image&&'anchorEvidenceId'in s.image||!proof.manifest.nodes.some(n=>n.evidenceId===s.evidenceId&&n.kind==='caption'))return null;
+    const first=s.captionMembers.filter(u=>u.startUtf16===0);if(first.length!==1)return null;
+    const match=/^[ \t\r\n]{0,8}(Table|Figure|Fig\.)[ \t]{1,4}([0-9]{1,4})(?:[ \t]{0,4}:|\.(?=[ \t\r\n]|$))/iu.exec(first[0].text.slice(0,64));
+    if(!match)return null;const kind=match[1].toLowerCase()==='table'?'Table':'Figure';
+    return {label:kind+match[2],key:kind+Number(match[2])};
+   });
+  for(const [index,prefix]of prefixes.entries())if(prefix&&prefixes.filter(p=>p?.key===prefix.key).length===1)
+   aliases.set(images[index].id,`${prefix.label}_Image${index+1}`);
+ }
  const prepared=packet.selectedPrepared,ids=[...prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),
   ...prepared.supports.filter(s=>s.kind==='image').map(s=>s.id)];
  if(!ids.length||new Set(ids).size!==ids.length||digest(ids)!==digest(packet.receipt.selectedSourceIds))throw Error('Invalid planned source labels');
  const canonicalPacketSha256=digest({bindingSha256:packet.bindingSha256,input:prepared.input}),
-  mapping={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalPacketSha256,entries:ids.map((canonicalId,index)=>({label:`Source${index+1}`,canonicalId}))},
+  mapping={version:aliasPolicy?CAPTION_ALIAS_SOURCE_LABEL_VERSION:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalPacketSha256,
+   entries:ids.map((canonicalId,index)=>({label:aliases.get(canonicalId)??`Source${index+1}`,canonicalId}))},
   byId=new Map(mapping.entries.map(e=>[e.canonicalId,e.label]));
  const selectedId=(id:string)=>{const label=byId.get(id);if(!label)throw Error('Incomplete planned source label mapping');return label;};
  const quoteUnits=prepared.quoteUnits.map(u=>({...u,id:selectedId(u.id)})),
@@ -182,8 +206,10 @@ export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof 
   input={...prepared.input,quoteUnits,evidence:prepared.input.evidence.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s)},
   // Historical revisions compare their original unprojected body. New v9
   // generation projects only after the typed SourceN mapping above.
-  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input},[PLANNED_STUDY_ANSWER_VERSION,COMPLETE_SOURCE_STUDY_ANSWER_VERSION].includes(packet.receipt.version)),mappingSha256=digest(mapping),
-  binding={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalBindingSha256:packet.bindingSha256,
+  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input},[PLANNED_STUDY_ANSWER_VERSION,COMPLETE_SOURCE_STUDY_ANSWER_VERSION].includes(packet.receipt.version)),mappingSha256=digest(mapping);
+ if(aliasPolicy)request.input[0].content+=' Caption-derived image labels are navigation aliases, not evidence of numerical or semantic support. '+
+  'ImageN is the actual image position, not the printed table/figure number. Inspect each selected original image and its row/column meanings; use only the actual allowed selection IDs.';
+ const binding={version:mapping.version,canonicalBindingSha256:packet.bindingSha256,
    canonicalInputFingerprint:packet.prepared.fingerprint,canonicalPacketSha256,mappingSha256,providerRequestSha256:digest(request)},
   bindingSha256=digest(binding);
  return {request,mapping,binding,bindingSha256,...studyPlanningRequestIdentity(
@@ -292,6 +318,7 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
  await assertPlannedStudyAnswerPolicy(policy);
  if(policy.citationRevision===true)throw Error('Content review and citation-only revision are mutually exclusive');
  const original=structuredClone(artifact),mode=policy.completeSourceReview??'diagnostic';
+ if(policy.sourceLabelPolicy!==undefined&&policy.sourceLabelPolicy!==original.receipt.sourceLabelPolicy)throw Error('Original artifact source-label policy cannot change');
  const restore=async()=>{
   const current=await readPacket(),proof=validateCompleteStudySource(current.context),contract=validateStudyQuestionContract(question,current.selectedPrepared.input.questionContract);
   if(current.receipt.initialRetrievalScope!=='selected-complete-source'||digest({...current.receipt,version:original.receipt.version})!==digest(original.receipt))
@@ -380,7 +407,9 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
     'Do not use the full-source diagnostic to excuse wrong selected references. A proposed claim must select its own actual supporting references and will receive a new selected-only audit. '+
     'Preserve correct useful facts, qualifications and material requested items. Do not delete them merely to obtain a favorable judgment or fit six claims. '+
     'Do not add outside facts, unasked counts, experiments or negative conclusions. Preserve genuine source ambiguity and conflicting roles or values. '+
-    'Return only the normal status/message/claims with the same actual SourceN selections. No new question plan or unsupported explanation.'},
+    (initial.transport.mapping.version===CAPTION_ALIAS_SOURCE_LABEL_VERSION?
+     'Return only the normal status/message/claims with the same actual allowed source-label selections. No new question plan or unsupported explanation.':
+     'Return only the normal status/message/claims with the same actual SourceN selections. No new question plan or unsupported explanation.')},
     {...user,content:content.map((part,i)=>i?part:{...part,text:JSON.stringify({...JSON.parse(sourceInputText),
      originalAnswer:initial.alias,coverageReview:{version:review.version,diagnostics:aliasDiagnostics,fallible:true},
      originalSelectedReferenceFindings:{version:DOCUMENT_CITATION_AUDIT_VERSION,findings:originalSelectedReferenceFindings,fallible:true},
@@ -415,6 +444,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  completeRoute?:CompleteStudyEvidenceRouteBinding){
  await assertPlannedStudyAnswerPolicy(policy);const checked=validateStudyQuestionContract(question,contract);
  if(policy.completeSourceReview&&!completeRoute)throw Error('Integrated coverage review requires the verified complete-source route');
+ if(policy.sourceLabelPolicy&&!completeRoute)throw Error('Caption aliases require the verified complete single-source evidence route');
  let plan:Omit<ReturnType<typeof restoreCompleteStudyEvidenceRoute>,'prepared'>|Awaited<ReturnType<typeof planContractStudyAnswer>>;
  if(completeRoute){const {prepared:_prepared,...receipt}=restoreCompleteStudyEvidenceRoute(question,await readInitial(),checked,completeRoute);plan=receipt;}
  else plan=await planContractStudyAnswer(question,readInitial,checked,journal(policy,'contract-plan'));
@@ -422,7 +452,7 @@ export async function answerPlannedStudyQuestion(question:string,readInitial:()=
  if(plan.completion==='capacity-exceeded')return {status:'capacity-exceeded',plan,wholeAnswerVerified:false};
  const queries='kind'in plan||plan.completeSourceProof?[]:studySupplementQueries(question,checked,plan.binding,supplementalSource),readers:(()=>Promise<DocumentAnswerContext>)[]=[];
  for(const q of queries)readers.push(await readSupplement(q.query));
- const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource);};
+ const read=async()=>{const initial=await readInitial(),extras=[];for(const r of readers)extras.push(await r());return preparePlannedStudyGeneration(question,initial,extras,checked,plan.binding,queries,supplementalSource,policy.sourceLabelPolicy);};
  const packet=await read();await policy.recordState({event:'supplement',receipt:packet.receipt});
  if(!packet.selectedPrepared.supports.length)return {status:'unavailable',plan,receipt:packet.receipt,wholeAnswerVerified:false};
  const transport=preparePlannedStudyGenerationTransport(packet),body=transport.request,budget=studyAnswerPlanRequestBudget(body,{prepared:packet.selectedPrepared});
