@@ -307,6 +307,12 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,...(visualUnitManifest?{visualUnitManifest}:{}),input,warnings,unavailableParents,fingerprint:sha(JSON.stringify(input))};
 }
 
+/** Use the same prepared evidence for capacity checks, selection, generation
+ * and source rechecks. Only the opt-in lane groups explicitly paired assets. */
+export function prepareDocumentAnswerForPolicy(question:string,context:DocumentAnswerContext,policy:DocumentAnswerPolicy={}){
+ return prepareDocumentAnswer(question,context,policy.evidenceSelection==='select-then-answer'?DOCUMENT_ANSWER_VISUAL_UNIT_POLICY:undefined);
+}
+
 export type DocumentAnswerRequestSettings={model:DocumentAnswerModel;reasoningEffort:'low'|'medium'|'high';maxOutputTokens:number};
 export class DocumentAnswerRequestLimitError extends Error{
  readonly code:'enum-count'|'enum-string';
@@ -380,7 +386,7 @@ export function buildDocumentAnswerRuntimeRequest(prepared:ReturnType<typeof pre
 export const DOCUMENT_EVIDENCE_SELECTION_VERSION='select-original-evidence-v1';
 export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_SELECTION_VERSION;coverage:'unassessed';referenceIds:string[];
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
- sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected'};
+ sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
 type PreparedAnswer=ReturnType<typeof prepareDocumentAnswer>;
 const selectableIds=(prepared:PreparedAnswer)=>[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
  ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
@@ -425,6 +431,7 @@ export function buildSelectedDocumentAnswerRequest(prepared:PreparedAnswer,refer
   quoteUnitProtocolVersion:prepared.input.quoteUnitProtocolVersion,quoteUnits:units,
   quoteUnitManifestSha256:sha(JSON.stringify(prepared.quoteUnitManifest.filter(unit=>selected.has(unit.id)))),
   documentMetadata:prepared.input.documentMetadata.filter(document=>documents.has(document.documentId)),warnings:prepared.warnings,
+  ...(prepared.input.unitPolicy?{unitPolicy:prepared.input.unitPolicy}:{}),
   parentMetadata:[],unavailableParents:[],sourceContentIsUntrusted:true,
   evidenceSelection:{version:DOCUMENT_EVIDENCE_SELECTION_VERSION,sourceInputFingerprint:prepared.fingerprint,coverage:'unassessed'}};
  user.content=[{type:'input_text',text:JSON.stringify(input)},...supports.flatMap(support=>selected.has(support.id)&&support.image?[
@@ -474,7 +481,7 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
 export async function synthesizeDocumentAnswer(question:string,readContext:()=>Promise<DocumentAnswerContext>,policy:DocumentAnswerPolicy={}){
  const {model,dailyLimit,effort,maxOutput,timeout}=await documentAnswerSettings(policy);
  policy.onStage?.('evidence-selection');
- const prepared=prepareDocumentAnswer(question,await readContext());
+ const prepared=prepareDocumentAnswerForPolicy(question,await readContext(),policy);
  let selectionReceipt:DocumentEvidenceSelectionReceipt|undefined,referenceIds:string[]|undefined;
  const receipt={referencePolicyVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnitManifest:prepared.quoteUnitManifest,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
@@ -495,11 +502,12 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
   referenceIds=validateDocumentEvidenceSelection(decoded,prepared);
-  if(prepareDocumentAnswer(question,await readContext()).fingerprint!==prepared.fingerprint)
+  if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
    throw new Error('Document evidence changed during evidence selection');
   selectionReceipt={version:DOCUMENT_EVIDENCE_SELECTION_VERSION,coverage:'unassessed',referenceIds,
    requestedModel:model,model:actualModel,providerRequestSha256,providerResponseId:payload.id??null,usage:payload.usage??null,
-   sourceInputFingerprint:prepared.fingerprint,outcome:referenceIds.length?'selected':'no-evidence-selected'};
+   sourceInputFingerprint:prepared.fingerprint,outcome:referenceIds.length?'selected':'no-evidence-selected',
+   ...(prepared.input.unitPolicy?{unitPolicy:prepared.input.unitPolicy}:{})};
   if(!referenceIds.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
    citationRepairs:[] as DocumentCitationRepair[],providerSelections:null,selectedUnits:[] as DocumentUnitSelection[],
    model:null,requestedModel:model,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
@@ -517,7 +525,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  const {answer,providerSelections,selectedUnits}=resolveDocumentAnswerSelections(decoded,prepared.supports);
  if(referenceIds&&selectedUnits.some(unit=>!referenceIds.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
  policy.onStage?.('evidence-selection');
- if(prepareDocumentAnswer(question,await readContext()).fingerprint!==prepared.fingerprint)
+ if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
   throw new Error('Document evidence changed during answer generation');
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
