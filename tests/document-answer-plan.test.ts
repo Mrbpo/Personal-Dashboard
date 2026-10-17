@@ -15,9 +15,9 @@ import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPl
  studyPlanningRequestIdentity,studyAnswerPlanRequestBudget,studyAnswerModelInput,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
  buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
- validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
+ validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareCompleteStudyEvidenceRoute,restoreCompleteStudyEvidenceRoute,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
 import {studySupplementQueries,preparePlannedStudyGeneration,buildPlannedStudyGenerationRequest,preparePlannedStudyGenerationTransport,
- decodePlannedStudyGenerationSelections,PLANNED_STUDY_ANSWER_VERSION,answerPlannedStudyQuestion,revisePlannedStudyCitation,
+ decodePlannedStudyGenerationSelections,PLANNED_STUDY_ANSWER_VERSION,COMPLETE_SOURCE_STUDY_ANSWER_VERSION,answerPlannedStudyQuestion,revisePlannedStudyCitation,
  type PlannedStudyAnswerPolicy,type PlannedStudyAnswerAttempt} from '../lib/kernel/document-planned-answer.ts';
 
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='dummy-plan-never-sent';
@@ -80,7 +80,7 @@ function completeInitialFixture(count=20,bodySize=0){
  return {title,source,ctx,manifest,selected,kernel,question};
 }
 
-test('explicit complete-source initial evidence reaches plan and generation past ranked14 without supplements or certifying the question',async()=>{
+test('complete evidence route skips AI planning while retaining all source input, question contract and neutral refusal',async()=>{
  await database.prepare('DELETE FROM ai_ledger').run();
  const f=completeInitialFixture(),states:Record<string,unknown>[]=[],j=journal(),oldFetch=globalThis.fetch;
  const requirements=[{id:'r0',aspect:'Describe the selected method',requestedScope:{...unknown}},
@@ -95,7 +95,6 @@ test('explicit complete-source initial evidence reaches plan and generation past
    assert.ok(input.quoteUnits.some((u:{text:string})=>u.text.includes('the method is described in this late paragraph')));
    assert.equal(body.input[1].content.filter((c:{type:string})=>c.type==='input_image').length,1);
    assert.equal(input.questionContract.question,f.question);assert.deepEqual(input.questionContract.requirements,requirements);
-   if(phase==='contract-plan')return response({clusters:[],conflicts:[],sourceSubscopes:[],missing:requirements.map(r=>({requirementId:r.id,reason:'Unverified requirement',supplementQuery:r.aspect}))});
    assert.equal(phase,'generation');return response({status:'insufficient-evidence',message:'I cannot provide a sufficiently supported answer.',claims:[]});
   };
   const result=await f.kernel.answerLearningContent('owner',f.question,{sourceHint:{selectedDocumentTitle:f.title}},
@@ -104,10 +103,71 @@ test('explicit complete-source initial evidence reaches plan and generation past
   assert.equal(result.initialEvidence.strategy,'selected-complete-source');assert.equal(result.initialEvidence.questionCoverage,'unassessed');
   if(!('receipt'in result)||!result.receipt)throw Error('Missing retained source receipt');
   assert.equal(result.receipt.initialRetrievalScope,'selected-complete-source');assert.equal(result.receipt.originalQuoteIds.length,20);
-  assert.deepEqual(result.receipt.supplemental,[]);assert.deepEqual(j.attempts.map(a=>a.phase),['question-contract','contract-plan','generation']);
-  if(!('unassessedPlanningGaps'in result))throw Error('Missing original gaps');assert.equal(result.unassessedPlanningGaps.length,2);
+  assert.deepEqual(result.receipt.supplemental,[]);assert.deepEqual(j.attempts.map(a=>a.phase),['question-contract','generation']);
+  if(!('providerSelections'in result)||!('planningGapsAssessment'in result))throw Error('Missing generation/coverage receipt');
+  assert.equal(result.receipt.version,COMPLETE_SOURCE_STUDY_ANSWER_VERSION);assert.equal(result.providerSelections.status,'insufficient-evidence');
+  assert.equal(result.planningGapsAssessment,'unassessed');assert.equal('unassessedPlanningGaps'in result,false,'No empty list pretending semantic gaps were checked');
+  if(!('kind'in result.plan))throw Error('Expected deterministic route');
+  assert.equal(result.plan.modelExecuted,false);assert.equal(result.plan.semanticPlanning,'not-performed');
+  assert.equal('plan'in result.plan,false);assert.equal('prepared'in result.plan,false,'Do not duplicate original PNG bytes into the route receipt');
+  assert.equal('providerRequestSha256'in result.plan.binding,false);assert.equal('rawResponseSha256'in result.plan.binding,false);
+  assert.equal(j.raw.length,2,'Only actual contract/generation responses are journaled');
   assert.ok(states.some(s=>s.event==='initial-source-evidence'&&s.selectedSourceInputCoverage==='complete'));
  });}finally{globalThis.fetch=oldFetch;}
+});
+
+test('complete evidence route binds unchanged canonical sources and genuine generation wire without synthetic AI artifacts',()=>{
+ const f=completeInitialFixture(),ctx={...f.ctx,completeSourceProof:{policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:f.title,manifest:f.manifest}},
+  c=freezeStudyQuestionContract(f.question,{requirements:Array.from({length:7},(_,i)=>({id:`r${i}`,aspect:`Requested aspect ${i}`,requestedScope:{...unknown}}))},'a'.repeat(64)),
+  before=JSON.stringify(ctx),route=prepareCompleteStudyEvidenceRoute(f.question,ctx,c),restored=restoreCompleteStudyEvidenceRoute(f.question,ctx,c,route.binding),
+  packet=preparePlannedStudyGeneration(f.question,ctx,[],c,route.binding,[]),transport=preparePlannedStudyGenerationTransport(packet),
+  prior=prepareContractStudyPlan(f.question,ctx,c),p=validateContractStudyPlan({clusters:[],conflicts:[],sourceSubscopes:[],
+   missing:c.requirements.map(r=>({requirementId:r.id,reason:'Unassessed synthetic requirement',supplementQuery:null}))},c,prior.input.allowedSourceIds),
+  oldBinding=bindContractStudyPlan(prior,p,sha(JSON.stringify(buildContractStudyPlanRequest(prior))),'b'.repeat(64)),
+  oldPacket=preparePlannedStudyGeneration(f.question,ctx,[],c,oldBinding,[]),oldTransport=preparePlannedStudyGenerationTransport(oldPacket);
+ assert.deepEqual(restored.binding,route.binding);assert.equal(route.completion,'input-ready-for-generation');assert.equal(JSON.stringify(ctx),before);
+ assert.equal(route.binding.inputFingerprint,oldBinding.inputFingerprint);assert.equal(packet.prepared.fingerprint,oldPacket.prepared.fingerprint);
+ assert.deepEqual(packet.selectedPrepared.quoteUnits,oldPacket.selectedPrepared.quoteUnits);assert.deepEqual(packet.receipt.selectedSourceIds,oldPacket.receipt.selectedSourceIds);
+ assert.deepEqual(packet.selectedPrepared.supports,oldPacket.selectedPrepared.supports);assert.deepEqual(packet.selectedPrepared.input.questionContract,c);
+ assert.equal(packet.receipt.originalPlanRawSha256,undefined);assert.equal(packet.receipt.originalPlanRequestSha256,undefined);
+ assert.equal(route.binding.modelExecuted,false);assert.equal(route.binding.questionCoverage,'unassessed');assert.equal(route.binding.semanticPlanning,'not-performed');
+ const {receiptSha256,...identity}=route.binding;assert.equal(receiptSha256,sha(JSON.stringify(identity)));
+ assert.deepEqual(studyPlanningRequestIdentity(COMPLETE_SOURCE_STUDY_ANSWER_VERSION,transport.request,transport.bindingSha256),
+  {providerRequestSha256:transport.providerRequestSha256,requestIdentity:transport.requestIdentity});
+ const answer={status:'insufficient-evidence',message:'I cannot provide a sufficiently supported answer.',claims:[]};
+ assert.deepEqual(decodePlannedStudyGenerationSelections(answer,packet,transport,transport),answer);
+ assert.throws(()=>decodePlannedStudyGenerationSelections(answer,packet,oldTransport,oldTransport),/binding changed/,'Old paid raw cannot be relabeled onto the new wire.');
+ assert.throws(()=>preparePlannedStudyGenerationTransport({...packet,receipt:{...packet.receipt,version:PLANNED_STUDY_ANSWER_VERSION}}),/relabeled/);
+ for(const binding of [{...route.binding,receiptSha256:'0'.repeat(64)},{...route.binding,contractSha256:'0'.repeat(64)},
+  {...route.binding,manifestSha256:'0'.repeat(64)},{...route.binding,rawResponseSha256:'b'.repeat(64)}])
+  assert.throws(()=>restoreCompleteStudyEvidenceRoute(f.question,ctx,c,binding),/binding changed/);
+ assert.throws(()=>restoreCompleteStudyEvidenceRoute(f.question,{...ctx,images:[]},c,route.binding),/binding changed/);
+ assert.throws(()=>preparePlannedStudyGeneration(f.question,ctx,[ctx],c,route.binding,[{requirementId:'r0',origin:'question-contract',query:'extra'}]),/supplemental/);
+});
+
+test('complete evidence route retains actual local audits and raw over-capacity answers with no planner request',async()=>{
+ await database.prepare('DELETE FROM ai_ledger').run();const f=completeInitialFixture(),saved=globalThis.fetch,
+  c=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Original observation',requestedScope:{...unknown}}]},'a'.repeat(64)),
+  claim={text:'The original source records observation zero.',citations:[{id:'Source1'}]},answer={status:'answered',message:'',claims:[claim]},
+  local={claimId:'c0',judgment:'supported',reason:'Selected original observation.',citationFindings:{r0:{judgment:'supports',reason:'Original selected text.'}},
+   objectUnitScope:{claim:'observation zero',evidence:'observation zero',alignment:'same'}};
+ try{await development(async()=>{
+  const j=journal();let calls=0;
+  globalThis.fetch=async()=>response([answer,local][calls++]);
+  const result=await f.kernel.answerPlannedStudyContent('owner',f.question,c,{sourceHint:{selectedDocumentTitle:f.title}},{...j.policy,recordState:async()=>{}});
+  assert.equal(result.status,'generated-awaiting-independent-review');if(!('audits'in result))throw Error('Missing local audit');
+  assert.equal(result.audits.length,1);assert.equal(result.audits[0].localSupported,true);assert.equal(result.wholeAnswerVerified,false);
+  assert.deepEqual(j.attempts.map(a=>a.phase),['generation','claim-audit']);assert.equal(j.raw.length,2);
+  assert.deepEqual(JSON.parse(JSON.parse(j.raw[0].rawBody).output_text),answer,'Alias raw stays original before canonical selection restoration');
+  const large=journal();calls=0;const tooMany={...answer,claims:Array.from({length:7},()=>claim)};
+  globalThis.fetch=async()=>{calls++;return response(tooMany);};
+  const capacity=await f.kernel.answerPlannedStudyContent('owner',f.question,c,{sourceHint:{selectedDocumentTitle:f.title}},{...large.policy,recordState:async()=>{}});
+  assert.equal(capacity.status,'capacity-exceeded');assert.equal(calls,1);assert.deepEqual(large.attempts.map(a=>a.phase),['generation']);
+  assert.equal(large.raw.length,1);if(!('untruncatedValue'in capacity))throw Error('Missing unchanged over-capacity raw');
+  const canonical=capacity.untruncatedValue as typeof tooMany;
+  assert.equal(canonical.claims.length,7);assert.ok(canonical.claims.every(c=>c.text===claim.text&&c.citations[0].id.startsWith('q:')));
+  assert.deepEqual(JSON.parse(JSON.parse(large.raw[0].rawBody).output_text),tooMany,'All seven provider claims stay unchanged in the actual raw');
+ });}finally{globalThis.fetch=saved;}
 });
 
 test('complete-source binding rejects missing/foreign nodes, omitted images, altered manifests and unsupported ranked overflow',()=>{
@@ -176,7 +236,7 @@ test('complete-source unavailable/request capacity and another explicit current 
     {...journal().policy,recordState:async s=>{states.push(s);throw stop;}}),e=>e===stop);
    assert.equal(states[0].strategy,'whole-library-query');assert.equal(states[0].reason,reason);assert.equal(states[0].selectedSourceInputCoverage,'unassessed');
   }
-  const large=completeInitialFixture(512,200),c=freezeStudyQuestionContract(large.question,{requirements:[{id:'r0',aspect:'Method',requestedScope:{...unknown}}]},'a'.repeat(64)),states:Record<string,unknown>[]=[];
+  const large=completeInitialFixture(512,256),c=freezeStudyQuestionContract(large.question,{requirements:[{id:'r0',aspect:'Method',requestedScope:{...unknown}}]},'a'.repeat(64)),states:Record<string,unknown>[]=[];
   await assert.rejects(large.kernel.answerPlannedStudyContent('owner',large.question,c,{sourceHint:{selectedDocumentTitle:large.title}},
    {...journal().policy,recordState:async s=>{states.push(s);throw stop;}}),e=>e===stop);
   assert.equal(states[0].reason,'request-capacity');assert.equal(states[0].strategy,'whole-library-query');
@@ -192,7 +252,7 @@ test('complete-source unavailable/request capacity and another explicit current 
  });}finally{globalThis.fetch=oldFetch;}
 });
 
-test('complete-source reread rejects manifest drift before the plan request, preserving its initial receipt',async()=>{
+test('complete evidence route rereads reject source drift before generation and after durably recorded raw',async()=>{
  const f=completeInitialFixture(),j=journal(),oldFetch=globalThis.fetch,c=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Method',requestedScope:{...unknown}}]},'a'.repeat(64));
  let reads=0,calls=0;f.kernel.readCompleteDocumentSource=async()=>({status:'available',context:f.ctx as never,
   manifest:{...f.manifest,manifestSha256:++reads===1?f.manifest.manifestSha256:'f'.repeat(64)}});
@@ -205,10 +265,10 @@ test('complete-source reread rejects manifest drift before the plan request, pre
   const afterPlan=completeInitialFixture(),next=journal();let drift=false;
   afterPlan.kernel.readCompleteDocumentSource=async()=>({status:'available',context:afterPlan.ctx as never,
    manifest:{...afterPlan.manifest,manifestSha256:drift?'f'.repeat(64):afterPlan.manifest.manifestSha256}});
-  globalThis.fetch=async()=>{calls++;drift=true;return response({clusters:[],conflicts:[],sourceSubscopes:[],missing:[{requirementId:'r0',reason:'Unverified',supplementQuery:null}]});};
+  globalThis.fetch=async()=>{calls++;drift=true;return response({status:'insufficient-evidence',message:'I cannot provide a sufficiently supported answer.',claims:[]});};
   await assert.rejects(afterPlan.kernel.answerPlannedStudyContent('owner',afterPlan.question,c,{sourceHint:{selectedDocumentTitle:afterPlan.title}},
    {...next.policy,recordState:async()=>{}}),/changed|no longer current/);
-  assert.equal(calls,1);assert.equal(next.raw.length,1);assert.equal(next.attempts.length,1,'No generation request after current manifest drift.');
+  assert.equal(calls,1);assert.equal(next.raw.length,1);assert.deepEqual(next.attempts.map(a=>a.phase),['generation'],'No planning call or additional request after current manifest drift.');
  });}finally{globalThis.fetch=oldFetch;}
 });
 
@@ -802,6 +862,7 @@ test('unavailable complete reader retains explicit-title scoped supplements and 
   assert.deepEqual(result.receipt.supplemental[0].sourceSelection,selected);
   assert.equal(result.receipt.supplemental[0].query,c.requirements[0].aspect);assert.ok(result.receipt.supplemental[0].originalQuery?.includes(title));
   assert.equal(result.receipt.supplemental[0].focusPolicy,'resolved-exact-title-query-v2');
+  if('kind'in result.plan)throw Error('Ranked fallback must retain its AI plan');
   const globalQueries=studySupplementQueries(query,c,result.plan.binding);assert.ok(globalQueries[0].query.includes(title));assert.equal(globalQueries[0].originalQuery,undefined);
   const before=calls,readCount=reads.length;
   await assert.rejects(()=>kernel.answerPlannedStudyContent('owner',query,c,{sourceHint:{selectedDocumentTitle:'Absent title'}},policy),/original question/);
