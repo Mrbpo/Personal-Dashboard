@@ -4,11 +4,11 @@ import {validateCompleteStudySource} from './document-study-source.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,auditDocumentCitationClaim,type DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,type DocumentCitationRevisionAttempt} from './document-citation-revision.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
-import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
+import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,studyAnswerModelInput,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {planContractStudyAnswer,restoreContractStudyPlan,validateStudyQuestionContract,type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import type {DocumentSourceResolution} from './document-source.ts';
 
-export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v8';
+export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
 export const PLANNED_STUDY_SOURCE_LABEL_VERSION='request-local-source-labels-v1';
 type SupplementalSource=Extract<DocumentSourceResolution,{status:'resolved'}>;
 export type StudySupplementQuery={requirementId:string;origin:'plan-missing'|'plan-source-subscope'|'question-contract';query:string;
@@ -134,8 +134,11 @@ export function preparePlannedStudyGeneration(question:string,initial:DocumentAn
    originalPlanRequestSha256:binding.providerRequestSha256,originalPlanRawSha256:binding.rawResponseSha256}}};
  return {context,prepared,selectedPrepared,receipt,bindingSha256:digest(receipt)};
 }
-function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlannedStudyGeneration>['selectedPrepared']){
+function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlannedStudyGeneration>['selectedPrepared'],modelView:boolean){
  const body=buildDocumentAnswerRequest(prepared,{model:'gpt-5.4-mini',reasoningEffort:'medium',maxOutputTokens:4000});
+ if(modelView){const sourceInput=body.input[1].content;
+  if(!Array.isArray(sourceInput)||sourceInput[0].type!=='input_text'||!('text'in sourceInput[0]))throw Error('Missing planned source input');
+  sourceInput[0].text=JSON.stringify(studyAnswerModelInput(prepared.input));}
  body.input[0].content+=' The complete original question, question-contract aspects and requested scope must all remain in force; the contract itself is fallible. '+
   'Answer every requested aspect and comparison family using all actual final quote units and images; planning provenance hashes are traceability metadata, not evidence of coverage. '+
   'Match the granularity actually requested: a positive existence answer can be supported by one explicit witness with the same requested subject and relation; do not require an exhaustive inventory or exact quantities unless asked. '+
@@ -148,10 +151,12 @@ function buildPlannedStudyGenerationBody(prepared:ReturnType<typeof preparePlann
  return body;
 }
 
-/** Only typed citation-ID fields cross this transport boundary. Source text,
- * metadata, nonselectable caption members, image bytes and order stay intact.
- * Canonical q/i identities remain in the packet, manifest and local audits. */
+/** Typed citation-ID mapping precedes the request-only metadata projection.
+ * Source text, semantic metadata, nonselectable caption members, image bytes
+ * and order stay intact. Canonical q/i identities remain bound in the packet. */
 export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof preparePlannedStudyGeneration>){
+ if(!['contract-supplement-answer-v7','contract-supplement-answer-v8',PLANNED_STUDY_ANSWER_VERSION].includes(packet.receipt.version))
+  throw Error('Unsupported planned source version');
  const prepared=packet.selectedPrepared,ids=[...prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),
   ...prepared.supports.filter(s=>s.kind==='image').map(s=>s.id)];
  if(!ids.length||new Set(ids).size!==ids.length||digest(ids)!==digest(packet.receipt.selectedSourceIds))throw Error('Invalid planned source labels');
@@ -162,7 +167,9 @@ export function preparePlannedStudyGenerationTransport(packet:ReturnType<typeof 
  const quoteUnits=prepared.quoteUnits.map(u=>({...u,id:selectedId(u.id)})),
   supports=prepared.supports.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s),
   input={...prepared.input,quoteUnits,evidence:prepared.input.evidence.map(s=>s.kind==='image'?{...s,id:selectedId(s.id)}:s)},
-  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input}),mappingSha256=digest(mapping),
+  // Historical revisions compare their original unprojected body. New v9
+  // generation projects only after the typed SourceN mapping above.
+  request=buildPlannedStudyGenerationBody({...prepared,quoteUnits,supports,input},packet.receipt.version===PLANNED_STUDY_ANSWER_VERSION),mappingSha256=digest(mapping),
   binding={version:PLANNED_STUDY_SOURCE_LABEL_VERSION,canonicalBindingSha256:packet.bindingSha256,
    canonicalInputFingerprint:packet.prepared.fingerprint,canonicalPacketSha256,mappingSha256,providerRequestSha256:digest(request)},
   bindingSha256=digest(binding);
@@ -212,7 +219,7 @@ export async function revisePlannedStudyCitation(question:string,readPacket:()=>
   const packet=await readPacket(),receipt=original.receipt;
   // A historical version stays historical. Compare its original receipt and
   // actual body, without predicting an old runtime request identity.
-  if(!['contract-supplement-answer-v7',PLANNED_STUDY_ANSWER_VERSION].includes(receipt.version)||
+  if(!['contract-supplement-answer-v7','contract-supplement-answer-v8',PLANNED_STUDY_ANSWER_VERSION].includes(receipt.version)||
    digest({...packet.receipt,version:receipt.version})!==digest(receipt))throw Error('Planned revision final source changed');
   const current=preparePlannedStudyGenerationTransport({...packet,receipt,bindingSha256:digest(receipt)}),sent=original.generation.sourceLabels;
   if(digest(current.request)!==digest(sent.request)||digest(current.mapping)!==digest(sent.mapping)||digest(current.binding)!==digest(sent.binding)||
