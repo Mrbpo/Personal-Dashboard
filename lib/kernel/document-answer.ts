@@ -9,7 +9,8 @@ import {validateCompleteStudySource,type CompleteStudySourceProof} from './docum
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
-import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,type SourceValueDerivation} from './document-source-values.ts';
+import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,sourceValueQuestionContract,
+ type SourceValueDerivation,type SourceValueQuestionContract} from './document-source-values.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -54,7 +55,7 @@ export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
 export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;selectedReferenceIds:string[];normalizedAnswer:GroundedDocumentAnswer};
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
- quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string};
+ quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
  sourceValueContract?:'difference-v1';
  recordSourceValueDerivation?:(receipt:Readonly<DocumentSourceValueDerivation>)=>Promise<void>;
@@ -513,11 +514,24 @@ export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,ref
   policy.citationCheck?.mode!=='selected-once')throw new Error('Source values require the application selector and selected-once check');
  const originalRequest=buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy),ids=new Set(referenceIds);
  const catalog=prepareSourceValueCatalog(prepared.supports.filter(s=>s.kind==='image'&&ids.has(s.id)));
- if(catalog.status!=='available')return {request:originalRequest,catalog,applied:false as const,reason:catalog.reason};
+ if(catalog.status!=='available')return {request:originalRequest,catalog,applied:false as const,reason:catalog.reason,questionContract:null};
+ const selectedSupportIds=new Set(prepared.quoteUnits.filter(unit=>ids.has(unit.id)).map(unit=>unit.supportId));
+ const sources=new Set(prepared.supports.filter(s=>s.kind==='image'?ids.has(s.id):selectedSupportIds.has(s.id))
+  .map(s=>JSON.stringify([s.documentId,s.documentVersionId,s.sourceVersionId,s.sourceHash])));
+ const intent=sourceValueQuestionContract(prepared.input.question),questionContract:SourceValueQuestionContract=
+  sources.size===1&&catalog.tables.length===1?intent:'mixed-v1';
+ const questionContractReason=sources.size!==1?'multiple-selected-sources':catalog.tables.length!==1?'multiple-selected-tables':
+  intent==='required-difference-v1'?'explicit-absolute-difference':'ordinary-or-unsupported-operator';
  const request=structuredClone(originalRequest);
  const user=request.input.at(-1)!,part=user.content[0] as {type:string;text:string};
- const input=JSON.parse(part.text);part.text=JSON.stringify({...input,sourceValueCatalog:catalog});
- request.input[0].content+=' This generation uses source-value difference-v1. Return typed statement or difference claims. '+
+ const input=JSON.parse(part.text);part.text=JSON.stringify({...input,sourceValueCatalog:catalog,
+  ...(questionContract==='required-difference-v1'?{questionContract}: {})});
+ request.input[0].content+=(questionContract==='required-difference-v1'?
+  ' This generation uses source-value difference-v1 and required-difference-v1. Return the strict root result object. '+
+  'An answered result requires at least one comparisons operation; statements remain a separate array. '+
+  'Comparisons and statements together must contain at most 30 claims. '+
+  'If the selected evidence cannot establish the requested comparison, use insufficient-evidence or conflicting-evidence instead of substituting a statement. ':
+  ' This generation uses source-value difference-v1. Return typed statement or difference claims. ')+
   'A statement keeps its own text and selected original references; never add an image merely because a table is available. '+
   'For a difference return only the listed value/row-label/column-label cell IDs: left minus right. '+
   'Do not write a result, unit, citation ID or extra assertion in a difference operation. '+
@@ -526,13 +540,13 @@ export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,ref
   'The server restores original labels and values, computes the decimal difference and cites that original PNG. '+
   'Catalog observations, geometry and header roles are fallible source declarations, not verified semantic relationships. '+
   'Ordinary statements and multi-source synthesis remain available; choose only what the question and sources support.';
- const proposed={...request,text:{...request.text,format:{...request.text.format,name:'grounded_document_source_values_v1',
-  schema:sourceValueAnswerSchema(catalog,referenceIds)}}};
+ const proposed={...request,text:{...request.text,format:{...request.text.format,name:questionContract==='required-difference-v1'?
+  'grounded_document_required_difference_v1':'grounded_document_source_values_v1',schema:sourceValueAnswerSchema(catalog,referenceIds,questionContract)}}};
  const nonImage=JSON.stringify(proposed,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
  const imageTokens=prepared.supports.filter(s=>s.image&&ids.has(s.id)).reduce((sum,s)=>sum+2*Math.ceil(s.image!.width/32)*Math.ceil(s.image!.height/32)+1,0);
  if(Buffer.byteLength(nonImage)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+imageTokens>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens)
-  return {request:originalRequest,catalog,applied:false as const,reason:'selected-request-input-limit' as const};
- return {request:proposed,catalog,applied:true as const,reason:null};
+  return {request:originalRequest,catalog,applied:false as const,reason:'selected-request-input-limit' as const,questionContract:null};
+ return {request:proposed,catalog,applied:true as const,reason:null,questionContract,questionContractReason};
 }
 
 async function documentModelPayload(response:Response,model:DocumentAnswerModel,policy:DocumentAnswerPolicy){
@@ -635,12 +649,13 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   const rawBody=await response.clone().text();
   await policy.recordSourceValueRawResponse?.({method:'source-value-response-v1',providerRequestSha256,sourceInputFingerprint:prepared.fingerprint,
    quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,catalogSha256:sourceValueGeneration.catalog.catalogSha256,
+   ...(sourceValueGeneration.questionContract==='required-difference-v1'?{questionContract:sourceValueGeneration.questionContract}:{}),
    httpStatus:response.status,rawBody,rawSha256:sha(rawBody)});
  }
  const {payload,actualModel,decoded,rawOutputText}=await documentModelPayload(response,model,policy);
  policy.onStage?.('citation-validation');
  const sourceValueDerivation:SourceValueDerivation|undefined=sourceValueGeneration?.applied?
-  deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!):undefined;
+  deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!,sourceValueGeneration.questionContract):undefined;
  const {answer,providerSelections:normalizedSelections,selectedUnits}=resolveDocumentAnswerSelections(sourceValueDerivation?.normalizedSelections??decoded,prepared.supports);
  const providerSelections=sourceValueDerivation?null:normalizedSelections;
  if(referenceIds&&selectedUnits.some(unit=>!referenceIds.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
@@ -655,6 +670,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
   sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,
   ...(sourceValueGeneration?{sourceValueContract:{policy:'difference-v1' as const,newContractApplied:sourceValueGeneration.applied,
+   ...(sourceValueGeneration.questionContract==='required-difference-v1'?{questionContract:sourceValueGeneration.questionContract}:{}),
    reason:sourceValueGeneration.reason,catalogSha256:sourceValueGeneration.catalog.catalogSha256},
    ...(boundSourceValueDerivation?{sourceValueDerivation:boundSourceValueDerivation}:{})}:{}),
   ...(selectionReceipt?{evidenceSelection:selectionReceipt}:{})};

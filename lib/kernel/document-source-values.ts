@@ -5,6 +5,23 @@ import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 
 export const SOURCE_VALUE_CONTRACT='difference-v1';
 export const SOURCE_VALUE_LIMITS=Object.freeze({cells:256,bytes:32768});
+export type SourceValueQuestionContract='mixed-v1'|'required-difference-v1';
+/** A deliberately narrow intent gate, not a model or a semantic guarantee.
+ * Ambiguous/non-subtraction operators keep the existing mixed contract. */
+export function sourceValueQuestionContract(question:string):SourceValueQuestionContract{
+ const text=question.normalize('NFKC').toLowerCase(),withoutAbsolutePoints=text.replace(/\b(?:percent|percentage)\s+points?\b/gu,'absolute points');
+ if(/\b(?:relative|relatively|ratio|ratios|percent|percentage|times|\w*fold|growth|average|mean|median|sum|total|cumulative|aggregate|product|quotient|divide|division|multiply|multiplication)\b|%|相对|比率|比例|百分比|增长率|倍|平均|均值|中位数|求和|总和|合计|累计|累积/u.test(withoutAbsolutePoints)||
+  /\bhow\s+(?:to|do|does|can|should|would|is|are)\b|\b(?:explain|describe|define|definition|derive|derivation|formula|metric|purpose|meaning)\b|\bused\s+for\b|如何|怎么|怎样|解释|说明|计算方法|公式|用途|概念|含义|定义/u.test(text))return 'mixed-v1';
+ const clauses=text.split(/[?？!！;；。\r\n]|\.\s+|\b(?:and|but|or)\b/u);
+ return clauses.some(clause=>{
+  const comparative=/\b(?:outperform\w*|exceed\w*|surpass\w*|improv\w*|increas\w*|decreas\w*|reduc\w*|higher|lower|larger|smaller|better|worse|gain\w*)\b/u.test(clause);
+  return (/\b(?:by\s+)?how\s+much\s+(?:do|does|did|is|are|was|were|has|have|had|can|could|will|would|higher|lower|larger|smaller|better|worse)\b/u.test(clause)&&comparative)||
+   /\b(?:what\s+(?:is|was)\s+(?:the\s+)?|(?:calculate|compute|find|give|determine)\s+(?:the\s+)?)(?:absolute|numeric|numerical|printed[- ]value)\s+(?:difference|gap|change|increase|decrease|improvement)\s+between\b/u.test(clause)||
+   /\bhow\s+many\s+(?:(?:percent|percentage)\s+)?(?:points|units)\s+(?:higher|lower|larger|smaller|better|worse)\b/u.test(clause)||
+   (/(?:计算|求出|算出|是多少|多大|多少)/u.test(clause)&&/(?:数值|绝对|原值)(?:的)?(?:差|差值|差额)/u.test(clause))||
+   /(?:相差|提高|提升|增加|减少|降低|高出|超出|优于|超过)(?:了)?多少/u.test(clause);
+ })?'required-difference-v1':'mixed-v1';
+}
 const sha=(v:string)=>createHash('sha256').update(v).digest('hex');
 const canonical=(v:unknown):string=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?
  Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
@@ -24,6 +41,7 @@ export type SourceValueCatalog={version:'source-value-catalog-v1';complete:boole
 type Selections={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Array<{text:string;citations:{id:string}[]}>};
 type Difference={kind:'difference';leftValueRef:string;rightValueRef:string;leftRowLabelRef:string;rightRowLabelRef:string;columnLabelRefs:string[]};
 export type SourceValueDerivation={method:'source-value-difference-v1';rawProviderResult:unknown;rawOutputText:string;rawOutputSha256:string;
+ questionContract?:'required-difference-v1';
  rawOperationSha256:string;catalogSha256:string;normalizedSelections:Selections;normalizedSelectionsSha256:string;
  operations:Array<{claimIndex:number;operation:Difference;sourceCells:Cell[];sourceTable:Table;difference:string;arithmetic:'exact-fixed-decimal';
   arithmeticVerified:true;semanticVerified:false;relationshipVerified:false;visibilityVerified:false}>;
@@ -94,9 +112,10 @@ function assertCatalog(c:SourceValueCatalog){
   if(!table||id!=='v:'+sha(canonical({table,...rest})).slice(0,40))throw new Error('Source cell identity changed');
  }
 }
-export function sourceValueAnswerSchema(catalog:SourceValueCatalog,selectedIds:string[]){
+export function sourceValueAnswerSchema(catalog:SourceValueCatalog,selectedIds:string[],questionContract:SourceValueQuestionContract='mixed-v1'){
  assertCatalog(catalog);
- return {type:'object',additionalProperties:false,$defs:{cellId:{type:'string',enum:catalog.cells.map(c=>c.id)},
+ if(!['mixed-v1','required-difference-v1'].includes(questionContract))throw new Error('Unknown source value question contract');
+ const mixed={type:'object',additionalProperties:false,$defs:{cellId:{type:'string',enum:catalog.cells.map(c=>c.id)},
   originalId:{type:'string',enum:selectedIds}},properties:{status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},
   message:{type:'string'},claims:{type:'array',maxItems:30,items:{anyOf:[{type:'object',additionalProperties:false,properties:{
    kind:{type:'string',enum:['statement']},text:{type:'string'},citations:{type:'array',minItems:1,maxItems:20,items:{type:'object',additionalProperties:false,
@@ -105,6 +124,13 @@ export function sourceValueAnswerSchema(catalog:SourceValueCatalog,selectedIds:s
     leftValueRef:{$ref:'#/$defs/cellId'},rightValueRef:{$ref:'#/$defs/cellId'},leftRowLabelRef:{$ref:'#/$defs/cellId'},
     rightRowLabelRef:{$ref:'#/$defs/cellId'},columnLabelRefs:{type:'array',minItems:1,maxItems:4,items:{$ref:'#/$defs/cellId'}}},
     required:['kind','leftValueRef','rightValueRef','leftRowLabelRef','rightRowLabelRef','columnLabelRefs']}]}}},required:['status','message','claims']};
+ if(questionContract==='mixed-v1')return mixed;
+ return {type:'object',additionalProperties:false,$defs:{...mixed.$defs,statement:mixed.properties.claims.items.anyOf[0],
+  difference:mixed.properties.claims.items.anyOf[1]},properties:{result:{anyOf:['answered','insufficient-evidence','conflicting-evidence'].map(status=>({
+   type:'object',additionalProperties:false,properties:{status:{type:'string',enum:[status]},message:{type:'string'},
+    comparisons:{type:'array',minItems:status==='answered'?1:0,maxItems:status==='insufficient-evidence'?0:30,items:{$ref:'#/$defs/difference'}},
+    statements:{type:'array',maxItems:status==='insufficient-evidence'?0:30,items:{$ref:'#/$defs/statement'}}},
+   required:['status','message','comparisons','statements']}))}},required:['result']};
 }
 function decimal(text:string){
  if(text.length>32||!(/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/u.test(text)))throw new Error('Source value is not an explicit plain decimal');
@@ -118,10 +144,27 @@ export function sourceDecimalDifference(left:string,right:string){
 }
 /** This decodes a NEW operation response. It never repairs an old free-form
  * assertion or adds references to a statement. Semantic flags remain false. */
-export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catalog:SourceValueCatalog,selectedIds:string[]):SourceValueDerivation{
+export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catalog:SourceValueCatalog,selectedIds:string[],
+ questionContract:SourceValueQuestionContract='mixed-v1'):SourceValueDerivation{
  assertCatalog(catalog);
- if(!exact(value,['status','message','claims'])||canonical(JSON.parse(rawOutputText))!==canonical(value))throw new Error('Invalid source value operation response');
- const v=value as {status:Selections['status'];message:string;claims:unknown[]};
+ if(!['mixed-v1','required-difference-v1'].includes(questionContract))throw new Error('Unknown source value question contract');
+ if(canonical(JSON.parse(rawOutputText))!==canonical(value))throw new Error('Invalid source value operation response');
+ let v:{status:Selections['status'];message:string;claims:unknown[]};
+ if(questionContract==='required-difference-v1'){
+  if(!exact(value,['result']))throw new Error('Invalid required difference result');
+  const r=(value as {result:unknown}).result;
+  if(!exact(r,['status','message','comparisons','statements']))throw new Error('Invalid required difference result');
+  const result=r as {status:Selections['status'];message:string;comparisons:unknown[];statements:unknown[]};
+  if(!Array.isArray(result.comparisons)||!Array.isArray(result.statements))throw new Error('Invalid required difference collections');
+  if(result.comparisons.length+result.statements.length>30)throw new Error('Combined source value claim count exceeds 30');
+  if(result.comparisons.some(op=>(op as {kind?:string}|null)?.kind!=='difference')||
+   result.statements.some(statement=>(statement as {kind?:string}|null)?.kind!=='statement'))throw new Error('Invalid required difference collections');
+  if(result.status==='answered'&&!result.comparisons.length)throw new Error('Answered result requires explicit difference operations');
+  v={status:result.status,message:result.message,claims:[...result.comparisons,...result.statements]};
+ }else{
+  if(!exact(value,['status','message','claims']))throw new Error('Invalid source value operation response');
+  v=value as typeof v;
+ }
  if(!['answered','insufficient-evidence','conflicting-evidence'].includes(v.status)||typeof v.message!=='string'||v.message.length>3000||
   !Array.isArray(v.claims)||v.claims.length>30)throw new Error('Invalid source value answer');
  if(v.status==='insufficient-evidence'?v.claims.length!==0:(!v.claims.length||v.message!==''))throw new Error('Invalid source value status');
@@ -157,7 +200,8 @@ export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catal
    sourceTable:structuredClone(table),difference,arithmetic:'exact-fixed-decimal',arithmeticVerified:true,semanticVerified:false,relationshipVerified:false,visibilityVerified:false});
  }
  const normalizedSelections={status:v.status,message:v.message,claims};
- return {method:'source-value-difference-v1',rawProviderResult:structuredClone(value),rawOutputText,rawOutputSha256:sha(rawOutputText),
+ return {method:'source-value-difference-v1',...(questionContract==='required-difference-v1'?{questionContract}:{}),
+  rawProviderResult:structuredClone(value),rawOutputText,rawOutputSha256:sha(rawOutputText),
   rawOperationSha256:sha(canonical(value)),catalogSha256:catalog.catalogSha256,normalizedSelections,normalizedSelectionsSha256:sha(canonical(normalizedSelections)),
   operations,semanticVerified:false,coverage:'unassessed'};
 }

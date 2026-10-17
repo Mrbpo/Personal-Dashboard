@@ -2,7 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
-import {prepareSourceValueCatalog,deriveSourceValueAnswer,sourceDecimalDifference,type SourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
+import {prepareSourceValueCatalog,deriveSourceValueAnswer,sourceDecimalDifference,sourceValueQuestionContract,sourceValueAnswerSchema,
+ type SourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,buildSelectedDocumentAnswerRequest,buildDocumentEvidenceSelectionRequest,
  synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {resolveSourceValueEvidenceSelection,validateDocumentEvidenceSelection} from '../lib/kernel/document-answer.ts';
@@ -173,4 +174,93 @@ test('table retention: unknown and original/effective capacity remain strict; em
  const full=prepareDocumentAnswerForPolicy('A table question?',large,off),sixtyFour=full.quoteUnits.filter(u=>u.selectable).slice(0,64).map(u=>u.id);
  assert.equal(sixtyFour.length,64);assert.equal(validateDocumentEvidenceSelection({referenceIds:sixtyFour},full).length,64);
  assert.throws(()=>resolveSourceValueEvidenceSelection({referenceIds:sixtyFour},full),/64-reference limit/,'65 effective references reject rather than dropping sources');
+});
+
+function sameSourceComponentContext(f:Awaited<ReturnType<typeof fixture>>):DocumentAnswerContext{
+ const source=f.image.source;
+ // A separate controlled body anchor, not a caption made selectable or a new PG source.
+ return {...f.context,anchors:[{...f.context.anchors[0],id:`pg:${source.currentVersionId}:2`,document_id:source.documentId,
+  source_version_id:source.sourceVersionId,source_hash:source.sourceHash,course_id:source.courseId,
+  evidence_id:'same-source-component-body',page_number:2,locator:'component:2'}]};
+}
+
+test('required difference: conservative absolute intent and actual selected-source bounds keep ordinary operators mixed',async()=>{
+ for(const question of ['By how much does one system outperform another?','What is the numerical difference between the values?',
+  'How many percentage points higher is the score?','提升了多少百分点？'])assert.equal(sourceValueQuestionContract(question),'required-difference-v1',question);
+ for(const question of ['Compare their methods.','What is the difference in methods?','By how much is the relative score higher?',
+  'By how much is the ratio higher?','What is the percentage increase?','By how much is it twofold higher?',
+  'By how much is the average higher?','What is the sum of the numerical differences?',
+  'How to calculate the numerical difference?','Explain the numerical difference formula.',
+  'What is the absolute difference metric used for?','How much data is used? Is the new model better?',
+  'How much do we use for training. Is the new model better?',
+  'How much data is used and is the new model better?','The absolute difference.','绝对差的用途是什么？','提升了多少倍？','相对提升了多少？'])
+  assert.equal(sourceValueQuestionContract(question),'mixed-v1',question);
+ const f=await fixture(),question='By how much does one system outperform another?',
+  multi=prepareDocumentAnswerForPolicy(question,f.context,off),multiIds=[multi.quoteUnits[0].id,'i0'],
+  cross=prepareSelectedSourceValueGeneration(multi,multiIds,settings,policy);
+ assert.equal(cross.applied,true);assert.equal(cross.questionContract,'mixed-v1');assert.equal(cross.questionContractReason,'multiple-selected-sources');
+ const single=sameSourceComponentContext(f),p=prepareDocumentAnswerForPolicy(question,single,off),ids=[p.quoteUnits[0].id,'i0'],
+  required=prepareSelectedSourceValueGeneration(p,ids,settings,policy);
+ assert.equal(required.applied,true);assert.equal(required.questionContract,'required-difference-v1');
+ assert.equal(required.request.text.format.name,'grounded_document_required_difference_v1');
+ const schema:any=required.request.text.format.schema;
+ assert.equal(schema.type,'object');assert.equal(schema.anyOf,undefined);assert.deepEqual(schema.required,['result']);
+ assert.equal(schema.properties.result.anyOf[0].properties.comparisons.minItems,1);
+ assert.equal((JSON.parse((required.request.input.at(-1)!.content as any[])[0].text)).questionContract,'required-difference-v1');
+ const ordinary=prepareDocumentAnswerForPolicy('Compare their methods.',single,off),ordinaryIds=[ordinary.quoteUnits[0].id,'i0'],
+  g=prepareSelectedSourceValueGeneration(ordinary,ordinaryIds,settings,policy);
+ assert.equal(g.questionContract,'mixed-v1');assert.equal(g.request.text.format.name,'grounded_document_source_values_v1');
+ assert.equal(JSON.stringify(g.request.text.format.schema),JSON.stringify(sourceValueAnswerSchema(g.catalog,ordinaryIds)));
+ assert.equal(JSON.stringify(sourceValueAnswerSchema(g.catalog,ordinaryIds)),JSON.stringify(sourceValueAnswerSchema(g.catalog,ordinaryIds,'mixed-v1')));
+ assert.equal(JSON.parse((g.request.input.at(-1)!.content as any[])[0].text).questionContract,undefined);
+ const absent=prepareSelectedSourceValueGeneration(p,[ids[0]],settings,policy);assert.equal(absent.applied,false);assert.equal(absent.questionContract,null);
+ assert.equal(JSON.stringify(absent.request),JSON.stringify(buildSelectedDocumentAnswerRequest(p,[ids[0]],settings,off)));
+ assert.equal(JSON.stringify(buildDocumentEvidenceSelectionRequest(p,settings,policy)),JSON.stringify(buildDocumentEvidenceSelectionRequest(p,settings,off)));
+});
+
+test('required difference: closed answered operations, preserved statements/refusals and raw-first synthesis use only the explicit question contract',async()=>{
+ const f=await fixture(),context=sameSourceComponentContext(f),question='By how much does one system outperform another?',
+  p=prepareDocumentAnswerForPolicy(question,context,off),ids=[p.quoteUnits[0].id,'i0'],g=prepareSelectedSourceValueGeneration(p,ids,settings,policy),
+  statement={kind:'statement',text:p.quoteUnits[0].text,citations:[{id:ids[0]}]},op=operation(g.catalog),
+  closed=(comparisons:unknown[],statements:unknown[],status='answered',message='')=>({result:{status,message,comparisons,statements}}),
+  value=closed([op],[statement]),rawText=JSON.stringify(value),before=sha(rawText),contract='required-difference-v1' as const;
+ const d=deriveSourceValueAnswer(value,rawText,g.catalog,ids,contract);
+ assert.equal(d.questionContract,contract);assert.equal(d.operations[0].difference,'0.14');assert.equal(d.operations[0].sourceCells[0].text,'66.31');
+ assert.equal(d.operations[0].sourceCells[1].text,'66.17');assert.deepEqual(d.normalizedSelections.claims[0].citations,[{id:'i0'}]);
+ assert.deepEqual(d.normalizedSelections.claims[1],{text:statement.text,citations:statement.citations});
+ assert.equal(d.semanticVerified,false);assert.equal(d.operations[0].relationshipVerified,false);assert.deepEqual(d.rawProviderResult,value);
+ assert.equal(d.rawOutputText,rawText);assert.equal(d.rawOutputSha256,before);assert.equal(sha(JSON.stringify(value)),before);
+ for(const bad of [closed([], [statement]),closed([statement],[]),closed([op],[], 'insufficient-evidence','Cannot establish it'),
+  closed(Array(31).fill(op),[]),{result:{...value.result,extra:true}},closed([{...op,rightValueRef:'outside'}],[])])
+  assert.throws(()=>deriveSourceValueAnswer(bad,JSON.stringify(bad),g.catalog,ids,contract));
+ const combined=closed(Array(20).fill(op),Array(20).fill(statement));
+ assert.throws(()=>deriveSourceValueAnswer(combined,JSON.stringify(combined),g.catalog,ids,contract),/Combined source value claim count exceeds 30/);
+ const mixed=raw(statement),mixedText=JSON.stringify(mixed);
+ assert.equal(deriveSourceValueAnswer(mixed,mixedText,g.catalog,ids).operations.length,0,'old mixed statements still decode without conversion');
+ assert.throws(()=>deriveSourceValueAnswer(mixed,mixedText,g.catalog,ids,contract));
+ assert.throws(()=>deriveSourceValueAnswer(value,rawText,g.catalog,ids),'closed shape is not auto-detected in the default decoder');
+ const oldBytes=await readFile(new URL('old-provider.raw.json',f.base)),old=JSON.parse(oldBytes.toString()),
+  oldText=old.output_text||old.output.flatMap((x:any)=>x.content??[]).map((x:any)=>x.text??'').join('');
+ assert.throws(()=>deriveSourceValueAnswer(JSON.parse(oldText),oldText,g.catalog,ids,contract));
+ assert.equal(sha(await readFile(new URL('old-provider.raw.json',f.base))),sha(oldBytes),'historical raw bytes are retained, not upgraded');
+ const insufficient=closed([],[],'insufficient-evidence','Cannot establish the comparison from selected evidence.'),
+  conflict=closed([], [statement,{...statement,text:'Another selected observation conflicts.',citations:[{id:'i0'}]}],'conflicting-evidence');
+ assert.equal(deriveSourceValueAnswer(insufficient,JSON.stringify(insufficient),g.catalog,ids,contract).normalizedSelections.status,'insufficient-evidence');
+ assert.equal(deriveSourceValueAnswer(conflict,JSON.stringify(conflict),g.catalog,ids,contract).normalizedSelections.claims.length,2);
+ const saved=globalThis.fetch,records:any[]=[],events:string[]=[];let calls=0,invalid=true;
+ try{
+  globalThis.fetch=async()=>{calls++;return Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:1,output_tokens:1},
+   output_text:JSON.stringify(calls%2===1?{referenceIds:ids}:invalid?closed([], [statement]):value)});};
+  const runPolicy={...policy,recordSourceValueRawResponse:async(r:any)=>{records.push(r);events.push('raw');},
+   recordSourceValueDerivation:async(r:any)=>{records.push(r);events.push('derived');}};
+  await assert.rejects(synthesizeDocumentAnswer(question,async()=>context,runPolicy),/requires explicit difference/);
+  assert.deepEqual(events,['raw']);assert.equal(records[0].questionContract,contract);
+  assert.deepEqual(JSON.parse(JSON.parse(records[0].rawBody).output_text).result.comparisons,[]);
+  invalid=false;events.length=0;records.length=0;
+  const result=await synthesizeDocumentAnswer(question,async()=>context,runPolicy);
+  assert.equal(calls,4);assert.deepEqual(events,['raw','derived']);assert.ok('sourceValueDerivation' in result&&result.sourceValueDerivation);
+  assert.equal(result.sourceValueDerivation.questionContract,contract);assert.equal(result.sourceValueContract?.questionContract,contract);
+  assert.deepEqual(result.sourceValueDerivation.rawProviderResult,value);assert.equal(result.providerSelections,null);
+  assert.deepEqual(result.sourceValueDerivation.normalizedSelections,d.normalizedSelections);
+ }finally{globalThis.fetch=saved;}
 });

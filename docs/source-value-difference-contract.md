@@ -50,6 +50,35 @@ New responses contain atomic typed claims:
   `rightRowLabelRef`, and 1–4 `columnLabelRefs`. No result, units, free assertion
   or citation ID is accepted on this operation.
 
+### Explicit absolute-difference questions
+
+`sourceValueQuestionContract(question)` is a conservative pure intent gate.
+Explicit numerical/absolute differences or how much a result outperforms or
+improves another can select `required-difference-v1`. Relative percentages,
+ratios, folds, averages/sums, methodological explanations and unrecognized
+wording keep `mixed-v1`. Percentage points are an absolute-difference cue, not
+a request for relative growth. This is fallible routing, not semantic proof;
+it reads no source values, titles, IDs or expected answers. The actual builder
+also keeps mixed mode when selected originals span multiple source identities
+or the catalog contains multiple tables. It cannot force a cross-source
+question into the existing same-table operation.
+
+Only the bounded, applicable new route changes the generator schema to a
+strict root `{result: ...}` union. `answered` requires nonempty `comparisons`
+of the existing ID-only differences; ordinary `statements` stay separate with
+their own unchanged references. Insufficient and conflicting results remain
+available. The program normalizes comparisons first, then statements, without
+changing statement text or adding their citations. Each array is bounded at
+30 in the schema; the combined 30-claim limit is an explicit decoder business
+constraint (like the same-table/column constraint), with a clear error rather
+than truncation or automatic retry. The builder returns its actual `questionContract` (or null when
+unapplied); the decoder's optional fifth parameter defaults to `mixed-v1` and
+never auto-detects the new shape. Old mixed schema, wire and default decoding
+stay unchanged. The new contract name is separately recorded in the actual
+request, raw-response receipt, derivation and application result metadata.
+Neither old statements nor an old failed response can be promoted to an
+operation. No extra model stage, source read, unit inference or review is added.
+
 A difference requires two explicit plain decimal, single-slot values from the
 same source table and numeric column, explicit nonblank positioned row labels
 and nonblank column/section labels covering that column above both values.
@@ -102,5 +131,10 @@ The two additional retention targets use a component prepared context. They do
 not replay the full original 35b packet or claim that the previously failed
 question has now succeeded; the original six-ID failed run remains unchanged.
 Its real full-packet offline check is separate from these committed targets.
+Two new required-difference targets cover conservative routing/source bounds,
+closed-schema decoding, unchanged statements/refusals, preservation of the
+frozen historical raw, and raw-first mocked synthesis. Their constructed
+operations verify a contract and fixed-point calculation, not that any model
+selected the right comparison or that an exposed question now passes.
 Local targeted checks mock all model transport and do not write PostgreSQL or
 claim fresh-current validation. No previous score or independent cohort changes.
