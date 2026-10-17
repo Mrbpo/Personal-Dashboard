@@ -35,3 +35,25 @@ Docling 正文、表格引用和图片区域文字引用的 formula 节点共用
 公式和文本 parser 身份分别改为 `docling-v3-source-preserved-search`、`docling-v3-source-preserved-text-search`，使新的 options/cache 身份与旧结果区分。历史 PostgreSQL 版本和 raw 不回写；SQLite 旧 `docling-v2-search`／`docling-v2-text-search` 仍仅作历史预览候选，不冒认为新 parser。此改动不后台重跑 PDF、模型或整组验收。
 
 历史预览先按页选定一个缓存版本，再限制最多 1000 页，多个版本不挤掉后页。两个当前 Docling 版本均可阻止就绪文档因预览而重复排队；旧 v2 不算当前版本。未完成或显式重解析尚未结束时，仍保留原先 `pdf-page-v2` 预览优先级。
+
+## Type1 singleton 占位映射（Issue #187）
+
+原 Type1 预检仍按嵌入 FontFile 的 literal Encoding 认定 `prime`／
+`negationslash`，不根据字体名、字符槽或页面答案推断。新增分支仅在完整可解析的
+单字节有界 codespace 中，允许把该源代码唯一 singleton `bfrange` 的 `FFFD`
+占位 destination 精确改为已有受信 glyph-name 映射。其他代码共享 FFFD 不构成
+源位置歧义；它们保持原字节，不被批量替换。目标为非 singleton、非 FFFD、
+bfchar 与 range 重叠、缺失、超界、未知语法、array range 或未证实的 Encoding override
+均拒绝派生。既有 bfchar 的唯一源／唯一逆向及 already-correct no-op 门不放宽。
+
+仅这个 singleton-FFFD 路径还可接受只含 `Type=Encoding` 与 `Differences`
+的受限字典：完整数组最多 512 项，代码为 0–255 整数、name 按规范顺序递增、
+每个显式代码唯一，而且每个被纠正代码必须明确映射同一嵌入 glyph 名。
+不推断 BaseEncoding，缺失、不同、重复、越界、未知项或其他字典键均拒绝；
+name Encoding 及旧 bfchar 的覆盖仍拒绝。原字典不改，复制后独立核其结构哈希。
+range 分支只使用完整验证过的 lexical view，不再扫描注释中的 bfchar 示例。
+
+复用原 CMap parser 的显式 bounded 参数及原 lexical/destination 定位工具；其他
+调用默认仍要求原 `00–ff` codespace。完整 CMap、FontFile 与各页内容流的前后
+哈希证明保留，原 PDF 与旧失败记录不改。此修复只解决确定性字体预检的已定位
+阻碍，不认证 glyph 绘制、公式结构、全文保真或摄取／问答已经通过。

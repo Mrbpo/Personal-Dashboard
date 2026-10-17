@@ -53,16 +53,40 @@ async function configuredFontReferences(){
  const bytes=await readFile(path);if(bytes.length>2*1024*1024||digest(bytes)!==pin)throw Error('Configured font reference asset checksum/size mismatch');
  return validateFontReferenceDictionary(JSON.parse(bytes.toString('utf8')));
 }
-function referenceCmap(text:string){
- const entries=new Map<number,string>(),put=(code:number,value:string)=>{if(code>255||entries.has(code))throw Error('Unsupported source CMap');entries.set(code,value.replace(/\s/g,'').toUpperCase());};
- if(!/1\s+begincodespacerange\s*<00>\s*<ff>\s*endcodespacerange/i.test(text)||(text.match(/\bendcmap\b/g)||[]).length!==1)throw Error('Unsupported source code space');
- for(const b of text.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)){
-  const pairs=[...b[2].matchAll(/<([\da-f]+)>\s*<([\da-f\s]+)>/gi)];if(pairs.length!==+b[1])throw Error('Unsupported source bfchar');for(const p of pairs)put(parseInt(p[1],16),p[2]);
+function referenceCmap(text:string,options:{boundedSingleByte?:boolean}={}){
+ const bounded=options.boundedSingleByte,spaces=[...text.matchAll(/(\d+)\s+begincodespacerange\b([\s\S]*?)\bendcodespacerange/g)],
+  space=bounded&&spaces.length===1?/^\s*<([\da-f]{2})>\s*<([\da-f]{2})>\s*$/i.exec(spaces[0][2]):null,
+  low=space?parseInt(space[1],16):0,high=space?parseInt(space[2],16):255;
+ const chars=[...text.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)],
+  ranges=[...text.matchAll(/(\d+)\s+beginbfrange\b([\s\S]*?)\bendbfrange/g)];
+ if(bounded){
+  if(text.length>65536||!space||Number(spaces[0][1])!==1||high<low||
+   (text.match(/\bbegincmap\b/g)||[]).length!==1||(text.match(/\bendcmap\b/g)||[]).length!==1||
+   /\busecmap\b|\b(?:begin|end)(?!cmap\b|codespacerange\b|bfchar\b|bfrange\b)[a-z]+\b/.test(text))throw Error('Unsupported bounded source code space');
+  const start=text.indexOf('begincmap'),end=text.indexOf('endcmap');
+  for(const [kind,blocks]of [['codespacerange',spaces],['bfchar',chars],['bfrange',ranges]] as const){
+   if((text.match(new RegExp(`\\bbegin${kind}\\b`,'g'))||[]).length!==blocks.length||
+    (text.match(new RegExp(`\\bend${kind}\\b`,'g'))||[]).length!==blocks.length||
+    blocks.some(b=>b.index!<start||b.index!+b[0].length>end))throw Error('Incomplete bounded source CMap');
+  }
  }
- for(const b of text.matchAll(/(\d+)\s+beginbfrange\b([\s\S]*?)\bendbfrange/g)){
-  const ranges=[...b[2].matchAll(/<([\da-f]+)>\s*<([\da-f]+)>\s*<([\da-f]+)>/gi)];if(ranges.length!==+b[1])throw Error('Unsupported source bfrange');
+ const entries=new Map<number,string>(),put=(code:number,value:string)=>{
+  const hex=value.replace(/\s/g,'').toUpperCase();
+  if(code>255||entries.has(code)||bounded&&(code<low||code>high||!/^(?:[\dA-F]{4}){1,16}$/.test(hex)||
+   !Buffer.from(hex,'hex').swap16().toString('utf16le').isWellFormed()))throw Error('Unsupported source CMap');entries.set(code,hex);
+ };
+ if(!bounded&&(!/1\s+begincodespacerange\s*<00>\s*<ff>\s*endcodespacerange/i.test(text)||(text.match(/\bendcmap\b/g)||[]).length!==1))throw Error('Unsupported source code space');
+ for(const b of chars){
+  const pattern=/<([\da-f]+)>\s*<([\da-f\s]+)>/gi,pairs=[...b[2].matchAll(pattern)];
+  if(pairs.length!==+b[1]||bounded&&(b[2].replace(pattern,'').trim()||pairs.some(p=>p[1].length!==2)))throw Error('Unsupported source bfchar');
+  for(const p of pairs)put(parseInt(p[1],16),p[2]);
+ }
+ for(const b of ranges){
+  const pattern=/<([\da-f]+)>\s*<([\da-f]+)>\s*<([\da-f]+)>/gi,ranges=[...b[2].matchAll(pattern)];
+  if(ranges.length!==+b[1]||bounded&&(b[2].replace(pattern,'').trim()||ranges.some(r=>r[1].length!==2||r[2].length!==2||r[3].length>64)))throw Error('Unsupported source bfrange');
   for(const r of ranges){const start=parseInt(r[1],16),end=parseInt(r[2],16);if(end<start||end>255)throw Error('Unsupported source range');
-   for(let code=start;code<=end;code++)put(code,(BigInt('0x'+r[3])+BigInt(code-start)).toString(16).padStart(r[3].length,'0'));}
+   for(let code=start;code<=end;code++){const value=(BigInt('0x'+r[3])+BigInt(code-start)).toString(16).padStart(r[3].length,'0');
+    if(bounded&&value.length!==r[3].length)throw Error('Overflowing source range');put(code,value);}}
  }if(!entries.size)throw Error('Missing source CMap');return entries;
 }
 
@@ -95,7 +119,29 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
    const value=lookup(doc,f.get(PDFName.of(field)));return value===undefined?null:value instanceof PDFName?value.toString():
     value instanceof PDFRawStream?digest(decode(value)):encodingReview('unsupported CID mapping preservation');
   }))));
- type Plan={index:number;key:string;patch:PdfSourceEncodingProof['patches'][number]};
+ // This deliberately does not resolve any BaseEncoding. Each name in a
+ // Differences sequence explicitly assigns the current code, then advances it.
+ const explicitType1Differences=(doc:PDFDocument,font:PDFDict)=>{
+  const encoding=lookup(doc,font.get(PDFName.of('Encoding')));
+  if(!(encoding instanceof PDFDict)||encoding.keys().length!==2||encoding.keys().some(k=>!['/Type','/Differences'].includes(k.toString()))||
+   String(lookup(doc,encoding.get(PDFName.of('Type'))))!=='/Encoding')encodingReview('unsupported Type1 Differences dictionary');
+  const differences=lookup(doc,(encoding as PDFDict).get(PDFName.of('Differences')));
+  if(!(differences instanceof PDFArray)||!differences.size()||differences.size()>512)encodingReview('unbounded or missing Type1 Differences');
+  const mapped=new Map<number,string>(),sequence:Array<number|string>=[];let code:number|undefined,pending=false;
+  for(const raw of (differences as PDFArray).asArray()){
+   const item=lookup(doc,raw);
+   if(item instanceof PDFNumber){const value=item.asNumber();
+    if(pending||!Number.isInteger(value)||value<0||value>255)encodingReview('invalid Type1 Differences code');
+    code=value;pending=true;sequence.push(value);
+   }else if(item instanceof PDFName){const glyph=item.decodeText();
+    if(code===undefined||code>255||mapped.has(code)||!glyph||glyph.length>127||!/^[A-Za-z0-9_.]+$/.test(glyph))encodingReview('ambiguous Type1 Differences name');
+    mapped.set(code!,glyph);sequence.push(glyph);code=code!+1;pending=false;
+   }else encodingReview('unsupported Type1 Differences item');
+  }
+  if(pending)encodingReview('incomplete Type1 Differences sequence');
+  return {mapped,hash:digest(JSON.stringify({type:'Encoding',differences:sequence}))};
+ };
+ type Plan={index:number;key:string;encodingHash?:string;patch:PdfSourceEncodingProof['patches'][number]};
  const plans:Plan[]=[],preserved:PdfSourceEncodingProof['preserved']=[];
  for(const index of indices){
   const page=original.getPage(index);
@@ -210,30 +256,60 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
    const cmap=lookup(original,font.get(PDFName.of('ToUnicode'))),cmapBytes=cmap===undefined?undefined:decode(cmap);
    if(!cmapBytes||cmapBytes.length>65536)encodingReview('missing/bounded ToUnicode');
    const cmapText=cmapBytes!.toString('latin1');
-   const pairs=[...cmapText.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)].flatMap(block=>{
+   const view=sourceCmapLexicalView(cmapText),ranged=/\bbeginbfrange\b/.test(view);
+   let bounded:Map<number,string>|undefined;
+   if(ranged)try{bounded=referenceCmap(view,{boundedSingleByte:true});}catch{encodingReview('unsupported bounded Type1 CMap');}
+   const pairs=ranged?[]:[...cmapText.matchAll(/(\d+)\s+beginbfchar\b([\s\S]*?)\bendbfchar/g)].flatMap(block=>{
     const matches=[...block[2].matchAll(/<([0-9a-f]+)>\s*<([0-9a-f]+)>/gi)];
     if(matches.length!==Number(block[1]))encodingReview('bfchar count mismatch');return matches;});
-   const corrections=targets.flatMap(target=>{
+   type Type1Correction={code:number;glyphName:keyof typeof glyphUnicode;current:RegExpExecArray|undefined;value:string;singletonPlaceholder:boolean};
+   const corrections=targets.flatMap<Type1Correction>(target=>{
     const code=Number(target[1]),glyphName=target[2] as keyof typeof glyphUnicode;
     const current=pairs.filter(m=>parseInt(m[1],16)===code);
+    if(ranged){
+     const value=bounded!.get(code);if(value===undefined)encodingReview('missing source CMap code');
+     if(glyphUnicode[glyphName].accepted.includes(value!))return [];
+     // Replacement placeholders need unique source position, not a unique
+     // inverse Unicode value. Multiple unrelated FFFD values remain unchanged.
+     if(value!=='FFFD'||replaceSingleCmapDestination(cmapText,code,'FFFD',glyphUnicode[glyphName].hex)===undefined||
+      ![...view.matchAll(/\d+\s+beginbfrange\b([\s\S]*?)\bendbfrange/g)].some(block=>
+       [...block[1].matchAll(/<([\da-f]{2})>\s*<([\da-f]{2})>\s*<fffd>/gi)].some(m=>parseInt(m[1],16)===code&&parseInt(m[2],16)===code)))
+      encodingReview('unsupported Type1 range target');
+     return [{code,glyphName,current:undefined,value:value!,singletonPlaceholder:true}];
+    }
     if(current.length!==1)encodingReview('nonunique source CMap code');
     const value=current[0][2].toUpperCase();
-    return glyphUnicode[glyphName].accepted.includes(value)?[]:[{code,glyphName,current:current[0],value}];
+    return glyphUnicode[glyphName].accepted.includes(value)?[]:[{code,glyphName,current:current[0],value,singletonPlaceholder:false}];
    });
    if(!corrections.length)continue; // Legal aliases require no rewrite proof.
-   if(encoding[1].replace(/dup\s+\d+\s+\/[A-Za-z0-9_.]+\s+put/g,'').trim()||font.has(PDFName.of('Encoding')))
-    encodingReview('overridden or unsupported Encoding');
+   if(encoding[1].replace(/dup\s+\d+\s+\/[A-Za-z0-9_.]+\s+put/g,'').trim())encodingReview('overridden or unsupported Encoding');
+   let encodingHash:string|undefined;
+   if(font.has(PDFName.of('Encoding'))){
+    if(corrections.some(c=>!c.singletonPlaceholder))encodingReview('overridden or unsupported Encoding');
+    const explicit=explicitType1Differences(original,font);
+    if(corrections.some(c=>explicit.mapped.get(c.code)!==c.glyphName))encodingReview('unproven Type1 Differences target');
+    encodingHash=explicit.hash;
+   }
    if(declared.some(m=>!Number.isSafeInteger(Number(m[1]))||Number(m[1])<0||Number(m[1])>255)||
     new Set(declared.map(m=>Number(m[1]))).size!==declared.length)encodingReview('duplicate or invalid character code');
    if(new Set(targets.map(m=>m[2])).size!==targets.length)encodingReview('nonunique glyph code');
-   if(/beginbfrange/.test(cmapText))encodingReview('unsupported CMap ranges');
+   if(!ranged&&/beginbfrange/.test(cmapText))encodingReview('unsupported CMap ranges');
    let after=cmapText;
-   for(const {code,glyphName,current,value} of corrections){
-    if(pairs.filter(m=>m[2].toUpperCase()===value).length!==1)encodingReview('nonunique inverse CMap value');
-    const literal=current[0];if(after.indexOf(literal)!==after.lastIndexOf(literal))encodingReview('nonunique CMap bytes');
-    after=after.replace(literal,literal.replace(/<[0-9a-f]+>$/i,`<${glyphUnicode[glyphName].hex}>`));
-    plans.push({index,key:key.toString(),patch:{pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file.data),code,glyphName,
+   for(const {code,glyphName,current,value,singletonPlaceholder} of corrections){
+    if(singletonPlaceholder){
+     const replacement=replaceSingleCmapDestination(after,code,value,glyphUnicode[glyphName].hex);
+     if(replacement===undefined)encodingReview('nonunique Type1 singleton destination');after=replacement!;
+    }else{
+     if(pairs.filter(m=>m[2].toUpperCase()===value).length!==1)encodingReview('nonunique inverse CMap value');
+     const literal=current![0];if(after.indexOf(literal)!==after.lastIndexOf(literal))encodingReview('nonunique CMap bytes');
+     after=after.replace(literal,literal.replace(/<[0-9a-f]+>$/i,`<${glyphUnicode[glyphName].hex}>`));
+    }
+    plans.push({index,key:key.toString(),...(encodingHash?{encodingHash}:{}),patch:{pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file.data),code,glyphName,
      unicodeSource:glyphUnicode[glyphName].source,beforeCmapHex:cmapBytes!.toString('hex'),afterCmapHex:'',beforeCmapHash:digest(cmapBytes!),afterCmapHash:''}});
+   }
+   if(bounded){
+    const verified=referenceCmap(sourceCmapLexicalView(after),{boundedSingleByte:true}),corrected=new Map(corrections.map(c=>[c.code,glyphUnicode[c.glyphName].hex]));
+    if(verified.size!==bounded.size||[...bounded].some(([code,value])=>verified.get(code)!==(corrected.get(code)??value)))encodingReview('non-target Type1 mapping changed');
    }
    if(after!==cmapText)for(const plan of plans.filter(p=>p.index===index&&p.key===key.toString())){
     const data=Buffer.from(after,'latin1');plan.patch.afterCmapHex=data.toString('hex');plan.patch.afterCmapHash=digest(data);
@@ -283,6 +359,7 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
     JSON.stringify(descendantCmaps(original,before as PDFDict))!==JSON.stringify(descendantCmaps(derived,after as PDFDict))))encodingReview('descendant or CID mapping changed');
    const sourceMap=lookup(original,(before as PDFDict).get(PDFName.of('ToUnicode'))),newMap=lookup(derived,(after as PDFDict).get(PDFName.of('ToUnicode')));
    const patch=plans.find(p=>p.index===index&&p.key===key.toString());
+   if(patch?.encodingHash&&explicitType1Differences(derived,after as PDFDict).hash!==patch.encodingHash)encodingReview('Type1 Differences changed while copying');
    if(sourceMap!==undefined&&(newMap===undefined||digest(decode(newMap))!==(patch?.patch.afterCmapHash??digest(decode(sourceMap)))))
     encodingReview('non-target CMap or corrected destination changed');
   }
