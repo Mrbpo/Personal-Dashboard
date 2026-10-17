@@ -1283,7 +1283,7 @@ export class KernelService {
           let evidenceRoute:ReturnType<typeof prepareCompleteStudyEvidenceRoute>|undefined;
           try{
             evidenceRoute=prepareCompleteStudyEvidenceRoute(question,initial,contract);
-            const packet=preparePlannedStudyGeneration(question,initial,[],contract,evidenceRoute.binding,[]),transport=preparePlannedStudyGenerationTransport(packet);
+            const packet=preparePlannedStudyGeneration(question,initial,[],contract,evidenceRoute.binding,[],undefined,policy.sourceLabelPolicy),transport=preparePlannedStudyGenerationTransport(packet);
             studyAnswerPlanRequestBudget(transport.request,{prepared:packet.selectedPrepared});
           }catch(error){if(!isStudyRequestCapacityError(error))throw error;
             initialEvidence={...initialEvidence,reason:'request-capacity',capacityReason:(error as Error).message};
