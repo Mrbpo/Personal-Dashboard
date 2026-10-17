@@ -175,6 +175,24 @@ test('question-scope-v1 incomplete candidate cannot be upgraded by generic local
  });}finally{globalThis.fetch=saved;}
 });
 
+test('question-scope-v1 uncertain original local evidence triggers the existing content revision despite no coverage gap',async()=>{
+ const f=fixture(),j=journal('one-content-revision'),ledger=scopeLedger(),saved=globalThis.fetch,
+  old=savedLocal(f,{...localUnsupported,judgment:'uncertain',objectUnitScope:{claim:'tuning',evidence:'fixed setting',alignment:'not-established'}}),
+  artifact={...f.artifact,originalLocalAudits:[old]},wires:Record<string,unknown>[]=[];
+ ledger.requirements.r0.qualifiers=[];ledger.requirements.r0.members[0].witnesses.splice(1);ledger.requirements.r0.members[0].claimIds=['c0'];
+ try{await development(async()=>{
+  globalThis.fetch=async(_url,init)=>{wires.push(JSON.parse(String(init?.body)));return response(wires.length===1?{...uncertain,scopeWitness:ledger}:
+   {answer:f.alias,discharges:[],unresolvedMemberIds:['m0']});};
+  const result=await reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,artifact,{...j.policy,scopeWitnessPolicy:'question-scope-v1'});
+  assert.equal(result.review.scopeAssessment?.status,'accounted-awaiting-independent-review');assert.equal(result.review.diagnostics.issues.length,0);
+  assert.deepEqual(j.attempts.map(a=>a.phase),['coverage-review','content-revision']);assert.equal(wires.length,2);
+  const input=JSON.parse(((wires[1].input as {content:{text:string}[]}[])[1].content)[0].text);
+  assert.equal(input.originalSelectedReferenceFindings.findings[0].diagnostics.judgment,'uncertain');
+  assert.equal(input.originalSelectedReferenceFindings.findings[0].rawResponseSha256,old.originalRaw.rawSha256);
+  assert.equal(result.revisionCandidate?.status,'incomplete-scope-witness');
+ });}finally{globalThis.fetch=saved;}
+});
+
 test('reasoned-v1 coverage preserves all source bytes and only its exact explicit phase permits medium',async()=>{
  const f=fixture(),legacy=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias),
   next=buildCompleteStudyCoverageReviewRequest(f.transport.request,f.alias,'reasoned-v1');

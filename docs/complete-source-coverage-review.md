@@ -109,6 +109,10 @@ execution-only `auditProfile`; absent the new policy, old request bytes and iden
 remain unchanged. No phase, model, output allowance, contract-v1 field or database table
 is added. Coverage and proposal schemas/identities use
 `complete-study-scope-witness-v1` and `complete-study-scope-revision-v1` respectively.
+In this opt-in lane, an existing selected-only finding that fails the normal local
+support predicate (including uncertain/not-established) also triggers that same single
+proposal and is passed through with its original raw identity. No-gap coverage cannot
+suppress it; the legacy lane keeps its original explicit-unsupported trigger.
 
 For each fixed rN, coverage returns a compact `scopeWitness`: answer kind (positive
 existence, enumeration, other or unclear), exact question span, relevant qualification

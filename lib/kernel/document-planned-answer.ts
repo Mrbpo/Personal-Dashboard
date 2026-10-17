@@ -404,20 +404,22 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
     ...execution,aliasDiagnostics,diagnostics,localSupportUnassessed:true,semanticVerified:false,wholeAnswerVerified:false,
     questionCoverage:'unassessed',fullSourceCoverage:'unassessed',conflictExhaustiveness:'unassessed'};
   await policy.recordState({event:'complete-source-review',review});
-  const localUnsupported=initial.selectedReferenceFindings.filter(f=>f.diagnostics.judgment==='unsupported');
-  if(mode!=='one-content-revision'||!diagnostics.issues.length&&!localUnsupported.length&&scopeAssessment?.status!=='incomplete')return {original:originalRecord,review,revisionCandidate:null};
+  const localConcerns=initial.selectedReferenceFindings.filter(f=>{const d=f.diagnostics;
+   return policy.scopeWitnessPolicy?d.judgment!=='supported'||!Object.values(d.citationFindings).some(v=>v.judgment==='supports')||
+    Object.values(d.citationFindings).some(v=>v.judgment==='contradicts')||['different','not-established'].includes(d.objectUnitScope.alignment):d.judgment==='unsupported';});
+  if(mode!=='one-content-revision'||!diagnostics.issues.length&&!localConcerns.length&&scopeAssessment?.status!=='incomplete')return {original:originalRecord,review,revisionCandidate:null};
   // A source-grounded model concern is still fallible. One proposal is a new
   // answer branch, never a verified correction or an overwrite of the old one.
   const base=initial.transport.request,user=base.input[1],content=user.content;
   if(!Array.isArray(content)||content[0]?.type!=='input_text'||typeof content[0].text!=='string')throw Error('Missing content revision source input');
   const sourceInputText=content[0].text;
-  const toLabel=new Map(initial.transport.mapping.entries.map(e=>[e.canonicalId,e.label])),originalSelectedReferenceFindings=localUnsupported.map(f=>({
+  const toLabel=new Map(initial.transport.mapping.entries.map(e=>[e.canonicalId,e.label])),originalSelectedReferenceFindings=localConcerns.map(f=>({
    claimId:f.claimId,diagnostics:f.diagnostics,references:f.selectedReferences.map(r=>({refId:r.refId,sourceId:toLabel.get(r.selectionId)!})),
    providerRequestSha256:f.providerRequestSha256,rawResponseSha256:f.rawResponseSha256,bindingSha256:f.bindingSha256}));
    const revisionVersion=policy.scopeWitnessPolicy?QUESTION_SCOPE_REVISION_VERSION:STUDY_CONTENT_REVISION_VERSION,
     revisionBinding={version:revisionVersion,parent:initial.binding,coverageReviewRequestSha256:execution.providerRequestSha256,
    coverageReviewRawSha256:execution.rawResponseSha256,coverageDiagnosticsSha256:digest(aliasDiagnostics),
-   originalUnsupportedClaimIds:localUnsupported.map(f=>f.claimId)},revisionBindingSha256=digest(revisionBinding),
+   ...(policy.scopeWitnessPolicy?{originalConcernClaimIds:localConcerns.map(f=>f.claimId)}:{originalUnsupportedClaimIds:localConcerns.map(f=>f.claimId)})},revisionBindingSha256=digest(revisionBinding),
    request={...base,input:[{...base.input[0],content:base.input[0].content+
     ' This is one content revision of the supplied original answer, not a citation-only edit. Treat reviewer findings as fallible source-bound concerns. '+
     'Address actual omissions or errors using all the original question, fixed question contract, supplied source text and original images. '+
