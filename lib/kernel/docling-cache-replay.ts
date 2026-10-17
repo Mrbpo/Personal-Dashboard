@@ -43,7 +43,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
   // Historical v1 must retain its original simple-TT and top-level-only proof
   // traversal, including on sources that also contain CID fonts.
   const prepared=await prepareSourceFontInput(original,undefined,references,
-   saved.proof?.version==='source-font-reference-v2'?'source-font-reference-v2':'source-font-reference-v1');
+   saved.proof?.version==='source-font-reference-v3'?'source-font-reference-v3':saved.proof?.version==='source-font-reference-v2'?'source-font-reference-v2':'source-font-reference-v1');
   if(!prepared.proof||digest(JSON.stringify({kind:prepared.proof.version,proof:prepared.proof}))!==identity.sourceEncodingReceiptHash||
    digest(prepared.bytes)!==prepared.proof.inputHash)throw new Error('Cached replay source encoding proof or input mismatch');
   parserPdf=await PDFDocument.load(prepared.bytes,{updateMetadata:false});

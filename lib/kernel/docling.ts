@@ -3,6 +3,7 @@ import { PDFArray, PDFDocument, PDFName, PDFStream, PDFRawStream, PDFDict, PDFNu
 import {readFile,stat} from 'node:fs/promises';
 import fontkit from '@pdf-lib/fontkit';
 import type {PdfSourceEncodingProof,PdfFontReferenceDictionary} from '../pdf-source-fidelity.ts';
+import {SOURCE_POST_AGL_POLICY,validateSourcePostAgl,sourcePostAglCandidate,sourceCmapLexicalView,replaceSingleCmapDestination,type SourcePostFont} from '../pdf-source-agl.ts';
 import { digest, getDocument, readBlob, splitText } from '../library.ts';
 import { kernel } from './service.ts';
 import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION } from './docling-result.ts';
@@ -42,7 +43,7 @@ export function validateFontReferenceDictionary(value:unknown):PdfFontReferenceD
  const keys=new Set<string>();for(const e of d.entries){
   if(!Array.isArray(e)||e.length!==3||!hexSha(e[0])||keys.has(e[0])||typeof e[1]!=='string'||!/^(?:[0-9A-F]{4}){1,16}$/.test(e[1])||
    !Array.isArray(e[2])||!e[2].length||e[2].length>32||new Set(e[2]).size!==e[2].length||e[2].some(i=>!integer(i,d.mappings.length-1)||sequences[i]!==e[1]))throw Error('Ambiguous or invalid font reference entry');keys.add(e[0]);
- }return d;
+ }validateSourcePostAgl(d);return d;
 }
 async function configuredFontReferences(){
  const path=process.env.PDF_FONT_REFERENCE_DICTIONARY,pin=process.env.PDF_FONT_REFERENCE_DICTIONARY_SHA256;
@@ -66,7 +67,7 @@ function referenceCmap(text:string){
 
 /** @internal Pure server-side input preparation; no I/O, OCR, model, CAS or publication. */
 export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[],references?:PdfFontReferenceDictionary,
- referencePolicy:typeof referenceVersion|typeof referenceCidVersion=referenceVersion):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
+ referencePolicy:typeof referenceVersion|typeof referenceCidVersion|typeof SOURCE_POST_AGL_POLICY=referenceVersion):Promise<{bytes:Uint8Array;proof?:PdfSourceEncodingProof}>{
  if(references)validateFontReferenceDictionary(references);
  const referenceHash=references?digest(JSON.stringify(references)):undefined,referenceIndex=new Map(references?.entries.map(e=>[e[0],e])??[]);
  const sourceHash=digest(bytes),original=await PDFDocument.load(bytes,{updateMetadata:false});
@@ -100,7 +101,7 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   const fonts=lookup(original,page.node.Resources()?.get(PDFName.of('Font')));
   for(const [key,ref] of fonts instanceof PDFDict?fonts.entries():[]){
    const font=lookup(original,ref);if(!(font instanceof PDFDict))continue;
-   if(String(font.get(PDFName.of('Subtype')))==='/Type0'&&references&&referencePolicy===referenceCidVersion){
+   if(String(font.get(PDFName.of('Subtype')))==='/Type0'&&references&&(referencePolicy===referenceCidVersion||referencePolicy===SOURCE_POST_AGL_POLICY)){
     // This is a CID-to-GID proof, not the simple-TT raw-cmap rule. Repair only
     // explicit replacement placeholders, never legitimate mapped Unicode.
     try{
@@ -149,13 +150,30 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
       table:{version:number;codeMap:{get:(i:number)=>number};firstCode:number;glyphIndices:{length:number;get:(i:number)=>number}}}>}};
      if(native.cmap.tables.length!==1||native.cmap.tables[0].platformID!==1||native.cmap.tables[0].encodingID!==0)continue;
      const table=native.cmap.tables[0].table;if(table.version!==0&&table.version!==6)continue;
-     const text=before.toString('latin1'),mapped=referenceCmap(text),added:PdfSourceEncodingProof['patches']=[];
+     const originalText=before.toString('latin1'),lexical=referencePolicy===SOURCE_POST_AGL_POLICY?sourceCmapLexicalView:(value:string)=>value,
+      text=lexical(originalText),mapped=referenceCmap(text),added:PdfSourceEncodingProof['patches']=[],changed:PdfSourceEncodingProof['patches']=[];
+     let after=originalText;const corrected=new Map<number,string>();
+     if(referencePolicy===SOURCE_POST_AGL_POLICY&&references.sourcePostAgl&&(/\busecmap\b/.test(text)||(text.match(/\bbegincodespacerange\b/g)||[]).length!==1))continue;
      for(let code=first.asNumber();code<=last.asNumber();code++){
-      if(mapped.has(code))continue;
+      if(mapped.has(code)&&(referencePolicy!==SOURCE_POST_AGL_POLICY||!references.sourcePostAgl))continue;
       // Read the actual raw cmap slot: glyphForCodePoint may re-encode MacRoman
       // and is not a general PDF raw-byte-to-GID API, especially above 0x7f.
       const offset=code-table.firstCode,gid=table.version===0?table.codeMap.get(code):offset>=0&&offset<table.glyphIndices.length?table.glyphIndices.get(offset):0;
       if(!Number.isInteger(gid)||gid<1||gid>=native.numGlyphs)continue;const glyph=native.getGlyph(gid);
+      if(mapped.has(code)){
+       const current=mapped.get(code)!;
+       if(referencePolicy!==SOURCE_POST_AGL_POLICY||!references.sourcePostAgl||!/^[0-9A-F]{4}$/.test(current))continue;
+       const candidate=sourcePostAglCandidate(native as unknown as SourcePostFont,gid,digest(file),references);
+       if(!candidate||candidate.utf16Hex===current)continue;
+       const replacement=replaceSingleCmapDestination(after,code,current,candidate.utf16Hex);if(replacement===undefined)continue;
+       after=replacement;corrected.set(code,candidate.utf16Hex);
+       changed.push({pageNumber:index+1,resourceKey:key.toString(),fontFileHash:digest(file),code,unicodeSource:`font-reference:${referenceHash}`,
+        beforeCmapHex:before.toString('hex'),afterCmapHex:'',beforeCmapHash:digest(before),afterCmapHash:'',
+        reference:{dictionarySha256:referenceHash!,pathSha256:candidate.pathSha256,glyphId:gid,unitsPerEm:native.unitsPerEm,utf16Hex:candidate.utf16Hex,mappingIndices:[],
+         sourceMapping:{policy:'symbolic-simple-tt-post2-agl-contradiction-v1',flags:flags.asNumber(),encodingAbsent:true,platformID:1,encodingID:0,format:table.version,
+          sourceUnicodeHex:current,postVersion:2,glyphName:candidate.glyphName,agl:candidate.agl,outlineWitnesses:candidate.outlineWitnesses}}});
+       continue;
+      }
       const commands=(glyph.path as unknown as {commands:Array<{command:string;args:number[]}>}).commands.map(c=>({command:c.command,args:[...c.args]}));
       if(!commands.length||commands.length>10000||commands.some(c=>c.args.some(n=>!Number.isFinite(n))))continue;
       const pathSha256=digest(JSON.stringify({unitsPerEm:native.unitsPerEm,commands})),entry=referenceIndex.get(pathSha256);
@@ -165,10 +183,11 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
        reference:{dictionarySha256:referenceHash!,pathSha256,glyphId:glyph.id,unitsPerEm:native.unitsPerEm,utf16Hex:entry[1],mappingIndices:[...entry[2]],
         sourceMapping:{policy:'symbolic-simple-tt-single-mac-cmap-v1',flags:flags.asNumber(),encodingAbsent:true,platformID:1,encodingID:0,format:table.version}}});
      }
-     if(added.length){const suffix=added.map(p=>`<${p.code.toString(16).padStart(2,'0').toUpperCase()}> <${p.reference!.utf16Hex}>`).join('\n'),
-       after=Buffer.from(text.replace(/\bendcmap\b/,`${added.length} beginbfchar\n${suffix}\nendbfchar\nendcmap`),'latin1'),verified=referenceCmap(after.toString('latin1'));
-      if(verified.size!==mapped.size+added.length||[...mapped].some(([c,v])=>verified.get(c)!==v))continue;
-      for(const patch of added){patch.afterCmapHex=after.toString('hex');patch.afterCmapHash=digest(after);plans.push({index,key:key.toString(),patch});}
+     if(added.length||changed.length){const suffix=added.map(p=>`<${p.code.toString(16).padStart(2,'0').toUpperCase()}> <${p.reference!.utf16Hex}>`).join('\n'),
+       end=/\bendcmap\b/.exec(lexical(after))!.index,
+       value=Buffer.from(added.length?after.slice(0,end)+`${added.length} beginbfchar\n${suffix}\nendbfchar\n`+after.slice(end):after,'latin1'),verified=referenceCmap(lexical(value.toString('latin1')));
+      if(verified.size!==mapped.size+added.length||[...mapped].some(([c,v])=>verified.get(c)!==(corrected.get(c)??v)))continue;
+      for(const patch of [...changed,...added]){patch.afterCmapHex=value.toString('hex');patch.afterCmapHash=digest(value);plans.push({index,key:key.toString(),patch});}
      }
     }catch{/* Unsupported/ambiguous font evidence retains its original mapping. */}
     continue;
@@ -221,7 +240,7 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
   }
  }
  if(!plans.length&&selected===undefined)return {bytes};
- const includeDescendants=referencePolicy===referenceCidVersion&&plans.some(p=>p.patch.reference);
+ const includeDescendants=(referencePolicy===referenceCidVersion||referencePolicy===SOURCE_POST_AGL_POLICY)&&plans.some(p=>p.patch.reference);
  // Only a real derivative needs full-object preservation hashing. Unrelated PDFs
  // keep their original bytes without decoding large content or TrueType programs.
  for(const index of indices){
@@ -326,7 +345,10 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   const formulaPreset=process.env.DOCLING_FORMULA_PRESET||'codeformulav2';
   const headers:HeadersInit=process.env.DOCLING_API_KEY?{'X-Api-Key':process.env.DOCLING_API_KEY}:{};
   const endpoint=base.replace(/\/$/,'');
-  const references=await configuredFontReferences(),encoding=await prepareSourceFontInput(bytes,undefined,references,referenceCidVersion);
+  const references=await configuredFontReferences(),referencePolicy=process.env.PDF_FONT_REFERENCE_POLICY??referenceCidVersion;
+  if(referencePolicy!==referenceCidVersion&&referencePolicy!==SOURCE_POST_AGL_POLICY)throw Error('Unknown configured source font reference policy');
+  if(referencePolicy===SOURCE_POST_AGL_POLICY&&!references?.sourcePostAgl)throw Error('Source post/AGL v3 requires an explicit proven reference asset');
+  const encoding=await prepareSourceFontInput(bytes,undefined,references,referencePolicy);
   if(encoding.proof&&(savedResult||legacyTaskId))encodingReview('legacy full-result input has no corrected-input identity');
   if(encoding.proof?.referenceDictionarySha256&&(!references||await storeDoclingResult(references)!==encoding.proof.referenceDictionarySha256))
     throw Error('Font reference CAS identity mismatch');
@@ -383,8 +405,10 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
         currentProgress=structuredClone(value);
       }});
   let pages=decoded.pages,warnings=decoded.warnings;
-  if(sourceEncodingReceiptHash&&!visual)warnings=[...warnings,encoding.proof?.referenceDictionarySha256?
-    '源字体缺失的 Unicode 映射已按精确字形及参考字符证明恢复；其余公式、上下标及页面结构未验证':
+  if(sourceEncodingReceiptHash&&!visual)warnings=[...warnings,
+    encoding.proof?.patches.some(p=>p.reference?.sourceMapping.policy==='symbolic-simple-tt-post2-agl-contradiction-v1')?
+    '源字体显式 Unicode 映射矛盾已按嵌入字形名、官方 AGL 及独立精确轮廓证明修正；其余公式、上下标及页面结构未验证':
+    encoding.proof?.referenceDictionarySha256?'源字体缺失的 Unicode 映射已按精确字形及参考字符证明恢复；其余公式、上下标及页面结构未验证':
     '源字体 Unicode 映射冲突已按嵌入字形证明修正；其余公式、上下标及页面结构未验证'];
   const totalPages=decoded.totalPages;
   if(visual)warnings=[...warnings,...pages.filter(page=>page.text.includes('[无法可靠辨认')).map(page=>`第 ${page.pageNumber} 页含无法可靠辨认的片段，须核对原 PDF`)];

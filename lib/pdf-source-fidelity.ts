@@ -7,14 +7,19 @@ export type PdfFontReferenceDictionary={version:'exact-font-reference-v1';witnes
  mappings:Array<[fontIndex:number,glyphId:number,proofs:Array<{kind:'cmap';codePoint:number}|{kind:'GSUB-ligature';
   lookupIndex:number;subtableIndex:number;lookupType:number;effectiveType:number;features:string[];coverageIndex:number;
   outputGlyphId:number;componentGlyphIds:number[];componentUnicodeOptions:number[][]}>]>;
- entries:Array<[pathSha256:string,utf16Hex:string,mappingIndices:number[]]>};
-export type PdfSourceEncodingProof={version:'source-type1-cmap-v1'|'source-font-reference-v1'|'source-font-reference-v2';sourceHash:string;copyIndices:number[];inputHash:string;
+ entries:Array<[pathSha256:string,utf16Hex:string,mappingIndices:number[]]>;
+ sourcePostAgl?:{version:'embedded-post2-agl-exact-outline-v1';glyphList:string;
+  outlines:Array<[pathSha256:string,unitsPerEm:number,referenceFontIndex:number,referenceGlyphId:number]>}};
+export type PdfSourceEncodingProof={version:'source-type1-cmap-v1'|'source-font-reference-v1'|'source-font-reference-v2'|'source-font-reference-v3';sourceHash:string;copyIndices:number[];inputHash:string;
  referenceDictionarySha256?:string;
  patches:Array<{pageNumber:number;resourceKey:string;fontFileHash:string;code:number;glyphName?:'prime'|'negationslash';
   unicodeSource:string;beforeCmapHex:string;afterCmapHex:string;beforeCmapHash:string;afterCmapHash:string;
   reference?:{dictionarySha256:string;pathSha256:string;glyphId:number;unitsPerEm:number;utf16Hex:string;mappingIndices:number[];
    sourceMapping:{policy:'symbolic-simple-tt-single-mac-cmap-v1';flags:number;encodingAbsent:true;platformID:1;encodingID:0;format:0|6}|
-    {policy:'identity-h-cidfonttype2-explicit-identity-v1';encoding:'Identity-H';cidToGid:'Identity';codeBytes:2;cid:number;sourceUnicodeHex:'FFFD'}}}>;
+    {policy:'identity-h-cidfonttype2-explicit-identity-v1';encoding:'Identity-H';cidToGid:'Identity';codeBytes:2;cid:number;sourceUnicodeHex:'FFFD'}|
+    {policy:'symbolic-simple-tt-post2-agl-contradiction-v1';flags:number;encodingAbsent:true;platformID:1;encodingID:0;format:0|6;
+     sourceUnicodeHex:string;postVersion:2;glyphName:string;agl:{source:string;sha256:string;line:number;literal:string};
+     outlineWitnesses:Array<{index:number;fontIndex:number;glyphId:number}>}}}>;
  preserved:Array<{pageNumber:number;contentHashes:string[];fontFileHashes:string[];unmodifiedCmapHashes:string[];fontMappingHashes?:string[]}>};
 
 export type SourceGlyph={symbol:string;font:string;bold:boolean|null;bbox:[number,number,number,number];subscript:string|null};
