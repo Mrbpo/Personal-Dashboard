@@ -140,9 +140,12 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  assert.equal((await pool.query('SELECT count(*) n FROM evidence WHERE source_version_id=$1',[hits[0].source.sourceVersionId])).rows[0].n,'1');
  const evidence=await kernel.readNativeTableCandidateEvidence(owner,hits);
  assert.equal(evidence.imageAnchors[0].evidence_id,hits[0].anchorEvidenceId);assert.equal(evidence.images[0].kind,'pdf-page');
+ assert.equal(evidence.images[0].tableObservations?.[0].status,'available');
+ assert.deepEqual(evidence.images[0].tableObservations?.[0].native,row.artifact.native);
  const prepared=prepareDocumentAnswer('What does the table report?',{anchors:[],parents:[],...evidence,sourceContentIsUntrusted:true});
  assert.deepEqual(prepared.quoteUnits,[]);assert.equal(prepared.supports.length,1);assert.equal(prepared.supports[0].kind,'image');
- assert.equal(JSON.stringify(prepared.input).includes("Gaussian 'Pillbox'"),false);
+ assert.equal(JSON.stringify(prepared.input).includes("Gaussian 'Pillbox'"),true,'current native declaration enters image metadata only');
+ assert.equal(prepared.input.evidence[0].tableObservations?.[0].semanticVerified,false);
  assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox'),[]);
  await assert.rejects(kernel.readNativeTableCandidateEvidence('foreign-owner',hits));
  await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,[{...hits[0],source:{...hits[0].source,courseId:'foreign-course'}}]));

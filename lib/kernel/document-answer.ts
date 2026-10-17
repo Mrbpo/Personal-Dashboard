@@ -2,11 +2,11 @@ import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {withDocumentRerankRunPolicy} from './document-rerank.ts';
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
-import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
+import {assertNativeTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,type NativeTableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -17,7 +17,7 @@ type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sou
  evidenceId:string;locator:string;body:string;bodySha256:string};
 type AuthorImage={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:string;byteLength:number;
  width:number;height:number;mime:'image/png';bytes:Uint8Array;source:{documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string}};
-type Image=AuthorImage|PdfVisualImageEvidence;
+type Image=AuthorImage|NativeTableObservedImage;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
@@ -34,6 +34,7 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  visual?:{kind:'pdf-page'|'pdf-region';physicalPage:number;rawPdfSha256:string;manifestSha256:string};
  captionMembers?:DocumentQuoteUnit[];
+ tableObservations?:NativeTableObservation[];
  evidenceId:string;locator:string;sha256:string;text?:string;image?:Image};
 type Citation={id:string;quote:string};
 type Claim={text:string;citations:Citation[]};
@@ -140,11 +141,18 @@ function supportFor(context:DocumentAnswerContext):Support[]{
     imageOnly.some(node=>node.evidence_id===anchor&&node.document_id===image.source.documentId&&node.page_number===image.physicalPage&&
      node.id===`pg:${image.source.currentVersionId}:${image.physicalPage}`&&node.source_version_id===image.source.sourceVersionId&&node.source_hash===image.source.sourceHash))))
    throw new Error('PDF image has no genuine current page evidence anchor');
+   const observations='tableObservations' in image?image.tableObservations:undefined;
+   if(observations!==undefined){
+    if(!pdf||!Array.isArray(observations)||!observations.length||observations.length>NATIVE_TABLE_OBSERVATION_LIMITS.perImage||
+     new Set(observations.map(o=>o.candidate?.artifactSha256)).size!==observations.length)throw new Error('Invalid native table observations');
+    for(const observation of observations)assertNativeTableObservation(observation,image);
+   }
   imageIds.add(image.attachmentId);
   supports.push({id:`i${imageIds.size-1}`,kind:'image',documentId:image.source.documentId,documentVersionId:image.source.currentVersionId,
    sourceVersionId:image.source.sourceVersionId,sourceHash:image.source.sourceHash,
    evidenceId:anchor,locator:pdf?`pdf:page:${image.physicalPage}:attachment:${image.attachmentId}`:`attachment:${image.attachmentId}`,sha256:image.sha256,image,
-   ...(pdf?{visual:{kind:image.kind,physicalPage:image.physicalPage,rawPdfSha256:image.rawPdfSha256,manifestSha256:image.manifestSha256}}:{})});
+    ...(pdf?{visual:{kind:image.kind,physicalPage:image.physicalPage,rawPdfSha256:image.rawPdfSha256,manifestSha256:image.manifestSha256}}:{}),
+    ...(observations?{tableObservations:structuredClone(observations)}:{})});
  }
  return supports;
 }

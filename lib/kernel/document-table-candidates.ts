@@ -13,6 +13,7 @@ import {DocumentEvidenceChangedError,type DocumentSelectedNodeHit} from './docum
 export const NATIVE_TABLE_PRODUCER='docling-native-table-v1';
 export const NATIVE_TABLE_NAMESPACE='table-derived-search-v1';
 export const NATIVE_TABLE_LIMITS=Object.freeze({tables:512,cells:10000,rows:1000,columns:200,bodyBytes:2*1024*1024,supplementalPages:2});
+export const NATIVE_TABLE_OBSERVATION_LIMITS=Object.freeze({bytes:32*1024,perImage:2});
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const canonical=(value:unknown):string=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)
  ?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
@@ -175,11 +176,72 @@ export async function commitNativeTableCandidates(db:Queryable,value:PreparedNat
 /** Deliberately no body, quote, rank-as-confidence or OCR string fields. */
 export type DerivedTableCandidate={kind:'derived-native-table';id:string;source:DocumentContextSource;pageNumber:number;
  anchorEvidenceId:string;manifestSha256:string;assetSha256:string;artifactSha256:string};
+export type NativeTableObservation={version:'docling-native-observation-v1';producer:typeof NATIVE_TABLE_PRODUCER;
+ authority:'parser-declared-untrusted';semanticVerified:false;relationshipVerified:false;visibilityVerified:false;
+ rawProvenancePageBasis:'derived-input-local';rawProvenanceCoordinateMapping:'unverified';
+ status:'available'|'unavailable';reason:null|'observation-byte-limit';candidate:DerivedTableCandidate;attachmentId:string;
+ nativeReference:string;nativeSha256:string;nativeByteLength:number;result:NonNullable<DoclingNativeTable['result']>;
+ native?:DoclingNativeTable;observationSha256:string};
+export type NativeTableObservedImage=PdfVisualImageEvidence&{tableObservations?:NativeTableObservation[]};
+const availableObservationBytes=(value:Omit<NativeTableObservation,'observationSha256'>)=>{
+ const {native:_native,...envelope}=value;
+ return Buffer.byteLength(canonical({...envelope,status:'available',reason:null,observationSha256:'0'.repeat(64)}))+
+  Buffer.byteLength(',"native":')+value.nativeByteLength;
+};
+
+/** Bounded transport of an existing declaration, never a new grid or text source. */
+export function prepareNativeTableObservation(item:DerivedTableCandidate,artifact:NativeTableArtifact,image:PdfVisualImageEvidence):NativeTableObservation{
+ const rebuilt=prepareNativeTableArtifact(artifact.native);
+ if(artifact.status!=='available'||canonical(rebuilt)!==canonical(artifact)||artifact.artifactSha256!==item.artifactSha256)
+  throw new DocumentEvidenceChangedError();
+ const native=structuredClone(artifact.native),value:Omit<NativeTableObservation,'observationSha256'>={
+  version:'docling-native-observation-v1',producer:NATIVE_TABLE_PRODUCER,authority:'parser-declared-untrusted',
+  semanticVerified:false,relationshipVerified:false,visibilityVerified:false,status:'available',reason:null,
+  rawProvenancePageBasis:'derived-input-local',rawProvenanceCoordinateMapping:'unverified',
+  candidate:structuredClone(item),attachmentId:image.attachmentId,nativeReference:native.reference,nativeSha256:sha(canonical(native)),
+  nativeByteLength:Buffer.byteLength(canonical(native)),result:structuredClone(native.result!),native};
+ if(availableObservationBytes(value)>NATIVE_TABLE_OBSERVATION_LIMITS.bytes){
+  delete value.native;value.status='unavailable';value.reason='observation-byte-limit';
+ }
+ const observation={...value,observationSha256:sha(canonical(value))};
+ assertNativeTableObservation(observation,image);return observation;
+}
+
+/** Check the declaration against this exact original page asset. Hashes bind
+ * saved parser observations, not their semantic or visual correctness. */
+export function assertNativeTableObservation(observation:NativeTableObservation,image:PdfVisualImageEvidence){
+ const {observationSha256,...value}=observation,item=value.candidate,source=item?.source,result=value.result;
+ const identity=source&&{namespace:NATIVE_TABLE_NAMESPACE,producer:NATIVE_TABLE_PRODUCER,source,artifactSha256:item.artifactSha256,
+  manifestSha256:item.manifestSha256,assetSha256:item.assetSha256,anchor:item.anchorEvidenceId};
+ if(value.version!=='docling-native-observation-v1'||value.producer!==NATIVE_TABLE_PRODUCER||value.authority!=='parser-declared-untrusted'||
+  value.semanticVerified!==false||value.relationshipVerified!==false||value.visibilityVerified!==false||!isSha(observationSha256)||
+  value.rawProvenancePageBasis!=='derived-input-local'||value.rawProvenanceCoordinateMapping!=='unverified'||
+  sha(canonical(value))!==observationSha256||Buffer.byteLength(canonical(observation))>NATIVE_TABLE_OBSERVATION_LIMITS.bytes||
+  item?.kind!=='derived-native-table'||!source||sha(canonical(identity))!==item.id||
+  ![item.id,item.assetSha256,item.artifactSha256,item.manifestSha256,source.sourceHash,value.nativeSha256].every(isSha)||
+  image.kind!=='pdf-page'||value.attachmentId!==image.attachmentId||item.pageNumber!==image.physicalPage||
+  item.anchorEvidenceId!==image.anchorEvidenceId||item.manifestSha256!==image.manifestSha256||item.assetSha256!==image.sha256||
+  source.documentId!==image.source.documentId||source.currentVersionId!==image.source.currentVersionId||
+  source.sourceVersionId!==image.source.sourceVersionId||source.sourceHash!==image.source.sourceHash||source.sourceHash!==image.rawPdfSha256||
+  (source.courseId??'')!==(image.source.courseId??'')||!/^#\/tables\/\d+$/.test(value.nativeReference)||
+  !Number.isSafeInteger(value.nativeByteLength)||value.nativeByteLength<1||value.nativeByteLength>NATIVE_TABLE_LIMITS.bodyBytes||!result||
+  ![result.resultBlobSha256,result.derivedInputSha256,result.optionsHash].every(isSha)||
+  !Array.isArray(result.copyIndices)||!result.copyIndices.includes(item.pageNumber-1))throw new DocumentEvidenceChangedError();
+ if(value.status==='available'){
+  if(availableObservationBytes(value)>NATIVE_TABLE_OBSERVATION_LIMITS.bytes||value.reason!==null||!value.native||value.native.reference!==value.nativeReference||
+   canonical(value.native.result)!==canonical(result)||canonical(value.native.pageNumbers)!==canonical([item.pageNumber])||
+   Buffer.byteLength(canonical(value.native))!==value.nativeByteLength||sha(canonical(value.native))!==value.nativeSha256||
+   prepareNativeTableArtifact(value.native).artifactSha256!==item.artifactSha256)throw new DocumentEvidenceChangedError();
+ }else if(value.status!=='unavailable'||value.reason!=='observation-byte-limit'||value.native!==undefined||
+  availableObservationBytes(value)<=NATIVE_TABLE_OBSERVATION_LIMITS.bytes)throw new DocumentEvidenceChangedError();
+}
 type CandidateRow={id:string;document_id:string;version_id:string;source_version_id:string;source_hash:string;course_id:string;
- page_number:number;anchor_evidence_id:string;manifest_sha256:string;asset_sha256:string;artifact_sha256:string;artifact:NativeTableArtifact};
+ page_number:number;anchor_evidence_id:string;manifest_sha256:string;asset_sha256:string;artifact_sha256:string;artifact:NativeTableArtifact;
+ raw_result_sha256:string;input_sha256:string;options_sha256:string};
 
 const candidateSQL=`SELECT t.id,t.document_id,t.version_id,t.source_version_id,t.source_hash,coalesce(d.course_id,'') course_id,
- t.page_number,t.anchor_evidence_id,t.manifest_sha256,t.asset_sha256,t.artifact_sha256,t.artifact,t.search_vector
+ t.page_number,t.anchor_evidence_id,t.manifest_sha256,t.asset_sha256,t.artifact_sha256,t.artifact,t.search_vector,
+ t.raw_result_sha256,t.input_sha256,t.options_sha256
  FROM document_table_candidates t
  JOIN document_texts d ON d.id=t.document_id AND d.current_version_id=t.version_id AND d.source_hash=t.source_hash
  JOIN document_text_versions v ON v.id=t.version_id AND v.document_id=d.id AND v.source_version_id=t.source_version_id
@@ -197,6 +259,8 @@ function candidate(row:CandidateRow):DerivedTableCandidate{
  const {artifactSha256,...artifact}=row.artifact;
  if(row.artifact.status!=='available'||artifactSha256!==row.artifact_sha256||sha(canonical(artifact))!==artifactSha256||
   row.artifact.namespace!==NATIVE_TABLE_NAMESPACE||row.artifact.producer!==NATIVE_TABLE_PRODUCER||
+  row.artifact.native.result?.resultBlobSha256!==row.raw_result_sha256||row.artifact.native.result?.derivedInputSha256!==row.input_sha256||
+  row.artifact.native.result?.optionsHash!==row.options_sha256||
   row.artifact.native.pageNumbers.length!==1||row.artifact.native.pageNumbers[0]!==row.page_number)throw new DocumentEvidenceChangedError();
  const source={documentId:row.document_id,currentVersionId:row.version_id,sourceVersionId:row.source_version_id,
   sourceHash:row.source_hash,courseId:row.course_id};
@@ -232,12 +296,13 @@ export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,re
  if(expected.length>NATIVE_TABLE_LIMITS.supplementalPages||new Set(expected.map(value=>value.id)).size!==expected.length)
   throw new Error('Invalid bounded native table selections');
  const verify=async()=>{
-  if(!expected.length)return;
+  if(!expected.length)return new Map<string,CandidateRow>();
   const rows=(await pool.query<CandidateRow>(`${candidateSQL} AND t.id=ANY($2::text[])`,[owner,expected.map(value=>value.id)])).rows;
   const actual=new Map(rows.map(row=>[row.id,candidate(row)]));
   if(rows.length!==expected.length||expected.some(value=>canonical(actual.get(value.id))!==canonical(value)))throw new DocumentEvidenceChangedError();
+  return new Map(rows.map(row=>[row.id,row]));
  };
- await verify();const imageAnchors:DocumentSelectedNodeHit[]=[],images:PdfVisualImageEvidence[]=[];
+ const rows=await verify();const imageAnchors:DocumentSelectedNodeHit[]=[],images:NativeTableObservedImage[]=[];
  const {readPdfVisualEvidence,PDF_VISUAL_READ_LIMITS}=await import('./pdf-visual-evidence.ts');
  for(const [index,item] of expected.entries()){
   const source=item.source,ids=[item.anchorEvidenceId];
@@ -250,7 +315,10 @@ export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,re
    if(!node||(!png&&!omitted))throw new Error('Native table original page image is unavailable');
    if(!png)continue;
    if(!imageAnchors.some(value=>value.evidence_id===node.evidence_id))imageAnchors.push(node);
-   if(!images.some(value=>value.attachmentId===png.attachmentId))images.push(png);
+   const observation=prepareNativeTableObservation(item,rows.get(item.id)!.artifact,png),existing=images.find(value=>value.attachmentId===png.attachmentId);
+   if(existing){if(!existing.tableObservations!.some(o=>o.candidate.id===item.id&&o.candidate.artifactSha256===item.artifactSha256))
+    existing.tableObservations!.push(observation);}
+   else images.push({...png,tableObservations:[observation]});
  }
  if(images.reduce((sum,image)=>sum+image.byteLength,0)>PDF_VISUAL_READ_LIMITS.bytes||
   images.reduce((sum,image)=>sum+2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1,0)>PDF_VISUAL_READ_LIMITS.imageInputTokens)
