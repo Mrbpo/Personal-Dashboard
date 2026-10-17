@@ -138,6 +138,21 @@ test('ID-only binding restores exact selected text/image and never rescues a leg
  assert.deepEqual(validateCompleteStudyCoverageReview(diagnostic,built.choices).issues[0].requirementIds,['r0']);
 });
 
+test('ID-only findings record parallel actual claim edges without pooling semantic support or adding citations',()=>{
+ const witness=scopeLedger();witness.requirements.r0.findings[0].claimIds=['c0','c1'];
+ const claims=[{text:'First requested case.',citations:[{id:'Source1'}]},
+  {text:'Second requested case.',citations:[{id:'Source2'}]}],original=JSON.stringify({witness,claims}),
+  assessment=assessQuestionScopeWitness(witness,claims);
+ assert.equal(assessment.status,'bindings-linked-awaiting-independent-review');
+ assert.deepEqual(assessment.requirements.r0.findings[0].selectedClaimBindings,
+  [{claimId:'c0',sourceIds:['Source1']},{claimId:'c1',sourceIds:['Source2']}]);
+ assert.equal(assessment.semanticVerified,false);assert.equal(assessment.questionCoverage,'unassessed');
+ assert.equal(JSON.stringify({witness,claims}),original);
+ assert.equal(assessQuestionScopeWitness(witness,[claims[0],{...claims[1],citations:[{id:'UnboundSource'}]}]).status,'incomplete');
+ witness.requirements.r0.findings[0].sourceIds.push('UnselectedSource');
+ assert.equal(assessQuestionScopeWitness(witness,claims).status,'incomplete');
+});
+
 test('ID-only scope shares actual schema enums and preflights both complete phase schemas',()=>{
  const f=fixture(),build=(n:number)=>{const request=structuredClone(f.transport.request),ids=Array.from({length:n},(_,i)=>`Source${i+1}`);
   request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum=ids;

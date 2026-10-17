@@ -145,8 +145,13 @@ Quote units are not counted as semantic entities.
 Program-assigned fN IDs identify those fallible findings for the one existing
 optional revision. It returns `{answer, discharges, unresolvedFindingIds}`. A
 discharge selects the same original aspect IDs, actual source IDs and new cN IDs.
-Old claim links are cleared; a candidate claim must itself select its witnesses,
-and different claims cannot pool citations to pass the mechanical linkage check.
+Old claim links are cleared. Each listed source must already be selected by a
+listed candidate claim, and each listed claim must select at least one listed
+source. `selected-source-claim-edges-v1` records the actual per-claim edges without
+adding references. A finding may address parallel answer claims; it is not a
+single semantic assertion or entity. These edges never pool semantic support:
+each claim still receives its own selected-only audit, and qualifications and
+whole-question completeness still require independent source-first assessment.
 Missing links, unresolved findings or `complete: false` retain the existing
 `incomplete-scope-witness` branch without spending new local-audit calls. Linked
 bindings are only `bindings-linked-awaiting-independent-review`; they are never

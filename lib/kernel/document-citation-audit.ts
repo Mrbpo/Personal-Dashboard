@@ -206,13 +206,20 @@ export function validateQuestionScopeWitness(value:unknown,choices:CoverageChoic
 /** Mechanical claim/source linkage only: neither an entity inventory nor semantic coverage. */
 export function assessQuestionScopeWitness(value:QuestionScopeWitness,claims:DocumentAnswerSelections['claims'],unresolved:string[]=[]){
  let ordinal=0;const findings=Object.fromEntries(Object.entries(value.requirements).map(([id,r])=>{
-  const entries=r.findings.map(f=>{const findingId=`f${ordinal++}`,linked=!unresolved.includes(findingId)&&f.judgment==='supports'&&f.claimIds.some(c=>{
-   const selected=new Set(claims[Number(c.slice(1))]?.citations.map(ref=>ref.id));return f.sourceIds.every(sourceId=>selected.has(sourceId));
-  });return {findingId,linked};});
+  const entries=r.findings.map(f=>{const findingId=`f${ordinal++}`,
+   selectedClaimBindings=f.claimIds.map(claimId=>{const selected=new Set(claims[Number(claimId.slice(1))]?.citations.map(ref=>ref.id));
+    return {claimId,sourceIds:f.sourceIds.filter(sourceId=>selected.has(sourceId))};}),
+   linked=!unresolved.includes(findingId)&&f.judgment==='supports'&&f.sourceIds.length>0&&selectedClaimBindings.length>0&&
+    selectedClaimBindings.every(binding=>binding.sourceIds.length>0)&&
+    f.sourceIds.every(sourceId=>selectedClaimBindings.some(binding=>binding.sourceIds.includes(sourceId)));
+   // Findings can span parallel answer claims. These edges only record references
+   // each claim already selected; they never pool semantic support or add a citation.
+   return {findingId,linked,selectedClaimBindings};});
   return [id,{status:value.complete&&entries.length>0&&entries.every(e=>e.linked)?'bindings-linked':'incomplete',findings:entries}];
  }));
  return {status:Object.values(findings).every(f=>f.status==='bindings-linked')?'bindings-linked-awaiting-independent-review' as const:'incomplete' as const,
-  bindingsValid:true as const,semanticVerified:false as const,questionCoverage:'unassessed' as const,requirements:findings};
+  assessmentVersion:'selected-source-claim-edges-v1' as const,bindingsValid:true as const,
+  semanticVerified:false as const,questionCoverage:'unassessed' as const,requirements:findings};
 }
 export function mapQuestionScopeWitness(value:QuestionScopeWitness,map:(sourceId:string)=>string):QuestionScopeWitness{
  return {...value,requirements:Object.fromEntries(Object.entries(value.requirements).map(([id,r])=>[id,{findings:r.findings.map(f=>({...f,sourceIds:f.sourceIds.map(map)}))}]))};
