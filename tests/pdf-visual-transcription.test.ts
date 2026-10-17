@@ -70,16 +70,19 @@ test('incomplete visual pages are not cached or published and leave the prior in
  const publish=t.mock.method(kernel,'ingestParsedDocument',async()=>{throw new Error('Incomplete text must not be published');});
  let calls=0;
  try{
-  for(const result of [
-   {output_text:JSON.stringify({text:'Partial visible equation',complete:false,uncertain_spans:[]})},
-   {status:'incomplete',output_text:JSON.stringify({text:'Looks complete but provider was truncated',complete:true,uncertain_spans:[]})},
+  for(const {result,reason} of [
+   {result:{output_text:JSON.stringify({blocks:[{kind:'text',text:'Partial visible equation'}],complete:false,uncertain_spans:[]})},reason:/Incomplete selected page/},
+   {result:{status:'incomplete',output_text:JSON.stringify({blocks:[{kind:'text',text:'Looks complete but provider was truncated'}],complete:true,uncertain_spans:[]})},reason:/视觉转写不完整/},
   ]){
    globalThis.fetch=async input=>{
     assert.equal(String(input),'https://api.openai.com/v1/responses');
     calls++;return Response.json(result);
    };
-   await assert.rejects(convertDocumentWithDocling('visual-test-owner',id),/第 1 页视觉转写不完整/);
-   assert.equal(await db.prepare("SELECT 1 FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1'").bind(id).first(),null);
+   await assert.rejects(convertDocumentWithDocling('visual-test-owner',id),error=>{
+    assert.ok(error instanceof PdfVisualStructureError);assert.equal(error.code,'PDF_VISUAL_TEXT_STRUCTURE_INVALID');
+    assert.match(error.message,reason);assert.equal(error.rawOutput,result.output_text);assert.equal(error.rawFormat,'provider-output-json');return true;
+   });
+   assert.equal(await db.prepare("SELECT 1 FROM library_parse_pages WHERE document_id=? AND (parser='pdf-visual-v1' OR parser LIKE 'pdf-visual-selected-v4:%')").bind(id).first(),null);
    assert.equal(publish.mock.callCount(),0);
    assert.equal((await db.prepare('SELECT body FROM library_chunks WHERE document_id=?').bind(id).first<{body:string}>())?.body,'Previous complete text');
    assert.equal((await db.prepare('SELECT status FROM library_documents WHERE id=?').bind(id).first<{status:string}>())?.status,'ready');
