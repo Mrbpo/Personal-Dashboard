@@ -35,6 +35,7 @@ test('kernel tutor shares current-source references, preserves ownership and req
   assert.equal(calls,1);assert.equal(legacyCalls,0);assert.equal(actual.owner,'alice');
   assert.equal(actual.policy.scope,'application');assert.equal(actual.policy.model,'gpt-5.4-mini');
   assert.equal(actual.options.includeImages,true);assert.equal(actual.options.relatedDocuments,true);
+  assert.equal(actual.options.refineAdjacent,process.env.KERNEL_DOCUMENT_HYBRID==='true'&&process.env.KERNEL_DOCUMENT_RERANK==='true');
   const state=await tutor.tutorState('alice',id),message=state.messages[1];
   assert.match(message.body,/42.*\[S1\]/);assert.equal(message.meta.citations[0].title,'Original notes · p2');
   assert.equal(message.meta.citations[0].evidence.documentVersionId,'v1');assert.equal(message.meta.study.semanticVerified,false);

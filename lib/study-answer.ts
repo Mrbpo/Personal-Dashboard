@@ -25,7 +25,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  let stage:StudyFailureStage='retrieval';
  try{
   const result=await kernel.answerStudyContent(owner,question,{...(courseId?{courseId}:{}),retrievalQuestion,
-   includeParents:true,includeImages:true,relatedDocuments:true,refineAdjacent:true,
+   includeParents:true,includeImages:true,relatedDocuments:true,
+   refineAdjacent:process.env.KERNEL_DOCUMENT_HYBRID==='true'&&process.env.KERNEL_DOCUMENT_RERANK==='true',
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,
