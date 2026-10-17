@@ -8,6 +8,10 @@ import {PDFDocument} from 'pdf-lib';
 import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
 import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
+import {writeFile} from 'node:fs/promises';
+import {preparePdfVisualEvidence} from '../lib/kernel/pdf-visual-evidence.ts';
+import {DocumentContextError} from '../lib/kernel/document-context.ts';
+import {sourcePageRegionsFixture,fixtureSha} from './fixtures/source-page-regions.ts';
 
 test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});
@@ -355,6 +359,40 @@ test('Docling failure keeps the original and retry commits parsed evidence',asyn
     assert.equal((await library.getDocument('owner',id)).status,'ready');
   }finally{
     globalThis.fetch=original;
+    rmSync(directory,{recursive:true,force:true});
+  }
+});
+
+test('real PG current-page regions bind registered synthetic PDF and injected PNG without rewriting evidence',async()=>{
+  await migrateKernel();
+  const directory=mkdtempSync(join(tmpdir(),'kernel-source-regions-')),previousRoot=process.env.LIBRARY_DIR,
+    previousFetch=globalThis.fetch,tag=randomUUID(),owner='regions-pg:'+tag,id='regions-pg-doc:'+tag,title='Synthetic regions '+tag;
+  process.env.LIBRARY_DIR=directory;let calls=0;
+  globalThis.fetch=async()=>{calls++;throw Error('Synthetic region integration has no external service');};
+  try{
+    const pdf=await PDFDocument.create();pdf.addPage([100,200]).drawText('Synthetic fixture',{x:5,y:100,size:6});
+    const bytes=await pdf.save(),sourceHash=fixtureSha(bytes),fixture=sourcePageRegionsFixture({documentId:id,
+      currentVersionId:'not-yet-registered',sourceVersionId:'not-yet-registered',sourceHash,courseId:''},owner,{sourceHash,inputHash:sourceHash});
+    await writeFile(join(directory,sourceHash),bytes);
+    for(const blob of fixture.casBlobs)await writeFile(join(directory,blob.sha256),blob.bytes);
+    // This is an explicitly injected 1px test renderer, not PDF text recognition.
+    const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout:fixture.layout},async()=>fixture.png);
+    await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:title,hash:sourceHash,mime:'application/pdf',origin:'regions-pg-fixture',originKey:id},
+      [{pageNumber:1,locator:'page:1',text:fixture.body}],{parserVersion:'synthetic-regions-fixture-v1',batchProvenance:fixture.progress,pdfVisuals:visuals});
+    const resolved=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});
+    assert.equal(resolved.status,'resolved');if(resolved.status!=='resolved')throw Error('Synthetic source not registered');
+    const source=resolved.document,before=await kernel.readDocumentSourcePages(owner,source),
+      result=await kernel.readDocumentPageRegions(owner,source,1);
+    assert.equal(result.status,'available');if(result.status!=='available')throw Error('Synthetic regions unavailable');
+    assert.equal(result.pageEvidenceId,before.nodes[0].evidenceId);assert.equal(result.pageBodySha256,fixtureSha(fixture.body));
+    assert.equal(result.image.sha256,fixture.pngSha);assert.equal(result.index.result.resultBlobSha256,fixture.rawHash);
+    assert.equal(result.index.nodes.length,7);assert.equal(result.index.semanticRelationsVerified,false);assert.equal(result.index.visibilityVerified,false);
+    assert.deepEqual(await kernel.readDocumentSourcePages(owner,source),before);
+    await assert.rejects(kernel.readDocumentPageRegions('foreign-owner',source,1),error=>
+      error instanceof DocumentContextError&&error.code==='DOCUMENT_CONTEXT_CHANGED');
+    assert.equal(calls,0);
+  }finally{
+    globalThis.fetch=previousFetch;if(previousRoot===undefined)delete process.env.LIBRARY_DIR;else process.env.LIBRARY_DIR=previousRoot;
     rmSync(directory,{recursive:true,force:true});
   }
 });
