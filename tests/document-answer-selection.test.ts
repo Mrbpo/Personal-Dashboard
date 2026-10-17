@@ -63,6 +63,13 @@ test('isolated application daily allowance shares selection generation and local
  // The literal guard is tested after initializing only this process's in-memory
  // SQLite. No PostgreSQL or file:/pdf-data/benchmark.sqlite connection is opened.
  await database.prepare('SELECT count(*) n FROM ai_ledger').first();
+ assert.equal(process.env.DATABASE_URL,':memory:');
+ const ledgerRows=async()=>(await database.prepare('SELECT * FROM ai_ledger ORDER BY id').all<Record<string,unknown>>()).results,
+  originalRows=await ledgerRows(),originalIds=new Set(originalRows.map(r=>String(r.id))),ownedIds=new Set<string>(),
+  dayStart=Math.floor(Date.now()/86400000)*86400000,dayEnd=dayStart+86400000,
+  dayCount=async()=>Number((await database.prepare("SELECT count(*) n FROM ai_ledger WHERE kind='document-answer' AND created_at>=? AND created_at<?")
+   .bind(dayStart,dayEnd).first<{n:number}>())!.n),beforeDayCount=await dayCount(),
+  fillCount=Math.max(0,200-beforeDayCount),startDayCount=beforeDayCount+fillCount,fixturePrefix='synthetic-prior-'+randomUUID()+'-';
  const names=['DATABASE_URL','KERNEL_DATABASE_URL','KERNEL_ADMIN_DEVELOPMENT_RUN','AI_BUDGET_TEST_BYPASS','AI_MONTHLY_BUDGET'] as const;
  const env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved=globalThis.fetch,c=context(),question='What count?';
  const attempts:string[]=[],raw:any[]=[],checkedPolicy={...policy,dailyLimit:1000,citationCheck:{mode:'selected-once' as const,
@@ -73,11 +80,13 @@ test('isolated application daily allowance shares selection generation and local
  try{
   process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
   process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='1';
-  await database.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<200)
+  if(fillCount)await database.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<?)
    INSERT INTO ai_ledger(id,month,kind,reserved,charged,status,created_at)
-   SELECT 'synthetic-prior-'||n,?,'document-answer',0.000001,0,'settled',? FROM seq`).bind(budgetMonth(),Date.now()).run();
-  globalThis.fetch=async(_url,init)=>{const request=JSON.parse(String(init?.body)),format=request.text.format.name;formats.push(format);
-   rowCounts.push(Number((await database.prepare("SELECT count(*) n FROM ai_ledger WHERE kind='document-answer'").first<{n:number}>())!.n));
+   SELECT ?||n,?,'document-answer',0.000001,0,'settled',? FROM seq`).bind(fillCount,fixturePrefix,budgetMonth(),Date.now()).run();
+  for(let n=1;n<=fillCount;n++)ownedIds.add(fixturePrefix+n);
+  globalThis.fetch=async(_url,init)=>{const fresh=(await ledgerRows()).filter(r=>!originalIds.has(String(r.id))&&!ownedIds.has(String(r.id)));
+   for(const row of fresh)ownedIds.add(String(row.id));assert.equal(fresh.length,1,'Only this mock phase creates a fresh ordinary reservation');
+   const request=JSON.parse(String(init?.body)),format=request.text.format.name;formats.push(format);rowCounts.push(await dayCount());
    if(format==='document_evidence_selection'){
     assert.equal(JSON.stringify(request),JSON.stringify(buildDocumentEvidenceSelectionRequest(p,settings,{...checkedPolicy,dailyLimit:200})));
     return output({referenceIds:[id]});}
@@ -88,15 +97,20 @@ test('isolated application daily allowance shares selection generation and local
   const result=await kernel.answerStudyContent('owner',question,{},checkedPolicy);
   assert.equal(result.answer.status,'answered');assert.equal(attempts.length,1);assert.equal(raw.length,1);
   assert.deepEqual(formats,['document_evidence_selection','grounded_document_answer_units','citation_local_visual_unit_v1']);
-  assert.deepEqual(rowCounts,[201,202,203]);
-  const rows=await database.prepare('SELECT kind,status,charged FROM ai_ledger').all<{kind:string;status:string;charged:number}>();
-  assert.equal(rows.results.length,203);assert.ok(rows.results.every(r=>r.kind==='document-answer'&&r.status==='settled'));
+  assert.deepEqual(rowCounts,[1,2,3].map(n=>startDayCount+n));
+  const rows=await ledgerRows(),created=rows.filter(r=>ownedIds.has(String(r.id)));
+  assert.equal(rows.length,originalRows.length+fillCount+3);assert.equal(created.length,fillCount+3);
+  assert.ok(created.every(r=>r.kind==='document-answer'&&r.status==='settled'));
   const blocked=(reason:string)=>(e:unknown)=>e instanceof AiBudgetDeferredError&&e.reason===reason;
-  await assert.rejects(kernel.answerStudyContent('owner',question,{}, {...checkedPolicy,dailyLimit:203}),blocked('daily'));
+  await assert.rejects(kernel.answerStudyContent('owner',question,{}, {...checkedPolicy,dailyLimit:startDayCount+3}),blocked('daily'));
   process.env.AI_MONTHLY_BUDGET='0';
   await assert.rejects(kernel.answerStudyContent('owner',question,{},checkedPolicy),blocked('monthly'));
-  assert.equal(formats.length,3);assert.equal(Number((await database.prepare('SELECT count(*) n FROM ai_ledger').first<{n:number}>())!.n),203);
- }finally{globalThis.fetch=saved;for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}
+  assert.equal(formats.length,3);assert.equal(await dayCount(),startDayCount+3);
+ }finally{globalThis.fetch=saved;
+  try{for(const id of ownedIds){assert.ok(!originalIds.has(id));await database.prepare('DELETE FROM ai_ledger WHERE id=?').bind(id).run();}
+   assert.deepEqual(await ledgerRows(),originalRows,'Only this fixture rows were removed; all prior rows and values survive');
+  }finally{for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}
+ }
 });
 
 test('empty selection and source changes stop before any generation without retries',async()=>{
