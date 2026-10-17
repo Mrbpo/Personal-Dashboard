@@ -63,6 +63,34 @@ and raw-response journals, and caller funding limits apply separately to each ph
 There is no retry, planner, model upgrade or new deployment/API route. An exported utility
 is not authorization to send a paid request.
 
+### Explicit reasoned evidence profile (Issue177)
+
+Development callers may pass `auditProfile: 'reasoned-v1'` through
+`KernelService.auditSelectedStudySourceClaim`, `KernelService.answerPlannedStudyContent`
+or `reviewCompletePlannedStudyAnswer`. Only new citation-local and complete-source
+coverage requests then use fixed `gpt-5.4-mini`, medium reasoning, 4000 output tokens
+and the existing 30s timeout. Prompts, schemas, original text, source IDs, PNG bytes,
+image detail, current-source checks and single-attempt boundaries are unchanged.
+Generation/content revision keeps its existing medium/4000 settings. Without this
+explicit profile the old local low/1000 and coverage low/4000 bodies and identities
+remain byte-compatible. The profile is bound to the new actual request identity and
+diagnostic/attempt metadata; actual-body reservation and usage bounds include 4000
+tokens for every new local check. There is no extra request or automatic upgrade.
+
+An archived original audit is restored using its own recorded profile (absent for
+historical low/1000), original request/raw identity and source binding. The new profile
+does not relabel, regenerate or re-audit it. Newly proposed content receives separate
+medium/4000 selected-only checks. Original selected-only failures remain separate from
+full-source coverage; neither can be washed away by an unrelated source. Combining
+this profile with `citationRevision: true` is rejected before source/provider work:
+the older citation-only proposal/final-audit protocol stays unchanged. Unknown profiles
+and medium coverage without the exact explicit profile fail before reservation.
+Production settings remain restricted to their existing defaults.
+
+These execution and mock compatibility checks do not prove better semantic accuracy,
+complete answers, correct PDF transcription or any independent benchmark pass. Actual
+paid validation and deployment require their separate coordinator authorization.
+
 Focused mock checks cover real-ID validation; uncertain/refusal handling; preservation
 of original raw, all source text/images and unchanged facts; physically local re-audits;
 tampered raw/diagnostics, source drift, invalid selectors and capacity; integrated capture
