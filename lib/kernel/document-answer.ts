@@ -6,7 +6,8 @@ import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
-import {assertNativeTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,type NativeTableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
+import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
+ type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v5';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -16,7 +17,8 @@ export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficient
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;body:string;bodySha256:string};
 type AuthorImage={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:string;byteLength:number;
- width:number;height:number;mime:'image/png';bytes:Uint8Array;source:{documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string}};
+ width:number;height:number;mime:'image/png';bytes:Uint8Array;source:{documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string};
+ tableObservations?:TableObservation[]};
 type Image=AuthorImage|NativeTableObservedImage;
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
@@ -34,7 +36,7 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  visual?:{kind:'pdf-page'|'pdf-region';physicalPage:number;rawPdfSha256:string;manifestSha256:string};
  captionMembers?:DocumentQuoteUnit[];
- tableObservations?:NativeTableObservation[];
+ tableObservations?:TableObservation[];
  evidenceId:string;locator:string;sha256:string;text?:string;image?:Image};
 type Citation={id:string;quote:string};
 type Claim={text:string;citations:Citation[]};
@@ -143,9 +145,20 @@ function supportFor(context:DocumentAnswerContext):Support[]{
    throw new Error('PDF image has no genuine current page evidence anchor');
    const observations='tableObservations' in image?image.tableObservations:undefined;
    if(observations!==undefined){
-    if(!pdf||!Array.isArray(observations)||!observations.length||observations.length>NATIVE_TABLE_OBSERVATION_LIMITS.perImage||
+    if(!Array.isArray(observations)||!observations.length||observations.length>NATIVE_TABLE_OBSERVATION_LIMITS.perImage||
      new Set(observations.map(o=>o.candidate?.artifactSha256)).size!==observations.length)throw new Error('Invalid native table observations');
-    for(const observation of observations)assertNativeTableObservation(observation,image);
+    for(const observation of observations){
+     if(observation.version==='docling-native-observation-v1'){
+      if(!pdf)throw new Error('Native PDF observation requires a PDF page');assertNativeTableObservation(observation,image);
+     }else{
+      if(pdf)throw new Error('Author image observation requires its actual caption attachment');
+      assertAuthorImageTableObservation(observation,image);
+      if(!supports.some(s=>s.evidenceId===anchor&&s.documentId===image.source.documentId&&s.documentVersionId===image.source.currentVersionId&&
+       s.sourceVersionId===image.source.sourceVersionId&&s.sourceHash===image.source.sourceHash)&&
+       !imageOnly.some(n=>n.evidence_id===anchor&&n.document_id===image.source.documentId&&n.id===`pg:${image.source.currentVersionId}:${n.page_number}`&&
+        n.source_version_id===image.source.sourceVersionId&&n.source_hash===image.source.sourceHash))throw new Error('Author observation has no current caption anchor');
+     }
+    }
    }
   imageIds.add(image.attachmentId);
   supports.push({id:`i${imageIds.size-1}`,kind:'image',documentId:image.source.documentId,documentVersionId:image.source.currentVersionId,

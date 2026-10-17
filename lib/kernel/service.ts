@@ -25,6 +25,8 @@ import type {IngestionJob} from './jobs.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
  searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
+ prepareAuthorImageTableCandidate,commitAuthorImageTableCandidate,searchAuthorImageTableCandidates,readAuthorImageTableCandidateEvidence,
+ type CompletedAuthorImageTableRun,
  type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
 import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
 
@@ -1013,6 +1015,21 @@ export class KernelService {
 
   nativeTableBlobHashes(){return nativeTableBlobHashes(kernelPool());}
 
+  /** Explicit administrator registration of one completed, source-bound run.
+   * No model, parser, embeddings, or batch import occurs here. */
+  async registerAuthorImageTableCandidate(owner:string,source:DocumentContextSource,input:CompletedAuthorImageTableRun){
+    const prepared=await prepareAuthorImageTableCandidate(kernelPool(),owner,source,input);
+    return kernelTransaction(client=>commitAuthorImageTableCandidate(client,prepared));
+  }
+
+  searchAuthorImageTableCandidates(owner:string,question:string,source:DocumentContextSource){
+    return searchAuthorImageTableCandidates(kernelPool(),owner,question,source);
+  }
+
+  readAuthorImageTableCandidateEvidence(owner:string,candidates:Parameters<typeof readAuthorImageTableCandidateEvidence>[2]){
+    return readAuthorImageTableCandidateEvidence(kernelPool(),owner,candidates);
+  }
+
   searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}){
     return searchNativeTableCandidates(kernelPool(),owner,question,scope);
   }
@@ -1164,15 +1181,34 @@ export class KernelService {
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
       const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
-      if(!tableCandidates.length)return context;
+      if(!tableCandidates.length)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
       const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
         imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined);
       const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
       const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
-      return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
+      const enriched={...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
         images,...(imageBudget?{imageSelection:imageBudget.snapshot()}:{}),
         ...('accounting' in context?{accounting:{...context.accounting,imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
+      return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,enriched,selected):enriched;
     };
+  }
+
+  /** One explicit title/source only. Original ranked anchors and other sources
+   * stay intact; the existing PNG is still the sole selectable image evidence. */
+  private async authorImageTableContext(owner:string,question:string,context:DocumentAnswerContext,source:DocumentContextSource):Promise<DocumentAnswerContext>{
+    const nativeImages=context.images.filter(image=>image.tableObservations?.some(o=>o.version==='docling-native-observation-v1'));
+    const candidates=(await this.searchAuthorImageTableCandidates(owner,question,source)).slice(0,Math.max(0,2-nativeImages.length));
+    if(!candidates.length)return context;
+    const budget=createDocumentImageBudget();
+    for(const [index,image]of context.images.entries())if(!budget.include(image,index+1))throw new Error('Existing image budget changed');
+    const extra=await readAuthorImageTableCandidateEvidence(kernelPool(),owner,candidates,{budget,firstAnchorRank:context.anchors.length+1});
+    const images=[...new Map([...context.images,...extra.images].map(image=>[image.attachmentId,image])).values()];
+    const supported=new Set([...context.anchors.map(n=>n.evidence_id),...context.parents.flatMap(p=>p.nodes.map(n=>n.evidenceId))]);
+    const imageAnchors=[...new Map([...context.imageAnchors??[],...extra.imageAnchors].filter(n=>!supported.has(n.evidence_id)).map(n=>[n.evidence_id,n])).values()];
+    if(imageAnchors.length>2)throw new Error('Shared supplemental image limit');
+    return {...context,images,imageAnchors,imageSelection:{...budget.snapshot(),omitted:[...context.imageSelection?.omitted??[],...budget.snapshot().omitted]},
+      ...('accounting' in context?{accounting:{...(context as {accounting:Record<string,unknown>}).accounting,
+        imageCount:images.length,imageBytes:images.reduce((sum,i)=>sum+i.byteLength,0)}}:{})};
   }
 
   /** Non-structured study content only; canonical business facts use their own
@@ -1191,8 +1227,9 @@ export class KernelService {
       if(mentioned.status==='resolved'){
         const selected=mentioned.matches[0];
         read=async()=>{
-          const base=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+          const ranked=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
           if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
+          const base=await this.authorImageTableContext(owner,retrievalQuestion??question,ranked,selected);
           const complete=await this.readCompleteDocumentSource(owner,selected);
           if(complete.status==='unavailable'){
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:complete.reason};return base;

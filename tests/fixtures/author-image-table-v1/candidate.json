@@ -1,0 +1,391 @@
+{
+  "complete": true,
+  "uncertain": [],
+  "tables": [
+    {
+      "caption": "Table 1. Evaluation of different VQA models on visual grounding and answer prediction. All the listed models are trained on VQA-",
+      "rowCount": 11,
+      "columnCount": 4,
+      "cells": [
+        {
+          "row": 0,
+          "column": 0,
+          "rowSpan": 2,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "",
+          "bold": "none"
+        },
+        {
+          "row": 0,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 2,
+          "headerRole": "section",
+          "text": "Rank Correlation",
+          "bold": "none"
+        },
+        {
+          "row": 0,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "section",
+          "text": "Accuracy/%",
+          "bold": "none"
+        },
+        {
+          "row": 1,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "column",
+          "text": "VQA-HAT",
+          "bold": "none"
+        },
+        {
+          "row": 1,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "column",
+          "text": "VQA-X",
+          "bold": "none"
+        },
+        {
+          "row": 1,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "column",
+          "text": "VQA-2.0",
+          "bold": "none"
+        },
+        {
+          "row": 2,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "Human [5]",
+          "bold": "none"
+        },
+        {
+          "row": 2,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.623",
+          "bold": "none"
+        },
+        {
+          "row": 2,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "-",
+          "bold": "none"
+        },
+        {
+          "row": 2,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "80.62",
+          "bold": "none"
+        },
+        {
+          "row": 3,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "PJ-X [17]",
+          "bold": "none"
+        },
+        {
+          "row": 3,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.396",
+          "bold": "none"
+        },
+        {
+          "row": 3,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.342",
+          "bold": "none"
+        },
+        {
+          "row": 3,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "-",
+          "bold": "none"
+        },
+        {
+          "row": 4,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "MCB [6]",
+          "bold": "none"
+        },
+        {
+          "row": 4,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.276",
+          "bold": "none"
+        },
+        {
+          "row": 4,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.261",
+          "bold": "none"
+        },
+        {
+          "row": 4,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "62.27",
+          "bold": "none"
+        },
+        {
+          "row": 5,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "Attn-MCB, α=1 (ours)",
+          "bold": "none"
+        },
+        {
+          "row": 5,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.580",
+          "bold": "all"
+        },
+        {
+          "row": 5,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.396",
+          "bold": "all"
+        },
+        {
+          "row": 5,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "60.51",
+          "bold": "none"
+        },
+        {
+          "row": 6,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "Attn-MCB (ours)",
+          "bold": "none"
+        },
+        {
+          "row": 6,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.517",
+          "bold": "none"
+        },
+        {
+          "row": 6,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.375",
+          "bold": "none"
+        },
+        {
+          "row": 6,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "62.24",
+          "bold": "none"
+        },
+        {
+          "row": 7,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "MFB [25]",
+          "bold": "none"
+        },
+        {
+          "row": 7,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.276",
+          "bold": "none"
+        },
+        {
+          "row": 7,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.299",
+          "bold": "none"
+        },
+        {
+          "row": 7,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "65.22",
+          "bold": "none"
+        },
+        {
+          "row": 8,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "Attn-MFB (ours)",
+          "bold": "none"
+        },
+        {
+          "row": 8,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.416",
+          "bold": "none"
+        },
+        {
+          "row": 8,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.335",
+          "bold": "none"
+        },
+        {
+          "row": 8,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "65.36",
+          "bold": "none"
+        },
+        {
+          "row": 9,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "MFH [26]",
+          "bold": "none"
+        },
+        {
+          "row": 9,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.354",
+          "bold": "none"
+        },
+        {
+          "row": 9,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.350",
+          "bold": "none"
+        },
+        {
+          "row": 9,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "66.17",
+          "bold": "none"
+        },
+        {
+          "row": 10,
+          "column": 0,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "row",
+          "text": "Attn-MFH (ours)",
+          "bold": "none"
+        },
+        {
+          "row": 10,
+          "column": 1,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.483",
+          "bold": "none"
+        },
+        {
+          "row": 10,
+          "column": 2,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "0.376",
+          "bold": "none"
+        },
+        {
+          "row": 10,
+          "column": 3,
+          "rowSpan": 1,
+          "columnSpan": 1,
+          "headerRole": "none",
+          "text": "66.31",
+          "bold": "all"
+        }
+      ]
+    }
+  ]
+}

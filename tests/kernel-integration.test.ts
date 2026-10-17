@@ -9,6 +9,68 @@ import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
 import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
 
+test('author-image table registration reaches natural title FTS, real selector/generator input and rejects foreign/current/row bindings',async()=>{
+  await migrateKernel();
+  const {hash,png,syntheticRun}=await import('./fixtures/author-image-table-v1/run.ts');
+  const {nativeTableBlobHashes}=await import('../lib/kernel/document-table-candidates.ts');
+  const tag=randomUUID(),owner=`author-grid-owner-${tag}`,id=`author-grid-${tag}`,title=`Author Grid Fixture ${tag}`;
+  const doc={id,ownerId:owner,courseId:'',name:title,hash:hash(tag),mime:'application/json',origin:'author-grid-fixture',originKey:id};
+  const text='Original author caption. The numeric contents exist only in the original image.';
+  await kernel.ingestParsedDocument(doc,[{locator:'caption:0',text}],{parserVersion:'author-grid-fixture'});
+  const resolved=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});
+  assert.equal(resolved.status,'resolved');if(resolved.status!=='resolved')throw new Error('fixture source');
+  const source=resolved.document,pages=await kernel.readDocumentSourcePages(owner,source),caption=pages.nodes[0].evidenceId;
+  await kernel.registerDocumentStructure(owner,source,{rawSourceHash:doc.hash,parserVersion:'author-grid-fixture',parents:[],
+    nodes:[{evidenceId:caption,locator:'caption:0',ordinal:0,kind:'caption',bodySha256:hash(text)}]});
+  await kernel.registerDocumentImage(owner,source,{captionEvidenceId:caption,originalReference:'original.png',bytes:png,
+    provenance:{sourceUrl:'https://example.invalid/public-fixture',revision:'synthetic-not-recognition'}});
+  const [image]=await kernel.readDocumentImages(owner,source,[caption]),outline=await kernel.readDocumentOutline(owner,source);
+  const run=await syntheticRun(image,outline.manifestSha256),item=await kernel.registerAuthorImageTableCandidate(owner,source,run);
+  assert.deepEqual(await kernel.registerAuthorImageTableCandidate(owner,source,run),item,'same immutable run is idempotent');
+  const hits=await kernel.searchAuthorImageTableCandidates(owner,'NeedleMeasure',source);assert.deepEqual(hits,[item]);
+  const textOnly=await (kernel as any).studyAnswerContextReader(owner,'NeedleMeasure',{sourceHint:{selectedDocumentTitle:title},
+    limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,includeParents:false,includeImages:false});
+  assert.deepEqual((await textOnly()).images,[],'an explicit title never bypasses the existing no-image switch');
+  const noDerived=await (kernel as any).studyAnswerContextReader(owner,'NeedleMeasure',{sourceHint:{selectedDocumentTitle:title},
+    limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,includeParents:true,includeImages:true},false);
+  assert.deepEqual((await noDerived()).images,[],'the existing derived-table opt-out also disables author observations');
+  const evidence=await kernel.readAuthorImageTableCandidateEvidence(owner,hits);
+  assert.equal(evidence.images[0].tableObservations?.[0].status,'available');assert.equal(evidence.images[0].sha256,hash(png));
+  const stored=(await kernelPool().query('SELECT * FROM document_table_candidates WHERE id=$1',[item.id])).rows[0];
+  assert.equal(stored.source_kind,'author-caption-image');assert.equal(stored.page_number,null);assert.equal(stored.manifest_sha256,null);
+  assert.equal(stored.options_sha256,null);assert.equal(stored.attachment_id,image.attachmentId);
+  assert.ok(stored.search_text.includes('rowSpan=1'));assert.ok(stored.search_text.includes('headerRole=section'));
+  const requestBodies:any[]=[],originalFetch=globalThis.fetch,originalBypass=process.env.AI_BUDGET_TEST_BYPASS;
+  process.env.AI_BUDGET_TEST_BYPASS='true';
+  try{
+    globalThis.fetch=async(_url,init)=>{
+      const request=JSON.parse(String(init?.body));requestBodies.push(request);
+      const payload=requestBodies.length===1?{referenceIds:['i0']}:{status:'answered',message:'',claims:[{text:'Synthetic test claim.',citations:[{id:'i0'}]}]};
+      if(requestBodies.length>2)throw new Error('Unexpected synthetic provider attempt');
+      return Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',output_text:JSON.stringify(payload),usage:{input_tokens:1,output_tokens:1}});
+    };
+    const question=`What does NeedleMeasure report in "${title}"?`;
+    await kernel.answerStudyContent(owner,question,{limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,
+      includeImages:true,includeParents:true},{scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000,evidenceSelection:'select-then-answer'});
+    assert.equal(requestBodies.length,2);
+    assert.equal(requestBodies[0].text.format.name,'document_evidence_selection');
+    for(const body of requestBodies){
+      const wire=JSON.stringify(body);assert.ok(wire.includes('author-image-table-observation-v1'));assert.ok(wire.includes('NeedleMeasure'));
+      assert.ok(wire.includes('"semanticVerified":false')||wire.includes('\\"semanticVerified\\":false'));
+      assert.equal(body.input.flatMap((x:any)=>Array.isArray(x.content)?x.content:[]).filter((x:any)=>x.type==='input_image').length,1);
+    }
+  }finally{globalThis.fetch=originalFetch;if(originalBypass===undefined)delete process.env.AI_BUDGET_TEST_BYPASS;else process.env.AI_BUDGET_TEST_BYPASS=originalBypass;}
+  await assert.rejects(kernel.readAuthorImageTableCandidateEvidence('foreign-owner',hits));
+  await assert.rejects(kernel.registerAuthorImageTableCandidate('foreign-owner',source,run));
+  await kernelPool().query('UPDATE document_table_candidates SET input_sha256=$2 WHERE id=$1',[item.id,hash('foreign request')]);
+  await assert.rejects(kernel.readAuthorImageTableCandidateEvidence(owner,hits));
+  await kernelPool().query('UPDATE document_table_candidates SET input_sha256=$2 WHERE id=$1',[item.id,stored.input_sha256]);
+  await kernel.ingestParsedDocument(doc,[{locator:'caption:0',text:'Changed current source'}],{parserVersion:'author-grid-fixture-new'});
+  await assert.rejects(kernel.readAuthorImageTableCandidateEvidence(owner,hits));
+  const refs=await nativeTableBlobHashes(kernelPool());
+  for(const ref of stored.artifact.blobReferences)assert.ok(refs.includes(ref.sha256),'historical original protocol bytes remain GC roots');
+});
+
 test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});
   assert.equal(parseDeadline('2026-09-25T12:30').precision,null);
