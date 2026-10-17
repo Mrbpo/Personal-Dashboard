@@ -1,4 +1,4 @@
-import {PDFDocument} from 'pdf-lib';
+import {PDFDocument,PDFName,PDFNumber} from 'pdf-lib';
 import {createHash} from 'node:crypto';
 import {database as db} from './database.ts';
 import {paidOpenAI,isGpt54MiniProviderModel} from './ai-budget.ts';
@@ -10,6 +10,7 @@ import {assertVisualCacheStructure,PdfVisualStructureError,VISUAL_UNCERTAINTY_HE
 import {VISUAL_CROP_VIEWS,visualTileCropBox,visualTileRotation} from './pdf-visual-tiles.ts';
 import {collectPdfSourceObservations,observationBinding,observationImage,sourceObservationInputText,encodeSourceObservationCache,readSourceObservationCache,type PdfSourceObservations} from './pdf-source-observations.ts';
 import {VISUAL_BLOCK_PROTOCOL,VISUAL_BLOCK_PROMPT,VISUAL_BLOCK_SCHEMA,validateVisualPageContent,visualPageSearchText,encodeVisualBlockCache,readVisualBlockCache} from './pdf-visual-blocks.ts';
+import {validatePdfNativeGridObservation,assertPdfNativeGridImage,nativeGridResponseSchema,nativeGridInputText,nativeGridCacheParser,derivePdfNativeGridPage,encodePdfNativeGridCache,readPdfNativeGridCache,PDF_NATIVE_GRID_PROMPT,type PdfNativeGridObservation,type PdfNativeGridFrame} from './pdf-native-grid.ts';
 import mammoth from 'mammoth';
 export const PDF_PARSER_VERSION='pdf-page-v3-latex';
 export const PDF_FORMULA_PAGES_PER_DOCUMENT=24;
@@ -17,7 +18,7 @@ export const PDF_FORMULA_PAGES_PER_UTC_DAY=60;
 export const PDF_VISUAL_PAGES_PER_DOCUMENT=24;
 export const PDF_VISUAL_PAGES_PER_UTC_DAY=60;
 
-export type VisualPageOptions={pageNumbers?:number[];expectedSourceHash?:string;model?:string;imageInput?:boolean;overviewImage?:boolean;fidelityProfile?:'structure-v1'|'source-observation-v1'};
+export type VisualPageOptions={pageNumbers?:number[];expectedSourceHash?:string;model?:string;imageInput?:boolean;overviewImage?:boolean;fidelityProfile?:'structure-v1'|'source-observation-v1';nativeGridObservations?:PdfNativeGridObservation[]};
 export const SELECTED_VISUAL_PARSER_VERSION='pdf-visual-selected-v4';
 const TILED_PNG_IDENTITY={mode:'four-overlapping-png-v2',rotationPolicy:'display-to-user-orthogonal-v1',promptVersion:1,renderMaxEdge:PDF_PAGE_IMAGE_MAX_EDGE,views:VISUAL_CROP_VIEWS};
 const OVERVIEW_TILED_PNG_IDENTITY={...TILED_PNG_IDENTITY,mode:'overview-and-four-overlapping-png-v1',overview:'full-visible-crop-before-details-v1'};
@@ -52,6 +53,21 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
  const sourceObservationProfile=options.fidelityProfile==='source-observation-v1';
  const structureProfile=options.fidelityProfile==='structure-v1'||sourceObservationProfile;
  if(structureProfile&&(!overviewImages||model!=='gpt-5.4-mini'))throw new Error('结构保真配置仅适用于显式选页、总览加四图 PNG 和 gpt-5.4-mini');
+ const nativeGridRoute=options.nativeGridObservations!==undefined,nativeGrids=new Map<number,PdfNativeGridObservation>();
+ if(nativeGridRoute){
+  if(!options.pageNumbers||!overviewImages||model!=='gpt-5.4-mini'||sourceObservationProfile||!Array.isArray(options.nativeGridObservations)||options.nativeGridObservations.length!==selection.length)
+   throw new Error('原生格输入仅适用于完整显式选页、总览四图 PNG 和 gpt-5.4-mini；不能叠加自动源观察');
+  for(const value of options.nativeGridObservations){
+   const grid=validatePdfNativeGridObservation(value);
+   if(!selection.includes(grid.physicalPage)||nativeGrids.has(grid.physicalPage))throw new Error('原生格页码缺失、重复或不在选页内');
+   const original=pdf.getPage(grid.physicalPage-1),unit=original.node.get(PDFName.of('UserUnit'));
+   if(unit!==undefined&&(!(unit instanceof PDFNumber)||unit.asNumber()!==1))throw new Error('原生格不支持未知或非一 UserUnit');
+   const media=original.getMediaBox(),crop=original.getCropBox(),rect=(b:typeof media):[number,number,number,number]=>[b.x,b.y,b.x+b.width,b.y+b.height];
+   const frame:PdfNativeGridFrame={rect:rect(media),mediaBox:rect(media),cropBox:rect(crop),rotation:original.getRotation().angle};
+   validatePdfNativeGridObservation(grid,{sourceHash,physicalPage:grid.physicalPage,frame});
+   nativeGrids.set(grid.physicalPage,grid);
+  }
+ }
  // Validate all selected rotations before any earlier page can make a request.
  if(tiledImages)for(const page of selection)visualTileRotation(pdf.getPage(page-1).getRotation().angle);
  // Selected-page repairs cannot reuse an unversioned, possibly differently
@@ -61,7 +77,8 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
  const pages:Array<{locator:string;text:string;pageNumber:number}>=[];
  for(const pageNumber of selection){
   const page=pageNumber-1;
-  const cached=sourceObservationProfile?null:await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?').bind(id,cacheParser,page).first<{body:string}>();
+  const nativeGrid=nativeGrids.get(pageNumber);
+  const cached=sourceObservationProfile||nativeGridRoute?null:await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?').bind(id,cacheParser,page).first<{body:string}>();
   if(cached){
    if(selectedBlocks){
     const text=readVisualBlockCache(cached.body,{sourceHash,physicalPage:pageNumber,model,parser:cacheParser}).text;
@@ -117,6 +134,11 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
    observations=await collectPdfSourceObservations(bytes,observationBinding(sourceHash,pageNumber,pdf.getPage(page),observedImages));
    visualInputs.push({type:'input_text',text:sourceObservationInputText(observations)});
   }
+  if(nativeGrid){
+   if(!fullPageImage)throw new Error('原生格需要真实完整总览 PNG；未发送请求');
+   assertPdfNativeGridImage(nativeGrid,fullPageImage);
+   visualInputs.push({type:'input_text',text:nativeGridInputText(nativeGrid)});
+  }
   // OCR observes one full source page, never a cropped detail or four-page derivative.
   if(selectedBlocks&&!fullPageImage&&process.env.LOCAL_OCR==='true'){
    const one=await PDFDocument.create(),view=(await one.copyPages(pdf,[page]))[0],box=pdf.getPage(page).getCropBox();
@@ -132,11 +154,16 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
     properties:{text:{type:'string'},complete:{type:'boolean'},uncertain_spans:{type:'array',items:{type:'string'}}},required:['text','complete','uncertain_spans']}}}};
   if(selectedBlocks){
    const promptPart=request.input[0].content[0];if(!('text' in promptPart))throw Error('Selected visual prompt missing');
-   promptPart.text+=VISUAL_BLOCK_PROMPT;
-   Object.assign(request.text.format,{name:'visual_page_blocks',schema:VISUAL_BLOCK_SCHEMA});
+   promptPart.text+=nativeGrid?PDF_NATIVE_GRID_PROMPT:VISUAL_BLOCK_PROMPT;
+   Object.assign(request.text.format,nativeGrid?{name:'visual_native_grid_cells',schema:nativeGridResponseSchema(nativeGrid)}:{name:'visual_page_blocks',schema:VISUAL_BLOCK_SCHEMA});
   }
-  const requestSha256=createHash('sha256').update(JSON.stringify(request)).digest('hex'),pageCacheParser=observations?
+  const requestSha256=createHash('sha256').update(JSON.stringify(request)).digest('hex'),pageCacheParser=nativeGrid?nativeGridCacheParser(cacheParser,nativeGrid):observations?
    selectedVisualPageCacheParser(sourceHash,model,imageInput,tiled,overviewImages,options.fidelityProfile,observations.sidecarSha256):cacheParser;
+  if(nativeGrid){
+   const cached=await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?').bind(id,pageCacheParser,page).first<{body:string}>();
+   if(cached){const derived=readPdfNativeGridCache(cached.body,{sourceHash,physicalPage:pageNumber,model,parser:pageCacheParser},nativeGrid,requestSha256);
+    pages.push({pageNumber,locator:`第 ${pageNumber} 页`,text:derived.searchText});continue;}
+  }
   if(observations){
    const cached=await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=?').bind(id,pageCacheParser,page).first<{body:string}>();
    if(cached){const body=readSourceObservationCache(cached.body,observations,requestSha256);
@@ -146,11 +173,17 @@ export async function transcribePdfVisualPages(id:string,bytes:Uint8Array,option
   const response=await paidOpenAI('responses',request,undefined,{kind:'pdf-transcription',dailyLimit:PDF_VISUAL_PAGES_PER_UTC_DAY});
   if(!response.ok)throw new Error(`第 ${page+1} 页视觉转写失败；已完成页保留`);
   const payload=await response.json();
-  if(sourceObservationProfile&&!isGpt54MiniProviderModel(payload.model))throw new Error(`第 ${page+1} 页源观察转写模型身份未知；不缓存，不自动重试`);
+  if((sourceObservationProfile||nativeGridRoute)&&!isGpt54MiniProviderModel(payload.model))throw new Error(`第 ${page+1} 页源观察转写模型身份未知；不缓存，不自动重试`);
   const raw=payload.output_text||payload.output?.flatMap((item:any)=>item.content||[]).map((item:any)=>item.text||'').join('');
   if(selectedBlocks){
    try{
-    if((sourceObservationProfile&&payload.status!=='completed')||payload.status==='incomplete'||payload.error||typeof raw!=='string'||raw.length>200000)throw Error('视觉转写不完整：Incomplete/oversize selected page');
+    if(((sourceObservationProfile||nativeGridRoute)&&payload.status!=='completed')||payload.status==='incomplete'||payload.error||typeof raw!=='string'||raw.length>200000)throw Error('视觉转写不完整：Incomplete/oversize selected page');
+    if(nativeGrid){
+     const binding={sourceHash,physicalPage:pageNumber,model,parser:pageCacheParser},derivation=derivePdfNativeGridPage(raw,nativeGrid);
+     const body=encodePdfNativeGridCache(binding,nativeGrid,requestSha256,ocr!,raw);
+     await db.prepare('INSERT OR IGNORE INTO library_parse_pages VALUES (?, ?, ?, ?)').bind(id,pageCacheParser,page,body).run();
+     pages.push({pageNumber,locator:`第 ${pageNumber} 页`,text:derivation.searchText});continue;
+    }
     const content=validateVisualPageContent(JSON.parse(raw));if(!content.complete)throw Error('Incomplete selected page');
     const text=visualPageSearchText(content),binding={sourceHash,physicalPage:pageNumber,model,parser:pageCacheParser};
     const body=encodeVisualBlockCache(binding,requestSha256,ocr!,raw);
