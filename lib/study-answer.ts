@@ -81,6 +81,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
+    ...('sourceScopedGeneration' in result?{sourceScopedGeneration:result.sourceScopedGeneration}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
     promptVersion:result.promptVersion,referencePolicyVersion:result.referencePolicyVersion,
     selectedUnits:result.selectedUnits,evidence:result.evidence,warnings:result.warnings,

@@ -390,6 +390,11 @@ export const DOCUMENT_EVIDENCE_SELECTION_VERSION='select-original-evidence-v1';
 export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_SELECTION_VERSION;coverage:'unassessed';referenceIds:string[];
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
  sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
+export type DocumentSourceScopedGenerationReceipt={version:'same-document-original-unit-probes-v1';coverage:'unassessed';
+ documentId:string;referenceIds:string[];mode:'unique-unit-answer'|'joint-fallback'|'stopped';generationBudgetMs:number;
+ attempts:{kind:'unit-probe'|'joint-fallback';referenceIds:string[];requestIdentity:string;providerRequestSha256:string;
+  state:'started'|'completed';requestedModel:DocumentAnswerModel;model?:string|null;providerResponseId?:string|null;usage?:unknown;
+  answerStatus?:DocumentAnswerSelections['status']}[]};
 type PreparedAnswer=ReturnType<typeof prepareDocumentAnswer>;
 const selectableIds=(prepared:PreparedAnswer)=>[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
  ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
@@ -520,22 +525,54 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    model:null,requestedModel:model,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
    promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt,evidenceSelection:selectionReceipt};
  }
- const request=referenceIds?buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy);
- const providerRequestSha256=sha(JSON.stringify(request));
- const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,
-  quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,fingerprint:prepared.fingerprint}));
- await policy.beforeAttempt?.(identity);
- policy.onStage?.('generation');
- const response=await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit});
- const {payload,actualModel,decoded}=await documentModelPayload(response,model,policy);
- policy.onStage?.('citation-validation');
- const {answer,providerSelections,selectedUnits}=resolveDocumentAnswerSelections(decoded,prepared.supports);
- if(referenceIds&&selectedUnits.some(unit=>!referenceIds.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
- policy.onStage?.('evidence-selection');
- if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
-  throw new Error('Document evidence changed during answer generation');
- return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
-  model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
-  sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,
-  ...(selectionReceipt?{evidenceSelection:selectionReceipt}:{})};
+ const selectedDocuments=referenceIds?.map(id=>{
+  const unit=prepared.quoteUnits.find(unit=>unit.id===id);
+  return prepared.supports.find(support=>support.id===(unit?.supportId??id))!.documentId;
+ });
+ const scoped=Boolean(referenceIds&&referenceIds.length>=2&&referenceIds.length<=3&&new Set(selectedDocuments).size===1);
+ const deadline=scoped?Date.now()+timeout:undefined;
+ const attempts:DocumentSourceScopedGenerationReceipt['attempts']=[];
+ const scopedReceipt=(mode:DocumentSourceScopedGenerationReceipt['mode']):DocumentSourceScopedGenerationReceipt=>({
+  version:'same-document-original-unit-probes-v1',coverage:'unassessed',documentId:selectedDocuments![0],referenceIds:[...referenceIds!],
+  mode,generationBudgetMs:timeout,attempts});
+ const remaining=()=>{const ms=deadline===undefined?timeout:deadline-Date.now();
+  if(ms<1)throw new Error('Document generation shared deadline reached');return ms;};
+ const generate=async(ids:string[]|undefined,kind?:'unit-probe'|'joint-fallback')=>{
+  remaining();
+  const request=ids?buildSelectedDocumentAnswerRequest(prepared,ids,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy);
+  const providerRequestSha256=sha(JSON.stringify(request));
+  const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,
+   quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,fingerprint:prepared.fingerprint}));
+  await policy.beforeAttempt?.(identity);
+  if(scoped&&prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
+   throw new Error('Document evidence changed before answer generation');
+  const attempt=kind?{kind,referenceIds:[...ids!],requestIdentity:identity,providerRequestSha256,state:'started' as const,requestedModel:model}:undefined;
+  if(attempt)attempts.push(attempt);
+  policy.onStage?.('generation');
+  const response=await paidOpenAI('responses',request,AbortSignal.timeout(remaining()),{kind:'document-answer',dailyLimit});
+  const {payload,actualModel,decoded}=await documentModelPayload(response,model,policy);
+  policy.onStage?.('citation-validation');
+  const restored=resolveDocumentAnswerSelections(decoded,prepared.supports);
+  if(ids&&restored.selectedUnits.some(unit=>!ids.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
+  if(attempt)Object.assign(attempt,{state:'completed',model:actualModel,providerResponseId:payload.id??null,usage:payload.usage??null,
+   answerStatus:restored.answer.status});
+  policy.onStage?.('evidence-selection');
+  if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
+   throw new Error('Document evidence changed during answer generation');
+  remaining();
+  return {...restored,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],model:actualModel,requestedModel:model,
+   providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
+   sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,
+   ...(selectionReceipt?{evidenceSelection:selectionReceipt}:{})};
+ };
+ if(!scoped)return generate(referenceIds);
+ try{
+  const probes=[];
+  for(const id of referenceIds!)probes.push(await generate([id],'unit-probe'));
+  const answered=probes.filter(result=>result.answer.status==='answered');
+  if(answered.length===1&&probes.every(result=>result===answered[0]||result.answer.status==='insufficient-evidence'))
+   return {...answered[0],sourceScopedGeneration:scopedReceipt('unique-unit-answer')};
+  return {...await generate(referenceIds,'joint-fallback'),sourceScopedGeneration:scopedReceipt('joint-fallback')};
+ }catch(error){throw Object.assign(error instanceof Error?error:new Error('Document source-scoped generation stopped',{cause:error}),
+  {sourceScopedGeneration:scopedReceipt('stopped')});}
 }
