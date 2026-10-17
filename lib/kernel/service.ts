@@ -7,7 +7,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText, type Documen
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -1203,11 +1203,13 @@ export class KernelService {
           const expanded=mergeStudyEvidence(base,complete.context);
           if(!expanded){contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-image-budget'};return base;}
           const prepared=prepareDocumentAnswer(question,expanded),settings=await documentAnswerSettings(policy);
-          try{buildDocumentAnswerRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput});}catch(error){
+          let request;
+          try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
             if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:error.code};return base;
           }
-          const inputUpper=Buffer.byteLength(JSON.stringify(prepared.input))+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+
+          const nonImageRequest=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
+          const inputUpper=Buffer.byteLength(nonImageRequest)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+
             (expanded.imageSelection?.accounting.imageInputTokens??0);
           if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-request-budget'};return base;
