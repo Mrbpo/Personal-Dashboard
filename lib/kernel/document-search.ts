@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import {createHash} from 'node:crypto';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
@@ -6,6 +7,8 @@ import {recallReferencedDocuments} from './document-references.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,DocumentSourceResolutionError,type DocumentSourceHint} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError} from './document-evidence.ts';
 import {refineSelectedDocumentPages} from './document-refinement.ts';
+import {assertDoclingOrigSearchHints,doclingOrigSearchHash,DOCLING_ORIG_SEARCH_POLICY,
+ type PreparedDoclingOrigSearchHints,type DoclingRegionSource} from './docling-source-regions.ts';
 
 const symbolNames: Record<string,string> = {
   '∫':' int integral ', '∑':' sum summation ', '∏':' prod product ', '√':' sqrt root ',
@@ -66,6 +69,52 @@ export function splitDocumentText(text:string):string[] {
   return out;
 }
 
+export type DocumentOrigSearchBinding=DoclingRegionSource&{currentVersionId:string;sourceVersionId:string;evidenceId:string;parserVersion:string};
+export type DocumentOrigSearchProvenance={policy:typeof DOCLING_ORIG_SEARCH_POLICY;binding:DocumentOrigSearchBinding;
+ basePolicy:'document-search-text-v1';baseSearchSha256:string;searchTextSha256:string;hints:PreparedDoclingOrigSearchHints;provenanceSha256:string};
+function origSearchParts(body:string,hints:PreparedDoclingOrigSearchHints){
+ const base=documentSearchText(body),missing=hints.entries.filter(e=>!body.includes(e.orig)).map(e=>e.orig).join('\n');
+ return {base,searchText:[base,documentSearchText(missing)].filter(Boolean).join(' '),hasHints:Boolean(missing)};
+}
+function origSource(binding:DocumentOrigSearchBinding):DoclingRegionSource{
+ return {owner:binding.owner,documentId:binding.documentId,sourceHash:binding.sourceHash,pageCount:binding.pageCount,physicalPage:binding.physicalPage};
+}
+/** This auxiliary field never becomes body/quote evidence. A stored base
+ * snapshot is deliberately unnecessary: reconstruct from the unchanged body.
+ * Unknown pre-existing page search additions cause a refusal, not data loss.
+ * Native table search remains in its own existing candidate index. */
+export function projectDocumentOrigSearch(body:string,currentSearch:string,old:DocumentOrigSearchProvenance|null,
+ hints:PreparedDoclingOrigSearchHints|null,binding:DocumentOrigSearchBinding){
+ const base=documentSearchText(body),bodyHash=createBodyHash(body);
+ if(old){
+  assertDocumentOrigSearchProvenance(old,binding,bodyHash);
+  const previous=origSearchParts(body,old.hints);
+  if(previous.searchText!==currentSearch||old.baseSearchSha256!==createBodyHash(base)||old.searchTextSha256!==createBodyHash(currentSearch))throw Error('Orig search previous index differs');
+ }else if(currentSearch!==base&&currentSearch!==body)throw Error('Unknown existing page search additions; index preserved');
+ if(!hints){if(old)throw Error('Registered orig hints unavailable; index preserved');return {searchText:base,provenance:null};}
+ assertDoclingOrigSearchHints(hints,origSource(binding),bodyHash,binding.parserVersion);
+ const parts=origSearchParts(body,hints);if(!parts.hasHints)return {searchText:base,provenance:null};
+ const content:Omit<DocumentOrigSearchProvenance,'provenanceSha256'>={policy:DOCLING_ORIG_SEARCH_POLICY,binding,
+  basePolicy:'document-search-text-v1',baseSearchSha256:createBodyHash(parts.base),searchTextSha256:createBodyHash(parts.searchText),hints};
+ return {searchText:parts.searchText,provenance:{...content,provenanceSha256:doclingOrigSearchHash(content)}};
+}
+const createBodyHash=(body:string)=>createHash('sha256').update(body).digest('hex');
+export function assertDocumentOrigSearchProvenance(value:DocumentOrigSearchProvenance,binding:DocumentOrigSearchBinding,bodySha256:string){
+ if(!value||value.policy!==DOCLING_ORIG_SEARCH_POLICY||value.basePolicy!=='document-search-text-v1'||
+  doclingOrigSearchHash(value.binding)!==doclingOrigSearchHash(binding)||!binding.currentVersionId||!binding.sourceVersionId||!binding.evidenceId||
+  !/^[a-f0-9]{64}$/.test(value.baseSearchSha256)||!/^[a-f0-9]{64}$/.test(value.searchTextSha256))throw Error('Orig search source binding differs');
+ const {provenanceSha256,...content}=value;
+ if(provenanceSha256!==doclingOrigSearchHash(content))throw Error('Orig search provenance checksum differs');
+ assertDoclingOrigSearchHints(value.hints,origSource(binding),bodySha256,binding.parserVersion);
+}
+export function documentOrigSearchMetadata(value:DocumentOrigSearchProvenance,binding:DocumentOrigSearchBinding,bodySha256:string,searchTextSha256:string){
+ assertDocumentOrigSearchProvenance(value,binding,bodySha256);
+ if(searchTextSha256!==value.searchTextSha256)throw Error('Orig search index checksum differs');
+ return {policy:value.policy,authority:'unverified-retrieval-hint' as const,provenanceSha256:value.provenanceSha256,
+  hintSha256:value.hints.hintSha256,rawResults:value.hints.references.map(r=>({...r,copyIndices:[...r.copyIndices]})),
+  references:value.hints.entries.map(e=>e.reference),visibilityVerified:false as const,semanticRelationsVerified:false as const};
+}
+
 export type DocumentTextHit={id:string;document_id:string;course_id:string;name:string;origin:string;
   origin_key:string;source_hash:string;body:string;locator:string;page_number:number;
   evidence_id:string;source_version_id:string;parser_version:string;score:number;parser_warnings?:string[];
@@ -74,6 +123,7 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   // transcription warnings and repeated headers can also contain matching terms.
   lexical_support?:number;
   evidence_body?:'full-page';
+  retrieval_hint?:ReturnType<typeof documentOrigSearchMetadata>;
   retrieval_scope?:'selected-title-scoped';
   rerank_model?:'gpt-5-mini'|'gpt-6-astra';rerank_reasoning_effort?:'low'|'medium'|'high'|'xhigh'|'max';
   rerank_max_output_tokens?:number;
@@ -232,7 +282,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
   const course=options.courseId?`AND d.course_id=$${args.push(options.courseId)}`:'';
   const document=options.documentId?`AND d.id=$${args.push(options.documentId)}`:'';
   const match=options.strict?'c.search_vector @@ q.exact':'c.search_vector @@ q.broad';
-  const rows=await pool.query<DocumentTextHit>(`
+  const rows=await pool.query<DocumentTextHit&{orig_provenance?:DocumentOrigSearchProvenance|null;orig_version_id:string;orig_page_count:number;orig_body_sha256:string;orig_search_sha256:string}>(`
     WITH q AS (SELECT
       plainto_tsquery('english',$2) || plainto_tsquery('simple',$2) AS exact,
       websearch_to_tsquery('english',$3) || websearch_to_tsquery('simple',$3) AS broad),
@@ -262,7 +312,10 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       ORDER BY score DESC,document_id,position LIMIT $4)
     SELECT 'pg:'||coalesce(snippet.id,c.id) AS id,d.id AS document_id,coalesce(d.course_id,'') AS course_id,
       d.name,d.origin,d.origin_key,d.source_hash,coalesce(snippet.body,p.body) body,p.locator,p.page_number,p.content_kind,p.start_ms::double precision,p.end_ms::double precision,
-      p.evidence_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,c.score,c.lexical_support
+      p.evidence_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,c.score,c.lexical_support,
+      p.search_hint_provenance orig_provenance,v.id orig_version_id,v.page_count orig_page_count,
+      CASE WHEN p.search_hint_provenance IS NOT NULL THEN encode(sha256(convert_to(p.body,'UTF8')),'hex') ELSE NULL END orig_body_sha256,
+      CASE WHEN p.search_hint_provenance IS NOT NULL THEN encode(sha256(convert_to(p.search_text,'UTF8')),'hex') ELSE NULL END orig_search_sha256
     FROM selected c JOIN document_texts d ON d.id=c.document_id CROSS JOIN q
       JOIN document_text_versions v ON v.id=c.version_id
       JOIN document_text_pages p ON p.version_id=c.version_id AND p.page_number=c.page_number
@@ -270,7 +323,10 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
         WHERE chunk.version_id=c.version_id AND chunk.page_number=c.page_number
         ORDER BY ts_rank_cd(chunk.search_vector,q.broad,0) DESC,chunk.position LIMIT 1) snippet ON true
     ORDER BY score DESC,d.id,c.position LIMIT $4`,args);
-  let hits:DocumentTextHit[]=rows.rows.map(row=>({...row,score:Number(row.score),
+  let hits:DocumentTextHit[]=rows.rows.map(({orig_provenance,orig_version_id,orig_page_count,orig_body_sha256,orig_search_sha256,...row})=>({...row,
+    ...(orig_provenance?{retrieval_hint:documentOrigSearchMetadata(orig_provenance,{owner,documentId:row.document_id,sourceHash:row.source_hash,
+      currentVersionId:orig_version_id,sourceVersionId:row.source_version_id,evidenceId:row.evidence_id,parserVersion:row.parser_version,
+      pageCount:orig_page_count,physicalPage:row.page_number},orig_body_sha256,orig_search_sha256)}:{}),score:Number(row.score),
     lexical_support:row.lexical_support===undefined?undefined:Number(row.lexical_support),retrieval_mode:'keyword' as const}));
   if(options.relatedDocuments&&!options.strict&&!options.documentId)
     hits=await recallReferencedDocuments(pool,owner,query,hits,semantic?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:limit,options.courseId);

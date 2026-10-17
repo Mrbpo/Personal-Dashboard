@@ -13,6 +13,87 @@ import {preparePdfVisualEvidence} from '../lib/kernel/pdf-visual-evidence.ts';
 import {DocumentContextError} from '../lib/kernel/document-context.ts';
 import {sourcePageRegionsFixture,fixtureSha} from './fixtures/source-page-regions.ts';
 
+test('registered orig recall hints update only page search, survive rebuild and reject stale/raw failure atomically',async()=>{
+  await migrateKernel();
+  const directory=mkdtempSync(join(tmpdir(),'kernel-orig-search-')),oldRoot=process.env.LIBRARY_DIR,oldHybrid=process.env.KERNEL_DOCUMENT_HYBRID,
+    oldFetch=globalThis.fetch,tag=randomUUID(),owner=`orig-search:${tag}`,id=`orig-search-doc:${tag}`,title=`Synthetic Orig ${tag}`;
+  process.env.LIBRARY_DIR=directory;process.env.KERNEL_DOCUMENT_HYBRID='false';let calls=0;
+  globalThis.fetch=async()=>{calls++;throw Error('Orig recall fixture forbids providers');};
+  try{
+    const {documentSearchText}=await import('../lib/kernel/document-search.ts');
+    const pdf=await PDFDocument.create();pdf.addPage([100,200]);const bytes=await pdf.save(),sourceHash=fixtureSha(bytes);
+    const fixture=sourcePageRegionsFixture({documentId:id,currentVersionId:'unregistered',sourceVersionId:'unregistered',sourceHash,courseId:''},owner,
+      {sourceHash,inputHash:sourceHash});
+    // Registered synthetic raw declares text intentionally absent from the
+    // stored body. This is an index engineering test, not PDF recognition.
+    const needle='unseenorigneedle'+tag.replace(/[^a-z]/g,''),result=structuredClone(fixture.result);
+    result.document.json_content.texts[1].orig=needle;
+    const raw=Buffer.from(JSON.stringify({identity:fixture.identity,result})),rawHash=fixtureSha(raw),
+      progress={...fixture.progress,batches:[{...fixture.progress.batches[0],resultHash:rawHash}]},
+      layout={...fixture.layout,resultReferences:[{...fixture.reference,resultBlobSha256:rawHash}]};
+    await writeFile(join(directory,sourceHash),bytes);await writeFile(join(directory,rawHash),raw);await writeFile(join(directory,fixture.pngSha),fixture.png);
+    const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout},async()=>fixture.png);
+    const document={id,ownerId:owner,courseId:'',name:title,hash:sourceHash,mime:'application/pdf',origin:'orig-fixture',originKey:id};
+    const pages=[{pageNumber:1,locator:'page:1',text:fixture.body}],options={parserVersion:'synthetic-orig-v1',batchProvenance:progress,pdfVisuals:visuals,
+      warnings:['Synthetic parser warning preserved'],evidenceConfidence:.5};
+    await kernel.ingestParsedDocument(document,pages,options);
+    const resolution=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});
+    assert.equal(resolution.status,'resolved');if(resolution.status!=='resolved')throw Error('Synthetic orig source unresolved');
+    const source=resolution.document,search=()=>kernel.searchDocumentText(owner,needle,{documentId:id,strict:true,semantic:false,aiRerank:false,hybrid:false,
+      relatedDocuments:false,evidenceBody:'full-page'});
+    const automatic=await search();assert.equal(automatic.length,1);assert.equal(automatic[0].body,fixture.body);
+    assert.equal(automatic[0].retrieval_hint?.authority,'unverified-retrieval-hint');
+    const immutable=async()=>(await kernelPool().query(`SELECT d.current_version_id,v.source_version_id,p.body,p.evidence_id,v.warnings,
+      e.parsed_value,e.confidence,pv.manifest,pv.manifest_sha256,
+      (SELECT count(*)::int FROM document_page_embeddings WHERE version_id=v.id) vectors
+      FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id
+      JOIN evidence e ON e.id=p.evidence_id JOIN document_pdf_visual_manifests pv ON pv.version_id=v.id WHERE d.owner_id=$1 AND d.id=$2`,[owner,id])).rows;
+    const original=await immutable(),index=async()=>(await kernelPool().query(`SELECT p.search_text,p.search_hint_provenance,
+      (SELECT jsonb_agg(jsonb_build_array(c.id,c.body,c.search_text) ORDER BY c.position) FROM document_text_chunks c WHERE c.version_id=p.version_id) chunks
+      FROM document_text_pages p WHERE p.version_id=$1 AND p.page_number=1`,[source.currentVersionId])).rows[0];
+    // Only this new fixture is reset to simulate an older body-only index.
+    await kernelPool().query('UPDATE document_text_pages SET search_text=$2,search_hint_provenance=NULL WHERE version_id=$1',
+      [source.currentVersionId,documentSearchText(fixture.body)]);
+    assert.equal((await search()).length,0);
+    assert.equal((await kernel.refreshDocumentOrigSearchHints(owner,source,1)).status,'updated');
+    const recalled=await search();assert.equal(recalled.length,1);assert.equal(recalled[0].evidence_id,automatic[0].evidence_id);
+    assert.equal(recalled[0].body.includes(needle),false);assert.equal(recalled[0].retrieval_hint?.visibilityVerified,false);
+    assert.deepEqual(recalled[0].retrieval_hint?.rawResults.map(r=>r.resultBlobSha256),[rawHash]);
+    const published=await index();assert.equal((await kernel.refreshDocumentOrigSearchHints(owner,source,1)).status,'unchanged');
+    await kernel.rebuildDocumentSearch(owner,id);assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
+    // Same immutable source replay must not append the old hint again.
+    await kernel.ingestParsedDocument(document,pages,options);assert.deepEqual(await index(),published);
+    await assert.rejects(kernel.refreshDocumentOrigSearchHints('foreign',source,1));
+    await assert.rejects(kernel.refreshDocumentOrigSearchHints(owner,{...source,currentVersionId:'stale'},1));
+    assert.deepEqual(await index(),published);
+    await writeFile(join(directory,rawHash),'broken CAS');
+    await assert.rejects(kernel.refreshDocumentOrigSearchHints(owner,source,1),/checksum/);
+    await assert.rejects(kernel.rebuildDocumentSearch(owner,id),/checksum/);
+    assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
+    await writeFile(join(directory,rawHash),raw);
+    // An unavailable optional hint cannot discard normal valid PDF/body
+    // ingestion. Its reason is returned separately from immutable warnings.
+    const missingId=id+'-missing',missingIdentity={...fixture.identity,documentId:missingId},
+      missingRawHash=fixtureSha(JSON.stringify({identity:missingIdentity,result})),
+      missingProgress={...progress,identity:{...progress.identity,documentId:missingId},
+        batches:[{...progress.batches[0],resultHash:missingRawHash}]};
+    const missingVisuals=await preparePdfVisualEvidence({owner,documentId:missingId,sourceHash,pdfBytes:bytes,
+      layout:{...fixture.layout,resultReferences:[]}},async()=>fixture.png);
+    const degraded=await kernel.ingestParsedDocument({...document,id:missingId,name:title+' missing raw',originKey:missingId},pages,
+      {parserVersion:'synthetic-orig-v1',batchProvenance:missingProgress,pdfVisuals:missingVisuals,warnings:options.warnings,evidenceConfidence:.5});
+    assert.equal(degraded?.origSearchHints.pages[0].code,'unavailable');
+    const persisted=(await kernelPool().query(`SELECT p.body,p.search_text,p.search_hint_provenance,v.warnings FROM document_texts d
+      JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id WHERE d.owner_id=$1 AND d.id=$2`,
+      [owner,missingId])).rows[0];
+    assert.equal(persisted.body,fixture.body);assert.equal(persisted.search_text,documentSearchText(fixture.body));
+    assert.equal(persisted.search_hint_provenance,null);assert.deepEqual(persisted.warnings,options.warnings);assert.equal(calls,0);
+  }finally{
+    globalThis.fetch=oldFetch;if(oldRoot===undefined)delete process.env.LIBRARY_DIR;else process.env.LIBRARY_DIR=oldRoot;
+    if(oldHybrid===undefined)delete process.env.KERNEL_DOCUMENT_HYBRID;else process.env.KERNEL_DOCUMENT_HYBRID=oldHybrid;
+    rmSync(directory,{recursive:true,force:true});
+  }
+});
+
 test('author-image table registration reaches natural title FTS, real selector/generator input and rejects foreign/current/row bindings',async()=>{
   await migrateKernel();
   const {hash,png,syntheticRun}=await import('./fixtures/author-image-table-v1/run.ts');

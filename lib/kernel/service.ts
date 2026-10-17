@@ -3,7 +3,8 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
-import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
+import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
+ type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
@@ -29,8 +30,44 @@ import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitN
  type CompletedAuthorImageTableRun,
  type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
 import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
+import {prepareDoclingOrigSearchHints,assertPreparedDoclingOrigSearchHints,doclingOrigSearchHash,type OrigSearchInput,type PreparedDoclingOrigSearchHints} from './docling-source-regions.ts';
+import {DoclingPageRegionError,type DoclingVisualLayout} from './docling-result.ts';
 
 type Json = Record<string, unknown>;
+type OrigSearchPage={document_id:string;current_version_id:string;source_version_id:string;source_hash:string;course_id:string;
+ raw_sha256:string;mime:string;parser_version:string;page_count:number;page_number:number;evidence_id:string;body:string;content_kind:string;
+ search_text:string;search_hint_provenance:DocumentOrigSearchProvenance|null;progress:unknown;layout:DoclingVisualLayout|null};
+/** One bounded source, no external IO. The publication read locks the same
+ * current source and page rows after all registered CAS has been prepared. */
+async function origSearchPages(db:Pick<PoolClient,'query'>,owner:string,id:string,page?:number,lock=false){
+ const rows=(await db.query<OrigSearchPage>(`SELECT d.id document_id,d.current_version_id,v.source_version_id,d.source_hash,
+  coalesce(d.course_id,'') course_id,s.raw_sha256,s.raw_value->>'mime' mime,v.parser_version,v.page_count,
+  p.page_number,p.evidence_id,p.body,p.content_kind,p.search_text,p.search_hint_provenance,s.raw_value->'batchProvenance' progress,
+  pv.manifest->'content'->'layout' layout
+  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+  JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
+  JOIN document_text_pages p ON p.version_id=v.id
+  JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id AND e.source_item_id=d.source_item_id
+  LEFT JOIN document_pdf_visual_manifests pv ON pv.version_id=v.id AND pv.source_version_id=v.source_version_id AND pv.source_hash=d.source_hash
+  WHERE d.owner_id=$1 AND d.id=$2 AND d.hidden=false AND ($3::integer IS NULL OR p.page_number=$3)
+  AND NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key
+   AND newer.hidden=false AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+  ORDER BY p.page_number ${lock?'FOR UPDATE OF d,p,v,s':''}`,[owner,id,page??null])).rows;
+ if(!rows.length||rows.some(r=>r.mime==='application/pdf'&&(r.raw_sha256!==r.source_hash||r.content_kind!=='page')))throw new DocumentEvidenceChangedError();
+ if(page===undefined&&(rows.length!==rows[0].page_count||rows.some((r,i)=>r.page_number!==i+1)))throw new DocumentEvidenceChangedError();
+ return rows;
+}
+function origSearchInput(owner:string,row:OrigSearchPage):OrigSearchInput{
+ return {owner,documentId:row.document_id,sourceHash:row.source_hash,pageCount:row.page_count,physicalPage:row.page_number,
+  body:row.body,parserVersion:row.parser_version,progress:row.progress,layout:row.layout};
+}
+function origSearchBinding(owner:string,row:OrigSearchPage){return {owner,documentId:row.document_id,sourceHash:row.source_hash,
+ pageCount:row.page_count,physicalPage:row.page_number,currentVersionId:row.current_version_id,sourceVersionId:row.source_version_id,
+ evidenceId:row.evidence_id,parserVersion:row.parser_version};}
+function assertOrigSearchSource(row:OrigSearchPage,source:DocumentContextSource){
+ if(row.document_id!==source.documentId||row.current_version_id!==source.currentVersionId||row.source_version_id!==source.sourceVersionId||
+  row.source_hash!==source.sourceHash||(source.courseId!==undefined&&source.courseId!==row.course_id))throw new DocumentEvidenceChangedError();
+}
 /** Supplement a named source without discarding the original cross-source recall. */
 export function mergeStudyEvidence(base:DocumentAnswerContext,added:DocumentAnswerContext):DocumentAnswerContext|null{
  const anchors=new Map(base.anchors.map(n=>[n.id,n]));
@@ -852,6 +889,19 @@ export class KernelService {
       assertPreparedDoclingSourceMath(options.sourceMath,owner,document.id,document.hash,pages);
     }
     const batchProvenance=options.sourceMath?doclingMathBatchProvenance(options.sourceMath,options.batchProvenance):options.batchProvenance;
+    const origHints:Array<PreparedDoclingOrigSearchHints|null>=[];
+    const origUnavailable:Array<{physicalPage:number;code:'unavailable'|'limit';reason:string}>=[];
+    for(const page of pages){
+      try{origHints.push(document.mime==='application/pdf'?await prepareDoclingOrigSearchHints({owner,documentId:document.id,
+        sourceHash:document.hash,pageCount:expected,physicalPage:page.pageNumber,body:page.text,parserVersion:parser,
+        progress:batchProvenance,layout:options.pdfVisuals?.content.layout}):null);}
+      catch(error){
+        // Optional recall metadata must not discard an otherwise valid body.
+        // Corrupt/foreign bindings are invalid and remain hard failures.
+        if(!(error instanceof DoclingPageRegionError)||(error.code!=='unavailable'&&error.code!=='limit'))throw error;
+        origHints.push(null);origUnavailable.push({physicalPage:page.pageNumber,code:error.code,reason:error.message});
+      }
+    }
     if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
       throw new Error('Document quality warnings are invalid');
     const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
@@ -918,6 +968,10 @@ export class KernelService {
       await client.query(`INSERT INTO document_text_versions(id,document_id,source_version_id,parser_version,text_hash,page_count,warnings)
         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
         [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(warnings)]);
+      // sourceVersion can reuse an immutable same-body historical row. Check
+      // that row's registered progress, not just this invocation's options.
+      const registeredProgress=origHints.some(Boolean)?(await client.query<{progress:unknown}>(
+        `SELECT raw_value->'batchProvenance' progress FROM source_item_versions WHERE id=$1 FOR UPDATE`,[version])).rows[0]?.progress:null;
       let position=0;const pageEvidenceIds:string[]=[];
       for(const [index,page] of pages.entries()){
         const evidenceId=stableId(version,`page:${index}`);
@@ -934,6 +988,20 @@ export class KernelService {
         await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text,content_kind,start_ms,end_ms)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(version_id,page_number) DO NOTHING`,
           [parsedVersion,page.pageNumber,evidenceId,page.locator,page.text,documentSearchText(page.text),page.contentKind||'page',page.startMs??null,page.endMs??null]);
+        const hint=origHints[index];
+        if(hint){
+          assertPreparedDoclingOrigSearchHints(hint,{owner,documentId:document.id,sourceHash:document.hash,pageCount:expected,
+            physicalPage:page.pageNumber,body:page.text,parserVersion:parser,progress:registeredProgress,layout:options.pdfVisuals?.content.layout});
+          const old=(await client.query<{body:string;search_text:string;search_hint_provenance:DocumentOrigSearchProvenance|null}>(
+            'SELECT body,search_text,search_hint_provenance FROM document_text_pages WHERE version_id=$1 AND page_number=$2 FOR UPDATE',
+            [parsedVersion,page.pageNumber])).rows[0];
+          if(!old||old.body!==page.text)throw new DocumentEvidenceChangedError();
+          const projected=projectDocumentOrigSearch(page.text,old.search_text,old.search_hint_provenance,hint,{owner,documentId:document.id,
+            sourceHash:document.hash,pageCount:expected,physicalPage:page.pageNumber,currentVersionId:parsedVersion,sourceVersionId:version,
+            evidenceId,parserVersion:parser});
+          await client.query('UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2',
+            [parsedVersion,page.pageNumber,projected.searchText,projected.provenance?JSON.stringify(projected.provenance):null]);
+        }
         for(const body of splitDocumentText(page.text)){
           await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
             VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,
@@ -958,6 +1026,10 @@ export class KernelService {
       if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
         await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
+    // Availability is not immutable parser quality. Keep it out of body,
+    // warnings and parsedVersion; no-data ordinary ingestion still returns void.
+    if(origUnavailable.length)return {origSearchHints:{status:'unavailable' as const,pages:origUnavailable,
+      authority:'unverified-retrieval-hint' as const}};
   }
 
   resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
@@ -1481,17 +1553,22 @@ export class KernelService {
   }
 
   async rebuildDocumentSearch(owner:string,id:string) {
+    const snapshot=await origSearchPages(kernelPool(),owner,id);
+    const staged:Array<PreparedDoclingOrigSearchHints|null>=[];
+    for(const page of snapshot)staged.push(page.mime==='application/pdf'?await prepareDoclingOrigSearchHints(origSearchInput(owner,page)):null);
+    const projections=snapshot.map((page,index)=>{
+      if(staged[index])assertPreparedDoclingOrigSearchHints(staged[index]!,origSearchInput(owner,page));
+      return projectDocumentOrigSearch(page.body,page.search_text,page.search_hint_provenance,staged[index],origSearchBinding(owner,page));
+    });
     return kernelTransaction(async client=>{
-      const version=(await client.query<{current_version_id:string}>(
-        'SELECT current_version_id FROM document_texts WHERE owner_id=$1 AND id=$2 FOR UPDATE',[owner,id])).rows[0]?.current_version_id;
-      if(!version)throw new Error('Document transcription not found');
-      const pages=(await client.query<{page_number:number;body:string}>(
-        'SELECT page_number,body FROM document_text_pages WHERE version_id=$1 ORDER BY page_number',[version])).rows;
+      const pages=await origSearchPages(client,owner,id,undefined,true),version=pages[0].current_version_id;
+      if(doclingOrigSearchHash(pages)!==doclingOrigSearchHash(snapshot))throw new DocumentEvidenceChangedError();
       await client.query('DELETE FROM document_text_chunks WHERE version_id=$1',[version]);
       let position=0;
-      for(const page of pages){
-       await client.query('UPDATE document_text_pages SET search_text=$3 WHERE version_id=$1 AND page_number=$2',
-        [version,page.page_number,documentSearchText(page.body)]);
+      for(const [index,page] of pages.entries()){
+       const projected=projections[index];
+       await client.query('UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2',
+        [version,page.page_number,projected.searchText,projected.provenance?JSON.stringify(projected.provenance):null]);
        for(const body of splitDocumentText(page.body)){
         await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
           VALUES ($1,$2,$3,$4,$5,$6)`,[stableId(version,String(position)),version,page.page_number,position,body,documentSearchText(body)]);
@@ -1499,6 +1576,25 @@ export class KernelService {
        }
       }
       return {documentId:id,chunks:position};
+    });
+  }
+
+  async refreshDocumentOrigSearchHints(owner:string,source:DocumentContextSource,physicalPage:number){
+    if(!Number.isInteger(physicalPage)||physicalPage<1)throw Error('One explicit physical page is required');
+    const snapshot=(await origSearchPages(kernelPool(),owner,source.documentId,physicalPage))[0];assertOrigSearchSource(snapshot,source);
+    if(snapshot.mime!=='application/pdf')throw Error('Orig search hints require a current PDF source');
+    const input=origSearchInput(owner,snapshot),prepared=await prepareDoclingOrigSearchHints(input);
+    if(!prepared)throw Error('Registered orig result unavailable; index preserved');
+    assertPreparedDoclingOrigSearchHints(prepared,input);
+    const projection=projectDocumentOrigSearch(snapshot.body,snapshot.search_text,snapshot.search_hint_provenance,prepared,origSearchBinding(owner,snapshot));
+    return kernelTransaction(async client=>{
+      const current=(await origSearchPages(client,owner,source.documentId,physicalPage,true))[0];assertOrigSearchSource(current,source);
+      if(doclingOrigSearchHash(current)!==doclingOrigSearchHash(snapshot))throw new DocumentEvidenceChangedError();
+      const unchanged=current.search_text===projection.searchText&&doclingOrigSearchHash(current.search_hint_provenance)===doclingOrigSearchHash(projection.provenance);
+      if(!unchanged)await client.query('UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2',
+        [current.current_version_id,physicalPage,projection.searchText,projection.provenance?JSON.stringify(projection.provenance):null]);
+      return {status:unchanged?'unchanged' as const:'updated' as const,source:{...source},physicalPage,
+        provenanceSha256:projection.provenance?.provenanceSha256??null,authority:'unverified-retrieval-hint' as const};
     });
   }
 
