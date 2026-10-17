@@ -5,6 +5,7 @@ import {isDeepStrictEqual} from 'node:util';
 import type {Pool} from 'pg';
 import {digest,readBlob} from '../library.ts';
 import {decodeDoclingResult} from './docling-result.ts';
+import {mapDoclingSourceMath,bindDoclingSourceMath,type DoclingSourceMath} from './docling-source-math.ts';
 
 export type DoclingIdentity={owner:string;documentId:string;sourceHash:string;optionsHash:string;totalPages:number;sourceEncodingReceiptHash?:string};
 export type DoclingBatch={start:number;end:number;taskId?:string;resultHash?:string;inputHash?:string;copyIndices?:number[]};
@@ -138,6 +139,7 @@ export function decodeDerivedDoclingResult(result:unknown,mapping:{start:number;
   return {...decoded,totalPages:mapping.totalPages,
     pages:decoded.pages.map(page=>({...page,pageNumber:original(page.pageNumber),locator:`第 ${original(page.pageNumber)} 页`})),
     formulaPageNumbers:decoded.formulaPageNumbers.map(original),
+    ...(decoded.sourceMath?{sourceMath:mapDoclingSourceMath(decoded.sourceMath,mapping.copyIndices)}:{}),
     visualLayout:{...decoded.visualLayout,pageSizes:decoded.visualLayout.pageSizes.map(page=>({...page,pageNumber:original(page.pageNumber)})),
       regions:decoded.visualLayout.regions.map(region=>({...region,pageNumber:original(region.pageNumber),copyIndices:[...mapping.copyIndices]}))},
     nativeTables:decoded.nativeTables.map(table=>({...table,pageNumbers:table.pageNumbers.map(original)})),
@@ -212,6 +214,8 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
   const progress=input.progress?validateDoclingProgress(input.progress,input.identity):createDoclingProgress(input.identity);
   await input.persist(progress);
   const pages:DecodedDocling['pages']=[],nativeTables:DecodedDocling['nativeTables']=[],warnings=new Set<string>(),formulaPages=new Set<number>();
+  const sourceMath:DoclingSourceMath[]=[];
+  let sourceMathBytes=0;
   const visualLayout:DecodedDocling['visualLayout']={status:'available',regions:[],pageSizes:[]};
   for(const batch of progress.batches){
     const prepared=await input.prepare(batch.start,batch.end);
@@ -259,6 +263,12 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
     }
     if(decoded.nativeTables.length&&batch.resultHash)nativeTables.push(...decoded.nativeTables.map(table=>({...table,result:{
       resultBlobSha256:batch.resultHash!,derivedInputSha256:prepared.inputHash,optionsHash:input.identity.optionsHash,copyIndices:[...prepared.copyIndices]}})));
+    if(decoded.sourceMath&&batch.resultHash){
+      const bound=bindDoclingSourceMath(decoded.sourceMath,{resultBlobSha256:batch.resultHash,
+        derivedInputSha256:prepared.inputHash,copyIndices:prepared.copyIndices,formulaEnriched:input.formulaEnriched})!;
+      sourceMathBytes+=Buffer.byteLength(JSON.stringify(bound));if(sourceMathBytes>8*1024*1024)throw Error('Document source math exceeds byte limit');
+      sourceMath.push(...bound);
+    }
     pages.push(...decoded.pages);decoded.warnings.forEach(w=>warnings.add(w));decoded.formulaPageNumbers.forEach(p=>formulaPages.add(p));
     if(decoded.visualLayout.status==='unavailable'){visualLayout.status='unavailable';visualLayout.reason=decoded.visualLayout.reason;}
     visualLayout.pageSizes.push(...decoded.visualLayout.pageSizes);
@@ -270,5 +280,6 @@ export async function convertDoclingBatches(input:{identity:DoclingIdentity;prog
   }
   if(pages.length!==input.identity.totalPages||pages.some((page,i)=>page.pageNumber!==i+1)||!pages.some(page=>page.text.trim()))
     throw new Error('Document transcription is incomplete');
-  return {pages,totalPages:input.identity.totalPages,warnings:[...warnings],formulaPageNumbers:[...formulaPages],visualLayout,nativeTables};
+  return {pages,totalPages:input.identity.totalPages,warnings:[...warnings],formulaPageNumbers:[...formulaPages],visualLayout,nativeTables,
+    ...(sourceMath.length?{sourceMath}: {})};
 }

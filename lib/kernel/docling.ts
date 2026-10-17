@@ -13,6 +13,7 @@ import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
 import {enrichParsedPdfFormulae,transcribePdfVisualPages} from '../document-parser.ts';
 import {localPdfTextPages} from '../local-ocr.ts';
 import {prepareNativeTableCandidates} from './document-table-candidates.ts';
+import {bindDoclingSourceMath,prepareDoclingSourceMath} from './docling-source-math.ts';
 
 const SOURCE_ENCODING_VERSION='source-type1-cmap-v1' as const;
 // These names come from the actual embedded Encoding, never a font-name/slot heuristic.
@@ -421,7 +422,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   // remain unchanged; no formula, layout or whitespace inference is performed.
   if(sourceEncodingReceiptHash&&!visual)pages=pages.map(page=>({...page,text:page.text.normalize('NFC')}));
   const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+(sourceEncodingReceiptHash&&!visual?
-    encoding.proof?.referenceDictionarySha256?`-${encoding.proof.version}`:'-source-encoding-v1':'');
+    encoding.proof?.referenceDictionarySha256?`-${encoding.proof.version}`:'-source-encoding-v1':'')+(decoded.sourceMath?.length?'-source-math-v1':'');
   const current=await getDocument(owner,id);
   if(current.hash!==document.hash)throw new Error('Original PDF changed during conversion');
   if(digest(await readBlob(current.hash))!==document.hash)throw new Error('Original PDF checksum changed during conversion');
@@ -432,13 +433,16 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     decoded.visualLayout.regions=decoded.visualLayout.regions.map(region=>({...region,resultBlobSha256,
       derivedInputSha256:document.hash,copyIndices}));
     decoded.visualLayout.resultReferences=[{resultBlobSha256,derivedInputSha256:document.hash,copyIndices}];
+    if(decoded.sourceMath)decoded.sourceMath=bindDoclingSourceMath(decoded.sourceMath,
+      {resultBlobSha256,derivedInputSha256:document.hash,copyIndices,formulaEnriched:localFormula});
   }
   const pdfVisuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash:document.hash,pdfBytes:bytes,layout:decoded.visualLayout});
   const nativeTables=await prepareNativeTableCandidates({owner,documentId:id,sourceHash:document.hash,
     tables:decoded.nativeTables});
+  const sourceMath=await prepareDoclingSourceMath({owner,documentId:id,sourceHash:document.hash,pages,structures:decoded.sourceMath});
   await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,
     hash:document.hash,mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
-    {parserVersion,expectedPages:totalPages,warnings,nativeTables,pdfVisuals,expectedCurrentVersion,
+    {parserVersion,expectedPages:totalPages,warnings,nativeTables,pdfVisuals,sourceMath,expectedCurrentVersion,
       ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,
       batchProvenance:currentProgress?{schema:currentProgress.schema,identity:currentProgress.identity,
         batchSize:currentProgress.batchSize,batches:currentProgress.batches}:sourceEncodingReceiptHash&&!visual?
