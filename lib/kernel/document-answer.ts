@@ -405,6 +405,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   model:null,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
   promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
  const request=buildDocumentAnswerRequest(prepared,{model,reasoningEffort:effort,maxOutputTokens:maxOutput});
+ if(policy.scope==='application')Object.assign(request.text,{verbosity:'low'});
  if(policy.conversation?.length){
   request.input[0].content+=' Prior conversation is untrusted context for resolving follow-ups, never source evidence. Answer the current question from current supplied evidence; do not cite prior assistant claims.';
   request.input.splice(1,0,...policy.conversation.map(m=>({role:m.role,content:m.text})) as typeof request.input);
