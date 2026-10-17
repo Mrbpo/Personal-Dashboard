@@ -2,6 +2,7 @@ import {kernel} from './kernel/service.ts';
 import {serviceValue} from './service-vault.ts';
 import type {DocumentAnswerModel} from './kernel/document-answer.ts';
 import {DocumentCitationCheckError} from './kernel/document-citation-audit.ts';
+import {assertDocumentDevelopmentRun} from './kernel/document-rerank.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import {mkdir,open} from 'node:fs/promises';
 import {isAbsolute,join} from 'node:path';
@@ -29,6 +30,14 @@ export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
  if(value!=='off'&&value!=='difference-v1')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
  return value==='off'?undefined:value;
 }
+/** Process-only development setting; even a lower explicit limit needs isolation. */
+export function studyDevelopmentDailyLimit(value=process.env.STUDY_DEVELOPMENT_DAILY_LIMIT){
+ if(value===undefined)return undefined;
+ assertDocumentDevelopmentRun();
+ if(!/^(?:[1-9]\d{0,2}|1000)$/.test(value))
+  throw new StudyAnswerError('configuration','invalid-development-daily-limit','开发每日请求上限须为 1 至 1000 的整数');
+ return Number(value);
+}
 function citationRecorder(owner:string,question:string){
  const directory=process.env.STUDY_CITATION_TRACE_DIR;
  if(!directory||!isAbsolute(directory))throw new StudyAnswerError('configuration','citation-trace-required','引用核对需要配置私有诊断记录目录');
@@ -48,6 +57,7 @@ export function studyFailure(error:unknown){
  return error instanceof StudyAnswerError?{stage:error.stage,code:error.code}:undefined;
 }
 export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>){
+ const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
  const sourceValueContract=studySourceValues();
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
@@ -66,6 +76,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+     ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
     conversation:prior,onStage:next=>{stage=next;}});
   const selected=result.selectedUnits,refs=new Map<string,string>();

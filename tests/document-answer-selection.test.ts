@@ -57,6 +57,48 @@ test('two-stage application binds exact selected IDs and rejects a later citatio
  }finally{globalThis.fetch=saved;}
 });
 
+test('isolated application daily allowance shares selection generation and local kind without lifting monthly funds',async()=>{
+ const {database}=await import('../lib/database.ts'),{budgetMonth,AiBudgetDeferredError}=await import('../lib/ai-budget.ts');
+ const {KernelService}=await import('../lib/kernel/service.ts');
+ // The literal guard is tested after initializing only this process's in-memory
+ // SQLite. No PostgreSQL or file:/pdf-data/benchmark.sqlite connection is opened.
+ await database.prepare('SELECT count(*) n FROM ai_ledger').first();
+ const names=['DATABASE_URL','KERNEL_DATABASE_URL','KERNEL_ADMIN_DEVELOPMENT_RUN','AI_BUDGET_TEST_BYPASS','AI_MONTHLY_BUDGET'] as const;
+ const env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved=globalThis.fetch,c=context(),question='What count?';
+ const attempts:string[]=[],raw:any[]=[],checkedPolicy={...policy,dailyLimit:1000,citationCheck:{mode:'selected-once' as const,
+  beforeAttempt:async(id:string)=>{attempts.push(id);},recordResponse:async(value:unknown)=>{raw.push(value);}}};
+ const p=prepareDocumentAnswerForPolicy(question,c,checkedPolicy),id=p.quoteUnits.find(u=>u.selectable)!.id,
+  kernel=new KernelService(),formats:string[]=[],rowCounts:number[]=[];
+ (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='1';
+  await database.prepare(`WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<200)
+   INSERT INTO ai_ledger(id,month,kind,reserved,charged,status,created_at)
+   SELECT 'synthetic-prior-'||n,?,'document-answer',0.000001,0,'settled',? FROM seq`).bind(budgetMonth(),Date.now()).run();
+  globalThis.fetch=async(_url,init)=>{const request=JSON.parse(String(init?.body)),format=request.text.format.name;formats.push(format);
+   rowCounts.push(Number((await database.prepare("SELECT count(*) n FROM ai_ledger WHERE kind='document-answer'").first<{n:number}>())!.n));
+   if(format==='document_evidence_selection'){
+    assert.equal(JSON.stringify(request),JSON.stringify(buildDocumentEvidenceSelectionRequest(p,settings,{...checkedPolicy,dailyLimit:200})));
+    return output({referenceIds:[id]});}
+   if(format==='grounded_document_answer_units')return output(claim(id));
+   assert.equal(format,'citation_local_visual_unit_v1');
+   return output({claimId:'c0',judgment:'supported',reason:'Synthetic fixture only.',citationFindings:{r0:{judgment:'supports',reason:'Synthetic original text.'}},
+    objectUnitScope:{claim:'sample count',evidence:'sample count',alignment:'same'}});};
+  const result=await kernel.answerStudyContent('owner',question,{},checkedPolicy);
+  assert.equal(result.answer.status,'answered');assert.equal(attempts.length,1);assert.equal(raw.length,1);
+  assert.deepEqual(formats,['document_evidence_selection','grounded_document_answer_units','citation_local_visual_unit_v1']);
+  assert.deepEqual(rowCounts,[201,202,203]);
+  const rows=await database.prepare('SELECT kind,status,charged FROM ai_ledger').all<{kind:string;status:string;charged:number}>();
+  assert.equal(rows.results.length,203);assert.ok(rows.results.every(r=>r.kind==='document-answer'&&r.status==='settled'));
+  const blocked=(reason:string)=>(e:unknown)=>e instanceof AiBudgetDeferredError&&e.reason===reason;
+  await assert.rejects(kernel.answerStudyContent('owner',question,{}, {...checkedPolicy,dailyLimit:203}),blocked('daily'));
+  process.env.AI_MONTHLY_BUDGET='0';
+  await assert.rejects(kernel.answerStudyContent('owner',question,{},checkedPolicy),blocked('monthly'));
+  assert.equal(formats.length,3);assert.equal(Number((await database.prepare('SELECT count(*) n FROM ai_ledger').first<{n:number}>())!.n),203);
+ }finally{globalThis.fetch=saved;for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}
+});
+
 test('empty selection and source changes stop before any generation without retries',async()=>{
  const saved=globalThis.fetch;
  try{for(const changed of [false,true]){

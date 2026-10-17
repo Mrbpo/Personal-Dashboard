@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
-import {withDocumentRerankRunPolicy} from './document-rerank.ts';
+import {withDocumentRerankRunPolicy,assertDocumentDevelopmentRun} from './document-rerank.ts';
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
@@ -640,7 +640,8 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  if(policy.scope==='development'){
   await withDocumentRerankRunPolicy({scope:'development',dailyLimit,maxAttempts:1,beforeAttempt:policy.beforeAttempt},async()=>{});
  }else if(policy.scope==='application'){
-  if(!['gpt-5-mini','gpt-5.4-mini'].includes(model)||dailyLimit>200||effort!=='low'||maxOutput>4000||timeout>55000)
+  if(dailyLimit>200)assertDocumentDevelopmentRun();
+  if(!['gpt-5-mini','gpt-5.4-mini'].includes(model)||effort!=='low'||maxOutput>4000||timeout>55000)
    throw new Error('Application answers require bounded mini settings');
  }else if(policy.scope!==undefined||model!=='gpt-5-mini'||dailyLimit>200||effort!=='low'||maxOutput!==4000||timeout!==30000)
   throw new Error('Extended answer settings require the isolated development process');

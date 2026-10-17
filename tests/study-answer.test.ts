@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 
@@ -17,6 +17,44 @@ test('legacy is the default, invalid configuration fails closed and application 
  await assert.rejects(documentAnswerSettings({scope:'application',model:'gpt-6-astra'}),/bounded mini/);
  await assert.rejects(documentAnswerSettings({scope:'application',maxOutputTokens:9000}),/bounded mini/);
  assert.equal((await documentAnswerSettings({scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000})).model,'gpt-5.4-mini');
+});
+
+test('explicit development daily limit is process guarded, strictly bounded and absent by default',async()=>{
+ const names=['STUDY_DEVELOPMENT_DAILY_LIMIT','KERNEL_ADMIN_DEVELOPMENT_RUN','KERNEL_DATABASE_URL','DATABASE_URL',
+  'STUDY_CITATION_CHECK','STUDY_SOURCE_VALUES'] as const;
+ const env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved=kernel.answerStudyContent,fetch=globalThis.fetch;
+ let kernelCalls=0,providerCalls=0,captured:any;
+ globalThis.fetch=async()=>{providerCalls++;throw Error('No provider in configuration fixture');};
+ kernel.answerStudyContent=async(_o,_q,_s,policy)=>{kernelCalls++;captured=policy;return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},
+  selectedUnits:[],sourceDocuments:[],warnings:[],textEvidenceCount:0,imageEvidenceCount:0,model:null} as any;};
+ try{
+  delete process.env.STUDY_DEVELOPMENT_DAILY_LIMIT;delete process.env.KERNEL_ADMIN_DEVELOPMENT_RUN;
+  process.env.STUDY_CITATION_CHECK='off';process.env.STUDY_SOURCE_VALUES='off';
+  assert.equal(studyDevelopmentDailyLimit(),undefined);
+  assert.equal((await documentAnswerSettings({scope:'application'})).dailyLimit,200);
+  await answerKernelStudy('owner','Synthetic question','',[]);assert.equal(Object.hasOwn(captured,'dailyLimit'),false);
+  const ordinaryPolicy=JSON.stringify(captured);kernelCalls=0;
+  await assert.rejects(documentAnswerSettings({scope:'application',dailyLimit:201}),/isolated administrator/);
+  for(const value of ['1','200','1000']){process.env.STUDY_DEVELOPMENT_DAILY_LIMIT=value;
+   await assert.rejects(answerKernelStudy('owner','Synthetic question','',[]),/isolated administrator/);}
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/not-acceptance';
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';
+  await assert.rejects(answerKernelStudy('owner','Synthetic question','',[]),/isolated administrator/);
+  process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';process.env.DATABASE_URL=':memory:';
+  await assert.rejects(answerKernelStudy('owner','Synthetic question','',[]),/isolated administrator/);
+  process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';
+  for(const value of ['','0','-1','1.5','1001','Infinity',' 200 ','0200','1e3']){
+   process.env.STUDY_DEVELOPMENT_DAILY_LIMIT=value;
+   await assert.rejects(answerKernelStudy('owner','Synthetic question','',[]),(e:any)=>e instanceof StudyAnswerError&&e.code==='invalid-development-daily-limit');}
+  assert.equal(kernelCalls,0);assert.equal(providerCalls,0);
+  for(const value of [1,200,1000]){process.env.STUDY_DEVELOPMENT_DAILY_LIMIT=String(value);
+   await answerKernelStudy('owner','Synthetic question','',[]);assert.equal(captured.dailyLimit,value);}
+  assert.equal((await documentAnswerSettings({scope:'application',dailyLimit:1000})).dailyLimit,1000);
+  delete process.env.STUDY_DEVELOPMENT_DAILY_LIMIT;
+  await answerKernelStudy('owner','Synthetic question','',[]);assert.equal(JSON.stringify(captured),ordinaryPolicy);
+  assert.equal(providerCalls,0);
+ }finally{kernel.answerStudyContent=saved;globalThis.fetch=fetch;
+  for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}
 });
 
 test('application trace retains a failed check and maps it to a non-answer error',async()=>{
