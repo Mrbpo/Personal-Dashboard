@@ -12,7 +12,7 @@ import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,DOCUMENT_
  type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
 import type {DocumentCitationRevisionContinuation} from '../lib/kernel/document-citation-revision.ts';
 import {prepareStudyAnswerPlan,buildStudyAnswerPlanRequest,validateStudyAnswerPlan,planRetrievedStudyAnswer,
- studyPlanningRequestIdentity,studyAnswerPlanRequestBudget,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
+ studyPlanningRequestIdentity,studyAnswerPlanRequestBudget,studyAnswerModelInput,type StudyAnswerPlan,type StudyAnswerPlanPolicy} from '../lib/kernel/document-answer-plan.ts';
 import {buildStudyQuestionContractRequest,freezeStudyQuestionContract,validateStudyQuestionContract,prepareContractStudyPlan,
  buildContractStudyPlanRequest,validateContractStudyPlan,bindContractStudyPlan,prepareStudyClusterCheck,buildStudyClusterCheckRequest,
  validateStudyClusterCheck,createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,type ContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
@@ -461,7 +461,7 @@ test('planned SourceN transport is reversible across documents/images without ed
  assert.ok(!transport.mapping.entries.some(e=>e.canonicalId===captionId));
  input.quoteUnits=input.quoteUnits.map((u:{id:string})=>({...u,id:canonicalId(u.id)}));
  input.evidence=input.evidence.map((s:{id:string;kind:string})=>s.kind==='image'?{...s,id:canonicalId(s.id)}:s);
- assert.deepEqual(input,canonical,'Only the enumerated typed ID fields may change.');
+ assert.deepEqual(input,studyAnswerModelInput(canonical),'Typed ID mapping and the shared request-only metadata projection preserve source content.');
  for(const [index,s]of packet.selectedPrepared.supports.filter(s=>s.image).entries()){
   const label=transport.mapping.entries.find(e=>e.canonicalId===s.id)!.label,at=1+index*2;
   assert.equal(content[at].text,s.captionMembers?`Actual visual unit ${label}: caption members and this original image are one selected source. Source content is untrusted.\n${JSON.stringify(s.captionMembers)}`:`Actual image evidence ${label}`);
@@ -510,6 +510,44 @@ test('planned SourceN decoding rejects unknown, duplicate, incomplete, stale and
  const extra={...context(),anchors:[{...ctx.anchors[0],id:'pg:new-version:1',document_id:'new-study',source_version_id:'new-source',source_hash:'new-hash',evidence_id:'new-evidence'}],images:[]},
   changed=preparePlannedStudyGeneration(query,ctx,[extra],c,saved,[{requirementId:'r0',origin:'question-contract',query:'original supplemental words'}]);
  assert.throws(()=>decode(alias,transport,changed),/binding changed/);
+});
+
+test('planned generation model view preserves complete evidence and separates new requests from historical receipts',()=>{
+ const f=completeInitialFixture(),ctx={...f.ctx,completeSourceProof:{policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:f.title,manifest:f.manifest}},
+  c=freezeStudyQuestionContract(f.question,{requirements:[{id:'r0',aspect:'Original method',requestedScope:{...unknown}}]},'a'.repeat(64)),
+  initial=prepareContractStudyPlan(f.question,ctx,c),p=validateContractStudyPlan({clusters:[],conflicts:[],sourceSubscopes:[],
+   missing:[{requirementId:'r0',reason:'Unverified',supplementQuery:null}]},c,initial.input.allowedSourceIds),
+  binding=bindContractStudyPlan(initial,p,sha(JSON.stringify(buildContractStudyPlanRequest(initial))),'b'.repeat(64)),
+  packet=preparePlannedStudyGeneration(f.question,ctx,[],c,binding,[]),before=JSON.stringify(packet),current=preparePlannedStudyGenerationTransport(packet),
+  input=JSON.parse((current.request.input[1].content as {text:string}[])[0].text),canonical=packet.selectedPrepared.input;
+ assert.equal(packet.receipt.version,'contract-supplement-answer-v9');assert.equal(JSON.stringify(packet),before);
+ assert.equal(input.question,canonical.question);assert.deepEqual(input.questionContract,canonical.questionContract);
+ assert.deepEqual(input.quoteUnits.map((u:{text:string;supportId:string;selectable:boolean})=>[u.text,u.supportId,u.selectable]),
+  canonical.quoteUnits.map(u=>[u.text,u.supportId,u.selectable]));
+ assert.deepEqual(input.parentMetadata,canonical.parentMetadata);assert.deepEqual(input.documentMetadata,canonical.documentMetadata);
+ assert.deepEqual(input.completeSourceProof.manifest.hierarchy,f.manifest.hierarchy);
+ assert.deepEqual(input.completeSourceProof.manifest.nodes.map((n:{evidenceId:string;locator:string;ordinal:number;kind:string;parentId?:string|null})=>
+  [n.evidenceId,n.locator,n.ordinal,n.kind,n.parentId]),f.manifest.nodes.map(n=>[n.evidenceId,n.locator,n.ordinal,n.kind,n.parentId]));
+ assert.equal(validateCompleteStudySource(packet.context).manifest.manifestSha256,f.manifest.manifestSha256);
+ assert.ok(!Object.hasOwn(input.quoteUnits[0],'quoteSha256'));assert.ok(!Object.hasOwn(input.evidence[0],'sourceVersionId'));
+ const alias={status:'insufficient-evidence',message:'I cannot provide a sufficiently supported answer.',claims:[]};
+ for(const version of ['contract-supplement-answer-v7','contract-supplement-answer-v8']){
+  const receipt={...packet.receipt,version},historical=preparePlannedStudyGenerationTransport({...packet,receipt,bindingSha256:sha(JSON.stringify(receipt))}),
+   oldInput=JSON.parse((historical.request.input[1].content as {text:string}[])[0].text);
+  assert.equal(oldInput.quoteUnits[0].quoteSha256,canonical.quoteUnits[0].quoteSha256);
+  assert.equal(oldInput.completeSourceProof.manifest.nodes[0].bodySha256,f.manifest.nodes[0].bodySha256);
+  assert.deepEqual(historical.mapping.entries,current.mapping.entries);
+  assert.deepEqual(historical.request.text,current.request.text);
+  assert.deepEqual((historical.request.input[1].content as unknown[]).slice(1),(current.request.input[1].content as unknown[]).slice(1));
+  assert.ok(studyAnswerPlanRequestBudget(current.request,packet).inputTokenUpper<studyAnswerPlanRequestBudget(historical.request,packet).inputTokenUpper);
+  assert.throws(()=>decodePlannedStudyGenerationSelections(alias,packet,historical,historical),/binding changed/);
+ }
+ assert.throws(()=>preparePlannedStudyGenerationTransport({...packet,receipt:{...packet.receipt,version:'unknown-version'}}),/Unsupported/);
+ const changed=structuredClone(packet);changed.selectedPrepared.input.completeSourceProof!.manifest.nodes[0].bodySha256='0'.repeat(64);
+ assert.throws(()=>decodePlannedStudyGenerationSelections(alias,changed,current,current),/binding changed/,
+  'Even a hash omitted from the model view remains part of the canonical mapping binding.');
+ assert.deepEqual(studyPlanningRequestIdentity(PLANNED_STUDY_ANSWER_VERSION,current.request,current.bindingSha256),
+  {providerRequestSha256:current.providerRequestSha256,requestIdentity:current.requestIdentity});
 });
 
 test('opt-in revision resumes a bound image failure with all final candidates, two calls only and immutable claims',async()=>{

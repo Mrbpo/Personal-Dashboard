@@ -43,6 +43,21 @@ export function prepareStudyAnswerPlan(question:string,context:DocumentAnswerCon
   method,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256}))};
 }
 
+/** Request-only projection. Full canonical proof/hash/version identities stay
+ * in the packet fingerprint and current-source rechecks. manifestSha256 is an
+ * opaque reference to that original proof, not a hash of this model view. */
+export function studyAnswerModelInput<T extends ReturnType<typeof prepareDocumentAnswer>['input']>(input:T){
+ const proof=input.completeSourceProof,modelProof=proof?(()=>{
+  const {orderedTextSha256:_text,structureManifestSha256:_structure,limits:_limits,imageInputTokenUpper:_tokens,...manifest}=proof.manifest;
+  return {...proof,manifest:{...manifest,nodes:manifest.nodes.map(({documentId:_document,documentVersionId:_version,
+   sourceVersionId:_sourceVersion,sourceHash:_source,bodySha256:_body,...node})=>node),
+  images:manifest.images.map(({attachmentId:_attachment,sha256:_sha,...image})=>image)}};
+ })():undefined;
+ return {...input,
+  evidence:input.evidence.map(({documentVersionId:_version,sourceVersionId:_sourceVersion,sourceHash:_source,sha256:_sha,...evidence})=>evidence),
+  quoteUnits:input.quoteUnits.map(({quoteSha256:_sha,...unit})=>unit),...(modelProof?{completeSourceProof:modelProof}:{})};
+}
+
 /** A plan is a fallible proposal, not canonical data or an answer verdict. */
 export function buildStudyAnswerPlanRequest(packet:ReturnType<typeof prepareStudyAnswerPlan>){
  const ids=packet.input.allowedSourceIds;
