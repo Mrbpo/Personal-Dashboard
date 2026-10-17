@@ -5,7 +5,7 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
@@ -1398,7 +1398,7 @@ export class KernelService {
       throw new Error('Planned answers allow user course/title context, not document filters');
     const {sourceHint}=scope;
     if(sourceHint!==undefined&&(!sourceHint||Object.keys(sourceHint).length!==1||typeof sourceHint.selectedDocumentTitle!=='string'||
-      !sourceHint.selectedDocumentTitle.trim()||sourceHint.selectedDocumentTitle.length>4000||!question.normalize('NFKC').includes(sourceHint.selectedDocumentTitle.normalize('NFKC'))))
+      !sourceHint.selectedDocumentTitle.trim()||sourceHint.selectedDocumentTitle.length>4000||!documentTitleMention(question,sourceHint.selectedDocumentTitle)))
       throw new Error('A supplemental source hint must be a complete user title present in the original question');
     return scope;
   }

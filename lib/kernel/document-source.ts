@@ -4,6 +4,24 @@ import type {Pool} from 'pg';
 export type DocumentSourceHint={selectedDocumentTitle:string};
 export type ResolvedDocumentSource={documentId:string;title:string;currentVersionId:string;sourceVersionId:string;sourceHash:string};
 export type MentionedDocumentSources={status:'not-mentioned'|'resolved'|'ambiguous';matches:ResolvedDocumentSource[]};
+/** A question mention is not a replacement for the canonical stored name. Only
+ * the terminal PDF extension may be omitted; no case folding or fuzzy aliases. */
+export function documentTitleMention(question:string,canonicalName:string){
+ const query=question.normalize('NFKC'),canonical=canonicalName.normalize('NFKC');
+ const forms=[canonical,...(/\.pdf$/i.test(canonical)?[canonical.slice(0,-4)]:[])];
+ for(const text of forms){
+  if(!text)continue;
+  let start=query.indexOf(text);
+  while(start>=0){
+   const before=query.slice(0,start),after=query.slice(start+text.length);
+   if(!(/^[\p{L}\p{N}\p{M}_]/u.test(text)&&/[\p{L}\p{N}\p{M}_]$/u.test(before))&&
+    !(/[\p{L}\p{N}\p{M}_]$/u.test(text)&&/^[\p{L}\p{N}\p{M}_]/u.test(after))&&
+    !/^\.[\p{L}\p{N}]/u.test(after))return {text,start,end:start+text.length};
+   start=query.indexOf(text,start+1);
+  }
+ }
+ return null;
+}
 type SourceResolutionScope={scope:'selected-title-scoped';selectedDocumentTitle:string};
 export type DocumentSourceResolution=SourceResolutionScope&(
  {status:'resolved';document:ResolvedDocumentSource}|
@@ -48,7 +66,7 @@ export async function resolveDocumentSource(pool:Pool,owner:string,hint:Document
 }
 
 /** Conservative metadata-only discovery, not intent or evidence validation.
- * Match the full case-sensitive NFKC title without aliases/whitespace rewriting.
+ * Match a full case-sensitive NFKC name or its terminal-PDF-extension-free form.
  * Automatic selection requires >=12 codepoints and two alphanumeric words, or
  * >=8 Han characters; short/single-word titles keep ordinary retrieval. Titles
  * embedded in a larger word do not count. Explicit sourceHint remains unchanged.
@@ -66,24 +84,19 @@ export async function findMentionedDocumentSources(pool:Pool,owner:string,questi
   v.id "currentVersionId",v.source_version_id "sourceVersionId",d.source_hash "sourceHash"
   FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   WHERE d.owner_id=$1 AND NOT d.hidden AND ($3::text IS NULL OR d.course_id=$3)
-   AND length(normalize(d.name,NFKC)) BETWEEN 8 AND 4000 AND strpos($2,normalize(d.name,NFKC))>0
+   AND length(normalize(d.name,NFKC)) BETWEEN 8 AND 4000
+   AND (strpos($2,normalize(d.name,NFKC))>0 OR strpos($2,regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0)
    AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
     AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
     AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
   ORDER BY d.id`,[owner,query,options.courseId||null])).rows;
  const matches:ResolvedDocumentSource[]=[];
  for(const row of rows){
-  const title=row.title.normalize('NFKC'),words=title.match(/[\p{L}\p{N}]+/gu)??[];
+  const mention=documentTitleMention(question,row.title);if(!mention)continue;
+  const title=mention.text,words=title.match(/[\p{L}\p{N}]+/gu)??[];
   if(!((Array.from(title).length>=12&&words.filter(word=>Array.from(word).length>=2).length>=2)||
    (title.match(/\p{Script=Han}/gu)?.length??0)>=8))continue;
-  let start=query.indexOf(title),mentioned=false;
-  while(start>=0){
-   const before=query.slice(0,start),after=query.slice(start+title.length);
-   if(!(/^[\p{L}\p{N}\p{M}_]/u.test(title)&&/[\p{L}\p{N}\p{M}_]$/u.test(before))&&
-    !(/[\p{L}\p{N}\p{M}_]$/u.test(title)&&/^[\p{L}\p{N}\p{M}_]/u.test(after))){mentioned=true;break;}
-   start=query.indexOf(title,start+1);
-  }
-  if(mentioned)matches.push(row);
+  matches.push(row);
   if(matches.length===2)break;
  }
  return {status:matches.length===1?'resolved':matches.length?'ambiguous':'not-mentioned',matches};
@@ -101,12 +114,13 @@ export function requireResolvedDocumentSource(resolution:DocumentSourceResolutio
  * of other current visible sources prevent an exclusive initial-source read.
  * Two examples suffice to establish a cross-source question; no bodies load. */
 export async function mentionedOtherDocumentSources(pool:Pool,owner:string,question:string,selectedDocumentId:string){
- return (await pool.query<Pick<ResolvedDocumentSource,'documentId'|'title'>>(`SELECT d.id "documentId",d.name title
+ const rows=(await pool.query<Pick<ResolvedDocumentSource,'documentId'|'title'>>(`SELECT d.id "documentId",d.name title
   FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   WHERE d.owner_id=$1 AND NOT d.hidden AND d.id<>$2 AND length(trim(d.name))>0
-   AND strpos($3,normalize(d.name,NFKC))>0
+   AND (strpos($3,normalize(d.name,NFKC))>0 OR strpos($3,regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0)
    AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
     AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
     AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
-  ORDER BY d.id LIMIT 2`,[owner,selectedDocumentId,question.normalize('NFKC')])).rows;
+  ORDER BY d.id`,[owner,selectedDocumentId,question.normalize('NFKC')])).rows;
+ return rows.filter(row=>documentTitleMention(question,row.title)).slice(0,2);
 }

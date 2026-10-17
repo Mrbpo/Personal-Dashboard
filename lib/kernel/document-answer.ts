@@ -7,6 +7,7 @@ import type {FlatTextStructureProvenance,DocumentContextSource} from './document
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudyPdfPageRegions,unavailableStudyPdfPageRegions,
  type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
+import {documentTitleMention} from './document-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
@@ -316,10 +317,10 @@ export function resolveDocumentAnswerSelections(value:unknown,supports:readonly 
 export function prepareDocumentAnswer(question:string,context:DocumentAnswerContext,unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY){
  if(typeof question!=='string'||!question.trim()||Array.from(question).length>4000)throw new Error('Invalid document question');
  if(unitPolicy!==undefined&&unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY)throw new Error('Invalid document citation unit policy');
- if(context.sourceCaptionProof&&!question.normalize('NFKC').includes(context.sourceCaptionProof.selectedDocumentTitle.normalize('NFKC')))
+ if(context.sourceCaptionProof&&!documentTitleMention(question,context.sourceCaptionProof.selectedDocumentTitle))
   throw new Error('Resolved caption title must occur in the complete question');
  if(context.completeSourceProof){validateCompleteStudySource(context);
-  if(!question.normalize('NFKC').includes(context.completeSourceProof.selectedDocumentTitle.normalize('NFKC')))
+  if(!documentTitleMention(question,context.completeSourceProof.selectedDocumentTitle))
    throw Error('Complete source title must occur in the original question');}
  const supports=supportFor(context);
  if(unitPolicy){

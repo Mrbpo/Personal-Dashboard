@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import type {Pool} from 'pg';
-import {findMentionedDocumentSources,type ResolvedDocumentSource} from '../lib/kernel/document-source.ts';
+import {documentTitleMention,findMentionedDocumentSources,mentionedOtherDocumentSources,resolveDocumentSource,type ResolvedDocumentSource} from '../lib/kernel/document-source.ts';
 
 const doc=(documentId:string,title:string):ResolvedDocumentSource=>({documentId,title,currentVersionId:`v-${documentId}`,
  sourceVersionId:`s-${documentId}`,sourceHash:`h-${documentId}`});
@@ -44,4 +45,60 @@ test('conservative Han-title boundary, rejected early substrings and empty input
  const result=await findMentionedDocumentSources(metadata([one,two,han]).pool,'alice',`pre${one.title}X pre${two.title}X 《${han.title}》`);
  assert.deepEqual(result,{status:'resolved',matches:[han]});
  const empty=metadata([]);assert.deepEqual(await findMentionedDocumentSources(empty.pool,'alice',' '),{status:'not-mentioned',matches:[]});assert.equal(empty.calls.length,0);
+});
+
+test('a complete PDF filename or its NFKC stem resolves without changing canonical metadata or explicit hints',async()=>{
+ const source=doc('pdf','Probability Ｌecture Notes.PDF'),db=metadata([source]);
+ for(const mention of ['Probability Lecture Notes.PDF','Probability Lecture Notes']){
+  const question=`Explain “${mention}”.`,result=await findMentionedDocumentSources(db.pool,'alice',question,{courseId:'math'});
+  assert.deepEqual(result,{status:'resolved',matches:[source]});assert.equal(result.matches[0].title,source.title);
+  assert.equal(documentTitleMention(question,source.title)?.text,mention);
+ }
+ assert.match(db.calls[0].sql,/regexp_replace\(normalize\(d\.name,NFKC\),'\[\.\]\[pP\]\[dD\]\[fF\]\$',''\)/);
+ const exact=metadata([]);await resolveDocumentSource(exact.pool,'alice',{selectedDocumentTitle:'Probability Lecture Notes'});
+ assert.match(exact.calls[0].sql,/normalize\(d\.name,NFKC\)=\$2/);assert.doesNotMatch(exact.calls[0].sql,/regexp_replace/);
+ const other=metadata([source]);assert.deepEqual(await mentionedOtherDocumentSources(other.pool,'alice','Compare “Probability Lecture Notes”.','selected'),[source]);
+ assert.deepEqual(other.calls[0].args,['alice','selected','Compare “Probability Lecture Notes”.']);
+ assert.doesNotMatch(other.calls[0].sql,/\bLIMIT\b/i,'boundary rejection happens before the two-source cap');
+});
+
+test('PDF stem collisions stay ambiguous and abbreviated, short or embedded mentions remain unselected',async()=>{
+ const stem='Probability Lecture Notes',pdf=doc('pdf',stem+'.pdf'),plain=doc('plain',stem),copy=doc('copy',stem+'.PDF');
+ assert.deepEqual(await findMentionedDocumentSources(metadata([pdf,plain,copy]).pool,'alice',`Use “${stem}”.`),
+  {status:'ambiguous',matches:[pdf,plain]});
+ for(const question of ['Use Probability Lecture','Use probability Lecture Notes',`pre${stem}Suffix`,`Use ${stem}.txt`,`Use ${stem}.pdf.backup`])
+  assert.deepEqual(await findMentionedDocumentSources(metadata([pdf]).pool,'alice',question),{status:'not-mentioned',matches:[]});
+ assert.equal(documentTitleMention('Use “Probability Lecture Notes”.',stem+'.txt'),null,'only .pdf may be omitted');
+ for(const title of ['Learning.pdf','Final exam.pdf'])assert.equal((await findMentionedDocumentSources(metadata([doc('short',title)]).pool,'alice',`Use ${title.slice(0,-4)}.`)).status,'not-mentioned','apply the automatic minimum to the actual stem mention');
+ assert.equal((await findMentionedDocumentSources(metadata([pdf]).pool,'alice',`pre${stem}Suffix; then “${stem}”.`)).status,'resolved');
+});
+
+test('PDF stem question passes canonical complete/caption proofs and planned focus but cannot replace the canonical proof name',async()=>{
+ const [{prepareDocumentAnswer},{COMPLETE_DOCUMENT_SOURCE_LIMITS},{freezeStudyQuestionContract},{studySupplementQueries}]=await Promise.all([
+  import('../lib/kernel/document-answer.ts'),import('../lib/kernel/document-context.ts'),
+  import('../lib/kernel/document-study-contract.ts'),import('../lib/kernel/document-planned-answer.ts')]);
+ const sha=(value:string)=>createHash('sha256').update(value).digest('hex'),canonical=(v:unknown):string=>JSON.stringify(v,(_key,x)=>
+  x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
+ const stem='Probability Lecture Notes',name=stem+'.pdf',question=`Explain “${stem}”.`,body='The measurements are recorded in the original source.',
+  source={documentId:'pdf',currentVersionId:'v-pdf',sourceVersionId:'s-pdf',sourceHash:sha('original'),courseId:''},
+  anchor={id:'pg:v-pdf:1',document_id:'pdf',course_id:'',name,origin:'fixture',origin_key:'original',source_hash:source.sourceHash,
+   source_version_id:source.sourceVersionId,body,locator:'page 1',page_number:1,evidence_id:'e1',parser_version:'fixture',score:1,evidence_body:'full-page' as const},
+  unsigned={method:'complete-current-source' as const,nodeOrder:'original-source' as const,complete:true,reason:null,source,sourceNodeCount:1,returnedNodeCount:1,
+   sourceBodyCodepoints:Array.from(body).length,sourceBodyUtf8Bytes:Buffer.byteLength(body),orderedTextSha256:sha(canonical([body])),structureManifestSha256:'f'.repeat(64),
+   parserWarnings:[],document:{name,origin:'fixture',originKey:'original',parserVersion:'fixture'},hierarchy:[],
+   nodes:[{documentId:'pdf',documentVersionId:'v-pdf',sourceVersionId:'s-pdf',sourceHash:source.sourceHash,evidenceId:'e1',locator:'page 1',ordinal:0,kind:'paragraph' as const,bodySha256:sha(body)}],
+   images:[],imageInputTokenUpper:0,limits:COMPLETE_DOCUMENT_SOURCE_LIMITS},manifest={...unsigned,manifestSha256:sha(canonical(unsigned))},
+  context={sourceContentIsUntrusted:true as const,anchors:[anchor],parents:[],images:[]},
+  proof={policy:'selected-complete-initial-v1' as const,selectedDocumentTitle:name,manifest};
+ assert.equal(prepareDocumentAnswer(question,{...context,completeSourceProof:proof}).input.completeSourceProof?.selectedDocumentTitle,name);
+ assert.equal(prepareDocumentAnswer(`Explain “${name}”.`,{...context,completeSourceProof:proof}).input.completeSourceProof?.manifest.manifestSha256,manifest.manifestSha256);
+ assert.throws(()=>prepareDocumentAnswer(question,{...context,completeSourceProof:{...proof,selectedDocumentTitle:stem}}),/binding changed/);
+ const caption={policy:'resolved-title-caption-images-v1' as const,selectedDocumentTitle:name,source,manifestSha256:'f'.repeat(64),totalCaptions:0,captions:[]};
+ assert.equal(prepareDocumentAnswer(question,{...context,sourceCaptionProof:caption}).input.sourceCaptionProof?.selectedDocumentTitle,name);
+ const contract=freezeStudyQuestionContract(question,{requirements:[{id:'r0',aspect:'Explain the measurements',requestedScope:{subject:stem,attribute:null,unit:null,population:null,stage:null,configuration:null,time:null}}]},'a'.repeat(64)),
+  binding={plan:{missing:[],sourceSubscopes:[]}} as unknown as import('../lib/kernel/document-study-contract.ts').StudyContractPlanBinding,
+  resolved={scope:'selected-title-scoped' as const,selectedDocumentTitle:name,status:'resolved' as const,document:{...doc('pdf',name),sourceHash:source.sourceHash}},
+  queries=studySupplementQueries(question,contract,binding,resolved);
+ assert.equal(queries[0].query,'Explain the measurements');assert.equal(queries[0].originalQuery,`Explain the measurements ${stem}`);
+ assert.equal(resolved.selectedDocumentTitle,name);assert.equal(proof.manifest.document.name,name);
 });
