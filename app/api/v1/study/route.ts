@@ -1,5 +1,6 @@
 import { getCurrentOwner, requireOwnerApi } from '@/lib/authz';
 import { createTutorThread, sendTutor, tutorState } from '@/lib/tutor';
+import {studyFailure} from '@/lib/study-answer';
 
 export const runtime='nodejs';
 
@@ -22,6 +23,6 @@ export async function POST(request:Request){
     return Response.json({threadId,answer,courses:state.threads.filter(thread=>thread.id===threadId).map(thread=>({id:thread.course_id})),generatedAt:new Date().toISOString()},{headers:{'Cache-Control':'no-store'}});
   }catch(error){
     const message=error instanceof Error&&/^[\u3400-\u9fff]/.test(error.message)?error.message:'学习问答暂时不可用';
-    return Response.json({error:message},{status:400});
+    return Response.json({error:message,...(studyFailure(error)?{failure:studyFailure(error)}:{})},{status:400});
   }
 }

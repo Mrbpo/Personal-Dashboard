@@ -7,6 +7,7 @@ import { saveBlob, readBlob, searchLibrary } from './library.ts';
 import { tutorWeb } from './tutor-web.ts';
 import { acquireLease,releaseLease,enqueue } from './jobs.ts';
 import {rollingMemory,relevantMemory} from './tutor-memory.ts';
+import {answerKernelStudy,studyAnswerBackend,StudyAnswerError} from './study-answer.ts';
 
 export type Attachment = { name: string; mime: string; data: string; size: number; hash?: string };
 export type TutorThread = { id: string; course_id: string; title: string; updated_at: string };
@@ -139,9 +140,16 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     const previousFiles = history.flatMap(m => JSON.parse(m.attachments_json) as Attachment[]);
     if (previousFiles.reduce((s,a) => s+a.size,0) + attachments.reduce((s,a) => s+a.size,0) > 20*1024*1024) throw new Error('本会话附件已超过 20 MB，请新建会话');
     const context = history.slice(-24);
+    const backend=studyAnswerBackend();
     const recentQuestions = context.filter(m => m.role === 'user').slice(-2).map(m => m.body).join(' ');
     let activeCourse=thread.course_id;
-    if(!activeCourse){
+    if(!activeCourse&&backend==='kernel'){
+      const courses=(await listCourseSettings()).filter(course=>course.enabled);
+      activeCourse=explicitCourseFromQuestion(question,courses);
+      if(!activeCourse&&needsCourseScope(question))throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
+      if(activeCourse){await db.prepare('UPDATE tutor_threads SET course_id=? WHERE id=? AND owner_id=? AND course_id=?').bind(activeCourse,threadId,owner,'').run();thread.course_id=activeCourse;}
+    }
+    if(!activeCourse&&backend==='legacy'){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
       activeCourse=explicitCourseFromQuestion(question,courses);
       if(!activeCourse&&question.trim()){
@@ -150,6 +158,18 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
       }
       if(!activeCourse&&needsCourseScope(question))throw new Error(`为避免串课，请在问题中写一次课程代码（例如 ${courses.slice(0,3).map(c=>c.code).join('、')||'课程代码'}）；后续追问会自动沿用。`);
       if(activeCourse){await db.prepare('UPDATE tutor_threads SET course_id=? WHERE id=? AND owner_id=? AND course_id=?').bind(activeCourse,threadId,owner,'').run();thread.course_id=activeCourse;}
+    }
+    if(backend==='kernel'){
+      if(previousFiles.length||attachments.length)throw new StudyAnswerError('parsing','attachment-not-indexed','内核问答请先将附件加入资料库并等待解析完成；本轮未调用模型');
+      const result=await answerKernelStudy(owner,question,activeCourse,context),now=new Date().toISOString();
+      if(!leaseValid)throw new Error('会话锁已失效，请刷新后重试');
+      await owned(owner,threadId);
+      await db.batch([
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}`,threadId,'user',question,'[]','{}',0,now),
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}:answer`,threadId,'assistant',result.answer,'[]',JSON.stringify(result.meta),0,now),
+        db.prepare('UPDATE tutor_threads SET title=?, updated_at=? WHERE id=? AND owner_id=?').bind(history.length?thread.title:question.slice(0,60),now,threadId,owner),
+      ]);
+      return;
     }
     // An unscoped conceptual question uses general knowledge and attachments only.
     // Course sources are never pooled across subjects into one answer.

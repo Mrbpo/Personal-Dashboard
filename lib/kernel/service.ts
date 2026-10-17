@@ -1156,9 +1156,12 @@ export class KernelService {
   /** Non-structured study content only; canonical business facts use their own
    * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
   async answerStudyContent(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean;retrievalQuestion?:string}={},policy:DocumentAnswerPolicy={}){
     await documentAnswerSettings(policy);
-    return synthesizeDocumentAnswer(question,await this.studyAnswerContextReader(owner,question,options),policy);
+    const {retrievalQuestion,...searchOptions}=options;
+    if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
+      throw new Error('Invalid study retrieval question');
+    return synthesizeDocumentAnswer(question,await this.studyAnswerContextReader(owner,retrievalQuestion??question,searchOptions),policy);
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

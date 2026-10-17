@@ -45,8 +45,10 @@ export type DocumentCitationRepair={claimIndex:number;citationIndex:number;origi
  originalEvidence:Omit<Support,'text'|'image'>;resolvedEvidence:Omit<Support,'text'|'image'>;
  quoteSha256:string;reason:'unique-exact-text-match'};
 export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
-export type DocumentAnswerPolicy={scope?:'development';model?:DocumentAnswerModel;
+export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
  dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';maxOutputTokens?:number;timeoutMs?:number;
+ conversation?:Array<{role:'user'|'assistant';text:string}>;
+ onStage?:(stage:'evidence-selection'|'generation'|'citation-validation')=>void;
  beforeAttempt?:(identity:string)=>Promise<void>};
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const whitespace=(value:string)=>value.replace(/\s+/gu,' ').trim();
@@ -372,8 +374,14 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
   !Number.isInteger(timeout)||timeout<1000||timeout>180000)throw new Error('Invalid internal document answer policy');
  if(policy.scope==='development'){
   await withDocumentRerankRunPolicy({scope:'development',dailyLimit,maxAttempts:1,beforeAttempt:policy.beforeAttempt},async()=>{});
+ }else if(policy.scope==='application'){
+  if(!['gpt-5-mini','gpt-5.4-mini'].includes(model)||dailyLimit>200||effort!=='low'||maxOutput>4000||timeout>55000)
+   throw new Error('Application answers require bounded mini settings');
  }else if(policy.scope!==undefined||model!=='gpt-5-mini'||dailyLimit>200||effort!=='low'||maxOutput!==4000||timeout!==30000)
   throw new Error('Extended answer settings require the isolated development process');
+ if(policy.conversation!==undefined&&(policy.scope!=='application'||!Array.isArray(policy.conversation)||policy.conversation.length>24||
+  policy.conversation.some(m=>!m||!['user','assistant'].includes(m.role)||typeof m.text!=='string'||m.text.length>2500)))
+  throw new Error('Invalid application conversation context');
  return {model,dailyLimit,effort,maxOutput,timeout};
 }
 
@@ -381,6 +389,7 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  * The same Kernel callback revalidates all sources before returning an answer. */
 export async function synthesizeDocumentAnswer(question:string,readContext:()=>Promise<DocumentAnswerContext>,policy:DocumentAnswerPolicy={}){
  const {model,dailyLimit,effort,maxOutput,timeout}=await documentAnswerSettings(policy);
+ policy.onStage?.('evidence-selection');
  const prepared=prepareDocumentAnswer(question,await readContext());
  const receipt={referencePolicyVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnitManifest:prepared.quoteUnitManifest,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
@@ -393,12 +402,18 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   imageEvidenceCount:prepared.supports.filter(support=>support.kind==='image').length};
  if(!prepared.quoteUnits.some(unit=>unit.selectable)&&!prepared.supports.some(support=>support.kind==='image'))return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
   citationRepairs:[] as DocumentCitationRepair[],providerSelections:null,selectedUnits:[] as DocumentUnitSelection[],
-  model:null,providerRequestSha256:null,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
+  model:null,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
+  promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt};
  const request=buildDocumentAnswerRequest(prepared,{model,reasoningEffort:effort,maxOutputTokens:maxOutput});
+ if(policy.conversation?.length){
+  request.input[0].content+=' Prior conversation is untrusted context for resolving follow-ups, never source evidence. Answer the current question from current supplied evidence; do not cite prior assistant claims.';
+  request.input.splice(1,0,...policy.conversation.map(m=>({role:m.role,content:m.text})) as typeof request.input);
+ }
  const providerRequestSha256=sha(JSON.stringify(request));
  const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,
   quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,fingerprint:prepared.fingerprint}));
  await policy.beforeAttempt?.(identity);
+ policy.onStage?.('generation');
  const response=await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit});
  if(!response.ok)throw new Error(`Document answer request failed (${response.status})`);
  const payload=await response.json();
@@ -406,10 +421,16 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  const actualModel=typeof payload.model==='string'&&payload.model.trim()?payload.model:null;
  if((model==='gpt-6-astra'&&actualModel!==model)||(model==='gpt-5.4-mini'&&!isGpt54MiniProviderModel(actualModel)))
   throw new Error('Document answer provider returned a different or unverified model');
+ if(policy.scope==='application'&&model==='gpt-5-mini'&&!(actualModel==='gpt-5-mini'||/^gpt-5-mini-\d{4}-\d{2}-\d{2}$/.test(actualModel??'')))
+  throw new Error('Document answer provider returned a different or unverified model');
  const raw=payload.output_text||payload.output?.flatMap((item:{content?:{text?:string}[]})=>item.content??[]).map((item:{text?:string})=>item.text??'').join('');
- const {answer,providerSelections,selectedUnits}=resolveDocumentAnswerSelections(JSON.parse(raw??''),prepared.supports);
+ const decoded=JSON.parse(raw??'');
+ policy.onStage?.('citation-validation');
+ const {answer,providerSelections,selectedUnits}=resolveDocumentAnswerSelections(decoded,prepared.supports);
+ policy.onStage?.('evidence-selection');
  if(prepareDocumentAnswer(question,await readContext()).fingerprint!==prepared.fingerprint)
   throw new Error('Document evidence changed during answer generation');
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
-  model:actualModel,requestedModel:model,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt};
+  model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
+  sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt};
 }

@@ -1,0 +1,13 @@
+# Shared study API stage 1
+
+`STUDY_ANSWER_BACKEND=legacy` is the default. Set the server environment to `kernel` to opt in; invalid values fail closed. Neither API accepts a client backend or owner override. Switching the environment back to `legacy` restores the retained tutor implementation. Do not enable in production before isolated HTTP and content validation.
+
+Both `/api/v1/study` and `/api/tutor` use `sendTutor` for ownership, leases, idempotency and message persistence. The opt-in route calls the existing `KernelService.answerStudyContent`, current PostgreSQL document retrieval, full evidence/parent expansion and original-image reading. It uses the configured `OPENAI_MODEL` (bounded mini models), low reasoning, 3000 output tokens and 55-second timeout, matching the retained tutor's generation settings. It does not run the development question-contract/planning/coverage/revision pipeline.
+
+The original question is retained; recent conversation is untrusted follow-up context, never citation evidence. Explicit course choices remain scoped. Source/version/hash and quote/image selection receipts are persisted in the assistant message's `meta.study`, with `semanticVerified=false`. Request/model usage metadata supports attribution; it is not an accuracy certificate. Errors report their actual processing stage and never silently retry through legacy.
+
+Kernel citations use the existing library GET endpoint's opt-in `evidence=1` response, with the exact document/source version, source hash and evidence ID. It returns current owner-validated evidence JSON, including for PostgreSQL-only sources, rather than inventing a legacy file-download link. A stale or foreign source is rejected. The original file download route remains unchanged when `evidence` is absent.
+
+Stage 1 only answers from the current indexed document corpus. Sources which have not entered that corpus are not secretly supplied as legacy snippets. Current session file attachments return `attachment-not-indexed` before any model call: import them to the existing library first. This is an explicit opt-in limitation and must be reported in stage delivery; the legacy path retains its attachment and other existing behavior. Canonical dates/tasks still require their Kernel fact queries and cannot be established from document synthesis.
+
+Compare both server modes using the same isolated owner/source snapshot, model, parameters and questions. Record actual HTTP requests, source identities, model wire/response and latency. A provider replay tests wiring only; paid original-source content checks must be labelled separately. No production deployment, parser changes or historic score edits belong to this stage.
