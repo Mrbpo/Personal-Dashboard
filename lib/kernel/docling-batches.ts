@@ -27,7 +27,7 @@ export async function parsingProvenanceBlobHashes(value:unknown,binding:{sourceH
  };
  const encoding=async(receipt:unknown,inputHash?:unknown,version?:unknown)=>{
   const saved=await json(add(receipt)),proof=object(saved.proof);
-  if(!['source-type1-cmap-v1','source-font-reference-v1','source-font-reference-v2'].includes(String(proof.version))||saved.kind!==proof.version||
+  if(!['source-type1-cmap-v1','source-font-reference-v1','source-font-reference-v2','source-font-reference-v3'].includes(String(proof.version))||saved.kind!==proof.version||
    proof.sourceHash!==binding.sourceHash||(version!==undefined&&proof.version!==version)||
    (inputHash!==undefined&&proof.inputHash!==inputHash)||typeof proof.inputHash!=='string'||!/^[a-f0-9]{64}$/.test(proof.inputHash)||
    !Array.isArray(proof.copyIndices)||!proof.copyIndices.length||proof.copyIndices.length>500||
