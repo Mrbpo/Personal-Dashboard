@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 
 test('legacy is the default, invalid configuration fails closed and application policy stays bounded',async()=>{
  assert.equal(studyAnswerBackend('legacy'),'legacy');assert.equal(studyAnswerBackend('kernel'),'kernel');
  assert.throws(()=>studyAnswerBackend('typo'),StudyAnswerError);
+ assert.equal(studyEvidenceSelection('single-pass'),undefined);assert.equal(studyEvidenceSelection('select-then-answer'),'select-then-answer');
+ assert.throws(()=>studyEvidenceSelection('typo'),StudyAnswerError);
  await assert.rejects(documentAnswerSettings({scope:'application',model:'gpt-6-astra'}),/bounded mini/);
  await assert.rejects(documentAnswerSettings({scope:'application',maxOutputTokens:9000}),/bounded mini/);
  assert.equal((await documentAnswerSettings({scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000})).model,'gpt-5.4-mini');

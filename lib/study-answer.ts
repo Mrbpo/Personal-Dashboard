@@ -13,10 +13,15 @@ export function studyAnswerBackend(value=process.env.STUDY_ANSWER_BACKEND??'lega
  if(value!=='legacy'&&value!=='kernel')throw new StudyAnswerError('configuration','invalid-backend','学习问答路径配置无效');
  return value;
 }
+export function studyEvidenceSelection(value=process.env.STUDY_EVIDENCE_SELECTION??'single-pass'){
+ if(value!=='single-pass'&&value!=='select-then-answer')throw new StudyAnswerError('configuration','invalid-evidence-selection','证据选择配置无效');
+ return value==='single-pass'?undefined:value;
+}
 export function studyFailure(error:unknown){
  return error instanceof StudyAnswerError?{stage:error.stage,code:error.code}:undefined;
 }
 export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>){
+ const evidenceSelection=studyEvidenceSelection();
  const model=serviceValue('OPENAI_MODEL')||'gpt-5-mini';
  if(!['gpt-5-mini','gpt-5.4-mini'].includes(model))throw new StudyAnswerError('configuration','unsupported-model','内核问答仅支持已配置的 mini 模型');
  const prior=history.slice(-24).map(m=>({role:m.role as 'user'|'assistant',text:m.body.slice(0,2500)}));
@@ -29,7 +34,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    refineAdjacent:process.env.KERNEL_DOCUMENT_HYBRID==='true'&&process.env.KERNEL_DOCUMENT_RERANK==='true',
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
-   {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,
+   {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,
     conversation:prior,onStage:next=>{stage=next;}});
   const selected=result.selectedUnits,refs=new Map<string,string>();
   for(const unit of selected){const key=JSON.stringify(unit.evidence);if(!refs.has(key))refs.set(key,`S${refs.size+1}`);}
@@ -53,6 +58,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
+    ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     promptVersion:result.promptVersion,referencePolicyVersion:result.referencePolicyVersion,
     selectedUnits:result.selectedUnits,evidence:result.evidence,warnings:result.warnings,
     semanticVerified:false,wholeAnswerVerified:false}}};
