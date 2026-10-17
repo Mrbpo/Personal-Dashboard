@@ -4,7 +4,7 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
@@ -29,6 +29,28 @@ import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitN
 import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
 
 type Json = Record<string, unknown>;
+/** Supplement a named source without discarding the original cross-source recall. */
+export function mergeStudyEvidence(base:DocumentAnswerContext,added:DocumentAnswerContext):DocumentAnswerContext|null{
+ const anchors=new Map(base.anchors.map(n=>[n.id,n]));
+ for(const node of added.anchors){const old=anchors.get(node.id);
+  if(old&&JSON.stringify([old.document_id,old.source_version_id,old.source_hash,old.evidence_id,old.locator,old.body])!==
+   JSON.stringify([node.document_id,node.source_version_id,node.source_hash,node.evidence_id,node.locator,node.body]))throw new DocumentEvidenceChangedError();
+  if(!old)anchors.set(node.id,node);
+ }
+ const parents=new Map(base.parents.map(p=>[p.parentId,p]));
+ for(const parent of added.parents){const old=parents.get(parent.parentId);
+  if(old&&JSON.stringify([old.status,old.nodes])!==JSON.stringify([parent.status,parent.nodes]))throw new DocumentEvidenceChangedError();
+  if(!old)parents.set(parent.parentId,parent);
+ }
+ const budget=createDocumentImageBudget(),images=new Map<string,DocumentAnswerContext['images'][number]>();
+ for(const [i,image]of [...base.images,...added.images].entries()){
+  if(!budget.include(image,i+1))return null;
+  if(!images.has(image.attachmentId))images.set(image.attachmentId,image);
+ }
+ return {...base,anchors:[...anchors.values()],parents:[...parents.values()],images:[...images.values()],
+  imageSelection:{...budget.snapshot(),omitted:[...base.imageSelection?.omitted??[],...added.imageSelection?.omitted??[]]},
+  imageAnchors:[...new Map([...base.imageAnchors??[],...added.imageAnchors??[]].map(n=>[n.evidence_id,n])).values()]};
+}
 type CandidateInput = {
   entityId: string; attribute: string; value: unknown; sourceVersionId: string;
   source: string; sourceItemId: string; originalExcerpt: string;
@@ -1161,7 +1183,43 @@ export class KernelService {
     const {retrievalQuestion,...searchOptions}=options;
     if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
       throw new Error('Invalid study retrieval question');
-    return synthesizeDocumentAnswer(question,await this.studyAnswerContextReader(owner,retrievalQuestion??question,searchOptions),policy);
+    const rankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,searchOptions);
+    let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
+    let read:()=>Promise<DocumentAnswerContext>=rankedRead;
+    if(policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages){
+      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+      if(mentioned.status==='resolved'){
+        const selected=mentioned.matches[0];
+        read=async()=>{
+          const base=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+          if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
+          const complete=await this.readCompleteDocumentSource(owner,selected);
+          if(complete.status==='unavailable'){
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:complete.reason};return base;
+          }
+          // Validate the existing complete-source proof before merging; it does
+          // not certify completeness of a multi-source question or the answer.
+          prepareDocumentAnswer(question,{...complete.context,completeSourceProof:{policy:'selected-complete-initial-v1',selectedDocumentTitle:selected.title,manifest:complete.manifest}});
+          const expanded=mergeStudyEvidence(base,complete.context);
+          if(!expanded){contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-image-budget'};return base;}
+          const prepared=prepareDocumentAnswer(question,expanded),settings=await documentAnswerSettings(policy);
+          try{buildDocumentAnswerRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput});}catch(error){
+            if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:error.code};return base;
+          }
+          const inputUpper=Buffer.byteLength(JSON.stringify(prepared.input))+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+
+            (expanded.imageSelection?.accounting.imageInputTokens??0);
+          if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-request-budget'};return base;
+          }
+          contextExpansion={strategy:'ranked-plus-complete-mentioned-source',coverage:'unassessed',selectedSource:selected,
+            sourceManifestSha256:complete.manifest.manifestSha256,sourceNodes:complete.manifest.returnedNodeCount,
+            sourceImages:complete.manifest.images.length,otherSourcesRetained:true,inputTokenUpper:inputUpper};
+          return expanded;
+        };
+      }
+    }
+    const result=await synthesizeDocumentAnswer(question,read,policy);return {...result,contextExpansion};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

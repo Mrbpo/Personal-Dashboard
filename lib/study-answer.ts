@@ -52,6 +52,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     retrievalQuestion,settings:{reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
+    contextExpansion:result.contextExpansion,
     promptVersion:result.promptVersion,referencePolicyVersion:result.referencePolicyVersion,
     selectedUnits:result.selectedUnits,evidence:result.evidence,warnings:result.warnings,
     semanticVerified:false,wholeAnswerVerified:false}}};
