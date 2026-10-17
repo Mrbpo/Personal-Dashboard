@@ -167,3 +167,13 @@ ID restoration (including a legal wrong source), original PNG/caption members,
 unknown/stale bindings, default compatibility, historical local reuse, capacity
 and the one-revision selected-only boundary. They establish no semantic improvement
 and change no old answers, source bytes, raw logs or benchmark scores.
+### Qualification and inventory boundaries
+
+The explicit scope-witness route distinguishes evidence that an item was used,
+evidence that it satisfies the requested qualification, and evidence that a
+qualified inventory is exhaustive. A broader list, baseline label, table row or
+list position alone establishes neither qualification nor exhaustiveness.
+Unresolved qualifications retain supported use/role facts with a bounded
+explanation instead of an invented category boundary or a generic refusal.
+These are fallible semantic instructions in the existing review/revision; they
+add no model stage and do not turn ID validity or local support into acceptance.

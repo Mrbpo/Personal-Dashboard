@@ -442,6 +442,9 @@ export async function reviewCompletePlannedStudyAnswer(question:string,readPacke
      ' Return an answer plus discharges/unresolvedFindingIds for program-assigned fN findings in coverageReview.scopeBindings. '+
      'Each discharge contains findingId and a binding with exactly the original aspectIds, actual sourceIds, new cN claimIds and fallible judgment. '+
      'Select IDs only, never copy quotes, labels or question spans. Cite the actual supporting source IDs in the answer itself; no citation is added by a discharge. '+
+     'Distinguish supported use and role facts from satisfaction of the requested qualification and exhaustiveness of that qualified set. A broader list/count, baseline label or table row does not by itself establish qualification or a complete qualified inventory. '+
+     'Without direct source evidence or a source-grounded bridge, retain the useful supported facts and explain the unresolved qualification or inventory boundary in the answer. Do not reintroduce an unestablished qualification or exclusivity by synonymous wording or by adopting a fallible review finding. '+
+     'Bound uncertainty explanations to the supplied evidence, not an unsupported global negative. Do not replace useful supported content with a generic refusal solely because a qualification remains unresolved. '+
      'Retain unresolved finding IDs when scope, evidence or capacity remains unclear. Neither valid bindings nor linked citations establish semantic coverage.'},
       {...request.input[1],content:content.map((part,i)=>i?part:{...part,text:JSON.stringify({...JSON.parse((request.input[1].content as {text:string}[])[0].text),
        coverageReview:{version:review.version,diagnostics:aliasDiagnostics,scopeBindings:aliasDiagnostics.scopeWitness?{
