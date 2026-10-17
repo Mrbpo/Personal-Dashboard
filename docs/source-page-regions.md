@@ -76,3 +76,19 @@ assert new visual fidelity or blind-test success. Its receipt is in ignored
 `data/issue187-validation/existing-raw-check.json`. Existing raw and scores stay
 unchanged. C23's wrong table/citation role cannot be cured by treating OCR or
 this index as semantic evidence.
+
+## Optional study-request projection
+
+Current retained original PDF pages can carry source-bound observations through
+the application study request. The optional complete observation limit is 32 KiB
+per page / 64 KiB per context. The existing 300000 total request bound still wins;
+original text, quote IDs and PNGs keep priority. Oversize observations remain
+explicitly unavailable; no prefix is represented as complete. Full source
+fingerprints remain distinct from actual transmitted-request digests.
+
+The former 16 KiB page limit omitted a real 19799-byte PDF19 observation despite
+valid source/PNG bindings. This capacity correction preserves that earlier
+unavailable result and all historical semantic failures; no new parse, rendering
+or source rewrite is involved. The observation's semantic/visibility/order
+verification flags remain false. This transport check is not website HTTP or
+content-fidelity acceptance.

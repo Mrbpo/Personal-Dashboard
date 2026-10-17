@@ -162,7 +162,7 @@ export async function readDocumentPageRegions(db:Queryable,owner:string,source:D
   throw error;
  }
 }
-export const STUDY_PDF_PAGE_REGION_LIMITS=Object.freeze({pageBytes:16384,contextBytes:32768});
+export const STUDY_PDF_PAGE_REGION_LIMITS=Object.freeze({pageBytes:32768,contextBytes:65536});
 type PageRegionRead=Awaited<ReturnType<typeof readDocumentPageRegions>>;
 export type StudyPdfPageRegionObservation={version:'study-pdf-page-regions-v1';status:'available'|'unavailable';reason:string|null;
  binding:{source:DocumentContextSource;physicalPage:number;anchorEvidenceId:string;attachmentId:string;imageSha256:string;
