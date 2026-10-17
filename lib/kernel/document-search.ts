@@ -90,7 +90,7 @@ export function projectDocumentOrigSearch(body:string,currentSearch:string,old:D
   assertDocumentOrigSearchProvenance(old,binding,bodyHash);
   const previous=origSearchParts(body,old.hints);
   if(previous.searchText!==currentSearch||old.baseSearchSha256!==createBodyHash(base)||old.searchTextSha256!==createBodyHash(currentSearch))throw Error('Orig search previous index differs');
- }else if(currentSearch!==base&&currentSearch!==body)throw Error('Unknown existing page search additions; index preserved');
+ }else if(currentSearch!==''&&currentSearch!==base&&currentSearch!==body)throw Error('Unknown existing page search additions; index preserved');
  if(!hints){if(old)throw Error('Registered orig hints unavailable; index preserved');return {searchText:base,provenance:null};}
  assertDoclingOrigSearchHints(hints,origSource(binding),bodyHash,binding.parserVersion);
  const parts=origSearchParts(body,hints);if(!parts.hasHints)return {searchText:base,provenance:null};

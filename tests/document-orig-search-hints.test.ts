@@ -63,6 +63,18 @@ test('orig staging rejects fabricated/current drift, missing or changed CAS and 
  assert.equal(doclingOrigSearchHash({b:2,a:1}),doclingOrigSearchHash({a:1,b:2}));
 });
 
+test('an empty disposable index rebuilds only without old provenance; registered or unknown nonempty indexes stay strict',async()=>{
+ const {f,input}=await inputWithOrig(),hints=await prepareDoclingOrigSearchHints(input);assert.ok(hints);
+ const binding={...hints.source,currentVersionId:f.source.currentVersionId,sourceVersionId:f.source.sourceVersionId,
+  evidenceId:f.evidenceId,parserVersion:input.parserVersion},base=documentSearchText(input.body),before=input.body;
+ assert.deepEqual(projectDocumentOrigSearch(input.body,'',null,null,binding),{searchText:base,provenance:null});
+ const expected=projectDocumentOrigSearch(input.body,base,null,hints,binding);
+ assert.deepEqual(projectDocumentOrigSearch(input.body,'',null,hints,binding),expected);
+ assert.ok(expected.provenance);assert.equal(input.body,before);
+ assert.throws(()=>projectDocumentOrigSearch(input.body,'unregistered extra content',null,hints,binding),/Unknown existing/);
+ assert.throws(()=>projectDocumentOrigSearch(input.body,'',expected.provenance,hints,binding),/previous index/);
+});
+
 test('orig progress binding ignores only batch taskId while keeping every other registered field strict',async()=>{
  const {input}=await inputWithOrig(),base=input.progress as ReturnType<typeof sourcePageRegionsFixture>['progress'];
  const progress={...base,taskId:'root-field-remains-bound',batches:[{...base.batches[0],taskId:'first-runtime-id',
