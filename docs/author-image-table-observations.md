@@ -8,12 +8,33 @@ new evidence node, automatic import, or replacement of original text/images.
 `kernel.registerAuthorImageTableCandidate(owner, source, run)` accepts one
 completed `visible_table_grid_v1` execution. `run` contains the exact request,
 provider raw response, candidate, TSV, schema, attempt, HTTP receipt,
-request-identity receipt and terminal bytes, plus caption/attachment IDs.
+request-identity receipt, terminal bytes and the historical complete-source
+manifest, plus caption/attachment IDs.
 The current Kernel outline and unique caption attachment must match the archived
 source/version/structure, PNG and original reference. Request image/TSV/schema,
 raw HTTP hash, completed mini model, parsed candidate, usage and the one reserved
 then settled execution identity are checked. Receipts are provenance records,
 not a cryptographic provider signature or a semantic correctness certificate.
+
+The artifact separately stores `historicalRunSource` from the old execution and
+`source` from the fresh Kernel reader. Only `courseId`, a mutable retrieval
+affiliation, may differ between those records. Document ID, current version,
+source version and source hash must match exactly, as must the caption,
+attachment, original PNG, structure manifest and original reference. No old
+request, raw response or receipt is rewritten. Candidate IDs, row checks and
+all subsequent readers still strictly bind the fresh current course; this
+does not authorize cross-course/current-source pooling or version rebinding.
+
+The old receipt's `sourceManifestSha256` identifies a
+`CompleteDocumentSourceManifest`, not the structure digest nested inside it.
+Registration verifies that manifest's own canonical self hash, original
+historical source (including its old course), exact target caption/attachment/
+PNG/byte length/dimensions and its nested structure hash against the fresh
+outline. The artifact separately stores `historicalSourceManifestSha256`,
+`historicalSourceManifestBlobSha256` and fresh `structureManifestSha256`.
+The supplied manifest bytes may be a canonical export from an existing saved
+object; that export CAS byte hash is not presented as an old standalone file.
+No manifest kind is substituted for another or verified merely by its name.
 
 IO and CAS archival precede publication. The short transaction locks the source
 and rechecks the current structure/caption/attachment. Migration 013 extends
@@ -22,7 +43,7 @@ from `pdf-page`, as is producer `visible-table-grid-v1` from Docling native.
 Physical page, PDF manifest, PDF options and bbox are unknown/null. They are
 never synthesized from the caption ordinal or the grid's row/column numbers.
 
-All nine original input/receipt blobs remain explicit, bounded historical GC
+All ten input/receipt blobs remain explicit, bounded historical GC
 references after a source becomes hidden or changes. The AST can be rebuilt
 from the saved raw output using the saved protocol/helper; re-registration
 requires the original source still to be current. It does not transplant an

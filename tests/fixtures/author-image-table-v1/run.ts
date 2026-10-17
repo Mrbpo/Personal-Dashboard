@@ -17,7 +17,11 @@ export async function syntheticRun(i:DocumentImageEvidence,manifest:string,grid?
   {row:0,column:0,rowSpan:1,columnSpan:2,headerRole:'section',text:'Observed shared heading',bold:'none'},
   {row:1,column:0,rowSpan:1,columnSpan:1,headerRole:'row',text:'NeedleMeasure',bold:'none'},
   {row:1,column:1,rowSpan:1,columnSpan:1,headerRole:'none',text:'007.50%',bold:'all'}]}]};
- const tsv=Buffer.from('level\tleft\ttop\twidth\theight\ttext\n'),sourceCheck={...i.source,sourceManifestSha256:manifest,
+ const completeValue={method:'complete-current-source',nodeOrder:'original-source',complete:true,reason:null,source:i.source,
+  structureManifestSha256:manifest,images:[{attachmentId:i.attachmentId,captionEvidenceId:i.captionEvidenceId,sha256:i.sha256,
+   byteLength:i.byteLength,width:i.width,height:i.height}]};
+ const complete={...completeValue,manifestSha256:hash(canonical(completeValue))};
+ const tsv=Buffer.from('level\tleft\ttop\twidth\theight\ttext\n'),sourceCheck={...i.source,sourceManifestSha256:complete.manifestSha256,
   attachmentId:i.attachmentId,captionEvidenceId:i.captionEvidenceId,originalReference:i.originalReference};
  const request=Buffer.from(JSON.stringify({model:'gpt-5.4-mini',store:false,reasoning:{effort:'low'},max_output_tokens:9000,
   input:[{role:'user',content:[{type:'input_text',text:'Transcribe only the visible table. Fixture, not a recognition result.'},
@@ -28,6 +32,7 @@ export async function syntheticRun(i:DocumentImageEvidence,manifest:string,grid?
   rawResponse=Buffer.from(JSON.stringify(raw)),checks={requestSha256:hash(request),pngSha256:i.sha256,tsvSha256:hash(tsv),source:sourceCheck};
  const json=(v:unknown)=>Buffer.from(JSON.stringify(v));
  return {captionEvidenceId:i.captionEvidenceId,attachmentId:i.attachmentId,request,rawResponse,candidate:json(grid),schema,tsv,
+  completeSourceManifest:Buffer.from(canonical(complete)),
   http:json({status:200,rawSha256:hash(rawResponse)}),attempt:json({requestSha256:hash(request),maxAttempts:1}),
   requestIdentity:json({requestSha256:hash(request),requestBytes:request.length,sourceChecks:checks,
    ledgerBeforeFetch:[{id:'synthetic-ledger-not-a-paid-call',kind:'pdf-transcription',reserved:0,charged:null,status:'reserved'}]}),

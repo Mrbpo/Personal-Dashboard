@@ -37,12 +37,34 @@ test('author table: legacy complete AST and section/spans stay unchanged; only o
 });
 test('author table: foreign current/caption/PNG, edited candidate, transport hash and unknown model reject before registration',async()=>{
  const run=await syntheticRun(image,manifest);
+ const originalRequestSha=hash(run.request),originalTerminalSha=hash(run.terminal),fresh={...image,source:{...image.source,courseId:'different-current-course'}};
+ const courseMoved=prepareAuthorImageTableArtifact(run,fresh,manifest);
+ assert.deepEqual(courseMoved.source,fresh.source);assert.deepEqual(courseMoved.historicalRunSource,image.source);
+ const complete=JSON.parse(Buffer.from(run.completeSourceManifest).toString());
+ assert.equal(courseMoved.historicalSourceManifestSha256,complete.manifestSha256);
+ assert.equal(courseMoved.historicalSourceManifestBlobSha256,hash(run.completeSourceManifest));
+ assert.equal(courseMoved.structureManifestSha256,manifest);assert.notEqual(complete.manifestSha256,manifest);
+ assert.equal(hash(run.request),originalRequestSha);assert.equal(hash(run.terminal),originalTerminalSha,'historical source/course receipts stay untouched');
+ const currentObservation=prepareAuthorImageTableObservation(candidateFor(courseMoved),courseMoved,fresh);
+ assertAuthorImageTableObservation(currentObservation,fresh);
+ assert.throws(()=>assertAuthorImageTableObservation(currentObservation,image),'fresh reader course matching stays strict');
+ for(const change of [(m:any)=>m.structureManifestSha256=hash('other structure'),(m:any)=>m.source.courseId='another historical course',
+  (m:any)=>m.images.push(structuredClone(m.images[0])),(m:any)=>m.images[0].sha256=hash('other PNG'),(m:any)=>m.images[0].width++,
+  (m:any)=>m.images[0].captionEvidenceId='foreign caption']){
+  const bad:any=structuredClone(run),m=JSON.parse(Buffer.from(bad.completeSourceManifest).toString());change(m);
+  const {manifestSha256:_self,...value}=m;m.manifestSha256=hash(canonical(value));bad.completeSourceManifest=Buffer.from(canonical(m));
+  const identity=JSON.parse(Buffer.from(bad.requestIdentity).toString()),terminal=JSON.parse(Buffer.from(bad.terminal).toString());
+  identity.sourceChecks.source.sourceManifestSha256=m.manifestSha256;terminal.sourceChecks.source.sourceManifestSha256=m.manifestSha256;
+  bad.requestIdentity=Buffer.from(JSON.stringify(identity));bad.terminal=Buffer.from(JSON.stringify(terminal));
+  assert.throws(()=>prepareAuthorImageTableArtifact(bad,fresh,manifest),'even a self-valid synthetic receipt cannot bypass actual source/structure/unique asset binding');
+ }
  for(const change of [(v:any)=>v.http=Buffer.from('{"status":200,"rawSha256":"wrong"}'),
   (v:any)=>v.candidate=Buffer.from('{"complete":true}'),(v:any)=>v.tsv=Buffer.from('modified'),
   (v:any)=>v.requestIdentity=Buffer.from(JSON.stringify({...JSON.parse(Buffer.from(v.requestIdentity).toString()),requestSha256:hash('different')}))]){
   const bad=structuredClone(run);change(bad);assert.throws(()=>prepareAuthorImageTableArtifact(bad,image,manifest));
  }
- assert.throws(()=>prepareAuthorImageTableArtifact(run,{...image,source:{...image.source,currentVersionId:'foreign'}},manifest));
+ for(const field of ['documentId','currentVersionId','sourceVersionId','sourceHash'])
+  assert.throws(()=>prepareAuthorImageTableArtifact(run,{...fresh,source:{...fresh.source,[field]:'foreign'}},manifest),field+' cannot change with course');
  assert.throws(()=>prepareAuthorImageTableArtifact(run,{...image,attachmentId:'foreign'},manifest));
  assert.throws(()=>prepareAuthorImageTableArtifact(run,image,hash('other structure')));
  const bad:any=structuredClone(run),raw=JSON.parse(Buffer.from(bad.rawResponse).toString());raw.model='unknown-provider-model';bad.rawResponse=Buffer.from(JSON.stringify(raw));

@@ -13,6 +13,8 @@ test('author-image table registration reaches natural title FTS, real selector/g
   await migrateKernel();
   const {hash,png,syntheticRun}=await import('./fixtures/author-image-table-v1/run.ts');
   const {nativeTableBlobHashes}=await import('../lib/kernel/document-table-candidates.ts');
+  const {documentSearchText}=await import('../lib/kernel/document-search.ts');
+  const {validateAndSerialize}=await import('../lib/kernel/visible-table-grid-v1.mjs');
   const tag=randomUUID(),owner=`author-grid-owner-${tag}`,id=`author-grid-${tag}`,title=`Author Grid Fixture ${tag}`;
   const doc={id,ownerId:owner,courseId:'',name:title,hash:hash(tag),mime:'application/json',origin:'author-grid-fixture',originKey:id};
   const text='Original author caption. The numeric contents exist only in the original image.';
@@ -39,7 +41,7 @@ test('author-image table registration reaches natural title FTS, real selector/g
   const stored=(await kernelPool().query('SELECT * FROM document_table_candidates WHERE id=$1',[item.id])).rows[0];
   assert.equal(stored.source_kind,'author-caption-image');assert.equal(stored.page_number,null);assert.equal(stored.manifest_sha256,null);
   assert.equal(stored.options_sha256,null);assert.equal(stored.attachment_id,image.attachmentId);
-  assert.ok(stored.search_text.includes('rowSpan=1'));assert.ok(stored.search_text.includes('headerRole=section'));
+  assert.equal(stored.search_text,documentSearchText(validateAndSerialize(stored.artifact.grid).searchText));
   const requestBodies:any[]=[],originalFetch=globalThis.fetch,originalBypass=process.env.AI_BUDGET_TEST_BYPASS;
   process.env.AI_BUDGET_TEST_BYPASS='true';
   try{
