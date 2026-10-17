@@ -36,17 +36,18 @@ async function cmap(bytes:Uint8Array,key:string){
  return Buffer.from(decodePDFRawStream(stream).decode()).toString();
 }
 
-async function singletonRangeFixture(mode='valid',glyph='prime',differenceMode?:string){
+async function singletonRangeFixture(mode='valid',glyph='prime',differenceMode?:string,sourceValue='FFFD'){
  const pdf=await PDFDocument.create(),page=pdf.addPage(),context=pdf.context,code=42;
  const program=Buffer.from(`%!PS-AdobeFont-1.0\n/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\ndup ${code} /${glyph} put\nreadonly def\ncurrentfile eexec\n`),
   file=context.register(context.flateStream(program,{Length1:program.length})),descriptor=context.register(context.obj({FontFile:file}));
  const rows=Array.from({length:32},(_,i)=>{const hex=(32+i).toString(16);return `<${hex}> <${hex}> <FFFD>`;});
+  rows[code-32]=`<2a> <2a> <${sourceValue}>`;
+  if(mode==='scalar-inverse')rows[code-31]=`<2b> <2b> <${sourceValue}>`;
  if(mode==='missing')rows.splice(code-32,1);
  if(mode==='overlap')rows.push('<2a> <2b> <FFFD>');
  if(mode==='duplicate')rows.push('<2a> <2a> <FFFD>');
  if(mode==='nonsingleton')rows.splice(code-32,2,'<2a> <2b> <FFFD>');
  if(mode==='array')rows[code-32]='<2a> <2a> [<FFFD>]';
- if(mode==='not-placeholder')rows[code-32]='<2a> <2a> <0030>';
  if(mode==='outside')rows.push('<40> <40> <FFFD>');
  if(mode==='wide')rows[code-32]='<002a> <002a> <FFFD>';
  if(mode==='bfchar-target')rows.splice(code-32,1);
@@ -80,9 +81,27 @@ test('bounded singleton placeholder ranges repair only embedded declared glyph d
   assert.equal(await cmap(result.bytes,'P'),before.replace('<2a> <2a> <FFFD>',`<2a> <2a> <${expected}>`));
   assert.deepEqual(result.proof!.preserved[0].contentHashes.length,1);
  }
- for(const mode of ['missing','overlap','duplicate','nonsingleton','array','not-placeholder','outside','wide','bfchar-target','count','junk','extra-codespace','usecmap','override']){
+ for(const mode of ['missing','overlap','duplicate','nonsingleton','array','outside','wide','bfchar-target','count','junk','extra-codespace','usecmap','override']){
   const input=await singletonRangeFixture(mode),snapshot=Buffer.from(input);
   await assert.rejects(prepareSourceFontInput(input),/needs review/,mode);assert.deepEqual(Buffer.from(input),snapshot);
+ }
+});
+
+test('unique scalar singleton destinations repair only literal embedded glyphs without Encoding overrides',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ for(const [glyph,sourceValue,expected]of [['prime','0027','2032'],['negationslash','0036','0338']]){
+  const input=await singletonRangeFixture('valid',glyph,undefined,sourceValue),snapshot=Buffer.from(input),
+   before=await cmap(input,'P'),result=await prepareSourceFontInput(input);
+  assert.deepEqual(Buffer.from(input),snapshot);assert.equal(result.proof?.patches.length,1);
+  assert.deepEqual(result.proof!.patches.map(p=>[p.code,p.glyphName]),[[42,glyph]]);
+  assert.equal(await cmap(result.bytes,'P'),before.replace(`<2a> <2a> <${sourceValue}>`,`<2a> <2a> <${expected}>`));
+  assert.equal(result.proof!.preserved[0].contentHashes.length,1);
+ }
+ for(const [mode,differences,value]of [['scalar-inverse',undefined,'0027'],['valid',undefined,'00610062'],
+  ['valid','match','0027'],['override',undefined,'0027']] as const){
+  const input=await singletonRangeFixture(mode,'prime',differences,value),snapshot=Buffer.from(input);
+  await assert.rejects(prepareSourceFontInput(input),/needs review/,`${mode}/${differences}/${value}`);
+  assert.deepEqual(Buffer.from(input),snapshot);
  }
 });
 

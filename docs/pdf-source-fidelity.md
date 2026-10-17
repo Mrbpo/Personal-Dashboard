@@ -42,7 +42,7 @@ Docling 正文、表格引用和图片区域文字引用的 formula 节点共用
 `negationslash`，不根据字体名、字符槽或页面答案推断。新增分支仅在完整可解析的
 单字节有界 codespace 中，允许把该源代码唯一 singleton `bfrange` 的 `FFFD`
 占位 destination 精确改为已有受信 glyph-name 映射。其他代码共享 FFFD 不构成
-源位置歧义；它们保持原字节，不被批量替换。目标为非 singleton、非 FFFD、
+源位置歧义；它们保持原字节，不被批量替换。目标为非 singleton、
 bfchar 与 range 重叠、缺失、超界、未知语法、array range 或未证实的 Encoding override
 均拒绝派生。既有 bfchar 的唯一源／唯一逆向及 already-correct no-op 门不放宽。
 
@@ -52,6 +52,12 @@ bfchar 与 range 重叠、缺失、超界、未知语法、array range 或未证
 不推断 BaseEncoding，缺失、不同、重复、越界、未知项或其他字典键均拒绝；
 name Encoding 及旧 bfchar 的覆盖仍拒绝。原字典不改，复制后独立核其结构哈希。
 range 分支只使用完整验证过的 lexical view，不再扫描注释中的 bfchar 示例。
+
+同一完整有界 CMap 的非 FFFD singleton destination，仅在解码为单一 Unicode
+scalar、该原值在完整映射中逆向唯一、且 PDF Font 完全没有 Encoding override
+时可按同一 literal glyph-name 证据纠正。精确 destination 定位与全映射保全复用
+原路径；多码点、重复逆值、非 singleton／array／重叠仍拒绝。此许可不扩展上述
+FFFD+Differences 分支，也不改旧 bfchar 行为。
 
 复用原 CMap parser 的显式 bounded 参数及原 lexical/destination 定位工具；其他
 调用默认仍要求原 `00–ff` codespace。完整 CMap、FontFile 与各页内容流的前后

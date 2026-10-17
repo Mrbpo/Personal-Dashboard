@@ -269,13 +269,17 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
     if(ranged){
      const value=bounded!.get(code);if(value===undefined)encodingReview('missing source CMap code');
      if(glyphUnicode[glyphName].accepted.includes(value!))return [];
-     // Replacement placeholders need unique source position, not a unique
-     // inverse Unicode value. Multiple unrelated FFFD values remain unchanged.
-     if(value!=='FFFD'||replaceSingleCmapDestination(cmapText,code,'FFFD',glyphUnicode[glyphName].hex)===undefined||
+     const singletonPlaceholder=value==='FFFD';
+     // Placeholders need unique source position; a non-placeholder must also
+     // decode to one scalar and have a unique inverse across the complete map.
+     if(!singletonPlaceholder&&([...Buffer.from(value!,'hex').swap16().toString('utf16le')].length!==1||
+      [...bounded!.values()].filter(v=>v===value).length!==1))encodingReview('nonunique or nonscalar Type1 range destination');
+     if(replaceSingleCmapDestination(cmapText,code,value!,glyphUnicode[glyphName].hex)===undefined||
       ![...view.matchAll(/\d+\s+beginbfrange\b([\s\S]*?)\bendbfrange/g)].some(block=>
-       [...block[1].matchAll(/<([\da-f]{2})>\s*<([\da-f]{2})>\s*<fffd>/gi)].some(m=>parseInt(m[1],16)===code&&parseInt(m[2],16)===code)))
+        [...block[1].matchAll(/<([\da-f]{2})>\s*<([\da-f]{2})>\s*<([\da-f\s]+)>/gi)].some(m=>
+         parseInt(m[1],16)===code&&parseInt(m[2],16)===code&&m[3].replace(/\s/g,'').toUpperCase()===value)))
       encodingReview('unsupported Type1 range target');
-     return [{code,glyphName,current:undefined,value:value!,singletonPlaceholder:true}];
+     return [{code,glyphName,current:undefined,value:value!,singletonPlaceholder}];
     }
     if(current.length!==1)encodingReview('nonunique source CMap code');
     const value=current[0][2].toUpperCase();
@@ -295,8 +299,8 @@ export async function prepareSourceFontInput(bytes:Uint8Array,selected?:number[]
    if(new Set(targets.map(m=>m[2])).size!==targets.length)encodingReview('nonunique glyph code');
    if(!ranged&&/beginbfrange/.test(cmapText))encodingReview('unsupported CMap ranges');
    let after=cmapText;
-   for(const {code,glyphName,current,value,singletonPlaceholder} of corrections){
-    if(singletonPlaceholder){
+   for(const {code,glyphName,current,value} of corrections){
+    if(ranged){
      const replacement=replaceSingleCmapDestination(after,code,value,glyphUnicode[glyphName].hex);
      if(replacement===undefined)encodingReview('nonunique Type1 singleton destination');after=replacement!;
     }else{
