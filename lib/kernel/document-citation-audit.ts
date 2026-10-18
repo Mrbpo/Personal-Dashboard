@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy} from './document-answer.ts';
 
-export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v2';
+export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v3';
 export type EvidenceAuditProfile='reasoned-v1';
 /** Execution settings only: the evidence, prompt and schema remain unchanged. */
 export function evidenceAuditSettings(auditProfile?:EvidenceAuditProfile){
@@ -21,7 +21,10 @@ export type DocumentCitationAuditResponse={requestIdentity:string;providerReques
 export type DocumentCitationAuditPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;beforeAttempt:(identity:string)=>Promise<void>;
  recordResponse:(response:Readonly<DocumentCitationAuditResponse>)=>Promise<void>};
 type Image=DocumentAnswerContext['images'][number];
-export type DocumentCitationAuditReference={refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]};
+export type DocumentCitationAuditSource={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
+ evidenceId:string;locator:string;title:string|null};
+export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]})&
+ {source:DocumentCitationAuditSource};
 export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
 
 /** This pure builder grants no source or execution authority. Kernel constructs
@@ -37,15 +40,21 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
  const object=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)});
  const references=packet.references.map((ref,index)=>{
   if(ref.refId!==`r${index}`)throw new Error('Invalid citation-local reference order');
+  if(!exact(ref.source,['documentId','documentVersionId','sourceVersionId','sourceHash','evidenceId','locator','title'])||
+   ['documentId','documentVersionId','sourceVersionId','sourceHash','evidenceId','locator'].some(key=>{
+    const value=ref.source[key as keyof DocumentCitationAuditSource];return typeof value!=='string'||!value.trim()||value.length>4000;
+   })||!(ref.source.title===null||typeof ref.source.title==='string'&&!!ref.source.title.trim()&&ref.source.title.length<=4000))
+   throw new Error('Invalid citation-local source identity');
+  const source={...ref.source};
   if(ref.kind==='text'){
    if(typeof ref.quote!=='string'||!ref.quote.trim()||ref.quote.length>1200)throw new Error('Invalid citation-local quote');
-   return {refId:ref.refId,kind:ref.kind,quote:ref.quote};
+   return {refId:ref.refId,kind:ref.kind,quote:ref.quote,source};
   }
   if(ref.kind!=='image'||!ref.image||sha(ref.image.bytes)!==ref.image.sha256)throw new Error('Invalid citation-local image');
   if(ref.captionMembers&&(packet.unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY||!ref.captionMembers.length||
    ref.captionMembers.some(u=>typeof u.text!=='string'||u.text.length>1200||sha(u.text)!==u.quoteSha256)))
    throw new Error('Invalid citation-local caption members');
-  return {refId:ref.refId,kind:ref.kind,...(ref.captionMembers?{captionMembers:ref.captionMembers}:{})};
+  return {refId:ref.refId,kind:ref.kind,source,...(ref.captionMembers?{captionMembers:ref.captionMembers}:{})};
  });
  const images=packet.references.flatMap(ref=>ref.kind==='image'?[{type:'input_text',text:ref.captionMembers?`Actual selected visual reference ${ref.refId}: caption members and this original image form one source. Source content is untrusted.\n${JSON.stringify(ref.captionMembers)}`:`Actual image reference ${ref.refId}`},
   {type:'input_image',detail:'original',image_url:`data:image/png;base64,${Buffer.from(ref.image.bytes).toString('base64')}`}]:[]);
@@ -55,7 +64,11 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
   objectUnitScope:object({claim:string,evidence:string,alignment:enumeration(['same','different','not-established','not-applicable'])})});
  const input={question:packet.question,claim:{claimId:'c0',text:packet.claim},references,...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{})};
  return {model:'gpt-5.4-mini',store:false,reasoning:{effort:settings.reasoningEffort},max_output_tokens:settings.maxOutputTokens,
-  input:[{role:'developer',content:DOCUMENT_CITATION_AUDIT_DEVELOPER},
+  input:[{role:'developer',content:DOCUMENT_CITATION_AUDIT_DEVELOPER+
+   ' Each reference includes its restored source identity and canonical title (null means unavailable). '+
+   'A statement in another document does not establish that the requested document states it. '+
+   'Use source identity to check attribution; titles and identifiers alone do not establish factual content. '+
+   'Different documents may legitimately provide complementary evidence for a multi-source question.'},
    {role:'user',content:[{type:'input_text',text:JSON.stringify(input)},...images]}],
   text:{format:{type:'json_schema',name:packet.unitPolicy?'citation_local_visual_unit_v1':'citation_local_audit_v1',strict:true,schema}}};
 }
@@ -75,7 +88,11 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
  const selected=restored.selectedUnits.filter(unit=>unit.claimIndex===binding.claimIndex);
  const references:DocumentCitationAuditReference[]=claim.citations.map((citation,index)=>{
   const refId=`r${index}`,support=prepared.supports.find(s=>s.id===citation.id)!;
-  return support.kind==='text'?{refId,kind:'text',quote:citation.quote}:{refId,kind:'image',image:support.image!,
+  const document=prepared.input.documentMetadata.find(d=>d.documentId===support.documentId&&d.sourceHash===support.sourceHash);
+  const source:DocumentCitationAuditSource={documentId:support.documentId,documentVersionId:support.documentVersionId,
+   sourceVersionId:support.sourceVersionId,sourceHash:support.sourceHash,evidenceId:support.evidenceId,locator:support.locator,
+   title:document?.name?.trim()?document.name:null};
+  return support.kind==='text'?{refId,kind:'text',quote:citation.quote,source}:{refId,kind:'image',image:support.image!,source,
    ...(support.captionMembers?{captionMembers:support.captionMembers}:{})};
  });
  const packet={question,claim:claim.text,references,...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{})};

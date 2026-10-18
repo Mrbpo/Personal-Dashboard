@@ -19,6 +19,11 @@ process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='5';
 after(async()=>{if(postgresUrl)await kernelPool().end();});
 const hash=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const source={documentId:'audit-source',currentVersionId:'version',sourceVersionId:'source-version',sourceHash:'source-sha'};
+const withoutSources=(refs:Array<Record<string,unknown>>)=>refs.map(({source:_source,...ref})=>ref);
+function auditInput(request:ReturnType<typeof buildDocumentCitationAuditRequest>){
+ const content=request.input[1].content;assert.ok(Array.isArray(content));
+ return JSON.parse(content[0].text!);
+}
 const question='How many samples are compared?',body='The study compares two samples.';
 const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j2i8AAAAASUVORK5CYII=','base64');
 function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,parents:[],anchors:[{
@@ -33,6 +38,49 @@ function binding(c=context()):DocumentCitationAuditBinding{
   providerSelections:{status:'answered',message:'',claims:[{text:'Two samples are compared.',
    citations:[{id:prepared.quoteUnits[0].id},{id:'i0'}]}]}};
 }
+test('local requests retain restored text and image source identity without changing quotes',()=>{
+ const c=context(),local=prepareDocumentCitationAudit(question,c,binding(c)),request=buildDocumentCitationAuditRequest(local.packet),
+  input=auditInput(request);
+ const common={documentId:source.documentId,documentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,
+  sourceHash:source.sourceHash,title:'Original study'};
+ assert.deepEqual(input.references[0].source,{...common,evidenceId:'original-evidence',locator:'original:1'});
+ assert.deepEqual(input.references[1].source,{...common,evidenceId:'image-evidence',locator:'attachment:image'});
+ assert.equal(input.references[0].quote,body);
+ assert.equal(local.binding.citations[0].quoteSha256,hash(body));
+ for(const changed of [undefined,{...input.references[0].source,documentId:''},
+  {...input.references[0].source,sourceHash:''},{...input.references[0].source,extra:'unbound'}]){
+  const packet=structuredClone(local.packet);packet.references[0].source=changed as any;
+  assert.throws(()=>buildDocumentCitationAuditRequest(packet),/source identity/);
+ }
+ const changed=context();changed.anchors[0].name='Changed title';
+ assert.throws(()=>prepareDocumentCitationAudit(question,changed,binding(c)),/source or context changed/);
+});
+
+test('a named question and a different cited document both remain visible to the existing audit',()=>{
+ const scopedQuestion='According to Original study, how many samples are compared?',c=context();
+ c.images=[];c.anchors[0].name='Different study';
+ const p=prepareDocumentAnswer(scopedQuestion,c),local=prepareDocumentCitationAudit(scopedQuestion,c,{
+  inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,claimIndex:0,
+  providerSelections:{status:'answered',message:'',claims:[{text:'The paper compares two samples.',citations:[{id:p.quoteUnits[0].id}]}]}}),
+  input=auditInput(buildDocumentCitationAuditRequest(local.packet));
+ assert.equal(input.question,scopedQuestion);assert.equal(input.references[0].source.title,'Different study');
+ assert.equal(input.references[0].source.documentId,source.documentId);assert.equal(input.references[0].quote,body);
+ // This is a transport regression, not a claim that a model rejected the answer.
+});
+
+test('citation provenance retains distinct documents for legitimate complementary references',()=>{
+ const c=context();c.images=[];c.anchors.push({...c.anchors[0],id:'pg:other-version:1',document_id:'other-document',
+  name:'Other study',source_hash:'other-source-sha',source_version_id:'other-source-version',
+  evidence_id:'other-evidence',body:'A second study compares three samples.'});
+ const p=prepareDocumentAnswer(question,c),local=prepareDocumentCitationAudit(question,c,{
+  inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,claimIndex:0,
+  providerSelections:{status:'answered',message:'',claims:[{text:'The studies compare two and three samples respectively.',
+   citations:p.quoteUnits.map(u=>({id:u.id}))}]}}),
+  input=auditInput(buildDocumentCitationAuditRequest(local.packet));
+ assert.deepEqual(input.references.map((r:any)=>[r.source.documentId,r.source.title,r.source.documentVersionId]),
+  [[source.documentId,'Original study',source.currentVersionId],['other-document','Other study','other-version']]);
+ assert.deepEqual(input.references.map((r:any)=>r.quote),[body,'A second study compares three samples.']);
+});
 function complete(c=context()):CompleteDocumentSourceRead{return {status:'available',context:{...c,parents:[],
  images:c.images.map(image=>'anchorEvidenceId' in image?image:({...image,originalReference:'source.png',provenance:{sourceUrl:'https://example.edu/source.png',revision:'fixture'}})),accounting:{
  anchorCount:1,parentCount:0,contextNodeCount:1,contextBodyCodepoints:body.length,imageCount:1,imageBytes:bytes.length}},manifest:{
@@ -68,7 +116,7 @@ test('reasoned-v1 local profile changes only execution settings and binds them w
  assert.equal(JSON.stringify(buildDocumentCitationAuditRequest(local.packet,undefined)),JSON.stringify(legacy));
  assert.deepEqual(request,{...legacy,reasoning:{effort:'medium'},max_output_tokens:4000});
  const old=documentCitationAuditRequestIdentity(legacy,local.bindingSha256),next=documentCitationAuditRequestIdentity(request,local.bindingSha256,'reasoned-v1');
- assert.equal(old.requestIdentity,hash(JSON.stringify({version:'citation-local-audit-v2',providerRequestSha256:old.providerRequestSha256,bindingSha256:local.bindingSha256})));
+ assert.equal(old.requestIdentity,hash(JSON.stringify({version:'citation-local-audit-v3',providerRequestSha256:old.providerRequestSha256,bindingSha256:local.bindingSha256})));
  assert.notEqual(old.providerRequestSha256,next.providerRequestSha256);assert.notEqual(old.requestIdentity,next.requestIdentity);
  assert.throws(()=>documentCitationAuditRequestIdentity(legacy,local.bindingSha256,'reasoned-v1'),/settings changed/);
  assert.throws(()=>buildDocumentCitationAuditRequest(local.packet,'other' as 'reasoned-v1'),/profile/);
@@ -84,7 +132,7 @@ test('reasoned-v1 reaches the current-source Kernel audit with original selected
  globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
   assert.equal(request.model,'gpt-5.4-mini');assert.equal(request.reasoning.effort,'medium');assert.equal(request.max_output_tokens,4000);
   const content=request.input[1].content;assert.equal(content.find((p:{type:string})=>p.type==='input_image').image_url,'data:image/png;base64,'+bytes.toString('base64'));
-  assert.deepEqual(JSON.parse(content[0].text).references,[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]);
+  assert.deepEqual(withoutSources(JSON.parse(content[0].text).references),[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]);
   return Response.json({...response(),usage:{input_tokens:100,output_tokens:1500}});};
  try{await development(async()=>{
   await assert.rejects(()=>kernel.auditSelectedStudySourceClaim('owner',question,source,binding(),{...policy(raw),auditProfile:'other'} as unknown as DocumentCitationAuditPolicy),/profile/);
@@ -103,7 +151,7 @@ test('audit restores the entire original selection object and only its actual se
  const request=buildDocumentCitationAuditRequest(prepared.packet),content=request.input[1].content;
  assert.ok(Array.isArray(content));const input=JSON.parse(content[0].text!);
  assert.deepEqual(input,{question,claim:{claimId:'c0',text:'Two samples are compared.'},
-  references:[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]});
+  references:[{refId:'r0',kind:'text',quote:body,source:prepared.packet.references[0].source},{refId:'r1',kind:'image',source:prepared.packet.references[1].source}]});
  assert.equal(request.model,'gpt-5.4-mini');assert.deepEqual(request.reasoning,{effort:'low'});assert.equal(request.max_output_tokens,1000);
  const image=content.find(item=>item.type==='input_image');assert.ok(image&&'image_url' in image);
  assert.equal(image.image_url,'data:image/png;base64,'+bytes.toString('base64'));assert.equal(image.detail,'original');
@@ -151,7 +199,7 @@ test('Kernel policy and current-source binding fail before fetch; valid calls re
    const result=await kernel.auditSelectedStudySourceClaim('owner',question,source,original,policy(raw,async identity=>{attempts++;identities.push(identity);}));
    assert.equal(result.status,'available');if(result.status!=='available')throw new Error('Expected audit');
    assert.deepEqual(result.result.diagnostics,diagnostics());assert.equal(reads,3);assert.equal(calls,1);assert.equal(attempts,1);
-   assert.equal(result.result.version,'citation-local-audit-v2');
+   assert.equal(result.result.version,'citation-local-audit-v3');
    assert.equal(result.result.requestIdentity,identities[0]);assert.equal(result.result.requestIdentity,raw[0].requestIdentity);
    assert.equal(result.result.providerRequestSha256,raw[0].providerRequestSha256);assert.equal(result.result.rawResponseSha256,hash(raw[0].rawBody));
    assert.equal(raw[0].httpStatus,200);assert.equal(JSON.stringify(original),saved);
@@ -210,7 +258,7 @@ test('actual PostgreSQL owner/current-source reads restore text and PNG and reje
  const originalFetch=globalThis.fetch;let calls=0,hide=false;
  globalThis.fetch=async(_url,init)=>{
   calls++;const request=JSON.parse(String(init?.body)),content=request.input[1].content,input=JSON.parse(content[0].text);
-  assert.deepEqual(input.references,[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]);
+  assert.deepEqual(withoutSources(input.references),[{refId:'r0',kind:'text',quote:body},{refId:'r1',kind:'image'}]);
   assert.equal(content.find((item:{type:string})=>item.type==='input_image').image_url,'data:image/png;base64,'+bytes.toString('base64'));
   if(hide)await kernel.hideParsedDocument(owner,id);return Response.json(response());
  };
