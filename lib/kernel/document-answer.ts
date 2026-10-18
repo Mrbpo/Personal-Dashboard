@@ -515,6 +515,9 @@ export function validateDocumentEvidenceSelection(value:unknown,prepared:Prepare
 
 export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';providerReferenceIds:string[];
  systemRetainedReferenceIds:string[];referenceIds:string[];expandedSupportIds:string[];skippedSupportIds:string[];
+ mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v1';documentId:string;sourceHash:string;
+  status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
+  inputScope:'available-original-quote-units';coverage:'unassessed';structureRelationsVerified:false};
  coverage:'unassessed';structureRelationsVerified:false};
 
 /** Keep the existing text of selected storage nodes together. Storage adjacency
@@ -534,6 +537,33 @@ export function retainSelectedStoredNodeText(value:unknown,prepared:PreparedAnsw
  }
  return {policy:'selected-stored-node-text-v1',providerReferenceIds,systemRetainedReferenceIds,referenceIds,
   expandedSupportIds,skippedSupportIds,coverage:'unassessed',structureRelationsVerified:false};
+}
+
+/** A uniquely named, already selected source may need qualifications outside a
+ * selected storage node. Retain its available selectable text atomically within
+ * 32 KiB and the existing 64-reference bound. No new reads, sources, images or
+ * structural assertions; other selected sources stay available for synthesis. */
+export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
+ const retained=retainSelectedStoredNodeText(value,prepared);
+ if(!retained.providerReferenceIds.length)return retained;
+ const mentioned=prepared.input.documentMetadata.filter(document=>documentTitleMention(prepared.input.question,document.name));
+ if(mentioned.length!==1)return retained;
+ const document=mentioned[0],supports=prepared.supports.filter(s=>s.documentId===document.documentId),
+  selectedIds=new Set(retained.providerReferenceIds),selectedSupports=new Set(prepared.quoteUnits.filter(u=>selectedIds.has(u.id)).map(u=>u.supportId));
+ if(!supports.some(s=>selectedIds.has(s.id)||selectedSupports.has(s.id))||supports.some(s=>s.sourceHash!==document.sourceHash)||
+  new Set(supports.map(s=>JSON.stringify([s.documentVersionId,s.sourceVersionId,s.sourceHash]))).size!==1)return retained;
+ const supportIds=new Set(supports.map(s=>s.id)),units=prepared.quoteUnits.filter(u=>u.selectable&&supportIds.has(u.supportId)),
+  textUtf8Bytes=units.reduce((sum,u)=>sum+Buffer.byteLength(u.text),0),ids=new Set(retained.referenceIds),
+  additions=units.filter(u=>!ids.has(u.id));
+ if(!additions.length)return retained;
+ const status=textUtf8Bytes>32768?'skipped-size-limit':retained.referenceIds.length+additions.length>64?'skipped-reference-limit':'retained';
+ const mentionedSourceRetention:NonNullable<StoredNodeTextSelection['mentionedSourceRetention']>={policy:'bounded-mentioned-source-text-v1',documentId:document.documentId,sourceHash:document.sourceHash,
+  status,textUtf8Bytes,addedReferenceIds:status==='retained'?additions.map(u=>u.id):[],
+  inputScope:'available-original-quote-units' as const,coverage:'unassessed' as const,structureRelationsVerified:false as const};
+ if(status!=='retained')return {...retained,mentionedSourceRetention};
+ return {...retained,referenceIds:[...retained.referenceIds,...additions.map(u=>u.id)],
+  systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...additions.map(u=>u.id)],
+  expandedSupportIds:[...new Set([...retained.expandedSupportIds,...additions.map(u=>u.supportId)])],mentionedSourceRetention};
 }
 
 /** Explicit source-value lane only. Suggestions cannot delete already retrieved
@@ -705,7 +735,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
   const sourceValueSelection=policy.sourceValueContract==='difference-v1'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
-  const textSelection=sourceValueSelection?undefined:retainSelectedStoredNodeText(decoded,prepared);
+  const textSelection=sourceValueSelection?undefined:retainDocumentSelectionContext(decoded,prepared);
   referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
   if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
    throw new Error('Document evidence changed during evidence selection');

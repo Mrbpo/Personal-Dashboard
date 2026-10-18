@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRuntimeRequest,buildDocumentEvidenceSelectionRequest,
- buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 
 process.env.DATABASE_URL=':memory:';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'selection-test-'+randomUUID());
@@ -51,6 +51,41 @@ test('application retains omitted original text in a selected node without addin
   assert.deepEqual(result.evidenceSelection?.textNodeRetention?.providerReferenceIds,[suggested]);
   assert.equal(result.selectedUnits[0].selectionId,omitted);
  }finally{globalThis.fetch=saved;}
+});
+
+test('named-source context preserves cross-node qualifications and excludes foreign text or unselected images',async()=>{
+ const c=context();c.anchors.push({...c.anchors[0],id:'pg:va:2',page_number:2,evidence_id:'qualification-a',locator:'original:2',
+  body:'This row is an author-added control, not the configuration of the prior publication.'});
+ const question='What is the improvement in Original a?',p=prepareDocumentAnswerForPolicy(question,c,policy),
+  id=p.quoteUnits.find(u=>u.supportId==='e0')!.id,qualification=p.quoteUnits.find(u=>u.text.includes('author-added control'))!;
+ const before=JSON.stringify(p),r=retainDocumentSelectionContext({referenceIds:[id]},p);
+ assert.ok(r.referenceIds.includes(qualification.id));assert.equal(r.mentionedSourceRetention?.status,'retained');
+ assert.deepEqual(r.providerReferenceIds,[id]);assert.equal(JSON.stringify(p),before);
+ const req=buildSelectedDocumentAnswerRequest(p,r.referenceIds,settings,policy),packet=JSON.parse(String((req.input.at(-1)!.content as any[])[0].text));
+ assert.ok(packet.quoteUnits.some((u:any)=>u.id===qualification.id&&u.text===qualification.text&&u.quoteSha256===qualification.quoteSha256));
+ assert.doesNotMatch(JSON.stringify(req.input),/hidden-marker-947|input_image/);
+ const saved=globalThis.fetch;let calls=0;
+ try{globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+   if(calls===2)assert.match(JSON.stringify(request.input),/author-added control/);
+   return output(calls===1?{referenceIds:[id]}:claim(id));};
+  const result=await synthesizeDocumentAnswer(question,async()=>c,policy);assert.equal(calls,2);
+  assert.ok('evidenceSelection' in result);assert.equal(result.evidenceSelection?.textNodeRetention?.mentionedSourceRetention?.status,'retained');
+ }finally{globalThis.fetch=saved;}
+});
+
+test('named-source retention refuses ambiguity, mixed versions and atomic size or reference overflow',()=>{
+ const make=()=>{const c=context();c.images=[];c.anchors.push({...c.anchors[0],id:'pg:va:2',page_number:2,evidence_id:'qualification-a',locator:'original:2',body:'Original qualification.'});return c;};
+ const run=(c:DocumentAnswerContext,q='What is the improvement in Original a?')=>{const p=prepareDocumentAnswer(q,c),id=p.quoteUnits[0].id;
+  return {p,id,result:retainDocumentSelectionContext({referenceIds:[id]},p)};};
+ assert.equal(run(make(),'Compare Original a and Original b.').result.mentionedSourceRetention,undefined);
+ const mixed=make();mixed.anchors[2].id='pg:other-version:2';assert.equal(run(mixed).result.mentionedSourceRetention,undefined);
+ const large=make();large.anchors[2].body='Long original '.repeat(2600);const a=run(large);
+ assert.equal(a.result.mentionedSourceRetention?.status,'skipped-size-limit');assert.deepEqual(a.result.referenceIds,[a.id]);
+ const many=make();for(let i=3;i<68;i++)many.anchors.push({...many.anchors[0],id:`pg:va:${i}`,page_number:i,evidence_id:`a-${i}`,body:`Original note ${i}.`});
+ const b=run(many);assert.equal(b.result.mentionedSourceRetention?.status,'skipped-reference-limit');assert.deepEqual(b.result.referenceIds,[b.id]);
+ assert.deepEqual(retainDocumentSelectionContext({referenceIds:[]},b.p).referenceIds,[]);
+ const foreign=make(),p=prepareDocumentAnswer('What is in Original a?',foreign);
+ assert.equal(retainDocumentSelectionContext({referenceIds:[p.quoteUnits.find(u=>u.text.includes('hidden-marker-947'))!.id]},p).mentionedSourceRetention,undefined);
 });
 
 test('stored-node retention respects the 64-ID bound atomically and leaves empty or invalid selection strict',()=>{
