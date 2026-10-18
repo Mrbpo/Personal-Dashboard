@@ -101,6 +101,22 @@ test('actual context reader uses registered source/page/manifest/PNG and never p
  db.version='new-current';await assert.rejects(readDocumentPageRegions(db.db(),f.owner,f.source,1),changed);
 });
 
+test('PDF visual identity is canonical across display metadata and omitted course while rejecting changed bindings',async()=>{
+ for(const courseId of ['', 'course-A']){
+  const db=new FixtureDb();db.f.source.courseId=courseId;await db.register();const f=db.f;
+  const {courseId:omitted,...identity}=f.source;void omitted;
+  const rich={...identity,title:'Display metadata is not source identity'};
+  const baseline=(await readPdfVisualEvidence(db.db(),f.owner,f.source,[f.evidenceId])).images[0],
+   image=(await readPdfVisualEvidence(db.db(),f.owner,rich,[f.evidenceId])).images[0];
+  assert.deepEqual(image.source,f.source);assert.equal(image.attachmentId,baseline.attachmentId);
+  const enriched=await readDocumentPageRegionsForImages(db.db(),f.owner,[image]);
+  assert.equal(enriched.images[0].pageRegions?.status,'available');
+  for(const key of ['documentId','currentVersionId','sourceVersionId','sourceHash','courseId'] as const)
+   await assert.rejects(readPdfVisualEvidence(db.db(),f.owner,{...rich,[key]:'changed-binding'},[f.evidenceId]),/not current/);
+  await assert.rejects(readPdfVisualEvidence(db.db(),'foreign',rich,[f.evidenceId]),/not current/);
+ }
+});
+
 test('missing Docling/PNG and ambiguous layouts remain unavailable; corrupt bindings and changing current/provenance cannot be returned',async()=>{
  const db=new FixtureDb();await db.register();const f=db.f;
  db.progress=null;db.visual=null;assert.equal((await readDocumentPageRegions(db.db(),f.owner,f.source,1)).status,'unavailable');

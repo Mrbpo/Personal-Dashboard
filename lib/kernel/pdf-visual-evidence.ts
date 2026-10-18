@@ -164,19 +164,25 @@ export type PdfVisualImageEvidence={kind:'pdf-page'|'pdf-region';attachmentId:st
  rawPdfSha256:string;manifestSha256:string;source:DocumentContextSource;mime:'image/png';sha256:string;byteLength:number;width:number;height:number;
  provenance:PdfVisualAsset['provenance'];bytes:Uint8Array};
 async function current(db:Queryable,owner:string,source:DocumentContextSource){
- const rows=(await db.query(`SELECT d.id FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+ const rows=(await db.query<DocumentContextSource>(`SELECT d.id "documentId",d.current_version_id "currentVersionId",
+  v.source_version_id "sourceVersionId",d.source_hash "sourceHash",coalesce(d.course_id,'') "courseId"
+  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
  JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
  WHERE d.owner_id=$1 AND d.id=$2 AND d.current_version_id=$3 AND v.source_version_id=$4 AND d.source_hash=$5 AND s.raw_sha256=$5 AND NOT d.hidden
  AND ($6::text IS NULL OR coalesce(d.course_id,'')=$6) AND NOT EXISTS(SELECT 1 FROM document_texts n WHERE n.owner_id=d.owner_id
  AND n.origin=d.origin AND n.origin_key=d.origin_key AND NOT n.hidden AND (n.created_at>d.created_at OR (n.created_at=d.created_at AND n.id>d.id)))`,
  [owner,source.documentId,source.currentVersionId,source.sourceVersionId,source.sourceHash,source.courseId??null])).rows;
  if(rows.length!==1)throw new PdfVisualEvidenceError('source-changed','PDF visual source is not current for this owner');
+ const row=rows[0];
+ return {documentId:row.documentId,currentVersionId:row.currentVersionId,sourceVersionId:row.sourceVersionId,
+  sourceHash:row.sourceHash,courseId:row.courseId};
 }
 /** Multiple real regions may share one real page; never invent caption nodes. */
 export async function readPdfVisualEvidence(db:Queryable,owner:string,source:DocumentContextSource,pageEvidenceIds?:string[],
  limits:{images:number;bytes:number;imageInputTokens:number}=PDF_VISUAL_READ_LIMITS,
  options:{selection?:{budget:DocumentImageBudget;anchorRank:number};pageAssetsOnly?:boolean}={}){
- await current(db,owner,source);
+  // Runtime image identity uses the validated current row, not caller display metadata.
+  source=await current(db,owner,{...source});
  if(![limits.images,limits.bytes,limits.imageInputTokens].every(n=>Number.isSafeInteger(n)&&n>0)||limits.images>PDF_VISUAL_READ_LIMITS.images||
   limits.bytes>PDF_VISUAL_READ_LIMITS.bytes||limits.imageInputTokens>PDF_VISUAL_READ_LIMITS.imageInputTokens)throw new PdfVisualEvidenceError('invalid','Invalid bounded PDF visual read');
  const row=(await db.query<{manifest:{content:ContentManifest;bindings:Array<{index:number;anchorEvidenceId:string}>};manifest_sha256:string;content_sha256:string}>(
