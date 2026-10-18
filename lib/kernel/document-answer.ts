@@ -541,6 +541,8 @@ export function validateDocumentEvidenceSelection(value:unknown,prepared:Prepare
 
 export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';providerReferenceIds:string[];
  systemRetainedReferenceIds:string[];referenceIds:string[];expandedSupportIds:string[];skippedSupportIds:string[];
+ nativeTablePageRetention?:{policy:'selected-node-original-table-page-v1';retainedImageIds:string[];skippedImageIds:string[];
+  structureRelationsVerified:false};
  mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v2';documentId:string;sourceHash:string;
   status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
   inputScope:'available-original-quote-units';coverage:'unassessed';structureRelationsVerified:false};
@@ -589,6 +591,28 @@ export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAn
  return {...retained,referenceIds:[...retained.referenceIds,...additions.map(u=>u.id)],
   systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...additions.map(u=>u.id)],
   expandedSupportIds:[...new Set([...retained.expandedSupportIds,...additions.map(u=>u.supportId)])],mentionedSourceRetention};
+}
+
+/** Preserve an already retrieved original table page with its selected text.
+ * A byte-limited parser grid stays unavailable; the PNG is still original
+ * evidence. Same-page binding never certifies a table's semantic relations. */
+export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,prepared:PreparedAnswer):StoredNodeTextSelection{
+ if(!retained.providerReferenceIds.length)return retained;
+ const ids=new Set(retained.referenceIds),selectedSupportIds=new Set(prepared.quoteUnits.filter(u=>ids.has(u.id)).map(u=>u.supportId)),
+  selectedText=prepared.supports.filter(s=>s.kind==='text'&&selectedSupportIds.has(s.id)),retainedImageIds:string[]=[],skippedImageIds:string[]=[];
+ for(const support of prepared.supports){
+  if(support.kind!=='image'||!support.image||!('kind'in support.image)||support.image.kind!=='pdf-page'||ids.has(support.id))continue;
+  const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[];
+  if(!native.length||!selectedText.some(s=>s.documentId===support.documentId&&s.documentVersionId===support.documentVersionId&&
+   s.sourceVersionId===support.sourceVersionId&&s.sourceHash===support.sourceHash&&s.evidenceId===support.evidenceId))continue;
+  for(const observation of native)assertNativeTableObservation(observation,support.image);
+  if(ids.size>=64){skippedImageIds.push(support.id);continue;}
+  ids.add(support.id);retainedImageIds.push(support.id);
+ }
+ if(!retainedImageIds.length&&!skippedImageIds.length)return retained;
+ return {...retained,referenceIds:[...retained.referenceIds,...retainedImageIds],
+  systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...retainedImageIds],
+  nativeTablePageRetention:{policy:'selected-node-original-table-page-v1',retainedImageIds,skippedImageIds,structureRelationsVerified:false}};
 }
 
 /** Explicit source-value lane only. Suggestions cannot delete already retrieved
@@ -785,7 +809,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
   const sourceValueSelection=policy.sourceValueContract==='difference-v1'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
-  const textSelection=sourceValueSelection?undefined:retainDocumentSelectionContext(decoded,prepared);
+  const textSelection=sourceValueSelection?undefined:retainSelectedNativeTablePages(retainDocumentSelectionContext(decoded,prepared),prepared);
   referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
   if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
    throw new Error('Document evidence changed during evidence selection');

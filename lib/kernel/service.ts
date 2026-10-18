@@ -1248,8 +1248,10 @@ export class KernelService {
       throw new Error('Study answer retrieval was degraded; no answer was generated');
     const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
       {courseId:searchOptions.courseId})):undefined;
+    // A resolved document already fixes the source; requiring every question
+    // word in a table caption/cell would discard its complementary original page.
     const tableCandidates=includeImages&&nativeTables?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
-      documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
+      documentId:selected?.documentId??searchOptions.documentId,strict:selected?false:searchOptions.strict}):[];
     return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
