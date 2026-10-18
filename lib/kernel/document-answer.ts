@@ -69,7 +69,8 @@ type Claim={text:string;citations:Citation[]};
 export type GroundedDocumentAnswer={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Claim[]};
 export type DocumentAnswerSelections=Omit<GroundedDocumentAnswer,'claims'>&{claims:{text:string;citations:{id:string}[]}[]};
 export type DocumentQuoteUnit={id:string;supportId:string;startUtf16:number;endUtf16:number;quoteSha256:string;text:string;selectable:boolean;
- contextWindow?:{policy:'docling-text-context-windows-v1';hintSha256:string;references:string[];semanticRelationsVerified:false}};
+ contextWindow?:{policy:'docling-text-context-windows-v1';hintSha256:string;references:string[];semanticRelationsVerified:false};
+ contextWindowCoverage?:{windowId:string;relation:'literal-span-containment';semanticRelationsVerified:false}};
 export type DocumentUnitSelection={claimIndex:number;citationIndex:number;selectionId:string;kind:'text'|'image';
  evidence:Omit<Support,'text'|'image'>;startUtf16:number|null;endUtf16:number|null;quoteSha256:string};
 export type DocumentCitationRepair={claimIndex:number;citationIndex:number;originalSupportId:string;resolvedSupportId:string;
@@ -287,9 +288,9 @@ const supportMetadata=({text,image,textContextWindows,...support}:Support)=>{
  void text;void image;void textContextWindows;return support;
 };
 
-/** A lossless partition of each original body. Offsets use JS/validator UTF-16
- * units; valid surrogate pairs are never split. Blank runs remain in the input
- * and manifest but cannot become citations under the existing strict rules. */
+/** Preserve the original lossless partition, with optional declared literal
+ * context windows. Offsets use JS/validator UTF-16; surrogate pairs are never
+ * split. Blank runs remain in the manifest but cannot become citations. */
 export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUnit[]{
  const units:DocumentQuoteUnit[]=[],identities=new Set<string>();
  const paired=new Set(supports.flatMap(s=>s.captionMembers?.map(u=>u.id)??[]));
@@ -336,6 +337,18 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
    units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:!paired.has(id),
     contextWindow:{policy:hint.policy,hintSha256:hint.hintSha256,references:window.references.map(ref=>ref.reference),semanticRelationsVerified:false}});
    extra++;
+  }
+ }
+ // Prefer a declared window to its contained bare fragment before selection.
+ // This is span containment, not a claim of semantic completeness. Old IDs
+ // and text remain visible; an unavailable ID is rejected, never redirected.
+ for(const unit of units){
+  if(!unit.selectable||unit.contextWindow)continue;
+  const window=units.find(candidate=>candidate.selectable&&candidate.contextWindow&&candidate.supportId===unit.supportId&&
+   candidate.startUtf16<=unit.startUtf16&&candidate.endUtf16>=unit.endUtf16&&candidate.text.length>unit.text.length);
+  if(window){
+   unit.selectable=false;
+   unit.contextWindowCoverage={windowId:window.id,relation:'literal-span-containment',semanticRelationsVerified:false};
   }
  }
  return units;

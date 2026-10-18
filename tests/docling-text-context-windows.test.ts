@@ -115,14 +115,21 @@ test('answer selection offers literal context windows without changing legacy ID
   evidence_id:input.evidenceId,parser_version:input.parserVersion,score:1,evidence_body:'full-page'}]},
   legacy=prepareDocumentAnswer('What are the training data sizes?',context),
   prepared=prepareDocumentAnswer('What are the training data sizes?',{...context,textContextWindows:[hint]});
- for(const unit of legacy.quoteUnits)assert.deepEqual(prepared.quoteUnits.find(candidate=>candidate.id===unit.id),unit);
+ for(const unit of legacy.quoteUnits){
+  const current=prepared.quoteUnits.find(candidate=>candidate.id===unit.id)!;assert.ok(current);
+  assert.deepEqual({...current,selectable:unit.selectable,contextWindowCoverage:undefined},{...unit,contextWindowCoverage:undefined});
+ }
  const window=prepared.quoteUnits.find(unit=>unit.contextWindow);assert.ok(window);
  assert.equal(window.text,left+'\n\n'+right);assert.equal(window.contextWindow!.semanticRelationsVerified,false);
  assert.deepEqual(window.contextWindow!.references,['#/texts/0','#/texts/1']);
  const choose=(id:string)=>resolveDocumentAnswerSelections({status:'answered',message:'',
   claims:[{text:'A test claim.',citations:[{id}]}]},prepared.supports);
  assert.equal(choose(window.id).answer.claims[0].citations[0].quote,window.text);
- const original=legacy.quoteUnits.at(-1)!;
+ const covered=prepared.quoteUnits.find(unit=>unit.contextWindowCoverage);assert.ok(covered);
+ assert.equal(covered.contextWindowCoverage!.windowId,window.id);assert.equal(covered.selectable,false);
+ assert.equal(legacy.quoteUnits.find(unit=>unit.id===covered.id)!.selectable,true);
+ assert.throws(()=>choose(covered.id),/ungrounded/); // Explicitly unavailable; never silently redirected.
+ const original=legacy.quoteUnits.find(unit=>prepared.quoteUnits.find(candidate=>candidate.id===unit.id)!.selectable)!;
  assert.equal(choose(original.id).answer.claims[0].citations[0].quote,original.text);
  assert.notEqual(original.text,window.text); // No late citation expansion.
  assert.throws(()=>prepareDocumentAnswer('Question',{...context,textContextWindows:[structuredClone(hint)]}),/staging/);
