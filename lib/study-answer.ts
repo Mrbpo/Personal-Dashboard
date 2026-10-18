@@ -34,6 +34,10 @@ export function studySourceScope(value=process.env.STUDY_SOURCE_SCOPE??'off'){
  if(value!=='off'&&value!=='question-scope')throw new StudyAnswerError('configuration','invalid-source-scope','问题来源范围配置无效');
  return value==='off'?undefined:value;
 }
+export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REASONING??'low'){
+ if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
+ return value==='low'?undefined:value;
+}
 /** Process-only development setting; even a lower explicit limit needs isolation. */
 export function studyDevelopmentDailyLimit(value=process.env.STUDY_DEVELOPMENT_DAILY_LIMIT){
  if(value===undefined)return undefined;
@@ -66,6 +70,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
+ const generationReasoningEffort=studyGenerationReasoning();
  const sourceValueContract=studySourceValues();
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
   throw new StudyAnswerError('configuration','source-values-require-selection-check','来源值需要内核、证据选择和原图引用核对');
@@ -83,6 +88,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
@@ -105,7 +111,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    citations,memories:[],web:[],webQuery:'',question,
    contextNote:`Kernel 当前证据：${result.textEvidenceCount} 条文本、${result.imageEvidenceCount} 张原图；历史对话仅用于理解追问。`,
    study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
-    retrievalQuestion,settings:{reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000},
+    retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
+     ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,

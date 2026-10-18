@@ -22,6 +22,16 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
 const output=(value:unknown)=>new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:100,output_tokens:20},output_text:JSON.stringify(value)}),{status:200});
 const claim=(id:string)=>({status:'answered',message:'',claims:[{text:'The count is two.',citations:[{id}]}]});
 
+test('application generation effort changes only generation and preserves the original selection request',()=>{
+ const p=prepareDocumentAnswer('What did Original a test?',context()),ids=[p.quoteUnits[0].id],
+  medium={...policy,generationReasoningEffort:'medium' as const},
+  lowRequest=buildSelectedDocumentAnswerRequest(p,ids,settings,policy),mediumRequest=buildSelectedDocumentAnswerRequest(p,ids,settings,medium);
+ assert.equal(mediumRequest.reasoning.effort,'medium');assert.equal(mediumRequest.model,lowRequest.model);
+ assert.equal(mediumRequest.max_output_tokens,3000);
+ assert.deepEqual({...mediumRequest,reasoning:lowRequest.reasoning},lowRequest,'source, prompt, schema and other settings stay identical');
+ assert.deepEqual(buildDocumentEvidenceSelectionRequest(p,settings,medium),buildDocumentEvidenceSelectionRequest(p,settings,policy));
+});
+
 test('mentioned source attribution survives selection without suppressing complementary sources',()=>{
  const c=context(),p=prepareDocumentAnswer('What did Original a test?',c),
   packet=(request:any)=>JSON.parse(request.input.at(-1).content[0].text),
