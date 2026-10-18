@@ -54,6 +54,12 @@ export type CompleteDocumentSourceManifest={method:'complete-current-source';nod
  imageInputTokenUpper:number;limits:typeof COMPLETE_DOCUMENT_SOURCE_LIMITS;manifestSha256:string};
 export type CompleteDocumentSourceRead={status:'unavailable';reason:CompleteDocumentSourceReason;manifest:CompleteDocumentSourceManifest}|
  {status:'available';context:DocumentContextRead;manifest:CompleteDocumentSourceManifest};
+export type DocumentTextSourceManifest={method:'current-persisted-text-v1';nodeOrder:'persisted-source-order';
+ textCoverage:'all-current-persisted-nodes'|'unavailable';source:DocumentContextSource;sourceNodeCount:number;returnedNodeCount:number;
+ sourceBodyCodepoints:number;sourceBodyUtf8Bytes:number;orderedTextSha256:string|null;structureManifestSha256:string|null;
+ originalFileCompletenessVerified:false;visualCompletenessVerified:false;parserWarnings:string[];manifestSha256:string};
+export type DocumentTextSourceRead={status:'unavailable';reason:'source-size-limit'|'structure-unavailable';manifest:DocumentTextSourceManifest}|
+ {status:'available';context:DocumentContextRead;manifest:DocumentTextSourceManifest};
 export type DocumentContextErrorCode='DOCUMENT_CONTEXT_INVALID'|'DOCUMENT_CONTEXT_CHANGED'|'DOCUMENT_STRUCTURE_UNAVAILABLE'|
  'DOCUMENT_STRUCTURE_CONFLICT'|'DOCUMENT_IMAGE_UNAVAILABLE'|'DOCUMENT_IMAGE_AMBIGUOUS'|'DOCUMENT_IMAGE_CHANGED';
 export class DocumentContextError extends Error{
@@ -103,6 +109,47 @@ const evidenceNode=(source:SourceRow,page:PageRow,node?:DocumentStructureInput['
  documentId:source.documentId,documentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,sourceHash:source.sourceHash,
  evidenceId:page.evidence_id,locator:page.locator,ordinal:page.page_number-1,kind:node?.kind||'page',parentId:node?.parentId??null,
  body:page.body,bodySha256:hash(page.body)});
+
+/** All persisted text is independent of whether every source image fits. This
+ * does not certify PDF extraction, visual coverage, or an answer's completeness. */
+export async function readCompleteDocumentText(pool:Pool,owner:string,expected:DocumentContextSource):Promise<DocumentTextSourceRead>{
+ const source={...expected},current=await currentSource(pool,owner,source),limits=COMPLETE_DOCUMENT_SOURCE_LIMITS;
+ const totals=(await pool.query<{nodes:number;points:string;bytes:string;warnings:string[]}>(`SELECT count(*)::int nodes,
+  coalesce(sum(length(p.body)),0)::text points,coalesce(sum(octet_length(p.body)),0)::text bytes,
+  (SELECT warnings FROM document_text_versions WHERE id=$1) warnings FROM document_text_pages p WHERE p.version_id=$1`,
+ [current.currentVersionId])).rows[0];
+ const manifest:Omit<DocumentTextSourceManifest,'manifestSha256'>={method:'current-persisted-text-v1',nodeOrder:'persisted-source-order',
+  textCoverage:'unavailable',source:identity(current),sourceNodeCount:totals.nodes,returnedNodeCount:0,
+  sourceBodyCodepoints:Number(totals.points),sourceBodyUtf8Bytes:Number(totals.bytes),orderedTextSha256:null,structureManifestSha256:null,
+  originalFileCompletenessVerified:false,visualCompletenessVerified:false,parserWarnings:totals.warnings};
+ const finish=()=>({...manifest,manifestSha256:hash(canonical(manifest))});
+ const unavailable=async(reason:'source-size-limit'|'structure-unavailable'):Promise<DocumentTextSourceRead>=>{
+  await currentSource(pool,owner,source);return {status:'unavailable',reason,manifest:finish()};
+ };
+ if(!manifest.sourceNodeCount||![manifest.sourceBodyCodepoints,manifest.sourceBodyUtf8Bytes].every(Number.isSafeInteger)||
+  manifest.sourceNodeCount>limits.nodes||manifest.sourceBodyCodepoints>limits.bodyCodepoints||manifest.sourceBodyUtf8Bytes>limits.bodyUtf8Bytes)
+  return unavailable('source-size-limit');
+ let data:Awaited<ReturnType<typeof structuredSource>>;
+ try{data=await structuredSource(pool,owner,source);}
+ catch(error){if(error instanceof DocumentContextError&&error.code==='DOCUMENT_STRUCTURE_UNAVAILABLE')return unavailable('structure-unavailable');throw error;}
+ if(data.nodes.length!==manifest.sourceNodeCount||data.nodes.reduce((sum,n)=>sum+Array.from(n.body).length,0)!==manifest.sourceBodyCodepoints||
+  data.nodes.reduce((sum,n)=>sum+Buffer.byteLength(n.body),0)!==manifest.sourceBodyUtf8Bytes)changed();
+ const anchors:DocumentEvidenceHit[]=[],parents=new Map<string,DocumentParentContext>();
+ for(let offset=0;offset<data.nodes.length;offset+=14){
+  const selected=await readDocumentNodes(pool,owner,source,data.nodes.slice(offset,offset+14).map(n=>n.evidenceId)),
+   packet=await readDocumentParents(pool,owner,selected);
+  anchors.push(...packet.anchors);
+  for(const parent of packet.parents)if(!parents.has(parent.parentId))parents.set(parent.parentId,parent);
+ }
+ if(anchors.length!==data.nodes.length||anchors.some((hit,index)=>hit.evidence_id!==data.nodes[index].evidenceId||hit.body!==data.nodes[index].body))changed();
+ await currentSource(pool,owner,source);
+ manifest.textCoverage='all-current-persisted-nodes';manifest.returnedNodeCount=anchors.length;
+ manifest.orderedTextSha256=hash(canonical(data.nodes.map(n=>n.body)));manifest.structureManifestSha256=data.manifestSha256;
+ manifest.parserWarnings=[...new Set(anchors.flatMap(hit=>hit.parser_warnings??[]))];
+ return {status:'available',manifest:finish(),context:{anchors,parents:[...parents.values()],images:[],sourceContentIsUntrusted:true,
+  accounting:{anchorCount:anchors.length,parentCount:parents.size,contextNodeCount:data.nodes.length,
+   contextBodyCodepoints:manifest.sourceBodyCodepoints,imageCount:0,imageBytes:0}}};
+}
 
 /** Adapter input, read through Kernel with full actual evidence identities. */
 export async function readDocumentSourcePages(db:Queryable,owner:string,source:DocumentContextSource){

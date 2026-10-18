@@ -16,7 +16,7 @@ import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerClu
  type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentPageRegions,readDocumentPageRegionsForImages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
- readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
+ readCompleteDocumentSource,readCompleteDocumentText,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
@@ -89,6 +89,10 @@ export function mergeStudyEvidence(base:DocumentAnswerContext,added:DocumentAnsw
  return {...base,anchors:[...anchors.values()],parents:[...parents.values()],images:[...images.values()],
   imageSelection:{...budget.snapshot(),omitted:[...base.imageSelection?.omitted??[],...added.imageSelection?.omitted??[]]},
   imageAnchors:[...new Map([...base.imageAnchors??[],...added.imageAnchors??[]].map(n=>[n.evidence_id,n])).values()]};
+}
+function studyContextInputUpper(request:ReturnType<typeof buildDocumentAnswerRuntimeRequest>,context:DocumentAnswerContext){
+ const nonImageRequest=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
+ return Buffer.byteLength(nonImageRequest)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+(context.imageSelection?.accounting.imageInputTokens??0);
 }
 type CandidateInput = {
   entityId: string; attribute: string; value: unknown; sourceVersionId: string;
@@ -1141,6 +1145,9 @@ export class KernelService {
   readCompleteDocumentSource(owner:string,expectedSource:DocumentContextSource){
     return readCompleteDocumentSource(kernelPool(),owner,expectedSource);
   }
+  readCompleteDocumentText(owner:string,expectedSource:DocumentContextSource){
+    return readCompleteDocumentText(kernelPool(),owner,expectedSource);
+  }
 
   /** Explicit selected-source route. Complete refers to source coverage, never
    * semantic correctness or a relevance ranking. No paid planner or fallback. */
@@ -1307,23 +1314,46 @@ export class KernelService {
           if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
           const base=await this.authorImageTableContext(owner,retrievalQuestion??question,ranked,selected);
           const complete=await this.readCompleteDocumentSource(owner,selected);
+          const retainText=async(visualReason:string):Promise<DocumentAnswerContext>=>{
+            const text=await this.readCompleteDocumentText(owner,selected);
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,
+              expansionUnavailable:visualReason,...(text.status==='unavailable'?{textExpansionUnavailable:text.reason}:{})};
+            if(text.status==='unavailable')return base;
+            const expanded=mergeStudyEvidence(base,text.context);
+            if(!expanded)return base;
+            const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),settings=await documentAnswerSettings(policy);
+            let request;
+            try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
+              if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
+              contextExpansion={...contextExpansion,textExpansionUnavailable:error.code};return base;
+            }
+            const inputUpper=studyContextInputUpper(request,expanded);
+            if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
+              contextExpansion={...contextExpansion,textExpansionUnavailable:'combined-request-budget'};return base;
+            }
+            contextExpansion={strategy:'ranked-plus-persisted-text-mentioned-source',coverage:'unassessed',selectedSource:selected,
+              textScope:text.manifest.textCoverage,textNodes:text.manifest.returnedNodeCount,
+              textSourceManifestSha256:text.manifest.manifestSha256,orderedTextSha256:text.manifest.orderedTextSha256,
+              visualScope:'ranked-selected-only',exhaustiveVisualUnavailable:visualReason,
+              originalFileCompletenessVerified:false,otherSourcesRetained:true,inputTokenUpper:inputUpper};
+            return expanded;
+          };
           if(complete.status==='unavailable'){
+            if(complete.reason.startsWith('image-'))return retainText(complete.reason);
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:complete.reason};return base;
           }
           // Validate the existing complete-source proof before merging; it does
           // not certify completeness of a multi-source question or the answer.
           prepareDocumentAnswer(question,{...complete.context,completeSourceProof:{policy:'selected-complete-initial-v1',selectedDocumentTitle:selected.title,manifest:complete.manifest}});
           const expanded=mergeStudyEvidence(base,complete.context);
-          if(!expanded){contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-image-budget'};return base;}
+          if(!expanded)return retainText('combined-image-budget');
           const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),settings=await documentAnswerSettings(policy);
           let request;
           try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
             if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:error.code};return base;
           }
-          const nonImageRequest=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
-          const inputUpper=Buffer.byteLength(nonImageRequest)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+
-            (expanded.imageSelection?.accounting.imageInputTokens??0);
+          const inputUpper=studyContextInputUpper(request,expanded);
           if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-request-budget'};return base;
           }
