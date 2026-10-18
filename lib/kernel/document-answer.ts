@@ -434,6 +434,9 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    'Absence of a statement is not evidence for its negation. '+
    'Return atomic claims, each citing IDs from the supplied selectable quoteUnits or actual image evidence. '+
    'For text, select the unit IDs whose original text supports the claim; never write quote strings or invent IDs. '+
+   'For a total, extremum, ranking or comparison, cite the evidence establishing the relevant components or comparison values, not just the chosen value. '+
+   'A single listed component does not establish a total; an isolated value does not establish highest or lowest. '+
+   'Keep the cited comparison within the same object, population, subset and configuration. '+
    'The server restores verbatim quotations. Image IDs require the actual supplied image, which follows its support-ID label. '+
    'Cover all question-relevant items in an explicit supplied list, rather than returning only one example. '+
    'For quantities, state the counted object, unit, scope, processing stage and configuration; preserve distinct supported interpretations and qualifications. '+
