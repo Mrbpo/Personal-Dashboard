@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRuntimeRequest,buildDocumentEvidenceSelectionRequest,
- buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 
 process.env.DATABASE_URL=':memory:';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'selection-test-'+randomUUID());
@@ -21,6 +21,49 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
   width:1,height:1,mime:'image/png',bytes:png,source:{documentId:id,currentVersionId:`v${id}`,sourceVersionId:`sv-${id}`,sourceHash:`hash-${id}`}}))};}
 const output=(value:unknown)=>new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:100,output_tokens:20},output_text:JSON.stringify(value)}),{status:200});
 const claim=(id:string)=>({status:'answered',message:'',claims:[{text:'The count is two.',citations:[{id}]}]});
+
+test('application retains omitted original text in a selected node without adding foreign nodes or images',async()=>{
+ const c=context();c.anchors[0].body=Array.from({length:4},(_,i)=>`Stored paragraph ${i}. ${'Original context. '.repeat(65)}`).join('\n\n');
+ const p=prepareDocumentAnswer('What are the stored stages?',c),units=p.quoteUnits.filter(unit=>unit.supportId==='e0'),
+  suggested=units[0].id,omitted=units.at(-1)!.id,before=JSON.stringify(p);
+ assert.ok(units.length>1);
+ const retention=retainSelectedStoredNodeText({referenceIds:[suggested,'i0']},p),request=buildSelectedDocumentAnswerRequest(p,retention.referenceIds,settings,policy),
+  packet=JSON.parse(String((request.input.at(-1)!.content as any[])[0].text));
+ assert.deepEqual(retention.providerReferenceIds,[suggested,'i0']);assert.ok(retention.systemRetainedReferenceIds.includes(omitted));
+ assert.ok(packet.quoteUnits.some((unit:any)=>unit.id===omitted&&unit.quoteSha256===sha(unit.text)));
+ assert.doesNotMatch(JSON.stringify(request.input),/hidden-marker-947|Actual image evidence i1/);
+ assert.deepEqual(retention.expandedSupportIds,['e0']);assert.equal(retention.structureRelationsVerified,false);
+ assert.equal(retention.coverage,'unassessed');assert.equal(JSON.stringify(p),before);
+ const saved=globalThis.fetch;let calls=0;
+ try{
+  globalThis.fetch=async(_url,init)=>{
+   const request=JSON.parse(String(init?.body));calls++;
+   if(calls===1)return output({referenceIds:[suggested]});
+   const input=JSON.parse(request.input.at(-1).content[0].text);
+   assert.ok(input.quoteUnits.some((unit:any)=>unit.id===omitted));
+   assert.ok(request.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum.includes(omitted));
+   return output(claim(omitted));
+  };
+  const result=await synthesizeDocumentAnswer('What are the stored stages?',async()=>c,policy);
+  assert.ok('evidenceSelection' in result);
+  assert.equal(calls,2,'transport requires no additional model phase');
+  assert.equal(result.evidenceSelection?.outcome,'provided-with-system-retention');
+  assert.deepEqual(result.evidenceSelection?.textNodeRetention?.providerReferenceIds,[suggested]);
+  assert.equal(result.selectedUnits[0].selectionId,omitted);
+ }finally{globalThis.fetch=saved;}
+});
+
+test('stored-node retention respects the 64-ID bound atomically and leaves empty or invalid selection strict',()=>{
+ const c=context();c.anchors[0].body=Array.from({length:80},(_,i)=>`Paragraph ${i}. ${'word '.repeat(210)}`).join('\n\n');
+ const p=prepareDocumentAnswer('What count?',c),units=p.quoteUnits.filter(unit=>unit.supportId==='e0');
+ assert.ok(units.length>64);
+ const result=retainSelectedStoredNodeText({referenceIds:[units[0].id]},p);
+ assert.deepEqual(result.referenceIds,[units[0].id]);assert.deepEqual(result.skippedSupportIds,['e0']);
+ assert.deepEqual(result.systemRetainedReferenceIds,[],'no silent partial node expansion at the limit');
+ assert.deepEqual(retainSelectedStoredNodeText({referenceIds:[]},p).referenceIds,[]);
+ for(const value of [{referenceIds:[units[0].id,units[0].id]},{referenceIds:['invented']},{referenceIds:[units[0].id],extra:true}])
+  assert.throws(()=>retainSelectedStoredNodeText(value,p));
+});
 
 test('selection preserves source IDs while generation excludes unselected bodies and original images',()=>{
  const p=prepareDocumentAnswer('What count and figure are given?',context()),before=JSON.stringify(p),id=p.quoteUnits[0].id;

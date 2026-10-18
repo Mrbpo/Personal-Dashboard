@@ -477,7 +477,8 @@ export type SourceValueEvidenceSelection={retentionPolicy:typeof DOCUMENT_TABLE_
 export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_SELECTION_VERSION;coverage:'unassessed';referenceIds:string[];
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
  sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected'|'provided-with-system-retention';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;
- pdfPageRegionTransport?:ReturnType<typeof pdfPageRegionTransport>}&
+ pdfPageRegionTransport?:ReturnType<typeof pdfPageRegionTransport>;
+ textNodeRetention?:Omit<StoredNodeTextSelection,'referenceIds'>}&
  Partial<Omit<SourceValueEvidenceSelection,'referenceIds'>>;
 type PreparedAnswer=ReturnType<typeof prepareDocumentAnswer>;
 const selectableIds=(prepared:PreparedAnswer)=>[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
@@ -507,6 +508,29 @@ export function validateDocumentEvidenceSelection(value:unknown,prepared:Prepare
  if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id))||new Set(ids).size!==ids.length)
   throw new Error('Invalid original evidence selection');
  return [...ids];
+}
+
+export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';providerReferenceIds:string[];
+ systemRetainedReferenceIds:string[];referenceIds:string[];expandedSupportIds:string[];skippedSupportIds:string[];
+ coverage:'unassessed';structureRelationsVerified:false};
+
+/** Keep the existing text of selected storage nodes together. Storage adjacency
+ * does not establish a list, table or diagram relation. Never add another node,
+ * source or image; keep whole-node additions within the existing 64-ID bound. */
+export function retainSelectedStoredNodeText(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
+ const providerReferenceIds=validateDocumentEvidenceSelection(value,prepared),selected=new Set(providerReferenceIds),
+  supportIds=new Set(prepared.quoteUnits.filter(unit=>selected.has(unit.id)).map(unit=>unit.supportId)),
+  referenceIds=[...providerReferenceIds],systemRetainedReferenceIds:string[]=[],expandedSupportIds:string[]=[],skippedSupportIds:string[]=[];
+ for(const support of prepared.supports){
+  if(support.kind!=='text'||!supportIds.has(support.id))continue;
+  const additions=prepared.quoteUnits.filter(unit=>unit.supportId===support.id&&unit.selectable&&!selected.has(unit.id)).map(unit=>unit.id);
+  if(!additions.length)continue;
+  if(referenceIds.length+additions.length>64){skippedSupportIds.push(support.id);continue;}
+  referenceIds.push(...additions);systemRetainedReferenceIds.push(...additions);expandedSupportIds.push(support.id);
+  for(const id of additions)selected.add(id);
+ }
+ return {policy:'selected-stored-node-text-v1',providerReferenceIds,systemRetainedReferenceIds,referenceIds,
+  expandedSupportIds,skippedSupportIds,coverage:'unassessed',structureRelationsVerified:false};
 }
 
 /** Explicit source-value lane only. Suggestions cannot delete already retrieved
@@ -678,13 +702,16 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
   const sourceValueSelection=policy.sourceValueContract==='difference-v1'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
-  referenceIds=sourceValueSelection?.referenceIds??validateDocumentEvidenceSelection(decoded,prepared);
+  const textSelection=sourceValueSelection?undefined:retainSelectedStoredNodeText(decoded,prepared);
+  referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
   if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
    throw new Error('Document evidence changed during evidence selection');
   selectionReceipt={version:DOCUMENT_EVIDENCE_SELECTION_VERSION,coverage:'unassessed',referenceIds,
    requestedModel:model,model:actualModel,providerRequestSha256,providerResponseId:payload.id??null,usage:payload.usage??null,
-   sourceInputFingerprint:prepared.fingerprint,outcome:sourceValueSelection?.systemRetainedReferenceIds.length?'provided-with-system-retention':referenceIds.length?'selected':'no-evidence-selected',
+   sourceInputFingerprint:prepared.fingerprint,outcome:sourceValueSelection?.systemRetainedReferenceIds.length||textSelection?.systemRetainedReferenceIds.length?
+    'provided-with-system-retention':referenceIds.length?'selected':'no-evidence-selected',
    ...(sourceValueSelection??{}),
+   ...(textSelection?{textNodeRetention:(({referenceIds:_,...retention})=>retention)(textSelection)}:{}),
    ...(prepared.pdfPageRegionReads?.length?{pdfPageRegionTransport:pdfPageRegionTransport(prepared,request)}:{}),
    ...(prepared.input.unitPolicy?{unitPolicy:prepared.input.unitPolicy}:{})};
   if(!referenceIds.length)return {answer:{status:'insufficient-evidence' as const,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]},
