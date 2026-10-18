@@ -8,7 +8,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText,projectDocume
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -1302,7 +1302,20 @@ export class KernelService {
     const {retrievalQuestion,...searchOptions}=options;
     if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
       throw new Error('Invalid study retrieval question');
-    const rankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,searchOptions);
+    let routedOptions=searchOptions,sourceRouting:Awaited<ReturnType<typeof planDocumentQueryScope>>|undefined;
+    if(policy.sourceRouting&&!searchOptions.sourceHint&&!searchOptions.documentId){
+      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+      if(mentioned.status==='resolved'){
+        sourceRouting=await planDocumentQueryScope(question,mentioned.matches[0],policy,async()=>{
+          const current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+          if(JSON.stringify(current)!==JSON.stringify(mentioned))throw new DocumentEvidenceChangedError();
+        });
+        if(sourceRouting.decision.scope==='named-document')routedOptions={...searchOptions,
+          sourceHint:{selectedDocumentTitle:mentioned.matches[0].title},strict:true,relatedDocuments:false};
+      }
+    }
+    if(sourceRouting)policy.onStage?.('retrieval');
+    const rankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions);
     let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
     let read:()=>Promise<DocumentAnswerContext>=rankedRead;
     if(policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages){
@@ -1380,7 +1393,7 @@ export class KernelService {
         quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
         ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
     }
-    return {...result,contextExpansion,...(citationCheck?{citationCheck}:{})};
+    return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{})};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

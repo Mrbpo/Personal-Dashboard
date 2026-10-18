@@ -7,7 +7,7 @@ import type {FlatTextStructureProvenance,DocumentContextSource} from './document
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudyPdfPageRegions,unavailableStudyPdfPageRegions,
  type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
-import {documentTitleMention} from './document-source.ts';
+import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
@@ -75,6 +75,8 @@ export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequest
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
+ sourceRouting?:{mode:'question-scope';beforeAttempt:(identity:string)=>Promise<void>;
+  recordResponse:(response:Readonly<DocumentQueryScopeResponse>)=>Promise<void>};
  sourceValueContract?:'difference-v1';
  recordSourceValueDerivation?:(receipt:Readonly<DocumentSourceValueDerivation>)=>Promise<void>;
  recordSourceValueRawResponse?:(receipt:Readonly<DocumentSourceValueRawResponse>)=>Promise<void>;
@@ -83,8 +85,10 @@ export type DocumentAnswerPolicy={scope?:'development'|'application';model?:Docu
  citationCheck?:{mode:'selected-once';beforeAttempt:(identity:string)=>Promise<void>;
   recordResponse:(response:Readonly<DocumentCitationAuditResponse>)=>Promise<void>};
  conversation?:Array<{role:'user'|'assistant';text:string}>;
- onStage?:(stage:'evidence-selection'|'generation'|'citation-validation')=>void;
+ onStage?:(stage:'retrieval'|'evidence-selection'|'generation'|'citation-validation')=>void;
  beforeAttempt?:(identity:string)=>Promise<void>};
+export type DocumentQueryScopeResponse={requestIdentity:string;providerRequestSha256:string;httpStatus:number;rawBody:string;rawSha256:string;
+ questionSha256:string;source:ResolvedDocumentSource};
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const whitespace=(value:string)=>value.replace(/\s+/gu,' ').trim();
 const exactKeys=(value:unknown,keys:string[])=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&
@@ -696,6 +700,10 @@ async function documentModelPayload(response:Response,model:DocumentAnswerModel,
 
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
+ if(policy.sourceRouting!==undefined&&(policy.scope!=='application'||
+  !exactKeys(policy.sourceRouting,['mode','beforeAttempt','recordResponse'])||policy.sourceRouting.mode!=='question-scope'||
+  typeof policy.sourceRouting.beforeAttempt!=='function'||typeof policy.sourceRouting.recordResponse!=='function'))
+  throw new Error('Invalid application source routing policy');
  if(policy.sourceValueContract!==undefined&&(policy.sourceValueContract!=='difference-v1'||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||
   typeof policy.recordSourceValueDerivation!=='function'||typeof policy.recordSourceValueRawResponse!=='function'))
@@ -727,6 +735,24 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
   policy.conversation.some(m=>!m||!['user','assistant'].includes(m.role)||typeof m.text!=='string'||m.text.length>2500)))
   throw new Error('Invalid application conversation context');
  return {model,dailyLimit,effort,maxOutput,timeout};
+}
+
+/** One fallible question-only routing decision, with the same application
+ * model/budget guard and current-source recheck. No retry or answer revision. */
+export async function planDocumentQueryScope(question:string,source:ResolvedDocumentSource,policy:DocumentAnswerPolicy,recheck:()=>Promise<void>){
+ source={...source};
+ const {model,dailyLimit,timeout}=await documentAnswerSettings(policy),routing=policy.sourceRouting;
+ if(policy.scope!=='application'||!routing||model==='gpt-6-astra')throw new Error('Application question scope requires explicit mini policy');
+ const body=buildDocumentQueryScopeRequest(question,source,model),providerRequestSha256=sha(JSON.stringify(body)),
+  questionSha256=sha(question),requestIdentity=sha(JSON.stringify({version:'question-source-scope-v1',providerRequestSha256,source}));
+ policy.onStage?.('evidence-selection');await recheck();await routing.beforeAttempt(requestIdentity);await recheck();
+ const response=await paidOpenAI('responses',body,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),
+  rawBody=await response.text(),rawSha256=sha(rawBody);
+ await routing.recordResponse({requestIdentity,providerRequestSha256,httpStatus:response.status,rawBody,rawSha256,questionSha256,source});
+ await recheck();
+ const {decoded,payload,actualModel}=await documentModelPayload(new Response(rawBody,{status:response.status}),model,policy),decision=validateDocumentQueryScope(decoded);
+ return {version:'question-source-scope-v1' as const,decision,source,questionSha256,providerRequestSha256,rawResponseSha256:rawSha256,
+  model:actualModel,usage:payload.usage,fallible:true as const,inputScope:'question-and-canonical-metadata-only' as const};
 }
 
 /** Read-only synthesis. No extraction, candidate or canonical state is written.

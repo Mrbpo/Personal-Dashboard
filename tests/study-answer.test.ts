@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 
@@ -14,6 +14,8 @@ test('legacy is the default, invalid configuration fails closed and application 
  assert.throws(()=>studyEvidenceSelection('typo'),StudyAnswerError);
  assert.equal(studyCitationCheck('off'),undefined);assert.equal(studyCitationCheck('selected-once'),'selected-once');
  assert.throws(()=>studyCitationCheck('typo'),StudyAnswerError);
+ assert.equal(studySourceScope('off'),undefined);assert.equal(studySourceScope('question-scope'),'question-scope');
+ assert.throws(()=>studySourceScope('typo'),StudyAnswerError);
  await assert.rejects(documentAnswerSettings({scope:'application',model:'gpt-6-astra'}),/bounded mini/);
  await assert.rejects(documentAnswerSettings({scope:'application',maxOutputTokens:9000}),/bounded mini/);
  assert.equal((await documentAnswerSettings({scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000})).model,'gpt-5.4-mini');

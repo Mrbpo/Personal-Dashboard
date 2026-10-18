@@ -30,6 +30,10 @@ export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
  if(value!=='off'&&value!=='difference-v1')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
  return value==='off'?undefined:value;
 }
+export function studySourceScope(value=process.env.STUDY_SOURCE_SCOPE??'off'){
+ if(value!=='off'&&value!=='question-scope')throw new StudyAnswerError('configuration','invalid-source-scope','问题来源范围配置无效');
+ return value==='off'?undefined:value;
+}
 /** Process-only development setting; even a lower explicit limit needs isolation. */
 export function studyDevelopmentDailyLimit(value=process.env.STUDY_DEVELOPMENT_DAILY_LIMIT){
  if(value===undefined)return undefined;
@@ -50,6 +54,8 @@ function citationRecorder(owner:string,question:string){
  };
  return {check:{mode:'selected-once' as const,beforeAttempt:async(identity:string)=>save(identity,'attempt',{requestIdentity:identity}),
   recordResponse:async(response:Readonly<import('./kernel/document-citation-audit.ts').DocumentCitationAuditResponse>)=>save(response.requestIdentity,'response',response)},
+  routing:{mode:'question-scope' as const,beforeAttempt:async(identity:string)=>save(identity,'source-scope.attempt',{requestIdentity:identity}),
+   recordResponse:async(response:Readonly<import('./kernel/document-answer.ts').DocumentQueryScopeResponse>)=>save(response.requestIdentity,'source-scope.response',response)},
   recordSourceValueRaw:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueRawResponse>)=>save(receipt.providerRequestSha256,'source-values.raw-response',receipt),
   recordSourceValues:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueDerivation>)=>save(receipt.providerRequestSha256,'source-values',receipt)};
 }
@@ -59,10 +65,11 @@ export function studyFailure(error:unknown){
 export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>){
  const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
+ const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const sourceValueContract=studySourceValues();
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
   throw new StudyAnswerError('configuration','source-values-require-selection-check','来源值需要内核、证据选择和原图引用核对');
- const recorder=studyCitationCheck()?citationRecorder(owner,question):undefined,citationCheck=recorder?.check;
+ const recorder=citationMode||sourceScope?citationRecorder(owner,question):undefined,citationCheck=citationMode?recorder!.check:undefined;
  const model=serviceValue('OPENAI_MODEL')||'gpt-5-mini';
  if(!['gpt-5-mini','gpt-5.4-mini'].includes(model))throw new StudyAnswerError('configuration','unsupported-model','内核问答仅支持已配置的 mini 模型');
  const prior=history.slice(-24).map(m=>({role:m.role as 'user'|'assistant',text:m.body.slice(0,2500)}));
@@ -76,6 +83,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
     conversation:prior,onStage:next=>{stage=next;}});
@@ -101,6 +109,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
+    ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
     ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
