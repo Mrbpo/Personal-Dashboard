@@ -194,3 +194,81 @@ export function assertDoclingOrigSearchHints(value:PreparedDoclingOrigSearchHint
  if(refs.length!==1||!Number.isInteger(value.derivedPage)||value.derivedPage!==refs[0].copyIndices.indexOf(source.physicalPage-1)+1||
   (value.references[0].optionsHash!==null&&!isSha(value.references[0].optionsHash))||!object(value.producerDocument))invalid('Stored orig search mapping differs');
 }
+
+export const DOCLING_TEXT_CONTEXT_WINDOWS_POLICY='docling-text-context-windows-v1' as const;
+export const DOCLING_TEXT_CONTEXT_WINDOW_LIMITS=Object.freeze({windows:64,utf16:1200});
+export type DoclingTextContextWindowBinding=DoclingRegionSource&{currentVersionId:string;sourceVersionId:string;evidenceId:string;
+ parserVersion:string;bodySha256:string};
+export type DoclingTextContextWindowsInput=OrigSearchInput&Pick<DoclingTextContextWindowBinding,'currentVersionId'|'sourceVersionId'|'evidenceId'>;
+type PageRegionObservation=Awaited<ReturnType<typeof readDoclingPageRegions>>;
+export type DoclingTextContextWindow={startUtf16:number;endUtf16:number;quoteSha256:string;
+ references:Array<PageRegionObservation['nodes'][number]&{startUtf16:number;endUtf16:number}>;
+ semanticRelationsVerified:false};
+export type PreparedDoclingTextContextWindows={policy:typeof DOCLING_TEXT_CONTEXT_WINDOWS_POLICY;binding:DoclingTextContextWindowBinding;
+ progressSha256:string;result:DoclingRegionResultReference;derivedPage:number;producerDocument:PageRegionObservation['producerDocument'];
+ pageSize:PageRegionObservation['pageSize'];windows:DoclingTextContextWindow[];hintSha256:string;
+ sourceBindingVerified:true;sourceContentIsUntrusted:true;visibilityVerified:false;textFaithfulnessVerified:false;
+ readingOrderVerified:false;semanticRelationsVerified:false};
+const preparedTextContextWindows=new WeakSet<PreparedDoclingTextContextWindows>();
+
+/** Preparation only: these literal windows must be offered before selection.
+ * Neither a shared parent nor adjacency establishes a paragraph, continuation,
+ * or semantic relation. Existing bodies and selected quotations are untouched. */
+export async function prepareDoclingTextContextWindows(input:DoclingTextContextWindowsInput):Promise<PreparedDoclingTextContextWindows|null>{
+ const {owner,documentId,currentVersionId,sourceVersionId,sourceHash,pageCount,physicalPage,evidenceId,parserVersion}=input;
+ if([owner,documentId,currentVersionId,sourceVersionId,evidenceId,parserVersion].some(value=>
+  typeof value!=='string'||!value.trim()||value.length>200||value.includes('\0'))||typeof input.body!=='string')
+  invalid('Invalid text context window binding');
+ if(Buffer.byteLength(input.body)>DOCLING_PAGE_REGION_LIMITS.pageBytes)
+  throw new DoclingPageRegionError('limit','Text context body exceeds page limit');
+ const source:DoclingRegionSource={owner,documentId,sourceHash,pageCount,physicalPage};
+ const references=doclingPageResultReferences(source,input.progress,input.layout??null);if(!references.length)return null;
+ const index=await readDoclingPageRegions(source,references[0]);
+ const candidates=index.nodes.flatMap(node=>{
+  // Only declared, leaf text items directly attached to body are eligible.
+  // Geometry is retained as observed/unknown; it never proves reading order.
+  const root=node.path.length===1?node.path[0]:undefined,position=root?.via.match(/^body\.children\[(\d+)\]$/);
+  if(!/^#\/texts\/\d+$/.test(node.reference)||node.membership!=='declared-provenance'||node.textScope!=='single-page'||
+   node.declaredPageNumbers.length!==1||node.declaredPageNumbers[0]!==index.derivedPage||
+   node.physicalPageNumbers.length!==1||node.physicalPageNumbers[0]!==physicalPage||!position||root?.reference!==node.reference||
+   object(node.raw.parent)?.$ref!=='#/body'||node.raw.label!=='text'||
+   ['children','captions','footnotes','references'].some(key=>node.raw[key]!==undefined&&
+    (!Array.isArray(node.raw[key])||(node.raw[key] as unknown[]).length>0)))return [];
+  const script=object(node.raw.formatting)?.script;if(script!==undefined&&script!==null&&script!=='baseline')return [];
+  const text=typeof node.raw.text==='string'&&node.raw.text.trim()?node.raw.text:
+   typeof node.raw.orig==='string'&&node.raw.orig.trim()?node.raw.orig:'';
+  if(!text||text.length>DOCLING_TEXT_CONTEXT_WINDOW_LIMITS.utf16)return [];
+  const start=input.body.indexOf(text);
+  if(start<0||input.body.indexOf(text,start+1)!==-1)return []; // Ambiguous occurrences cannot acquire a source span.
+  return [{position:Number(position[1]),node,startUtf16:start,endUtf16:start+text.length}];
+ }).sort((a,b)=>a.position-b.position);
+ const windows:DoclingTextContextWindow[]=[];
+ for(let i=1;i<candidates.length;i++){
+  const left=candidates[i-1],right=candidates[i];
+  if(right.position!==left.position+1||right.startUtf16<=left.endUtf16||
+   right.endUtf16-left.startUtf16>DOCLING_TEXT_CONTEXT_WINDOW_LIMITS.utf16||
+   !/^\s+$/u.test(input.body.slice(left.endUtf16,right.startUtf16)))continue;
+  if(windows.length>=DOCLING_TEXT_CONTEXT_WINDOW_LIMITS.windows)
+   throw new DoclingPageRegionError('limit','Text context windows exceed page limit');
+  windows.push({startUtf16:left.startUtf16,endUtf16:right.endUtf16,
+   quoteSha256:sha(Buffer.from(input.body.slice(left.startUtf16,right.endUtf16))),
+   references:[left,right].map(member=>({...member.node,startUtf16:member.startUtf16,endUtf16:member.endUtf16})),
+   semanticRelationsVerified:false});
+ }
+ const binding:DoclingTextContextWindowBinding={...source,currentVersionId,sourceVersionId,evidenceId,parserVersion,bodySha256:sha(Buffer.from(input.body))};
+ const observation={policy:DOCLING_TEXT_CONTEXT_WINDOWS_POLICY,binding,progressSha256:stableOrigProgressHash(input.progress),
+  result:index.result,derivedPage:index.derivedPage,producerDocument:index.producerDocument,pageSize:index.pageSize,windows,
+  sourceBindingVerified:true as const,sourceContentIsUntrusted:true as const,visibilityVerified:false as const,
+  textFaithfulnessVerified:false as const,readingOrderVerified:false as const,semanticRelationsVerified:false as const};
+ if(Buffer.byteLength(canonical(observation))>DOCLING_PAGE_REGION_LIMITS.pageBytes)
+  throw new DoclingPageRegionError('limit','Text context window provenance exceeds page limit');
+ const value:PreparedDoclingTextContextWindows={...observation,hintSha256:doclingOrigSearchHash(observation)};
+ freezeOrig(value);preparedTextContextWindows.add(value);return value;
+}
+
+/** A caller must supply the binding read from its current source/body. JSON,
+ * a matching digest, or an old prepared value cannot upgrade another binding. */
+export function assertPreparedDoclingTextContextWindows(value:PreparedDoclingTextContextWindows,binding:DoclingTextContextWindowBinding){
+ if(!preparedTextContextWindows.has(value)||!isDeepStrictEqual(value.binding,binding))
+  invalid('Text context window staging differs from current source/body binding');
+}

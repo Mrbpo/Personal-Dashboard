@@ -30,7 +30,8 @@ import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitN
  type CompletedAuthorImageTableRun,
  type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
 import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
-import {prepareDoclingOrigSearchHints,assertPreparedDoclingOrigSearchHints,doclingOrigSearchHash,type OrigSearchInput,type PreparedDoclingOrigSearchHints} from './docling-source-regions.ts';
+import {prepareDoclingOrigSearchHints,assertPreparedDoclingOrigSearchHints,doclingOrigSearchHash,
+ prepareDoclingTextContextWindows,type PreparedDoclingTextContextWindows,type OrigSearchInput,type PreparedDoclingOrigSearchHints} from './docling-source-regions.ts';
 import {DoclingPageRegionError,type DoclingVisualLayout} from './docling-result.ts';
 
 type Json = Record<string, unknown>;
@@ -1383,6 +1384,37 @@ export class KernelService {
       const readOriginal=read;
       read=async()=>{const context=await readOriginal();return {...context,
         ...await readDocumentPageRegionsForImages(kernelPool(),owner,context.images)};};
+    }
+    if(policy.textContextWindows==='producer-neighbors-v1'){
+      const readOriginal=read,cache=new Map<string,Promise<PreparedDoclingTextContextWindows|null>>();
+      read=async()=>{
+        const context=await readOriginal(),textContextWindows:PreparedDoclingTextContextWindows[]=[];
+        // Bound auxiliary CAS reads. The original context stays complete and
+        // unchanged when a page has no usable producer observations.
+        const anchors=context.anchors.slice(0,64),documents=new Map<string,OrigSearchPage[]>();
+        for(const anchor of anchors){
+          if(!anchor.parser_version.startsWith('docling-'))continue;
+          if(!documents.has(anchor.document_id))documents.set(anchor.document_id,await origSearchPages(kernelPool(),owner,anchor.document_id));
+          const row=documents.get(anchor.document_id)!.find(page=>page.page_number===anchor.page_number),
+            version=/^pg:(.+):([0-9]+)$/.exec(anchor.id);
+          if(!row||!version||row.current_version_id!==version[1]||row.source_version_id!==anchor.source_version_id||
+            row.source_hash!==anchor.source_hash||row.evidence_id!==anchor.evidence_id||row.body!==anchor.body||
+            row.parser_version!==anchor.parser_version)throw new DocumentEvidenceChangedError();
+          const key=createHash('sha256').update(JSON.stringify([row.current_version_id,row.source_version_id,row.source_hash,
+            row.evidence_id,row.body,row.parser_version,row.progress,row.layout?.resultReferences])).digest('hex');
+          let pending=cache.get(key);
+          if(!pending){
+            pending=prepareDoclingTextContextWindows({...origSearchInput(owner,row),currentVersionId:row.current_version_id,
+              sourceVersionId:row.source_version_id,evidenceId:row.evidence_id}).catch(error=>{
+                if(error instanceof DoclingPageRegionError&&['unavailable','limit'].includes(error.code))return null;
+                throw error;
+              });
+            cache.set(key,pending);
+          }
+          const hint=await pending;if(hint?.windows.length)textContextWindows.push(hint);
+        }
+        return {...context,...(textContextWindows.length?{textContextWindows}:{})};
+      };
     }
     const result=await synthesizeDocumentAnswer(question,read,policy);
     if('pdfPageRegionTransport'in result&&result.pdfPageRegionTransport)

@@ -38,6 +38,10 @@ export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REAS
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
  return value==='low'?undefined:value;
 }
+export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WINDOWS??'off'){
+ if(value!=='off'&&value!=='producer-neighbors-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
+ return value==='off'?undefined:value;
+}
 /** Process-only development setting; even a lower explicit limit needs isolation. */
 export function studyDevelopmentDailyLimit(value=process.env.STUDY_DEVELOPMENT_DAILY_LIMIT){
  if(value===undefined)return undefined;
@@ -71,7 +75,10 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const generationReasoningEffort=studyGenerationReasoning();
+ const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
+ if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','text-context-requires-selection-check','原文上下文窗口需要内核、证据选择和引用核对');
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
   throw new StudyAnswerError('configuration','source-values-require-selection-check','来源值需要内核、证据选择和原图引用核对');
  const recorder=citationMode||sourceScope?citationRecorder(owner,question):undefined,citationCheck=citationMode?recorder!.check:undefined;
@@ -88,6 +95,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),

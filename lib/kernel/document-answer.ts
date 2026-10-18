@@ -9,6 +9,7 @@ import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudy
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
+import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,sourceValueQuestionContract,
@@ -28,6 +29,7 @@ type Image=AuthorImage|(NativeTableObservedImage&{pageRegions?:StudyPdfPageRegio
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ textContextWindows?:PreparedDoclingTextContextWindows[];
  pdfPageRegionReads?:StudyPdfPageRegionRead[];
  completeSourceProof?:CompleteStudySourceProof;
  imageSelection?:DocumentImageSelection;
@@ -40,6 +42,9 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
   sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
+ textContextWindows?:PreparedDoclingTextContextWindows;
+ textContextObservation?:{policy:'docling-text-context-windows-v1';hintSha256:string;resultBlobSha256:string;
+  physicalPage:number;bodySha256:string;candidateWindows:number;semanticRelationsVerified:false};
  visual?:{kind:'pdf-page'|'pdf-region';physicalPage:number;rawPdfSha256:string;manifestSha256:string};
  captionMembers?:DocumentQuoteUnit[];
  tableObservations?:TableObservation[];
@@ -63,7 +68,8 @@ type Citation={id:string;quote:string};
 type Claim={text:string;citations:Citation[]};
 export type GroundedDocumentAnswer={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Claim[]};
 export type DocumentAnswerSelections=Omit<GroundedDocumentAnswer,'claims'>&{claims:{text:string;citations:{id:string}[]}[]};
-export type DocumentQuoteUnit={id:string;supportId:string;startUtf16:number;endUtf16:number;quoteSha256:string;text:string;selectable:boolean};
+export type DocumentQuoteUnit={id:string;supportId:string;startUtf16:number;endUtf16:number;quoteSha256:string;text:string;selectable:boolean;
+ contextWindow?:{policy:'docling-text-context-windows-v1';hintSha256:string;references:string[];semanticRelationsVerified:false}};
 export type DocumentUnitSelection={claimIndex:number;citationIndex:number;selectionId:string;kind:'text'|'image';
  evidence:Omit<Support,'text'|'image'>;startUtf16:number|null;endUtf16:number|null;quoteSha256:string};
 export type DocumentCitationRepair={claimIndex:number;citationIndex:number;originalSupportId:string;resolvedSupportId:string;
@@ -75,6 +81,7 @@ export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequest
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
+ textContextWindows?:'producer-neighbors-v1';
  sourceRouting?:{mode:'question-scope';beforeAttempt:(identity:string)=>Promise<void>;
   recordResponse:(response:Readonly<DocumentQueryScopeResponse>)=>Promise<void>};
  sourceValueContract?:'difference-v1';
@@ -276,7 +283,9 @@ export function resolveGroundedDocumentAnswerReferences(value:unknown,supports:r
  return {answer:validateGroundedDocumentAnswer(proposed,supports),citationRepairs};
 }
 
-const supportMetadata=({text,image,...support}:Support)=>support;
+const supportMetadata=({text,image,textContextWindows,...support}:Support)=>{
+ void text;void image;void textContextWindows;return support;
+};
 
 /** A lossless partition of each original body. Offsets use JS/validator UTF-16
  * units; valid surrogate pairs are never split. Blank runs remain in the input
@@ -305,6 +314,28 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
    if(identities.has(id))throw new Error('Duplicate or colliding source quote unit ID');identities.add(id);
    units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:Boolean(whitespace(text))&&!paired.has(id)});
    start=end;
+  }
+ }
+ // Additional windows are offered before selection. Every original partition
+ // stays intact; no citation is expanded after the model has selected it.
+ let extra=0;
+ for(const support of supports){
+  const hint=support.textContextWindows;if(support.kind!=='text'||!hint)continue;
+  const body=support.text??'',sourceIdentity=[support.documentId,support.documentVersionId,support.sourceVersionId,
+   support.sourceHash,support.evidenceId,support.locator,support.sha256];
+  for(const window of hint.windows){
+   if(extra>=128)break;
+   const {startUtf16:start,endUtf16:end}=window,text=body.slice(start,end),quoteSha256=sha(text);
+   if(units.some(u=>u.supportId===support.id&&u.startUtf16===start&&u.endUtf16===end))continue;
+   const id='q:'+sha(JSON.stringify([hint.policy,sourceIdentity,start,end,quoteSha256,hint.hintSha256])).slice(0,24);
+   // Count even caption-paired units so repeated preparation cannot create a
+   // different candidate set after caption/image pairing suppresses IDs.
+   const eligible=[...units.map(u=>u.id),...supports.filter(s=>s.kind==='image').map(s=>s.id),id];
+   if(eligible.length+3>1000||eligible.length>250&&eligible.reduce((n,v)=>n+v.length,0)>15000)break;
+   if(identities.has(id))throw new Error('Duplicate or colliding context quote unit ID');identities.add(id);
+   units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:!paired.has(id),
+    contextWindow:{policy:hint.policy,hintSha256:hint.hintSha256,references:window.references.map(ref=>ref.reference),semanticRelationsVerified:false}});
+   extra++;
   }
  }
  return units;
@@ -341,6 +372,19 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
   if(!documentTitleMention(question,context.completeSourceProof.selectedDocumentTitle))
    throw Error('Complete source title must occur in the original question');}
  const supports=supportFor(context);
+ for(const hint of context.textContextWindows??[]){
+  const binding=hint.binding,support=supports.find(s=>s.kind==='text'&&s.documentId===binding.documentId&&
+   s.documentVersionId===binding.currentVersionId&&s.sourceVersionId===binding.sourceVersionId&&
+   s.sourceHash===binding.sourceHash&&s.evidenceId===binding.evidenceId&&s.sha256===binding.bodySha256);
+  const anchor=context.anchors.find(hit=>hit.document_id===binding.documentId&&hit.evidence_id===binding.evidenceId);
+  if(!support||!anchor||support.textContextWindows)throw new Error('Missing or duplicate current text context binding');
+  assertPreparedDoclingTextContextWindows(hint,{...binding,currentVersionId:support.documentVersionId,
+   sourceVersionId:support.sourceVersionId,sourceHash:support.sourceHash,evidenceId:support.evidenceId,
+   physicalPage:anchor.page_number,parserVersion:anchor.parser_version,bodySha256:sha(support.text??'')});
+  support.textContextWindows=hint;
+  support.textContextObservation={policy:hint.policy,hintSha256:hint.hintSha256,resultBlobSha256:hint.result.resultBlobSha256,
+   physicalPage:binding.physicalPage,bodySha256:binding.bodySha256,candidateWindows:hint.windows.length,semanticRelationsVerified:false};
+ }
  if(unitPolicy){
   const units=documentQuoteUnits(supports),same=(a:Support,b:Support)=>a.documentId===b.documentId&&a.documentVersionId===b.documentVersionId&&
    a.sourceVersionId===b.sourceVersionId&&a.sourceHash===b.sourceHash&&a.evidenceId===b.evidenceId;
@@ -351,8 +395,8 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
    if(members.some(u=>u.selectable))image.captionMembers=members.map(u=>({...u,selectable:false}));
   }
  }
- const metadata=supports.map(({image,text,...support})=>({...support,
-  ...(image?{attachmentId:image.attachmentId,width:image.width,height:image.height,byteLength:image.byteLength}: {})}));
+ const metadata=supports.map(support=>({...supportMetadata(support),
+  ...(support.image?{attachmentId:support.image.attachmentId,width:support.image.width,height:support.image.height,byteLength:support.image.byteLength}: {})}));
  const quoteUnits=documentQuoteUnits(supports),bySupport=new Map(supports.map(support=>[support.id,support]));
  const quoteUnitManifest=quoteUnits.map(({text,...unit})=>({...unit,evidence:supportMetadata(bySupport.get(unit.supportId)!)}));
  const visualUnitManifest=unitPolicy?supports.filter(s=>s.captionMembers).map(supportMetadata):undefined;
@@ -725,6 +769,9 @@ async function documentModelPayload(response:Response,model:DocumentAnswerModel,
 
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
+ if(policy.textContextWindows!==undefined&&(policy.textContextWindows!=='producer-neighbors-v1'||policy.scope!=='application'||
+  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
+  throw new Error('Text context windows require application/select-then-answer/selected-once');
  if(policy.generationReasoningEffort!==undefined&&(policy.scope!=='application'||!['low','medium'].includes(policy.generationReasoningEffort)))
   throw new Error('Invalid application generation reasoning policy');
  if(policy.sourceRouting!==undefined&&(policy.scope!=='application'||
