@@ -111,7 +111,14 @@ test('named-source retention refuses ambiguity, mixed versions and atomic size o
  const b=run(many);assert.equal(b.result.mentionedSourceRetention?.status,'skipped-reference-limit');assert.deepEqual(b.result.referenceIds,[b.id]);
  assert.deepEqual(retainDocumentSelectionContext({referenceIds:[]},b.p).referenceIds,[]);
  const foreign=make(),p=prepareDocumentAnswer('What is in Original a?',foreign);
- assert.equal(retainDocumentSelectionContext({referenceIds:[p.quoteUnits.find(u=>u.text.includes('hidden-marker-947'))!.id]},p).mentionedSourceRetention,undefined);
+ const foreignId=p.quoteUnits.find(u=>u.text.includes('hidden-marker-947'))!.id,
+  retained=retainDocumentSelectionContext({referenceIds:[foreignId]},p);
+ assert.equal(retained.mentionedSourceRetention?.status,'retained');
+ assert.equal(retained.mentionedSourceRetention?.policy,'bounded-mentioned-source-text-v2');
+ assert.deepEqual(retained.providerReferenceIds,[foreignId]);assert.ok(retained.referenceIds.includes(foreignId));
+ assert.ok(retained.referenceIds.includes(p.quoteUnits.find(u=>u.text==='Original qualification.')!.id));
+ assert.ok(retained.systemRetainedReferenceIds.every(id=>p.quoteUnits.some(u=>u.id===id)));
+ assert.ok(retained.referenceIds.every(id=>!id.startsWith('i')),'no unselected images are added');
 });
 
 test('stored-node retention respects the 64-ID bound atomically and leaves empty or invalid selection strict',()=>{
