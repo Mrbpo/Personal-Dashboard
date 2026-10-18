@@ -22,6 +22,32 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
 const output=(value:unknown)=>new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:100,output_tokens:20},output_text:JSON.stringify(value)}),{status:200});
 const claim=(id:string)=>({status:'answered',message:'',claims:[{text:'The count is two.',citations:[{id}]}]});
 
+test('mentioned source attribution survives selection without suppressing complementary sources',()=>{
+ const c=context(),p=prepareDocumentAnswer('What did Original a test?',c),
+  packet=(request:any)=>JSON.parse(request.input.at(-1).content[0].text),
+  selection=packet(buildDocumentEvidenceSelectionRequest(p,settings,policy));
+ assert.deepEqual(selection.mentionedSource,{policy:'exact-mentioned-source-attribution-v1',documentId:'a',
+  documentVersionId:'va',sourceVersionId:'sv-a',sourceHash:'hash-a',title:'Original a'});
+ assert.equal(selection.evidence.length,p.input.evidence.length);
+ assert.deepEqual(selection.quoteUnits,p.input.quoteUnits);
+ const foreign=p.quoteUnits.find(u=>u.supportId==='e1')!,
+  selected=packet(buildSelectedDocumentAnswerRequest(p,[foreign.id],settings,policy));
+ assert.deepEqual(selected.mentionedSource,selection.mentionedSource,'requested identity survives even if only another source was selected');
+ assert.equal(selected.evidence[0].documentId,'b');assert.equal(selected.evidence.length,1);
+ assert.equal(selected.quoteUnits[0].text,foreign.text);
+ const multi=prepareDocumentAnswer('Compare Original a and Original b.',c);
+ assert.equal(multi.input.mentionedSource,undefined);
+ assert.deepEqual(multi.input.evidence,p.input.evidence,'multiple named documents remain available');
+});
+
+test('mentioned source attribution stays unknown for duplicate names or mixed versions',()=>{
+ const duplicate=context();duplicate.anchors[1].name='Original a';
+ assert.equal(prepareDocumentAnswer('What did Original a test?',duplicate).input.mentionedSource,undefined);
+ const mixed=context();mixed.anchors.push({...mixed.anchors[0],id:'pg:other-version:2',page_number:2,evidence_id:'other-version'});
+ assert.equal(prepareDocumentAnswer('What did Original a test?',mixed).input.mentionedSource,undefined);
+ assert.equal(prepareDocumentAnswer('What did Original ab test?',context()).input.mentionedSource,undefined);
+});
+
 test('application retains omitted original text in a selected node without adding foreign nodes or images',async()=>{
  const c=context();c.anchors[0].body=Array.from({length:4},(_,i)=>`Stored paragraph ${i}. ${'Original context. '.repeat(65)}`).join('\n\n');
  const p=prepareDocumentAnswer('What are the stored stages?',c),units=p.quoteUnits.filter(unit=>unit.supportId==='e0'),

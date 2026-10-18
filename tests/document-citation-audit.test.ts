@@ -38,6 +38,22 @@ function binding(c=context()):DocumentCitationAuditBinding{
   providerSelections:{status:'answered',message:'',claims:[{text:'Two samples are compared.',
    citations:[{id:prepared.quoteUnits[0].id},{id:'i0'}]}]}};
 }
+test('mentioned source attribution reaches the local audit when all actual citations are foreign',()=>{
+ const c=context();c.images=[];c.anchors.push({...c.anchors[0],id:'pg:foreign-version:1',document_id:'foreign',
+  name:'Different study',source_hash:'foreign-hash',source_version_id:'foreign-source-version',evidence_id:'foreign-evidence',body:'The different study tests six samples.'});
+ const q='According to Original study, how many samples are compared?',p=prepareDocumentAnswer(q,c),
+  foreign=p.quoteUnits.find(u=>u.supportId==='e1')!,local=prepareDocumentCitationAudit(q,c,{
+   inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,claimIndex:0,
+   providerSelections:{status:'answered',message:'',claims:[{text:'The paper tests six samples.',citations:[{id:foreign.id}]}]}}),
+  input=auditInput(buildDocumentCitationAuditRequest(local.packet));
+ assert.equal(input.mentionedSource.documentId,'audit-source');assert.equal(input.mentionedSource.title,'Original study');
+ assert.equal(input.references.length,1);assert.equal(input.references[0].source.documentId,'foreign');
+ assert.equal(input.references[0].quote,foreign.text);
+ const invalid=structuredClone(local.packet);invalid.mentionedSource!.title='Not mentioned';
+ assert.throws(()=>buildDocumentCitationAuditRequest(invalid),/mentioned source identity/);
+ // Transport and binding are checked here; source correctness still requires content validation.
+});
+
 test('local requests retain restored text and image source identity without changing quotes',()=>{
  const c=context(),local=prepareDocumentCitationAudit(question,c,binding(c)),request=buildDocumentCitationAuditRequest(local.packet),
   input=auditInput(request);

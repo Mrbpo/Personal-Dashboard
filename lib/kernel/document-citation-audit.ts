@@ -1,8 +1,9 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
-import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy} from './document-answer.ts';
+import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy,type DocumentMentionedSource} from './document-answer.ts';
+import {documentTitleMention} from './document-source.ts';
 
-export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v3';
+export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v4';
 export type EvidenceAuditProfile='reasoned-v1';
 /** Execution settings only: the evidence, prompt and schema remain unchanged. */
 export function evidenceAuditSettings(auditProfile?:EvidenceAuditProfile){
@@ -25,7 +26,8 @@ export type DocumentCitationAuditSource={documentId:string;documentVersionId:str
  evidenceId:string;locator:string;title:string|null};
 export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]})&
  {source:DocumentCitationAuditSource};
-export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
+export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];
+ mentionedSource?:DocumentMentionedSource;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
 
 /** This pure builder grants no source or execution authority. Kernel constructs
  * its packet by restoring original selections against current complete evidence. */
@@ -36,6 +38,11 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
   !Array.isArray(packet.references)||!packet.references.length||packet.references.length>20||
   (packet.unitPolicy!==undefined&&packet.unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY))
   throw new Error('Invalid citation-local audit packet');
+ if(packet.mentionedSource&&(!exact(packet.mentionedSource,['policy','documentId','documentVersionId','sourceVersionId','sourceHash','title'])||
+  packet.mentionedSource.policy!=='exact-mentioned-source-attribution-v1'||
+  ['documentId','documentVersionId','sourceVersionId','sourceHash','title'].some(key=>{
+   const value=packet.mentionedSource![key as keyof DocumentMentionedSource];return typeof value!=='string'||!value.trim()||value.length>4000;
+  })||!documentTitleMention(packet.question,packet.mentionedSource.title)))throw new Error('Invalid mentioned source identity');
  const string={type:'string'},enumeration=(values:string[])=>({type:'string',enum:values});
  const object=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)});
  const references=packet.references.map((ref,index)=>{
@@ -62,11 +69,13 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
  const schema=object({claimId:enumeration(['c0']),judgment:enumeration(['supported','unsupported','uncertain']),reason:string,
   citationFindings:object(Object.fromEntries(packet.references.map(ref=>[ref.refId,finding]))),
   objectUnitScope:object({claim:string,evidence:string,alignment:enumeration(['same','different','not-established','not-applicable'])})});
- const input={question:packet.question,claim:{claimId:'c0',text:packet.claim},references,...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{})};
+ const input={question:packet.question,claim:{claimId:'c0',text:packet.claim},references,
+  ...(packet.mentionedSource?{mentionedSource:packet.mentionedSource}:{}),...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{})};
  return {model:'gpt-5.4-mini',store:false,reasoning:{effort:settings.reasoningEffort},max_output_tokens:settings.maxOutputTokens,
   input:[{role:'developer',content:DOCUMENT_CITATION_AUDIT_DEVELOPER+
    ' Each reference includes its restored source identity and canonical title (null means unavailable). '+
    'A statement in another document does not establish that the requested document states it. '+
+   'mentionedSource identifies the uniquely named document in the question, even when the claim cites only another source; check the attribution against reference source identities. '+
    'Use source identity to check attribution; titles and identifiers alone do not establish factual content. '+
    'Different documents may legitimately provide complementary evidence for a multi-source question.'},
    {role:'user',content:[{type:'input_text',text:JSON.stringify(input)},...images]}],
@@ -95,7 +104,8 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
   return support.kind==='text'?{refId,kind:'text',quote:citation.quote,source}:{refId,kind:'image',image:support.image!,source,
    ...(support.captionMembers?{captionMembers:support.captionMembers}:{})};
  });
- const packet={question,claim:claim.text,references,...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{})};
+ const packet={question,claim:claim.text,references,
+  ...(prepared.input.mentionedSource?{mentionedSource:prepared.input.mentionedSource}:{}),...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{})};
  const receipt={inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{}),
   originalSelectionsSha256:sha(JSON.stringify(restored.providerSelections)),originalAnswerSha256:sha(JSON.stringify(restored.answer)),
   originalClaimIndex:binding.claimIndex,claimSha256:sha(JSON.stringify(claim)),
