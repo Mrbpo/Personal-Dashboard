@@ -50,3 +50,23 @@ Targeted tests cover native mappings, unknown/duplicate/cyclic cases, bounded
 coverage, unchanged source objects, disabled projection parity, existing
 manifest persistence, metadata-only reads and rejected owner/stale/policy
 bindings. Real whole-answer API acceptance remains separate.
+
+## Text-container candidates (Issue #204)
+
+`KernelService.readPdfNavigationTextContainers(owner, source, physicalPage)`
+combines current native navigation with the existing bound Docling region read
+and the exact current stored page. It returns candidates only for a compatible
+zero-origin/unrotated frame, a unique text box fully containing the native link
+rectangle and a unique exact occurrence of that parser text in the page body.
+The original source/version, page evidence/body hash, raw parser-result reference,
+annotation and observed box/range remain traceable. No nearest-box selection,
+text normalization, inferred word-level link or semantic equivalence is added.
+Ambiguous/incompatible/unavailable cases keep explicit unknown/unavailable states.
+
+The deterministic `coverPdfNavigationContainer` utility can establish that a
+set of already selected UTF-16 ranges collectively covers a parser container.
+It does not fill gaps, including whitespace gaps, or import additional text.
+That is a group relation: it does not assign the native link to an individual
+word or one arbitrarily chosen quote unit. Caller quote IDs are not accepted as
+current model references by this reader. This slice is not connected to the
+generator yet; answer accuracy and final website API acceptance are still open.

@@ -28,6 +28,7 @@ import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,readPdfInternalLinkEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
+import {readPdfNavigationTextContainers} from './pdf-navigation-text.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
  searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
@@ -1102,6 +1103,9 @@ export class KernelService {
   }
   readPdfInternalLinks(owner:string,source:DocumentContextSource){
     return readPdfInternalLinkEvidence(kernelPool(),owner,source);
+  }
+  readPdfNavigationTextContainers(owner:string,source:DocumentContextSource,physicalPage:number){
+    return readPdfNavigationTextContainers(kernelPool(),owner,source,physicalPage);
   }
 
   nativeTableBlobHashes(){return nativeTableBlobHashes(kernelPool());}
