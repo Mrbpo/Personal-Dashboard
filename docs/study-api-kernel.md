@@ -2,6 +2,18 @@
 
 `STUDY_ANSWER_BACKEND=legacy` is the default. Set the server environment to `kernel` to opt in; invalid values fail closed. Neither API accepts a client backend or owner override. Switching the environment back to `legacy` restores the retained tutor implementation. Do not enable in production before isolated HTTP and content validation.
 
+## Optional explicit retrieval scope
+
+In the kernel lane, `/api/v1/study` accepts an optional JSON `routingScope` on a question request. `/api/tutor` accepts the same object encoded as a JSON-text multipart field when sending a question; its JSON action still only creates a thread and rejects a scope on that action. Both enter the same `sendTutor → answerKernelStudy → KernelService` path. No UI setting or production switch is added.
+
+Allowed scope fields are `courseIds`, `documentIds`, `origins` and `termIds`, each a list. IDs are canonical identifiers; origins are literal stored source keys. List values form a union; dimensions and a retained thread course constraint intersect. An empty list means no candidates. Values are deduplicated, deterministically sorted and frozen. The scope DTO is bounded to16000 serialized characters. Unknown/inferred topic/type fields are rejected. Legacy requests with a scope return `configuration/routing-requires-kernel`; the restriction is never silently ignored.
+
+An explicit course/document list allows a multi-source question without guessing or writing a single course to the thread. A scope with only origins/terms does not establish a course. An explicit document list already defines the source set and skips the redundant named-document planner; multiple course IDs also prevent that planner from collapsing the requested search space to one source. Complementary retrieval and full-source supplements remain available.
+
+User-message metadata retains the versioned normalized scope and fingerprint. A completed requestId may only be reused with the same question and scope; reordered equivalent sets are accepted, changed question/scope is `idempotency-scope-conflict`. Old requests with no scope keep their original deduplication behavior. Assistant `meta.study.explicitRouting` contains that witness and before-retrieval current candidate file/page counts with an observation time. Counts are not actual scoring work, relevance or answer correctness. Owner/source/version and the final combined-context scope are rechecked by Kernel.
+
+These are explicit caller restrictions, not automatic topic classification or an accuracy certificate. Actual HTTP and independent content acceptance must be reported separately from mocked sender/DTO tests and PostgreSQL scope tests.
+
 Both `/api/v1/study` and `/api/tutor` use `sendTutor` for ownership, leases, idempotency and message persistence. The opt-in route calls the existing `KernelService.answerStudyContent`, current PostgreSQL document retrieval, full evidence/parent expansion and original-image reading. It uses the configured `OPENAI_MODEL` (bounded mini models), low reasoning, 3000 output tokens and 55-second timeout, matching the retained tutor's generation settings. It does not run the development question-contract/planning/coverage/revision pipeline.
 
 The original question is retained; recent conversation is untrusted follow-up context, never citation evidence. Explicit course choices remain scoped. Source/version/hash and quote/image selection receipts are persisted in the assistant message's `meta.study`, with `semanticVerified=false`. Request/model usage metadata supports attribution; it is not an accuracy certificate. Errors report their actual processing stage and never silently retry through legacy.

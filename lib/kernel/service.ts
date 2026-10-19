@@ -1311,7 +1311,8 @@ export class KernelService {
     if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
       throw new Error('Invalid study retrieval question');
     let routedOptions=searchOptions,sourceRouting:Awaited<ReturnType<typeof planDocumentQueryScope>>|undefined;
-    if(policy.sourceRouting&&!searchOptions.sourceHint&&!searchOptions.documentId){
+    const explicitSourceSelection=searchOptions.routingScope?.documentIds!==undefined||(searchOptions.routingScope?.courseIds?.length??0)>1;
+    if(policy.sourceRouting&&!searchOptions.sourceHint&&!searchOptions.documentId&&!explicitSourceSelection){
       const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
       if(mentioned.status==='resolved'){
         sourceRouting=await planDocumentQueryScope(question,mentioned.matches[0],policy,async()=>{

@@ -8,6 +8,7 @@ import {assertDocumentDevelopmentRun} from './kernel/document-rerank.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import {mkdir,open} from 'node:fs/promises';
 import {isAbsolute,join} from 'node:path';
+import {normalizeDocumentRoutingScope,DOCUMENT_ROUTING_SCOPE_VERSION,type DocumentRoutingScope} from './kernel/document-routing-scope.ts';
 
 export const STUDY_APPLICATION_VERSION='kernel-study-http-v1';
 export type StudyFailureStage='configuration'|'parsing'|'structure-storage'|'retrieval'|'evidence-selection'|'generation'|'citation-validation';
@@ -19,6 +20,26 @@ export class StudyAnswerError extends Error{
 export function studyAnswerBackend(value=process.env.STUDY_ANSWER_BACKEND??'legacy'){
  if(value!=='legacy'&&value!=='kernel')throw new StudyAnswerError('configuration','invalid-backend','学习问答路径配置无效');
  return value;
+}
+
+/** A caller restriction, not an inferred relevance classification. Legacy must
+ * reject a requested restriction instead of answering from a broader corpus. */
+export function studyRoutingScope(value:unknown,jsonField=false):DocumentRoutingScope|undefined{
+ if(value===undefined||(jsonField&&value===null))return undefined;
+ let scope:DocumentRoutingScope|undefined;
+ try{
+  if(jsonField){if(typeof value!=='string'||value.length>16000)throw Error('Invalid scope field');value=JSON.parse(value);}
+  scope=normalizeDocumentRoutingScope(value);
+  if(!scope||JSON.stringify(scope).length>16000)throw Error('Scope exceeds request bound');
+ }catch(cause){throw new StudyAnswerError('configuration','invalid-routing-scope','检索范围格式无效',{cause});}
+ if(studyAnswerBackend()!=='kernel')throw new StudyAnswerError('configuration','routing-requires-kernel','当前问答路径不支持指定检索范围');
+ return scope;
+}
+
+export function studyRoutingScopeWitness(scope:DocumentRoutingScope|undefined){
+ if(scope===undefined)return undefined;
+ const value={version:DOCUMENT_ROUTING_SCOPE_VERSION,scope:normalizeDocumentRoutingScope(scope)!};
+ return Object.freeze({...value,fingerprint:createHash('sha256').update(JSON.stringify(value)).digest('hex')});
 }
 export function studyEvidenceSelection(value=process.env.STUDY_EVIDENCE_SELECTION??'single-pass'){
  if(value!=='single-pass'&&value!=='select-then-answer')throw new StudyAnswerError('configuration','invalid-evidence-selection','证据选择配置无效');
@@ -82,7 +103,8 @@ function citationRecorder(owner:string,question:string){
 export function studyFailure(error:unknown){
  return error instanceof StudyAnswerError?{stage:error.stage,code:error.code}:undefined;
 }
-export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>){
+export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>,requestedScope?:DocumentRoutingScope){
+ const routingScope=studyRoutingScope(requestedScope),routingWitness=studyRoutingScopeWitness(routingScope);
  const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
@@ -105,7 +127,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const retrievalQuestion=previousQuestions?`${question}\nPrevious user questions (query context only):\n${previousQuestions}`:question;
  let stage:StudyFailureStage='retrieval';
  try{
-  const result=await kernel.answerStudyContent(owner,question,{...(courseId?{courseId}:{}),retrievalQuestion,
+  const explicitRouting=routingScope?{...routingWitness!,phase:'before-retrieval' as const,observedAt:new Date().toISOString(),
+   candidateCounts:await kernel.documentRoutingCounts(owner,{...(courseId?{courseId}:{}),routingScope})}:undefined;
+  const result=await kernel.answerStudyContent(owner,question,{...(courseId?{courseId}:{}),...(routingScope?{routingScope}:{}),retrievalQuestion,
    includeParents:true,includeImages:true,relatedDocuments:true,
    refineAdjacent:process.env.KERNEL_DOCUMENT_HYBRID==='true'&&process.env.KERNEL_DOCUMENT_RERANK==='true',
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
@@ -137,6 +161,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    citations,memories:[],web:[],webQuery:'',question,
    contextNote:`Kernel 当前证据：${result.textEvidenceCount} 条文本、${result.imageEvidenceCount} 张原图；历史对话仅用于理解追问。`,
    study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
+    ...(explicitRouting?{explicitRouting}:{}),
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
      ...(textContextWindows?{textContextWindows}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},

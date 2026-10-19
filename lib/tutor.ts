@@ -7,7 +7,8 @@ import { saveBlob, readBlob, searchLibrary } from './library.ts';
 import { tutorWeb } from './tutor-web.ts';
 import { acquireLease,releaseLease,enqueue } from './jobs.ts';
 import {rollingMemory,relevantMemory} from './tutor-memory.ts';
-import {answerKernelStudy,studyAnswerBackend,StudyAnswerError} from './study-answer.ts';
+import {answerKernelStudy,studyAnswerBackend,studyRoutingScope,studyRoutingScopeWitness,StudyAnswerError} from './study-answer.ts';
+import type {DocumentRoutingScope} from './kernel/document-routing-scope.ts';
 
 export type Attachment = { name: string; mime: string; data: string; size: number; hash?: string };
 export type TutorThread = { id: string; course_id: string; title: string; updated_at: string };
@@ -122,8 +123,9 @@ export function dominantCourse(evidence:string[]){
  return ranked[0][1]>=2&&ranked[0][1]-(ranked[1]?.[1]||0)>=2?ranked[0][0]:'';
 }
 function needsCourseScope(question:string){return /(?:本课|课程|作业|实验|截止|提交|老师|教授)|\b(?:lecture|lab|assignment|quiz|exam|syllabus|due|piazza|canvas)\b/i.test(question);}
-export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='') {
+export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='',requestedScope?:DocumentRoutingScope) {
   const thread = await owned(owner, threadId);
+  const routingScope=studyRoutingScope(requestedScope),routingWitness=studyRoutingScopeWitness(routingScope);
   if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestId)) throw new Error('请求标识无效');
   if (question.length > 6000 || (!question.trim() && !attachments.length)) throw new Error('请输入问题（最多 6000 字）或上传附件');
   if (attachments.length > 3 || attachments.reduce((s,a) => s+a.size,0) > 12*1024*1024) throw new Error('每次最多 3 份附件，总计不超过 12 MB');
@@ -134,7 +136,13 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     if(!await acquireLease(lease,token))throw new Error('当前会话仍在回答，请稍后再试');
     renewal=setInterval(()=>{void acquireLease(lease,token).then(ok=>{if(!ok)leaseValid=false;}).catch(()=>{leaseValid=false;});},30000);
     const history = await rows(threadId);
-    if (history.some(m => m.id === `${threadId}:${requestId}`)) return;
+    const existing=history.find(m=>m.id===`${threadId}:${requestId}`);
+    if(existing){
+      const prior=JSON.parse(existing.meta_json).requestRouting;
+      if((routingWitness||prior)&&(existing.body!==question||prior?.fingerprint!==routingWitness?.fingerprint))
+        throw new StudyAnswerError('configuration','idempotency-scope-conflict','请求标识已用于其它问题或范围，请使用新的请求标识');
+      return;
+    }
     if (!hasAI()) throw new Error('请先在设置中配置 AI 接入');
     // All attachments in the conversation remain available; cap prevents silently dropping old files.
     const previousFiles = history.flatMap(m => JSON.parse(m.attachments_json) as Attachment[]);
@@ -143,7 +151,8 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     const backend=studyAnswerBackend();
     const recentQuestions = context.filter(m => m.role === 'user').slice(-2).map(m => m.body).join(' ');
     let activeCourse=thread.course_id;
-    if(!activeCourse&&backend==='kernel'){
+    const explicitTarget=routingScope?.courseIds!==undefined||routingScope?.documentIds!==undefined;
+    if(!activeCourse&&backend==='kernel'&&!explicitTarget){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
       activeCourse=explicitCourseFromQuestion(question,courses);
       if(!activeCourse&&needsCourseScope(question))throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
@@ -161,11 +170,11 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     }
     if(backend==='kernel'){
       if(previousFiles.length||attachments.length)throw new StudyAnswerError('parsing','attachment-not-indexed','内核问答请先将附件加入资料库并等待解析完成；本轮未调用模型');
-      const result=await answerKernelStudy(owner,question,activeCourse,context),now=new Date().toISOString();
+      const result=await answerKernelStudy(owner,question,activeCourse,context,routingScope),now=new Date().toISOString();
       if(!leaseValid)throw new Error('会话锁已失效，请刷新后重试');
       await owned(owner,threadId);
       await db.batch([
-        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}`,threadId,'user',question,'[]','{}',0,now),
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}`,threadId,'user',question,'[]',JSON.stringify(routingWitness?{requestRouting:routingWitness}:{}),0,now),
         db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}:answer`,threadId,'assistant',result.answer,'[]',JSON.stringify(result.meta),0,now),
         db.prepare('UPDATE tutor_threads SET title=?, updated_at=? WHERE id=? AND owner_id=?').bind(history.length?thread.title:question.slice(0,60),now,threadId,owner),
       ]);

@@ -1,6 +1,7 @@
 import type {Pool} from 'pg';
 
 const dimensions=['courseIds','documentIds','origins','termIds'] as const;
+export const DOCUMENT_ROUTING_SCOPE_VERSION='explicit-document-scope-v1';
 export type DocumentRoutingScope=Readonly<Partial<Record<typeof dimensions[number],readonly string[]>>>;
 type LegacyScope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
 
@@ -16,7 +17,7 @@ export function normalizeDocumentRoutingScope(value:unknown):DocumentRoutingScop
   const items=(value as Record<string,unknown>)[key];
   if(!Array.isArray(items)||items.length>256||items.some(item=>typeof item!=='string'||!item.trim()||item.length>4000||item.includes('\0')))
    throw Error('Invalid explicit document routing values');
-  out[key]=Object.freeze([...new Set(items)]);
+  out[key]=Object.freeze([...new Set(items)].sort());
  }
  return Object.freeze(out);
 }
