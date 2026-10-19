@@ -1031,8 +1031,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    return {selectionId,kind:support.kind,source:{documentId:support.documentId,documentVersionId:support.documentVersionId,sourceVersionId:support.sourceVersionId,
     sourceHash:support.sourceHash,evidenceId:support.evidenceId,locator:support.locator},sourceSha256:support.sha256,
     ...(unit?{quoteUnit:{startUtf16:unit.startUtf16,endUtf16:unit.endUtf16,quoteSha256:unit.quoteSha256}}:{})};}),
-  sourceTables:structuredClone(sourceQuantityGeneration!.applied?sourceQuantityGeneration.table.tables:[]),
-  tableProvenance:structuredClone(sourceQuantityGeneration!.applied?sourceQuantityGeneration.table.tableContexts?.map(({tableId,physicalPage,result,captionLinkStatus})=>
+  sourceTables:structuredClone(sourceQuantityGeneration?.applied?sourceQuantityGeneration.table.tables:[]),
+  tableProvenance:structuredClone(sourceQuantityGeneration?.applied?sourceQuantityGeneration.table.tableContexts?.map(({tableId,physicalPage,result,captionLinkStatus})=>
    ({tableId,physicalPage,result,captionLinkStatus}))??[]:[])}:undefined;
  if(boundSourceQuantityDerivation)await policy.recordSourceQuantityDerivation?.(boundSourceQuantityDerivation);
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
