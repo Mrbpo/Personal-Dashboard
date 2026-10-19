@@ -1,4 +1,5 @@
 import type {Pool} from 'pg';
+import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import type {DocumentTextHit} from './document-search.ts';
 
 const normalize=(text:string)=>text.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/gu,' ').trim();
@@ -35,15 +36,17 @@ export function mergeReferencedEvidence(base:DocumentTextHit[],direct:DocumentTe
  return out.map((hit,index)=>({...hit,score:1/(index+1),retrieval_mode:'keyword' as const}));
 }
 
-async function references(pool:Pool,owner:string,query:string,texts:string[],seedAliases:string[],courseId?:string):Promise<DocumentTextHit[]>{
+async function references(pool:Pool,owner:string,query:string,texts:string[],seedAliases:string[],courseId?:string,routingScope?:DocumentRoutingScope):Promise<DocumentTextHit[]>{
  if(!texts.length&&!seedAliases.length)return [];
  const normalizedTexts=texts.map(normalize);
  const words=[...new Set(normalizedTexts.flatMap(value=>value.split(' ')))];
+ const args:unknown[]=[owner,normalize(query).split(' ').filter(word=>word.length>=2).slice(0,40).map(word=>`"${word}"`).join(' OR '),
+  normalizedTexts,seedAliases,courseId||null,explicitSingleNames(texts),words],routing=documentRoutingScopeSql(routingScope,args);
  // Metadata matching is bounded; no vector JSON or full corpus bodies leave PG.
  const rows=await pool.query<DocumentTextHit>(`WITH current_docs AS MATERIALIZED (
   SELECT d.*,v.id version_id,v.source_version_id,v.parser_version,v.warnings FROM document_texts d
   JOIN document_text_versions v ON v.id=d.current_version_id
-  WHERE d.owner_id=$1 AND NOT d.hidden AND ($5::text IS NULL OR d.course_id=$5)
+  WHERE d.owner_id=$1 AND NOT d.hidden AND ($5::text IS NULL OR d.course_id=$5) ${routing}
    AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin
      AND newer.origin_key=d.origin_key AND NOT newer.hidden
      AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))),
@@ -67,32 +70,32 @@ async function references(pool:Pool,owner:string,query:string,texts:string[],see
   source_hash,body,locator,page_number,evidence_id,source_version_id,parser_version,warnings parser_warnings,
   content_kind,start_ms::double precision,end_ms::double precision,relevance score
  FROM choices WHERE choice=1 ORDER BY relevance DESC,specificity DESC,id LIMIT 24`,
- [owner,normalize(query).split(' ').filter(word=>word.length>=2).slice(0,40).map(word=>`"${word}"`).join(' OR '),
-  normalizedTexts,seedAliases,courseId||null,explicitSingleNames(texts),words]);
+ args);
  return rows.rows.map(row=>({...row,score:Number(row.score),retrieval_mode:'keyword' as const}));
 }
 
 /** Two bounded title/mention hops. Text is data, not instructions; references
  * preserve distinct documents and make no state changes or external calls. */
-export async function recallReferencedDocuments(pool:Pool,owner:string,query:string,base:DocumentTextHit[],limit:number,courseId?:string){
- const direct=await references(pool,owner,query,[query],[],courseId);
+export async function recallReferencedDocuments(pool:Pool,owner:string,query:string,base:DocumentTextHit[],limit:number,courseId?:string,routingScope?:DocumentRoutingScope){
+ const direct=await references(pool,owner,query,[query],[],courseId,routingScope);
  const seeds=[...direct.slice(0,4),...base.slice(0,3)];
  const unique=new Map(seeds.map(hit=>[hit.document_id,hit]));
  const selected=[...unique.values()].slice(0,4);
  const related=await references(pool,owner,query,selected.map(hit=>hit.body.slice(0,6000)),
-  selected.flatMap(hit=>documentTitleAliases(hit.name)),courseId);
+  selected.flatMap(hit=>documentTitleAliases(hit.name)),courseId,routingScope);
  const ordered=mergeReferencedEvidence(base,direct,related,Math.max(limit,base.length+direct.length+related.length));
+ const args:unknown[]=[owner,JSON.stringify(ordered.map(hit=>({document_id:hit.document_id,page_number:hit.page_number,
+  source_version_id:hit.source_version_id,evidence_id:hit.evidence_id}))),courseId||null],routing=documentRoutingScopeSql(routingScope,args);
  const current=(await pool.query<{evidence_id:string}>(`WITH requested AS (SELECT * FROM jsonb_to_recordset($2::jsonb)
    AS r(document_id text,page_number integer,source_version_id text,evidence_id text))
   SELECT p.evidence_id FROM requested r JOIN document_texts d ON d.id=r.document_id AND d.owner_id=$1 AND NOT d.hidden
   JOIN document_text_versions v ON v.id=d.current_version_id AND v.source_version_id=r.source_version_id
   JOIN document_text_pages p ON p.version_id=v.id AND p.page_number=r.page_number AND p.evidence_id=r.evidence_id
   JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id
-  WHERE ($3::text IS NULL OR d.course_id=$3) AND NOT EXISTS (SELECT 1 FROM document_texts newer
+  WHERE ($3::text IS NULL OR d.course_id=$3) ${routing} AND NOT EXISTS (SELECT 1 FROM document_texts newer
    WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
     AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))`,
-  [owner,JSON.stringify(ordered.map(hit=>({document_id:hit.document_id,page_number:hit.page_number,
-   source_version_id:hit.source_version_id,evidence_id:hit.evidence_id}))),courseId||null])).rows;
+  args)).rows;
  const verified=new Set(current.map(row=>row.evidence_id));
  return ordered.filter(hit=>verified.has(hit.evidence_id)).slice(0,limit);
 }

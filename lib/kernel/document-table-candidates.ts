@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
 import type {DocumentImageBudget} from './document-image-budget.ts';
 import type {Pool,PoolClient} from 'pg';
+import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import {readBlob} from '../library.ts';
 import type {DoclingNativeTable} from './docling-result.ts';
 import {decodeDoclingResult} from './docling-result.ts';
@@ -209,15 +210,16 @@ function candidate(row:CandidateRow):DerivedTableCandidate{
 
 /** FTS uses the same current corpus scope, without changing protected text ranks.
  * At most two distinct page anchors supplement a normal answer. */
-export async function searchNativeTableCandidates(pool:Pool,owner:string,query:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}):Promise<DerivedTableCandidate[]>{
+export async function searchNativeTableCandidates(pool:Pool,owner:string,query:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;strict?:boolean}={}):Promise<DerivedTableCandidate[]>{
  const {normalized,words}=documentSearchTerms(query);
  if(!words.length)return [];
  const args:unknown[]=[owner,scope.strict?normalized:words.map(word=>`"${word}"`).join(' OR ')];
  const course=scope.courseId?`AND d.course_id=$${args.push(scope.courseId)}`:'';
  const document=scope.documentId?`AND d.id=$${args.push(scope.documentId)}`:'';
+ const routing=documentRoutingScopeSql(scope.routingScope,args);
  const querySQL=scope.strict?`plainto_tsquery('simple',$2)||plainto_tsquery('english',$2)`:
   `websearch_to_tsquery('simple',$2)||websearch_to_tsquery('english',$2)`;
- const rows=(await pool.query<CandidateRow>(`WITH hits AS (${candidateSQL} ${course} ${document}
+ const rows=(await pool.query<CandidateRow>(`WITH hits AS (${candidateSQL} ${course} ${document} ${routing}
   AND t.search_vector @@ (${querySQL})), ranked AS (SELECT hits.*,ts_rank_cd(search_vector,(${querySQL})) match_rank,row_number() OVER
   (PARTITION BY version_id,page_number ORDER BY ts_rank_cd(search_vector,(${querySQL})) DESC,id) page_rank FROM hits)
   SELECT * FROM ranked WHERE page_rank=1 ORDER BY match_rank DESC,id LIMIT ${NATIVE_TABLE_LIMITS.supplementalPages}`,args)).rows;

@@ -1,11 +1,12 @@
 import {createHash,randomUUID} from 'node:crypto';
 import type {Pool} from 'pg';
+import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import type {DocumentTextHit} from './document-search.ts';
 import type {IngestionJob} from './jobs.ts';
 import {DOCUMENT_EMBEDDING_MODEL,DOCUMENT_EMBEDDING_DIMENSIONS,DOCUMENT_EMBEDDING_BATCH_SIZE,
   embedDocumentInputs} from './document-semantic.ts';
 
-export type DocumentVectorScope={courseId?:string;documentId?:string};
+export type DocumentVectorScope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
 export type DocumentVectorCoverage={totalPages:number;searchablePages:number;indexedPages:number;emptyPages:number;complete:boolean};
 export type DocumentVectorResult={hits:DocumentTextHit[];coverage:DocumentVectorCoverage;degradedReason?:'incomplete-vector-index'};
 export type DocumentVectorPayload={owner:string;documentId:string;versionId:string;model:string;pageCursor:number};
@@ -29,10 +30,11 @@ function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
   const course=scope.courseId?`AND d.course_id=$${args.push(scope.courseId)}`:'';
   const document=scope.documentId?`AND d.id=$${args.push(scope.documentId)}`:'';
   const version=versionId?`AND v.id=$${args.push(versionId)}`:'';
+  const routing=documentRoutingScopeSql(scope.routingScope,args);
   const sql=`WITH current_documents AS MATERIALIZED (
     SELECT d.*,v.id version_id,v.source_version_id,v.parser_version,v.warnings AS parser_warnings,v.page_count
     FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id
-    WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document} ${version}
+    WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document} ${version} ${routing}
       AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
         AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
         AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
