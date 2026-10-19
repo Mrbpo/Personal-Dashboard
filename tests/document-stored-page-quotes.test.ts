@@ -7,6 +7,12 @@ import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '..
 import {studyTextContextWindows} from '../lib/study-answer.ts';
 
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
+function inputPacket(content:unknown){
+ assert.ok(Array.isArray(content));const first:unknown=content[0];
+ assert.ok(first&&typeof first==='object'&&'type' in first&&'text' in first);
+ assert.equal(first.type,'input_text');assert.ok(typeof first.text==='string');
+ return JSON.parse(first.text);
+}
 function context(body:string):DocumentAnswerContext{return {sourceContentIsUntrusted:true,parents:[],images:[],anchors:[{
  id:'pg:current:2',document_id:'study',course_id:'',name:'Study',origin:'fixture',origin_key:'study',source_hash:sha('pdf'),
  source_version_id:'source-version',body,locator:'page:2',page_number:2,evidence_id:'page-two',parser_version:'docling-fixture',score:1,evidence_body:'full-page'}]};}
@@ -25,7 +31,7 @@ test('stored page quotes: opt-in preserves a complete source page through genera
  assert.equal(restored.selectedUnits[0].evidence.evidenceId,'page-two');
  const audit=prepareDocumentCitationAudit('What data is used?',enabled,{inputFingerprint:prepared.fingerprint,
   quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,providerSelections:selection(unit.id),claimIndex:0});
- const request=buildDocumentCitationAuditRequest(audit.packet),input=JSON.parse(request.input[1].content[0].text!);
+ const request=buildDocumentCitationAuditRequest(audit.packet),input=inputPacket(request.input[1].content);
  assert.equal(input.references[0].quote,body);assert.equal(input.references[0].source.locator,'page:2');
  assert.equal(audit.binding.citations[0].quoteSha256,sha(body));
  assert.equal(resolveDocumentAnswerSelections(selection(legacy.quoteUnits[0].id),prepared.supports).answer.claims[0].citations[0].quote,
@@ -42,14 +48,14 @@ test('stored page quotes: fine selector IDs promote only already selected nodes 
   evidence_id:'foreign-page',locator:'foreign:1',body:'Foreign source marker. '.repeat(80)});
  const p=prepareDocumentAnswer('What are the training sizes?',c),page=p.quoteUnits.find(u=>u.pageContext&&u.supportId==='e0')!,
   fine=p.quoteUnits.filter(u=>!u.pageContext&&u.supportId==='e0'),settings={model:'gpt-5.4-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:3000},
-  selector=buildDocumentEvidenceSelectionRequest(p,settings),packet=JSON.parse(selector.input.at(-1)!.content[0].text!);
+  selector=buildDocumentEvidenceSelectionRequest(p,settings),packet=inputPacket(selector.input.at(-1)!.content);
  assert.ok(packet.quoteUnits.every((u:any)=>!u.pageContext&&u.text.length<=1200));
  assert.ok(!selector.text.format.schema.properties.referenceIds.items.enum.includes(page.id));
  assert.throws(()=>retainSelectedStoredNodeText({referenceIds:[page.id]},p),/unoffered/);
  const kept=retainSelectedStoredNodeText({referenceIds:[fine[0].id,fine.at(-1)!.id]},p);
  assert.deepEqual(kept.providerReferenceIds,[fine[0].id,fine.at(-1)!.id]);assert.deepEqual(kept.referenceIds,[page.id]);
  assert.equal(kept.pageQuotePromotions?.[0].relation,'same-stored-page');assert.equal(kept.pageQuotePromotions?.[0].semanticRelationsVerified,false);
- const generation=buildSelectedDocumentAnswerRequest(p,kept.referenceIds,settings),input=JSON.parse(generation.input.at(-1)!.content[0].text!);
+ const generation=buildSelectedDocumentAnswerRequest(p,kept.referenceIds,settings),input=inputPacket(generation.input.at(-1)!.content);
  assert.deepEqual(input.quoteUnits.map((u:any)=>u.id),[page.id]);assert.equal(input.quoteUnits[0].text,body);
  assert.doesNotMatch(JSON.stringify(generation.input),/Foreign source marker/);
  assert.deepEqual(generation.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum,[page.id]);
