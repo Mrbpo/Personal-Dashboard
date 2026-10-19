@@ -1385,6 +1385,10 @@ export class KernelService {
       read=async()=>{const context=await readOriginal();return {...context,
         ...await readDocumentPageRegionsForImages(kernelPool(),owner,context.images)};};
     }
+    if(policy.textContextWindows==='stored-page-v1'){
+      const readOriginal=read;
+      read=async()=>({...await readOriginal(),textQuotePolicy:'stored-page-v1' as const});
+    }
     if(policy.textContextWindows==='producer-neighbors-v1'){
       const readOriginal=read,cache=new Map<string,Promise<PreparedDoclingTextContextWindows|null>>();
       read=async()=>{

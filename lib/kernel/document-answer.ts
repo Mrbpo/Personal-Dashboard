@@ -18,6 +18,7 @@ import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswe
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v7';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
 export const DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION='source-quote-units-v1';
+export const DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16=8192;
 export const DOCUMENT_ANSWER_VISUAL_UNIT_POLICY='author-image-caption-v1';
 export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
@@ -29,6 +30,8 @@ type Image=AuthorImage|(NativeTableObservedImage&{pageRegions?:StudyPdfPageRegio
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ /** Kernel configuration only; original page boundaries and bodies stay intact. */
+ textQuotePolicy?:'stored-page-v1';
  textContextWindows?:PreparedDoclingTextContextWindows[];
  pdfPageRegionReads?:StudyPdfPageRegionRead[];
  completeSourceProof?:CompleteStudySourceProof;
@@ -42,6 +45,7 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
   sourceNodeCount:number;sourceBodyCodepoints:number;nodes:Node[]}[];
  images:Image[];sourceContentIsUntrusted:true};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
+ textQuotePolicy?:'stored-page-v1';
  textContextWindows?:PreparedDoclingTextContextWindows;
  textContextObservation?:{policy:'docling-text-context-windows-v1';hintSha256:string;resultBlobSha256:string;
   physicalPage:number;bodySha256:string;candidateWindows:number;semanticRelationsVerified:false};
@@ -82,7 +86,7 @@ export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequest
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
- textContextWindows?:'producer-neighbors-v1';
+ textContextWindows?:'producer-neighbors-v1'|'stored-page-v1';
  sourceRouting?:{mode:'question-scope';beforeAttempt:(identity:string)=>Promise<void>;
   recordResponse:(response:Readonly<DocumentQueryScopeResponse>)=>Promise<void>};
  sourceValueContract?:'difference-v1';
@@ -104,6 +108,7 @@ const exactKeys=(value:unknown,keys:string[])=>value!==null&&typeof value==='obj
 
 function supportFor(context:DocumentAnswerContext):Support[]{
  if(context.sourceContentIsUntrusted!==true)throw new Error('Document answer requires a verified Kernel context');
+ if(context.textQuotePolicy!==undefined&&context.textQuotePolicy!=='stored-page-v1')throw new Error('Invalid stored page quote policy');
  const supports:Support[]=[],seen=new Map<string,Support>();
  const addText=(node:Omit<Support,'id'|'kind'|'sha256'>)=>{
   if(!node.documentId||!node.documentVersionId||!node.sourceVersionId||!node.sourceHash||!node.evidenceId||typeof node.text!=='string')
@@ -120,7 +125,7 @@ function supportFor(context:DocumentAnswerContext):Support[]{
   const version=/^pg:(.+):([0-9]+)$/.exec(hit.id);
   if(!version||Number(version[2])!==hit.page_number)throw new Error('Full document evidence has no version identity');
   addText({documentId:hit.document_id,documentVersionId:version[1],sourceVersionId:hit.source_version_id,sourceHash:hit.source_hash,
-   evidenceId:hit.evidence_id,locator:hit.locator,text:hit.body});
+   evidenceId:hit.evidence_id,locator:hit.locator,text:hit.body,...(context.textQuotePolicy?{textQuotePolicy:context.textQuotePolicy}:{})});
  }
  for(const parent of context.parents){
   if(parent.status!=='available'){
@@ -237,13 +242,13 @@ function answerShape(value:unknown,mode:'literal'|'units'='literal'):GroundedDoc
    !Array.isArray(claim.citations)||!claim.citations.length||claim.citations.length>20)return invalid();
   for(const citation of claim.citations){
    if(!exactKeys(citation,mode==='literal'?['id','quote']:['id'])||typeof citation.id!=='string')return invalid();
-   if(mode==='literal'&&(typeof citation.quote!=='string'||citation.quote.length>1200))return invalid();
+   if(mode==='literal'&&(typeof citation.quote!=='string'||citation.quote.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16))return invalid();
   }
  }
  return answer;
 }
 
-export function validateGroundedDocumentAnswer(value:unknown,supports:readonly Pick<Support,'id'|'kind'|'text'>[]):GroundedDocumentAnswer{
+export function validateGroundedDocumentAnswer(value:unknown,supports:readonly Pick<Support,'id'|'kind'|'text'|'textQuotePolicy'>[]):GroundedDocumentAnswer{
  const invalid=()=>{throw new Error('Invalid or ungrounded document answer');};
  const answer=answerShape(value);
  if(answer.status==='insufficient-evidence')return {...answer,message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE};
@@ -254,7 +259,8 @@ export function validateGroundedDocumentAnswer(value:unknown,supports:readonly P
    const citationKey=JSON.stringify([citation.id,whitespace(citation.quote)]);
    if(claimCitations.has(citationKey))return invalid();
    const support=byId.get(citation.id);if(!support)return invalid();
-   if(support.kind==='text'&&(!whitespace(citation.quote)||!whitespace(support.text??'').includes(whitespace(citation.quote))))return invalid();
+   if(support.kind==='text'&&(citation.quote.length>(support.textQuotePolicy==='stored-page-v1'?DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16:1200)||
+    !whitespace(citation.quote)||!whitespace(support.text??'').includes(whitespace(citation.quote))))return invalid();
    if(support.kind==='image'&&citation.quote!=='')return invalid();
    claimCitations.add(citationKey);used.add(citation.id);
   }
@@ -302,7 +308,7 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
   const sourceIdentity=[support.documentId,support.documentVersionId,support.sourceVersionId,
    support.sourceHash,support.evidenceId,support.locator,support.sha256];
   for(let start=0;start<body.length;){
-   let end=Math.min(start+1200,body.length);
+   let end=Math.min(start+(support.textQuotePolicy==='stored-page-v1'?DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16:1200),body.length);
    if(end<body.length){
     const chunk=body.slice(start,end),boundary=lastEnd(chunk,/(?:\r\n|\r|\n)[\t ]*(?:\r\n|\r|\n)/gu)
      ??lastEnd(chunk,/[.!?。！？]["'’”\])]*\s+/gu)??lastEnd(chunk,/\s+/gu);
@@ -782,7 +788,7 @@ async function documentModelPayload(response:Response,model:DocumentAnswerModel,
 
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
- if(policy.textContextWindows!==undefined&&(policy.textContextWindows!=='producer-neighbors-v1'||policy.scope!=='application'||
+ if(policy.textContextWindows!==undefined&&(!['producer-neighbors-v1','stored-page-v1'].includes(policy.textContextWindows)||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
   throw new Error('Text context windows require application/select-then-answer/selected-once');
  if(policy.generationReasoningEffort!==undefined&&(policy.scope!=='application'||!['low','medium'].includes(policy.generationReasoningEffort)))

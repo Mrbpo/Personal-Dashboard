@@ -39,7 +39,7 @@ export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REAS
  return value==='low'?undefined:value;
 }
 export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WINDOWS??'off'){
- if(value!=='off'&&value!=='producer-neighbors-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
+ if(value!=='off'&&value!=='producer-neighbors-v1'&&value!=='stored-page-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
  return value==='off'?undefined:value;
 }
 /** Process-only development setting; even a lower explicit limit needs isolation. */

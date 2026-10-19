@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
-import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy,type DocumentMentionedSource} from './document-answer.ts';
+import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy,type DocumentMentionedSource} from './document-answer.ts';
 import {documentTitleMention} from './document-source.ts';
 
 export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v4';
@@ -54,12 +54,12 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
    throw new Error('Invalid citation-local source identity');
   const source={...ref.source};
   if(ref.kind==='text'){
-   if(typeof ref.quote!=='string'||!ref.quote.trim()||ref.quote.length>1200)throw new Error('Invalid citation-local quote');
+   if(typeof ref.quote!=='string'||!ref.quote.trim()||ref.quote.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16)throw new Error('Invalid citation-local quote');
    return {refId:ref.refId,kind:ref.kind,quote:ref.quote,source};
   }
   if(ref.kind!=='image'||!ref.image||sha(ref.image.bytes)!==ref.image.sha256)throw new Error('Invalid citation-local image');
   if(ref.captionMembers&&(packet.unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY||!ref.captionMembers.length||
-   ref.captionMembers.some(u=>typeof u.text!=='string'||u.text.length>1200||sha(u.text)!==u.quoteSha256)))
+   ref.captionMembers.some(u=>typeof u.text!=='string'||u.text.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16||sha(u.text)!==u.quoteSha256)))
    throw new Error('Invalid citation-local caption members');
   return {refId:ref.refId,kind:ref.kind,source,...(ref.captionMembers?{captionMembers:ref.captionMembers}:{})};
  });
