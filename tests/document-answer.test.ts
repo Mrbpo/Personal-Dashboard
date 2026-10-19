@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,validateGroundedDocumentAnswer,resolveGroundedDocumentAnswerReferences,documentQuoteUnits,
- resolveDocumentAnswerSelections,buildDocumentAnswerRequest,synthesizeDocumentAnswer,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ resolveDocumentAnswerSelections,buildDocumentAnswerRequest,synthesizeDocumentAnswer,DocumentModelResponseError,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceRead} from '../lib/kernel/document-context.ts';
@@ -302,6 +302,25 @@ test('synthesis revalidates current sources, rejects incomplete output and makes
   globalThis.fetch=async()=>{calls++;return Response.json({status:'incomplete',output_text:JSON.stringify(answer)});};
   await assert.rejects(synthesizeDocumentAnswer('How many samples?',async()=>context()),/incomplete/);
   assert.equal(calls,3,'incomplete or stale evidence never triggers an automatic paid retry');
+ }finally{globalThis.fetch=original;}
+});
+
+test('incomplete model responses retain deterministic failure codes and never publish partial JSON or retry',async()=>{
+ const original=globalThis.fetch;let calls=0,attempts=0;
+ const cases=[
+  {status:'incomplete',incomplete_details:{reason:'max_output_tokens'},output:[],
+   usage:{input_tokens:26561,output_tokens:3000,output_tokens_details:{reasoning_tokens:3000}}},
+  {status:'incomplete',incomplete_details:{reason:'max_output_tokens'},output_text:JSON.stringify(answer)},
+  {status:'incomplete',incomplete_details:{reason:'content_filter'},output_text:JSON.stringify(answer)}
+ ];
+ try{
+  for(const [i,payload]of cases.entries()){
+   globalThis.fetch=async()=>{calls++;return Response.json(payload);};
+   await assert.rejects(synthesizeDocumentAnswer('How many samples?',async()=>context(),
+    {beforeAttempt:async()=>{attempts++;}}),(error:unknown)=>error instanceof DocumentModelResponseError&&
+     error.code===(i<2?'model-output-limit':'model-response-incomplete'));
+   assert.equal(calls,i+1);assert.equal(attempts,i+1,'each failed completion makes only the originally requested attempt');
+  }
  }finally{globalThis.fetch=original;}
 });
 

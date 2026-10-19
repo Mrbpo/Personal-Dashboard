@@ -4,7 +4,7 @@ process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
 const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyQuantityConsistency,studyGenerationReasoning,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
-const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
+const {documentAnswerSettings,DocumentModelResponseError}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
 
@@ -34,6 +34,22 @@ test('source header argument failures are attributed to generation, not PDF pars
   await assert.rejects(answerKernelStudy('owner','Synthetic header arguments','',[]),(e:any)=>e instanceof StudyAnswerError&&
    e.stage==='generation'&&e.code==='source-value-header-path-not-established'&&e.cause instanceof SourceValueHeaderError);
  }finally{kernel.answerStudyContent=saved;for(const k of names){if(env[k]===undefined)delete process.env[k];else process.env[k]=env[k];}}
+});
+
+test('application preserves model completion failure code and active pipeline stage without retry',async()=>{
+ const values={STUDY_DEVELOPMENT_DAILY_LIMIT:undefined,STUDY_CITATION_CHECK:'off',STUDY_SOURCE_VALUES:'off',
+  STUDY_SOURCE_QUANTITIES:'off',STUDY_SOURCE_SCOPE:'off',STUDY_TEXT_CONTEXT_WINDOWS:'off',OPENAI_MODEL:'gpt-5.4-mini'},
+  env=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;
+ let calls=0;
+ try{
+  for(const [k,v]of Object.entries(values))if(v===undefined)delete process.env[k];else process.env[k]=v;
+  for(const [stage,limit]of [['evidence-selection',true],['generation',true],['generation',false]] as const){
+   kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;policy?.onStage?.(stage);throw new DocumentModelResponseError(limit);};
+   await assert.rejects(answerKernelStudy('owner','Synthetic incomplete-response fixture','',[]),(e:unknown)=>
+    e instanceof StudyAnswerError&&e.stage===stage&&e.code===(limit?'model-output-limit':'model-response-incomplete')&&e.cause instanceof DocumentModelResponseError);
+  }
+  assert.equal(calls,3,'no automatic retry or fallback answer');
+ }finally{kernel.answerStudyContent=saved;for(const [k,v]of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
 });
 
 test('legacy is the default, invalid configuration fails closed and application policy stays bounded',async()=>{

@@ -896,10 +896,19 @@ function prepareSelectedSourceValueGenerationV1(prepared:PreparedAnswer,referenc
  return {request:proposed,catalog,applied:true as const,reason:null,questionContract,questionContractReason};
 }
 
+/** A provider completion failure, not a missing-source or JSON parsing result. */
+export class DocumentModelResponseError extends Error{
+ readonly code:'model-output-limit'|'model-response-incomplete';
+ constructor(outputLimit:boolean){
+  super(outputLimit?'Document answer response is incomplete (output token limit)':'Document answer response is incomplete');
+  this.name='DocumentModelResponseError';this.code=outputLimit?'model-output-limit':'model-response-incomplete';
+ }
+}
 async function documentModelPayload(response:Response,model:DocumentAnswerModel,policy:DocumentAnswerPolicy){
  if(!response.ok)throw new Error(`Document answer request failed (${response.status})`);
  const payload=await response.json();
- if(payload.status!=='completed'||payload.error)throw new Error('Document answer response is incomplete');
+ if(payload.status!=='completed'||payload.error)throw new DocumentModelResponseError(
+  payload.status==='incomplete'&&payload.incomplete_details?.reason==='max_output_tokens');
  const actualModel=typeof payload.model==='string'&&payload.model.trim()?payload.model:null;
  if((model==='gpt-6-astra'&&actualModel!==model)||(model==='gpt-5.4-mini'&&!isGpt54MiniProviderModel(actualModel)))
   throw new Error('Document answer provider returned a different or unverified model');

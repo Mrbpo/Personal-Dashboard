@@ -1,6 +1,6 @@
 import {kernel} from './kernel/service.ts';
 import {serviceValue} from './service-vault.ts';
-import type {DocumentAnswerModel} from './kernel/document-answer.ts';
+import {DocumentModelResponseError,type DocumentAnswerModel} from './kernel/document-answer.ts';
 import {DocumentCitationCheckError} from './kernel/document-citation-audit.ts';
 import {SourceValueHeaderError} from './kernel/document-source-values.ts';
 import {SourceCellBindingError} from './kernel/document-source-cell-bindings.ts';
@@ -199,6 +199,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     semanticVerified:false,wholeAnswerVerified:false}}};
  }catch(error){
   if(error instanceof StudyAnswerError)throw error;
+  if(error instanceof DocumentModelResponseError)throw new StudyAnswerError(stage,error.code,
+   error.code==='model-output-limit'?'模型在输出限制内未完成回答，本轮未发布答案':'模型响应未完成，本轮未发布答案',{cause:error});
   if(error instanceof SourceCellBindingError)throw new StudyAnswerError(error.stage,error.code,'来源单元格或完整标签路径未通过绑定验证，本轮未发布答案',{cause:error});
   if(error instanceof SourceValueHeaderError)throw new StudyAnswerError('generation',error.code,
    '表格比较缺少完整且明确的列标题关系，本轮未发布答案',{cause:error});
