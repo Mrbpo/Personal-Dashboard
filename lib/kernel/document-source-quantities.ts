@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {assertSourceValueCatalog,completeSourceValueColumnHeaders,type SourceValueCatalog} from './document-source-values.ts';
+import {assertSourceValueCatalog,completeSourceValueColumnHeaders,sourceValueQuestionContract,type SourceValueCatalog} from './document-source-values.ts';
 import {explicitDocumentQuantityFamilies} from './document-quantity-consistency.ts';
 import {DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,type DocumentQuoteUnit,type DocumentAnswerSelections} from './document-answer.ts';
 
@@ -14,6 +14,8 @@ const exact=(v:unknown,keys:string[])=>!!v&&typeof v==='object'&&!Array.isArray(
 const decimal=/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/u;
 export function sourceQuantityQuestionFamily(question:string):Family|null{
  const text=question.normalize('NFKC').toLowerCase(),families=explicitDocumentQuantityFamilies(text);
+ if(sourceValueQuestionContract(question)==='required-difference-v1'||
+  /\b(?:calculate|compute|derive|compare|contrast|difference|highest|lowest|higher|lower|relative|ratio|sum|total|improv\w*|increas\w*|decreas\w*|reduc\w*)\b|计算|求和|比较|差值|最高|最低|相对/u.test(text))return null;
  if(/\b(?:explain|describe|define|definition|meaning)\b|\bwhat\s+(?:does|do)\b.*\bmean\b|定义|含义|解释|是什么/u.test(text)||
   !/\bhow\s+(?:many|much|long|quickly|fast)\b|\b(?:number|count|percentage|percent|value|score|rate)\b|\bmean\s+auc\b|多少|多久|几轮|百分比|一致率/u.test(text)||families.length!==1)return null;
  return families[0]==='rater-agreement'?'agreement':families[0];
@@ -33,13 +35,26 @@ type TableValue={kind:'table';tableId:string;valueCellId:string;rowLabelIds:stri
 type TextValue={kind:'text';quoteUnitId:string;supportId:string;quoteSha256:string;numberStartUtf16:number;numberEndUtf16:number;
  metricStartUtf16:number;metricEndUtf16:number;contextStartUtf16:number;contextEndUtf16:number;value:string;metricLiteral:string;originalExcerpt:string;
  family:Family;relationship:'literal-in-same-source-sentence'};
-type Observation=(TableValue|TextValue)&{id:string};
-export type SourceQuantityCatalog={version:'source-quantity-catalog-v1';sourceTableCatalogSha256:string|null;textUnitManifestSha256:string;
+type SourceQuote={kind:'source-quote';quoteUnitId:string;supportId:string;quoteSha256:string;contextStartUtf16:0;contextEndUtf16:number;
+ originalExcerpt:string;family:Family|null;relationship:'original-quote-no-inferred-value-binding'};
+type Observation=(TableValue|TextValue|SourceQuote)&{id:string};
+/** Literal modifiers, not an inference that Overall, mean or total coincide. */
+export function sourceQuantityAggregations(text:string){
+ const v=text.normalize('NFKC').toLowerCase(),labels:string[]=[];
+ for(const [label,pattern]of [['mean',/\b(?:mean|average)\b|平均/u],['overall',/\boverall\b|总体|整体/u],
+  ['median',/\bmedian\b|中位数/u],['minimum',/\bminimum\b|最小/u],['maximum',/\bmaximum\b|最大/u],
+  ['sum',/\bsum\b|求和/u],['total',/\btotal\b|总数|总量/u]] as const)if(pattern.test(v))labels.push(label);
+ return labels;
+}
+function observationAggregations(o:Observation){return sourceQuantityAggregations(o.kind==='table'?
+ [...o.rowLabels,...o.columnLabels,...o.captionTexts].join('\n'):o.originalExcerpt);}
+export type SourceQuantityCatalog={version:'source-quantity-catalog-v2';sourceTableCatalogSha256:string|null;textUnitManifestSha256:string;
+ aggregationHints:Record<string,string[]>;
  observations:Observation[];transport:'available'|'unavailable';reason:null|'observation-limit';semanticVerified:false;scopeVerified:false;catalogSha256:string};
 export function prepareSourceQuantityCatalog(table:SourceValueCatalog|undefined,units:readonly Quote[]):SourceQuantityCatalog{
  if(table?.status==='available')assertSourceValueCatalog(table);
  if(new Set(units.map(u=>u.id)).size!==units.length||units.some(u=>sha(u.text)!==u.quoteSha256))throw Error('Source quantity quote identity differs');
- const observations:Observation[]=[],add=(value:TableValue|TextValue)=>observations.push({id:'sq:'+sha(canonical(value)).slice(0,40),...value});
+ const observations:Observation[]=[],add=(value:TableValue|TextValue|SourceQuote)=>observations.push({id:'sq:'+sha(canonical(value)).slice(0,40),...value});
  if(table?.status==='available')for(const cell of table.cells){
   if(cell.headerRole!=='none'||cell.rowSpan!==1||cell.columnSpan!==1||!decimal.test(cell.text)||cell.text.length>32)continue;
   const source=table.tables.find(t=>t.id===cell.tableId)!,context=table.tableContexts?.find(c=>c.tableId===cell.tableId),
@@ -57,6 +72,12 @@ export function prepareSourceQuantityCatalog(table:SourceValueCatalog|undefined,
    family:known?families[0]:null,relationship:positioned&&linked?'parser-declared':'unknown'});
  }
  for(const unit of units){let cursor=0;
+  const families=sourceLabelFamilies(unit.text);
+  // Keep an existing original unit intact. Multiple values and their entities
+  // remain in the source sentence/paragraph; no new relation is inferred.
+  if(/\d/u.test(unit.text)&&unit.text.length<=2000&&families.length)add({kind:'source-quote',quoteUnitId:unit.id,supportId:unit.supportId,
+   quoteSha256:unit.quoteSha256,contextStartUtf16:0,contextEndUtf16:unit.text.length,originalExcerpt:unit.text,
+   family:families.length===1?families[0]:null,relationship:'original-quote-no-inferred-value-binding'});
   for(const segment of unit.text.split(/\n|(?<=[.!?])\s+(?=[A-Z])/u)){
    const start=unit.text.indexOf(segment,cursor);cursor=start+segment.length;if(!segment.trim()||segment.length>2000)continue;
    const quantities=[...segment.matchAll(/(?<![\w.])([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(epochs?|milliseconds?|seconds?|minutes?|hours?|percent|%)(?!\w)/giu)];
@@ -76,17 +97,27 @@ export function prepareSourceQuantityCatalog(table:SourceValueCatalog|undefined,
    }
   }
  }
- const base={version:'source-quantity-catalog-v1' as const,sourceTableCatalogSha256:table?.catalogSha256??null,
+ const base={version:'source-quantity-catalog-v2' as const,sourceTableCatalogSha256:table?.catalogSha256??null,
   textUnitManifestSha256:sha(canonical(units.map(u=>({id:u.id,supportId:u.supportId,quoteSha256:u.quoteSha256})))),
+  aggregationHints:Object.fromEntries(observations.map(o=>[o.id,observationAggregations(o)])),
   observations,transport:'available' as const,reason:null,semanticVerified:false as const,scopeVerified:false as const};
- if(observations.length>256||Buffer.byteLength(canonical(base))>65536){const unavailable={...base,observations:[],transport:'unavailable' as const,reason:'observation-limit' as const};return {...unavailable,catalogSha256:sha(canonical(unavailable))};}
+ if(observations.length>256||Buffer.byteLength(canonical(base))>65536){const unavailable={...base,observations:[],aggregationHints:{},transport:'unavailable' as const,reason:'observation-limit' as const};return {...unavailable,catalogSha256:sha(canonical(unavailable))};}
  return {...base,catalogSha256:sha(canonical(base))};
 }
-export function sourceQuantityAnswerSchema(catalog:SourceQuantityCatalog){
- const ids=catalog.observations.map(o=>o.id);
- if(catalog.transport!=='available'||!ids.length)throw Error('Source quantity catalog unavailable');
- return {type:'object',additionalProperties:false,properties:{status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},message:{type:'string'},
-  values:{type:'array',maxItems:8,items:{type:'object',additionalProperties:false,properties:{valueId:{type:'string',enum:ids}},required:['valueId']}}},required:['status','message','values']};
+function compatibleObservationIds(question:string,catalog:SourceQuantityCatalog){
+ const family=sourceQuantityQuestionFamily(question),aggregations=sourceQuantityAggregations(question);
+ if(!family)return [];
+ return catalog.observations.filter(o=>o.family===family&&o.relationship!=='unknown'&&
+  aggregations.every(label=>catalog.aggregationHints[o.id].includes(label))).map(o=>o.id);
+}
+export function sourceQuantityAnswerSchema(catalog:SourceQuantityCatalog,question:string){
+ if(catalog.transport!=='available'||!catalog.observations.length)throw Error('Source quantity catalog unavailable');
+ const ids=compatibleObservationIds(question,catalog);
+ return {type:'object',additionalProperties:false,properties:{status:{type:'string',enum:ids.length?
+  ['answered','insufficient-evidence',...(ids.length>1?['conflicting-evidence']:[])]:['insufficient-evidence']},
+  message:ids.length?{type:'string',enum:['',DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE]}:{type:'string',enum:[DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE]},
+  values:{type:'array',maxItems:Math.min(8,ids.length),items:{type:'object',additionalProperties:false,
+   properties:{valueId:ids.length?{type:'string',enum:ids}:{type:'string'}},required:['valueId']}}},required:['status','message','values']};
 }
 export function deriveSourceQuantityAnswer(question:string,value:unknown,rawOutputText:string,catalog:SourceQuantityCatalog,
  table:SourceValueCatalog|undefined,units:readonly Quote[],selectedIds:readonly string[]){
@@ -98,15 +129,16 @@ export function deriveSourceQuantityAnswer(question:string,value:unknown,rawOutp
   (v.status==='insufficient-evidence'?(v.values.length!==0||v.message!==DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE):(!v.values.length||v.message!==''))||
   (v.status==='conflicting-evidence'&&v.values.length<2))throw new SourceQuantityOperationError('Invalid bound source quantity result');
  const selected=v.values.map(o=>{const found=catalog.observations.find(x=>x.id===o.valueId);if(!found)throw new SourceQuantityOperationError('Unknown source quantity ID');return found;});
- for(const o of selected){const reference=o.kind==='text'?o.quoteUnitId:table!.tables.find(t=>t.id===o.tableId)!.imageId;
+ for(const o of selected){const reference=o.kind!=='table'?o.quoteUnitId:table!.tables.find(t=>t.id===o.tableId)!.imageId;
   if(!selectedIds.includes(reference))throw new SourceQuantityOperationError('Unselected source quantity reference');}
- const compatible=selected.length>0&&selected.every(o=>o.family===requested&&o.relationship!=='unknown'),
-  claims=compatible?selected.map(o=>o.kind==='text'?{text:o.originalExcerpt,citations:[{id:o.quoteUnitId}]}:{
+ const requiredAggregations=sourceQuantityAggregations(question),eligible=new Set(compatibleObservationIds(question,catalog)),
+  compatible=selected.length>0&&selected.every(o=>eligible.has(o.id)),
+  claims=compatible?selected.map(o=>o.kind!=='table'?{text:o.originalExcerpt,citations:[{id:o.quoteUnitId}]}:{
    text:`Source table observation: row ${o.rowLabels.map(x=>JSON.stringify(x)).join(' / ')}; column ${o.columnLabels.map(x=>JSON.stringify(x)).join(' / ')}; printed value ${o.value}.`+
     (o.captionTexts.length?` Original caption: ${o.captionTexts.join(' ')}`:''),citations:[{id:table!.tables.find(t=>t.id===o.tableId)!.imageId}]}):[];
  if(claims.some(c=>c.text.length>3000))throw new SourceQuantityOperationError('Bound source quantity claim exceeds bound');
  const normalizedSelections:DocumentAnswerSelections=compatible?{status:v.status as 'answered'|'conflicting-evidence',message:'',claims}:{status:'insufficient-evidence',message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]};
- return {method:'source-bound-quantity-v1' as const,questionSha256:sha(question),requestedFamily:requested,catalogSha256:catalog.catalogSha256,
+ return {method:'source-bound-quantity-v2' as const,questionSha256:sha(question),requestedFamily:requested,requiredAggregations,catalogSha256:catalog.catalogSha256,
   sourceTableCatalogSha256:catalog.sourceTableCatalogSha256,textUnitManifestSha256:catalog.textUnitManifestSha256,
   rawProviderResult:structuredClone(value),rawOutputText,rawOutputSha256:sha(rawOutputText),operations:structuredClone(selected),
   outcome:compatible?'compatible-source-label' as const:v.status==='insufficient-evidence'?'provider-insufficient' as const:'source-metric-not-established' as const,

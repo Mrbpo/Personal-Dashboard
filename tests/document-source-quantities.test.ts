@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {prepareSourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
-import {prepareSourceQuantityCatalog,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,SourceQuantityOperationError} from '../lib/kernel/document-source-quantities.ts';
+import {prepareSourceQuantityCatalog,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAnswerSchema,SourceQuantityOperationError} from '../lib/kernel/document-source-quantities.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceQuantityGeneration,buildSelectedDocumentAnswerRequest,
  synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext,type DocumentSourceQuantityDerivation,type DocumentSourceQuantityRawResponse} from '../lib/kernel/document-answer.ts';
 process.env.DATABASE_URL=':memory:';process.env.AI_BUDGET_TEST_BYPASS='true';process.env.OPENAI_API_KEY='fixture-never-sent';
@@ -20,7 +20,7 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,i
  page_number:1,locator:'p1',body:'Each model is trained for 100 epochs for each dataset.',parser_version:'fixture',score:1,evidence_body:'full-page'}]};}
 
 test('source quantities bind literal spans and reject metric renaming, changed source values or unselected references',()=>{
- const u=unit('Each model is trained for 100 epochs for each dataset.'),catalog=prepareSourceQuantityCatalog(undefined,[u]),o=catalog.observations[0],
+ const u=unit('Each model is trained for 100 epochs for each dataset.'),catalog=prepareSourceQuantityCatalog(undefined,[u]),o=catalog.observations.find(o=>o.kind==='text')!,
   value={status:'answered',message:'',values:[{valueId:o.id}]},before=JSON.stringify(catalog);
  const positive=deriveSourceQuantityAnswer('How many epochs is each model trained for?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
  assert.equal(positive.normalizedSelections.claims[0].text,u.text);assert.equal(positive.operations[0].kind,'text');
@@ -29,19 +29,23 @@ test('source quantities bind literal spans and reject metric renaming, changed s
  for(const invalid of [{...value,values:[{valueId:o.id,metricLabel:'hours'}]},{...value,values:[{valueId:'fabricated'}]}])
   assert.throws(()=>deriveSourceQuantityAnswer('How many epochs?',invalid,JSON.stringify(invalid),catalog,undefined,[u],[u.id]),SourceQuantityOperationError);
  assert.throws(()=>deriveSourceQuantityAnswer('How many epochs?',value,JSON.stringify(value),catalog,undefined,[u],[]),SourceQuantityOperationError);
- const changed=structuredClone(catalog);changed.observations[0].value='101';
+ const changed=structuredClone(catalog);const changedValue=changed.observations.find(candidate=>candidate.id===o.id&&candidate.kind==='text')!;
+ if(changedValue.kind==='text')changedValue.value='101';
  assert.throws(()=>deriveSourceQuantityAnswer('How many epochs?',value,JSON.stringify(value),changed,undefined,[u],[u.id]),SourceQuantityOperationError);
  assert.equal(JSON.stringify(catalog),before);assert.equal(negative.semanticVerified,false);assert.equal(negative.scopeVerified,false);
 });
 
 test('authentic agreement wording preserves qualifiers and percentages do not borrow a metric from another sentence',()=>{
  const u=unit('Perfect agreement (0 or 3 doubts) occur in 48 percent of cases. AUC was measured separately.'),
-  catalog=prepareSourceQuantityCatalog(undefined,[u]),o=catalog.observations.find(o=>o.value==='48')!;
+  catalog=prepareSourceQuantityCatalog(undefined,[u]),o=catalog.observations.find(o=>o.kind==='text'&&o.value==='48')!;
  assert.equal(o.family,'agreement');assert.equal(o.kind,'text');
  if(o.kind==='text'){assert.equal(u.text.slice(o.numberStartUtf16,o.numberEndUtf16),'48');assert.equal(u.text.slice(o.metricStartUtf16,o.metricEndUtf16),'agreement');}
  const value={status:'answered',message:'',values:[{valueId:o.id}]},r=deriveSourceQuantityAnswer('What percentage of inter-annotator agreement is reported?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
  assert.equal(r.normalizedSelections.claims[0].text,'Perfect agreement (0 or 3 doubts) occur in 48 percent of cases.');
- assert.equal(prepareSourceQuantityCatalog(undefined,[unit('AUC was measured. The score was 48 percent.')]).observations.length,0);
+ const adjacent=unit('AUC was measured. The score was 48 percent.'),adjacentCatalog=prepareSourceQuantityCatalog(undefined,[adjacent]);
+ assert.equal(adjacentCatalog.observations.filter(o=>o.kind==='text').length,0);
+ const quote=adjacentCatalog.observations.find(o=>o.kind==='source-quote')!,wrong={status:'answered',message:'',values:[{valueId:quote.id}]};
+ assert.equal(deriveSourceQuantityAnswer('What percentage of human agreement?',wrong,JSON.stringify(wrong),adjacentCatalog,undefined,[adjacent],[adjacent.id]).normalizedSelections.status,'insufficient-evidence');
 });
 
 test('an original table with an unrecognized metric remains unknown rather than borrowing the requested AUC label',async()=>{
@@ -56,13 +60,29 @@ test('an original table with an unrecognized metric remains unknown rather than 
 });
 
 test('off/ordinary routes retain the original generator wire and policies stay explicit',async()=>{
- for(const q of ['Explain the training setup.','What was the inter-annotator agreement between the expert annotators?','Compare AUC and rater agreement.']){
+ for(const q of ['Explain the training setup.','What was the inter-annotator agreement between the expert annotators?','Compare AUC and rater agreement.',
+  'Calculate the mean AUC of the models.','By how much does the mean AUC improve?']){
   assert.equal(sourceQuantityQuestionFamily(q),null);const p=prepareDocumentAnswerForPolicy(q,context(),policy),ids=[p.quoteUnits[0].id],
    proposed=prepareSelectedSourceQuantityGeneration(p,ids,settings,policy);
   assert.equal(proposed.applied,false);assert.deepEqual(proposed.request,buildSelectedDocumentAnswerRequest(p,ids,settings,policy));
  }
  await assert.rejects(documentAnswerSettings({...policy,sourceValueContract:'difference-v1'}),/Source quantities require/);
  await assert.rejects(documentAnswerSettings({...policy,recordSourceQuantityRawResponse:undefined}),/Source quantities require/);
+});
+
+test('original numerical prose preserves multiple entities and values without inventing a value binding',()=>{
+ const text='The mean AUC is 0.56 for the model and 0.58 for humans, compared to a chance score of 0.5.',u=unit(text),catalog=prepareSourceQuantityCatalog(undefined,[u]),
+  o=catalog.observations.find(o=>o.kind==='source-quote')!,value={status:'answered',message:'',values:[{valueId:o.id}]},
+  result=deriveSourceQuantityAnswer('What mean AUC is reported for humans?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
+ assert.equal(result.normalizedSelections.claims[0].text,text);assert.equal(result.operations[0].relationship,'original-quote-no-inferred-value-binding');
+ assert.deepEqual(catalog.aggregationHints[o.id],['mean']);assert.equal(result.semanticVerified,false);assert.equal(result.scopeVerified,false);
+ const overall=unit('The overall AUC is 0.58.'),other=prepareSourceQuantityCatalog(undefined,[overall]),id=other.observations.find(o=>o.kind==='source-quote')!.id,
+  bad={status:'answered',message:'',values:[{valueId:id}]};
+ assert.equal(deriveSourceQuantityAnswer('What mean AUC is reported?',bad,JSON.stringify(bad),other,undefined,[overall],[overall.id]).normalizedSelections.status,'insufficient-evidence');
+ const schema=sourceQuantityAnswerSchema(catalog,'What mean AUC is reported for humans?');
+ assert.deepEqual(schema.properties.values.items.properties.valueId.enum,[o.id]);
+ const missing=sourceQuantityAnswerSchema(other,'What mean AUC is reported?');
+ assert.deepEqual(missing.properties.status.enum,['insufficient-evidence']);assert.equal(missing.properties.values.maxItems,0);
 });
 
 test('the application generator records the actual raw and compiles a mismatched source unit to neutral refusal without a third model call',async()=>{

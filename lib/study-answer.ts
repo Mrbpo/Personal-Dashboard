@@ -149,7 +149,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...('quantityConsistency' in result?{quantityConsistency:result.quantityConsistency}:{}),
     ...('sourceQuantityContract' in result?{sourceQuantityContract:result.sourceQuantityContract}:{}),
     ...('sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?{sourceQuantityDerivation:result.sourceQuantityDerivation,
-     answerContract:'source-bound-quantity-v1',claimOrigins:result.answer.claims.map(()=> 'program-rendered-source-quantity')}:{}),
+     answerContract:result.sourceQuantityDerivation.method,claimOrigins:result.answer.claims.map(()=> 'program-rendered-source-quantity')}:{}),
     ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
     ...('sourceValueDerivation' in result&&result.sourceValueDerivation?{sourceValueDerivation:result.sourceValueDerivation,answerContract:'difference-v1',
      claimOrigins:result.answer.claims.map((_claim,index)=>result.sourceValueDerivation!.operations.some(op=>op.claimIndex===index)?
