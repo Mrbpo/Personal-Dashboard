@@ -657,6 +657,9 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
  pageQuotePromotions?:Array<{supportId:string;providerReferenceIds:string[];referenceId:string;
   relation:'same-stored-page';semanticRelationsVerified:false}>;
  nativeTablePageRetention?:{policy:'selected-node-original-table-page-v1';retainedImageIds:string[];skippedImageIds:string[];
+  imageTextPairing?:{policy:'selected-original-table-page-text-v1';
+   pairs:Array<{imageId:string;supportId:string;referenceIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false}>;
+   skippedSupportIds:string[];inputScope:'already-retrieved-selectable-text';structureRelationsVerified:false};
   structureRelationsVerified:false};
  mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v2';documentId:string;sourceHash:string;
   status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
@@ -717,26 +720,48 @@ export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAn
   expandedSupportIds:[...new Set([...retained.expandedSupportIds,...additions.map(u=>u.supportId)])],mentionedSourceRetention};
 }
 
-/** Preserve an already retrieved original table page with its selected text.
+/** Keep an already retrieved native table page and its existing text together.
  * A byte-limited parser grid stays unavailable; the PNG is still original
- * evidence. Same-page binding never certifies a table's semantic relations. */
+ * evidence. Text must already be a selectable support, never imageAnchors.
+ * Same-page binding never certifies a table's semantic relations. */
 export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,prepared:PreparedAnswer):StoredNodeTextSelection{
  if(!retained.providerReferenceIds.length)return retained;
  const ids=new Set(retained.referenceIds),selectedSupportIds=new Set(prepared.quoteUnits.filter(u=>ids.has(u.id)).map(u=>u.supportId)),
-  selectedText=prepared.supports.filter(s=>s.kind==='text'&&selectedSupportIds.has(s.id)),retainedImageIds:string[]=[],skippedImageIds:string[]=[];
+  selectedText=prepared.supports.filter(s=>s.kind==='text'&&selectedSupportIds.has(s.id)),retainedImageIds:string[]=[],skippedImageIds:string[]=[],
+  samePage=(text:Support,image:Support)=>text.kind==='text'&&text.documentId===image.documentId&&text.documentVersionId===image.documentVersionId&&
+   text.sourceVersionId===image.sourceVersionId&&text.sourceHash===image.sourceHash&&text.evidenceId===image.evidenceId;
  for(const support of prepared.supports){
   if(support.kind!=='image'||!support.image||!('kind'in support.image)||support.image.kind!=='pdf-page'||ids.has(support.id))continue;
   const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[];
-  if(!native.length||!selectedText.some(s=>s.documentId===support.documentId&&s.documentVersionId===support.documentVersionId&&
-   s.sourceVersionId===support.sourceVersionId&&s.sourceHash===support.sourceHash&&s.evidenceId===support.evidenceId))continue;
+  if(!native.length||!selectedText.some(s=>samePage(s,support)))continue;
   for(const observation of native)assertNativeTableObservation(observation,support.image);
   if(ids.size>=64){skippedImageIds.push(support.id);continue;}
   ids.add(support.id);retainedImageIds.push(support.id);
  }
- if(!retainedImageIds.length&&!skippedImageIds.length)return retained;
- return {...retained,referenceIds:[...retained.referenceIds,...retainedImageIds],
-  systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...retainedImageIds],
-  nativeTablePageRetention:{policy:'selected-node-original-table-page-v1',retainedImageIds,skippedImageIds,structureRelationsVerified:false}};
+ const units=generationQuoteUnits(prepared),pairs:NonNullable<NonNullable<StoredNodeTextSelection['nativeTablePageRetention']>['imageTextPairing']>['pairs']=[],
+  skippedSupportIds:string[]=[];
+ for(const support of prepared.supports){
+  if(support.kind!=='image'||!ids.has(support.id)||!support.image||!('kind'in support.image)||support.image.kind!=='pdf-page')continue;
+  const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[];
+  if(!native.length)continue;
+  for(const observation of native)assertNativeTableObservation(observation,support.image);
+  for(const text of prepared.supports.filter(s=>samePage(s,support))){
+   const additions=units.filter(u=>u.supportId===text.id&&!ids.has(u.id)).map(u=>u.id);
+   if(!additions.length)continue;
+   if(ids.size+additions.length>64){skippedSupportIds.push(text.id);continue;}
+   additions.forEach(id=>ids.add(id));pairs.push({imageId:support.id,supportId:text.id,referenceIds:additions,
+    relation:'same-stored-pdf-page',semanticRelationsVerified:false});
+  }
+ }
+ if(!retainedImageIds.length&&!skippedImageIds.length&&!pairs.length&&!skippedSupportIds.length)return retained;
+ const textIds=pairs.flatMap(pair=>pair.referenceIds);
+ return {...retained,referenceIds:[...retained.referenceIds,...retainedImageIds,...textIds],
+  systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...retainedImageIds,...textIds],
+  ...(pairs.length?{expandedSupportIds:[...new Set([...retained.expandedSupportIds,...pairs.map(pair=>pair.supportId)])]}:{}),
+  nativeTablePageRetention:{policy:'selected-node-original-table-page-v1',retainedImageIds,skippedImageIds,
+   ...(pairs.length||skippedSupportIds.length?{imageTextPairing:{policy:'selected-original-table-page-text-v1',pairs,
+    skippedSupportIds:[...new Set(skippedSupportIds)],inputScope:'already-retrieved-selectable-text',structureRelationsVerified:false}}:{}),
+   structureRelationsVerified:false}};
 }
 
 /** Explicit source-value lane only. Suggestions cannot delete already retrieved

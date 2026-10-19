@@ -8,7 +8,7 @@ import {prepareDocumentAnswer,retainSelectedStoredNodeText,retainSelectedNativeT
 const sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex');
 const canonical=(v:unknown)=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 
-test('selected native table page preserves original image and uncertainty, without importing unrelated page evidence',async()=>{
+test('selected native table page preserves original image/text pairing and uncertainty without importing unrelated evidence',async()=>{
  const dir=new URL('./fixtures/native-table-mit-class5/',import.meta.url),raw=await readFile(new URL('result.json',dir)),png=await readFile(new URL('source-page.png',dir)),
   meta=JSON.parse(await readFile(new URL('provenance.json',dir),'utf8')),
   native=decodeDerivedDoclingResult(JSON.parse(raw.toString()),{start:1,end:1,totalPages:1,copyIndices:[0]},{verifiedBlankPages:[],formulaEnriched:false}).nativeTables[0];
@@ -34,8 +34,40 @@ test('selected native table page preserves original image and uncertainty, witho
   content=request.input.at(-1)!.content as Array<{type:string;text?:string}>;
  assert.equal(content.filter(c=>c.type==='input_image').length,1);assert.ok(JSON.stringify(request).includes('parser-declared-untrusted'));
  assert.deepEqual(prepared.quoteUnits,units);assert.equal(canonical(context),original);assert.equal(observation.semanticVerified,false);assert.equal(observation.relationshipVerified,false);
- for(const referenceIds of [[],[other.id],['i0']]){
+ for(const referenceIds of [[],[other.id]]){
   const prior=retainSelectedStoredNodeText({referenceIds},prepared);
   assert.deepEqual(retainSelectedNativeTablePages(prior,prepared).referenceIds,referenceIds);
  }
+ const imageOnly=retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:['i0']},prepared),prepared);
+ assert.deepEqual(imageOnly.providerReferenceIds,['i0']);assert.deepEqual(imageOnly.referenceIds,['i0',first.id]);
+ assert.deepEqual(imageOnly.systemRetainedReferenceIds,[first.id]);assert.deepEqual(imageOnly.expandedSupportIds,['e0']);
+ assert.deepEqual(imageOnly.nativeTablePageRetention?.imageTextPairing?.pairs,[{imageId:'i0',supportId:'e0',referenceIds:[first.id],
+  relation:'same-stored-pdf-page',semanticRelationsVerified:false}]);
+ const paired=buildSelectedDocumentAnswerRequest(prepared,imageOnly.referenceIds,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},{scope:'application'}),
+  packet=JSON.parse((paired.input.at(-1)!.content as Array<{type:string;text?:string}>)[0].text!);
+ assert.deepEqual(packet.quoteUnits.map((u:{text:string})=>u.text),[context.anchors[0].body]);
+ assert.equal(JSON.stringify(packet).includes(context.anchors[1].body),false);assert.deepEqual(prepared.quoteUnits,units);
+ assert.deepEqual(retainSelectedNativeTablePages(imageOnly,prepared),imageOnly,'retaining the same page is idempotent');
+ const {score:_score,...baseAnchor}=context.anchors[0],anchor={...baseAnchor,evidence_body:'full-page' as const,
+  reader_selection:'evidence-node-ids' as const,retrieval_mode:'reader-selection' as const};
+ const imageAnchorOnly=prepareDocumentAnswer('Which?',{...context,anchors:[],imageAnchors:[anchor]});
+ assert.deepEqual(retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:['i0']},imageAnchorOnly),imageAnchorOnly).referenceIds,['i0'],
+  'an image binding anchor is never promoted to text evidence');
+ const foreign=prepareDocumentAnswer('Which?',{...context,imageAnchors:[anchor],anchors:[{...context.anchors[0],
+  id:'pg:foreign:1',document_id:'foreign-document',source_version_id:'foreign-source',source_hash:sha('foreign-source'),body:'Foreign page with a colliding evidence label.'}]});
+ assert.deepEqual(retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:['i0']},foreign),foreign).referenceIds,['i0']);
+ const large=prepareDocumentAnswer('Which?',{...context,anchors:[context.anchors[0],{...context.anchors[1],body:'word '.repeat(16000)}]}),
+  fullIds=[...large.quoteUnits.filter(u=>u.supportId==='e1').slice(0,63).map(u=>u.id),'i0'];assert.equal(fullIds.length,64);
+ const bounded=retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:fullIds},large),large);
+ assert.deepEqual(bounded.referenceIds,fullIds);assert.deepEqual(bounded.nativeTablePageRetention?.imageTextPairing?.skippedSupportIds,['e0']);
+ assert.deepEqual(bounded.nativeTablePageRetention?.imageTextPairing?.pairs,[],'whole text additions never partially fill a full reference set');
+ const incomplete=structuredClone(native);(incomplete.raw.data as {table_cells:unknown[]}).table_cells.shift();
+ incomplete.cellTexts=incomplete.cellTexts.slice(1).map((cell,index)=>({...cell,cellIndex:index}));
+ const partial=prepareNativeTableArtifact(incomplete),partialIdentity={...identity,artifactSha256:partial.artifactSha256},
+  partialCandidate={...candidate,id:sha(canonical(partialIdentity)),artifactSha256:partial.artifactSha256},
+  partialObservation=prepareNativeTableObservation(partialCandidate,partial,image),
+  partialPrepared=prepareDocumentAnswer('Which?',{...context,images:[{...image,tableObservations:[partialObservation]}]});
+ const partialPaired=retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:['i0']},partialPrepared),partialPrepared);
+ assert.deepEqual(partialPaired.referenceIds,['i0',first.id]);assert.equal(partialObservation.status,'unavailable');
+ assert.equal(partialObservation.reason,'incomplete-grid');assert.equal(partialObservation.native,undefined);
 });
