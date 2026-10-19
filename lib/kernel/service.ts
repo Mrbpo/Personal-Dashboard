@@ -8,7 +8,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText,projectDocume
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,studyContextInputUpper,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -90,10 +90,6 @@ export function mergeStudyEvidence(base:DocumentAnswerContext,added:DocumentAnsw
  return {...base,anchors:[...anchors.values()],parents:[...parents.values()],images:[...images.values()],
   imageSelection:{...budget.snapshot(),omitted:[...base.imageSelection?.omitted??[],...added.imageSelection?.omitted??[]]},
   imageAnchors:[...new Map([...base.imageAnchors??[],...added.imageAnchors??[]].map(n=>[n.evidence_id,n])).values()]};
-}
-function studyContextInputUpper(request:ReturnType<typeof buildDocumentAnswerRuntimeRequest>,context:DocumentAnswerContext){
- const nonImageRequest=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
- return Buffer.byteLength(nonImageRequest)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+(context.imageSelection?.accounting.imageInputTokens??0);
 }
 type CandidateInput = {
   entityId: string; attribute: string; value: unknown; sourceVersionId: string;
