@@ -91,14 +91,15 @@ AUTO_SYNC_ENABLED=false
 
 ### 3. 初始化与启动
 
-首次使用空数据库时执行迁移，再启动网站：
+首次使用空数据库时执行迁移，准备绘图字体资源，再启动网站：
 
 ```sh
 node --env-file=.env.local --experimental-strip-types scripts/kernel-migrate.ts
+node scripts/copy-excalidraw-assets.mjs
 node --env-file=.env.local scripts/dev-local.mjs --hostname 127.0.0.1
 ```
 
-这里显式加载 `.env.local`，让开发启动器也能读取同步开关。打开 <http://127.0.0.1:3000>。另开终端，在同一项目目录启动后台 worker，处理摄取、解析与索引任务：
+这里显式执行通常由 `npm run dev` 的 `predev` 完成的资源准备，并加载 `.env.local`，让开发启动器也能读取同步开关。打开 <http://127.0.0.1:3000>。另开终端，在同一项目目录启动后台 worker，处理摄取、解析与索引任务：
 
 ```sh
 node --env-file=.env.local --experimental-strip-types scripts/worker.ts
