@@ -68,6 +68,20 @@ test('larger generation output reserves its real cost and retains ambiguous outc
  }finally{globalThis.fetch=original;for(const n of names)if(saved[n]===undefined)delete process.env[n];else process.env[n]=saved[n];}
 });
 
+test('generation verbosity preserves the exact source request and selector, with explicit chain validation',async()=>{
+ const p=prepareDocumentAnswer('What did Original a test?',context()),ids=[p.quoteUnits[0].id],
+  check={mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}},base={...policy,citationCheck:check},
+  medium={...base,generationVerbosity:'medium' as const},before=buildSelectedDocumentAnswerRequest(p,ids,settings,base),
+  after=buildSelectedDocumentAnswerRequest(p,ids,settings,medium);
+ assert.equal(after.text.verbosity,'medium');assert.equal(before.text.verbosity,'low');
+ assert.deepEqual({...after,text:{...after.text,verbosity:'low'}},before,'only generation text.verbosity changes');
+ assert.deepEqual(buildDocumentEvidenceSelectionRequest(p,settings,medium),buildDocumentEvidenceSelectionRequest(p,settings,base));
+ await documentAnswerSettings(medium);
+ for(const invalid of [{...medium,generationVerbosity:'high'},{...medium,scope:'development'},
+  {...medium,evidenceSelection:undefined},{...medium,citationCheck:undefined}])
+  await assert.rejects(documentAnswerSettings(invalid as any),/Generation verbosity/);
+});
+
 test('mentioned source attribution survives selection without suppressing complementary sources',()=>{
  const c=context(),p=prepareDocumentAnswer('What did Original a test?',c),
   packet=(request:any)=>JSON.parse(request.input.at(-1).content[0].text),

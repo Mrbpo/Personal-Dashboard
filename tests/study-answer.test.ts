@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyQuantityConsistency,studyGenerationReasoning,studyGenerationOutputTokens,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyQuantityConsistency,studyGenerationReasoning,studyGenerationOutputTokens,studyGenerationVerbosity,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings,DocumentModelResponseError}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
@@ -69,6 +69,30 @@ test('application generation envelope is explicit, chain guarded and does not re
   await assert.rejects(answerKernelStudy('owner','Synthetic budget question','',[]),(e:any)=>e.code==='model-output-limit');
   process.env.STUDY_EVIDENCE_SELECTION='single-pass';
   await assert.rejects(answerKernelStudy('owner','Synthetic budget question','',[]),(e:any)=>e.code==='generation-output-requires-selection-check');
+  assert.equal(calls,1);
+ }finally{kernel.answerStudyContent=saved;for(const [k,v]of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
+});
+
+test('application generation verbosity is opt-in, recorded and rejects wrong chains before retrieval',async()=>{
+ assert.equal(studyGenerationVerbosity('low'),undefined);assert.equal(studyGenerationVerbosity('medium'),'medium');
+ for(const value of ['','high','MEDIUM'])assert.throws(()=>studyGenerationVerbosity(value),StudyAnswerError);
+ const values={STUDY_GENERATION_VERBOSITY:'medium',STUDY_GENERATION_OUTPUT_TOKENS:undefined,STUDY_ANSWER_BACKEND:'kernel',
+  STUDY_DEVELOPMENT_DAILY_LIMIT:undefined,STUDY_EVIDENCE_SELECTION:'select-then-answer',STUDY_CITATION_CHECK:'selected-once',
+  STUDY_SOURCE_VALUES:'off',STUDY_SOURCE_QUANTITIES:'off',STUDY_SOURCE_SCOPE:'off',STUDY_TEXT_CONTEXT_WINDOWS:'off',
+  OPENAI_MODEL:'gpt-5.4-mini',STUDY_CITATION_TRACE_DIR:`${process.cwd()}/data/verbosity-fixture-never-written`},
+  env=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;
+ let calls=0;
+ try{
+  for(const [k,v]of Object.entries(values))if(v===undefined)delete process.env[k];else process.env[k]=v;
+  kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;
+   assert.equal(policy?.generationVerbosity,'medium');await documentAnswerSettings(policy);
+   return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},selectedUnits:[],sourceDocuments:[],warnings:[],
+    textEvidenceCount:0,imageEvidenceCount:0,model:null} as any;};
+  const response=await answerKernelStudy('owner','Synthetic verbosity question','',[]);
+  assert.equal(response.meta.study.settings.generationVerbosity,'medium');
+  assert.equal(response.meta.study.settings.evidenceSelectionVerbosity,'low');
+  process.env.STUDY_EVIDENCE_SELECTION='single-pass';
+  await assert.rejects(answerKernelStudy('owner','Synthetic verbosity question','',[]),(e:any)=>e.code==='generation-verbosity-requires-selection-check');
   assert.equal(calls,1);
  }finally{kernel.answerStudyContent=saved;for(const [k,v]of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
 });

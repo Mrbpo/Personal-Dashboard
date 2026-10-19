@@ -85,6 +85,10 @@ export function studyGenerationOutputTokens(value=process.env.STUDY_GENERATION_O
  if(value!=='6000')throw new StudyAnswerError('configuration','invalid-generation-output','生成输出上限仅允许 3000 或 6000');
  return 6000 as const;
 }
+export function studyGenerationVerbosity(value=process.env.STUDY_GENERATION_VERBOSITY??'low'){
+ if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-verbosity','答案详略仅允许 low 或 medium');
+ return value==='low'?undefined:value;
+}
 export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WINDOWS??'off'){
  if(value!=='off'&&value!=='producer-neighbors-v1'&&value!=='stored-page-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
  return value==='off'?undefined:value;
@@ -127,8 +131,11 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const generationReasoningEffort=studyGenerationReasoning();
  const generationOutputTokens=studyGenerationOutputTokens();
+ const generationVerbosity=studyGenerationVerbosity();
  if(generationOutputTokens&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','generation-output-requires-selection-check','独立生成输出额度需要内核、证据选择和引用核对');
+ if(generationVerbosity&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','generation-verbosity-requires-selection-check','答案详略需要内核、证据选择和引用核对');
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
  if(sourceValueContract==='cell-bindings-v2'&&nativeCellObservations!=='declared-v1')
@@ -162,6 +169,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(generationOutputTokens?{generationOutputTokens}:{}),
+    ...(generationVerbosity?{generationVerbosity}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
@@ -187,6 +195,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...(explicitRouting?{explicitRouting}:{}),
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:generationOutputTokens??3000,timeoutMs:55000,
      ...(generationOutputTokens?{generationOutputTokens,evidenceSelectionMaxOutputTokens:3000}:{}),
+     ...(generationVerbosity?{generationVerbosity,evidenceSelectionVerbosity:'low'}:{}),
      ...(nativeCellObservations?{nativeCellObservations}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},

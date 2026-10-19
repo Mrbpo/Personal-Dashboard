@@ -2,6 +2,10 @@
 
 `STUDY_ANSWER_BACKEND=legacy` is the default. Set the server environment to `kernel` to opt in; invalid values fail closed. Neither API accepts a client backend or owner override. Switching the environment back to `legacy` restores the retained tutor implementation. Do not enable in production before isolated HTTP and content validation.
 
+## Optional generation verbosity
+
+`STUDY_GENERATION_VERBOSITY=medium` changes only the application's generation `text.verbosity`. Unset/`low` preserves the existing wire. It requires the Kernel selector and selected-once citation check; both the application and Kernel reject other settings or chains before paid work. Selection remains `low`; prompts, evidence, schema, model, reasoning, output limits and timeouts are unchanged. The shared request builder applies it to ordinary and source-value/quantity generation, including capacity preflight and request fingerprints. Assistant `meta.study.settings` records the explicit generation value and selector value. This adds no retry, model review, coverage certificate or production switch. A saved-request calibration is not actual website or independent content acceptance.
+
 ## Optional explicit retrieval scope
 
 In the kernel lane, `/api/v1/study` accepts an optional JSON `routingScope` on a question request. `/api/tutor` accepts the same object encoded as a JSON-text multipart field when sending a question; its JSON action still only creates a thread and rejects a scope on that action. Both enter the same `sendTutor → answerKernelStudy → KernelService` path. No UI setting or production switch is added.

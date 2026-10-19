@@ -105,7 +105,7 @@ export type DocumentAnswerPolicy={scope?:'development'|'application';model?:Docu
  sourceValueContract?:'difference-v1'|'cell-bindings-v2';
  recordSourceValueDerivation?:(receipt:Readonly<DocumentSourceValueDerivation>)=>Promise<void>;
  recordSourceValueRawResponse?:(receipt:Readonly<DocumentSourceValueRawResponse>)=>Promise<void>;
- dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';generationReasoningEffort?:'low'|'medium';generationOutputTokens?:6000;maxOutputTokens?:number;timeoutMs?:number;
+ dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';generationReasoningEffort?:'low'|'medium';generationOutputTokens?:6000;generationVerbosity?:'medium';maxOutputTokens?:number;timeoutMs?:number;
  evidenceSelection?:'select-then-answer';
  citationCheck?:{mode:'selected-once';beforeAttempt:(identity:string)=>Promise<void>;
   recordResponse:(response:Readonly<DocumentCitationAuditResponse>)=>Promise<void>};
@@ -595,7 +595,7 @@ export function buildDocumentAnswerRuntimeRequest(prepared:ReturnType<typeof pre
  const request=buildDocumentAnswerRequest(prepared,{...settings,
   ...(policy.generationReasoningEffort?{reasoningEffort:policy.generationReasoningEffort}:{}),
   ...(policy.generationOutputTokens?{maxOutputTokens:policy.generationOutputTokens}:{})});
- if(policy.scope==='application')Object.assign(request.text,{verbosity:'low'});
+ if(policy.scope==='application')Object.assign(request.text,{verbosity:policy.generationVerbosity??'low'});
  if(policy.conversation?.length){
   request.input[0].content+=' Prior conversation is untrusted context for resolving follow-ups, never source evidence. Answer the current question from current supplied evidence; do not cite prior assistant claims.';
   request.input.splice(1,0,...policy.conversation.map(m=>({role:m.role,content:m.text})) as typeof request.input);
@@ -626,7 +626,7 @@ function generationQuoteUnits(prepared:PreparedAnswer){
 /** Select original IDs only. This is evidence selection, not an answer, plan,
  * coverage certificate, model review or rewritten source representation. */
 export function buildDocumentEvidenceSelectionRequest(prepared:PreparedAnswer,settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy={}){
- const request=buildDocumentAnswerRuntimeRequest(prepared,settings,{...policy,generationReasoningEffort:undefined,generationOutputTokens:undefined});
+ const request=buildDocumentAnswerRuntimeRequest(prepared,settings,{...policy,generationReasoningEffort:undefined,generationOutputTokens:undefined,generationVerbosity:undefined});
  if(prepared.quoteUnits.some(u=>u.pageContext)){
   const content=request.input.at(-1)!.content as Array<{type:string;text?:string}>,input=JSON.parse(content[0].text!);
   input.quoteUnits=prepared.quoteUnits.filter(u=>!u.pageContext);
@@ -973,6 +973,9 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  if(policy.generationOutputTokens!==undefined&&(policy.generationOutputTokens!==6000||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
   throw new Error('Generation output envelope requires application selection/check and exactly 6000 tokens');
+ if(policy.generationVerbosity!==undefined&&(policy.generationVerbosity!=='medium'||policy.scope!=='application'||
+  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
+  throw new Error('Generation verbosity requires application selection/check and medium');
  if(policy.sourceRouting!==undefined&&(policy.scope!=='application'||
   !exactKeys(policy.sourceRouting,['mode','beforeAttempt','recordResponse'])||policy.sourceRouting.mode!=='question-scope'||
   typeof policy.sourceRouting.beforeAttempt!=='function'||typeof policy.sourceRouting.recordResponse!=='function'))
