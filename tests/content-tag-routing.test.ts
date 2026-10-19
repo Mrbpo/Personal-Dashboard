@@ -2,7 +2,8 @@ import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import type {Pool} from 'pg';
-import {contentTagQueryPlan,contentTagRoutingMode,orderMetadataTaggedCandidates,routeDocumentContentTagCandidates} from '../lib/kernel/content-tag-routing.ts';
+import {contentTagQueryPlan,contentTagRoutingMode,orderMetadataTaggedCandidates,routeDocumentContentTagCandidates,contentTagAnswerObservation} from '../lib/kernel/content-tag-routing.ts';
+import {prepareDocumentAnswer,buildDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {classifyContentMetadata} from '../lib/kernel/content-tags.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {kernel} from '../lib/kernel/service.ts';
@@ -66,6 +67,25 @@ test('default off and queries without aliases do no tag SQL; source drift reject
    await assert.rejects(routeDocumentContentTagCandidates({query:async()=>({rows})} as unknown as Pool,'owner','syllabus',hits),/changed|stale/i);
   }
  });
+});
+
+test('answer diagnostics identify only observed anchors and never change provider input or claim full-pool coverage',()=>{
+ const hits=Array.from({length:12},(_,i)=>({...candidate(String(i)),id:'pg:version:'+i})),p=contentTagQueryPlan('syllabus'),
+  observations=new Map(hits.map(h=>[h.document_id,{matches:[],snapshotIds:[],reason:'no-current-tags' as const}])),
+  routed=orderMetadataTaggedCandidates(hits,observations,p),subset=[routed[0],routed[1],hits[2]],receipt=contentTagAnswerObservation(subset)!;
+ assert.equal(contentTagAnswerObservation(hits),undefined);assert.equal(receipt.observedAnchors,3);
+ assert.equal(receipt.routedAnchors,2);assert.equal(receipt.unroutedAnchors,1);assert.equal(receipt.pools[0].candidateCount,12);
+ assert.equal(receipt.pools[0].observedAnchors,2);assert.equal(receipt.eligibleCorpusDocuments,null);assert.equal(receipt.scoredDocuments,null);
+ assert.equal(receipt.semanticVerified,false);assert.equal(receipt.answerCorrectness,'unassessed');
+ assert.equal(receipt.anchors[0].sourceHash,hits[0].source_hash);
+ receipt.anchors[0].receipt.snapshotIds.push('changed diagnostic copy');assert.deepEqual(routed[0].content_tag_routing.snapshotIds,[]);
+ const base={...hits[0],id:'pg:version:1',evidence_body:'full-page' as const,course_id:'',name:'Original notes',origin:'canvas',origin_key:'file:1',locator:'page 1',parser_version:'fixture'},
+  context:DocumentAnswerContext={anchors:[base],parents:[],images:[],sourceContentIsUntrusted:true},
+  tagged:DocumentAnswerContext={...context,anchors:[{...base,content_tag_routing:routed[0].content_tag_routing}]},
+  settings={model:'gpt-5.4-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:3000};
+ assert.deepEqual(prepareDocumentAnswer('Explain gravity',context),prepareDocumentAnswer('Explain gravity',tagged));
+ assert.deepEqual(buildDocumentAnswerRequest(prepareDocumentAnswer('Explain gravity',context),settings),
+  buildDocumentAnswerRequest(prepareDocumentAnswer('Explain gravity',tagged),settings));
 });
 
 test('incompatible or disagreeing current snapshots disable priority, with JSONB key order tolerated',async()=>enabled(async()=>{

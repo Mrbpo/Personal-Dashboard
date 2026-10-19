@@ -193,6 +193,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
+    ...('contentTagRouting' in result&&result.contentTagRouting?{contentTagRouting:result.contentTagRouting}:{}),
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),

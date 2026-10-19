@@ -51,6 +51,25 @@ export type ContentTagRoutingReceipt={version:typeof CONTENT_TAG_ROUTE_VERSION;p
  matches:TagMatch[];snapshotIds:string[];reason:Observation['reason'];filterAuthorization:false;semanticVerified:false};
 const candidateKey=(c:Candidate)=>JSON.stringify([c.document_id,c.page_number,c.source_version_id,c.evidence_id,c.source_hash]);
 
+/** This describes the ranked reader's returned anchors, not its whole pool or
+ * the corpus. It stays outside provider input and citation/source authority. */
+export function contentTagAnswerObservation(candidates:Array<Candidate&{id:string;content_tag_routing?:ContentTagRoutingReceipt}>){
+ const routed=candidates.filter(c=>c.content_tag_routing);if(!routed.length)return undefined;
+ const pools=new Map<string,{planSha256:string;candidateSetSha256:string;candidateCount:number;observedAnchors:number}>();
+ const anchors=routed.map(c=>{
+  const receipt=structuredClone(c.content_tag_routing!),key=JSON.stringify([receipt.planSha256,receipt.candidateSetSha256]);
+  const pool=pools.get(key)??{planSha256:receipt.planSha256,candidateSetSha256:receipt.candidateSetSha256,
+   candidateCount:receipt.candidateCount,observedAnchors:0};
+  pool.observedAnchors++;pools.set(key,pool);
+  return {id:c.id,documentId:c.document_id,physicalPage:c.page_number,sourceVersionId:c.source_version_id,
+   sourceHash:c.source_hash,evidenceId:c.evidence_id,receipt};
+ });
+ return {version:'metadata-answer-routing-observation-v1' as const,scope:'ranked-reader-returned-anchors-only' as const,
+  observedAnchors:candidates.length,routedAnchors:routed.length,unroutedAnchors:candidates.length-routed.length,
+  observedDocuments:new Set(candidates.map(c=>c.document_id)).size,pools:[...pools.values()],anchors,
+  eligibleCorpusDocuments:null,scoredDocuments:null,filtering:'none' as const,semanticVerified:false as const,answerCorrectness:'unassessed' as const};
+}
+
 /** Reorder only within the original rank window. No candidate is added,
  * removed or rewritten, and the original relevance score is not confidence. */
 export function orderMetadataTaggedCandidates<T extends Candidate>(candidates:T[],observations:Map<string,Observation>,plan:ReturnType<typeof contentTagQueryPlan>):Array<T&{content_tag_routing:ContentTagRoutingReceipt}>{

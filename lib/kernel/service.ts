@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
@@ -1326,7 +1327,13 @@ export class KernelService {
       }
     }
     if(sourceRouting)policy.onStage?.('retrieval');
-    const rankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions);
+    const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions);
+    let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
+    const rankedRead=async()=>{
+      const context=await originalRankedRead();
+      contentTagRouting=contentTagAnswerObservation(context.anchors);
+      return context;
+    };
     let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
     let read:()=>Promise<DocumentAnswerContext>=rankedRead;
     if(policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages){
@@ -1455,7 +1462,8 @@ export class KernelService {
         quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
         ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
     }
-    return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{})};
+    return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
+      ...(contentTagRouting?{contentTagRouting}:{})};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

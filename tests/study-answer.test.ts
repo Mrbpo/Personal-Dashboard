@@ -184,3 +184,28 @@ test('kernel tutor shares current-source references, preserves ownership and req
   for(const [name,value]of Object.entries({STUDY_ANSWER_BACKEND:saved.backend,OPENAI_MODEL:saved.model}))if(value===undefined)delete process.env[name];else process.env[name]=value;
  }
 });
+
+test('shared tutor persists Kernel routing diagnostics unchanged without turning them into citations',async()=>{
+ const names=['STUDY_ANSWER_BACKEND','OPENAI_MODEL','STUDY_SOURCE_SCOPE','STUDY_CITATION_CHECK','STUDY_SOURCE_VALUES','STUDY_SOURCE_QUANTITIES',
+  'STUDY_TEXT_CONTEXT_WINDOWS'] as const,env=Object.fromEntries(names.map(n=>[n,process.env[n]])),
+  saved={answer:kernel.answerStudyContent,courses:kernel.listCourses,fetch:globalThis.fetch};
+ const diagnostic={version:'metadata-answer-routing-observation-v1',scope:'ranked-reader-returned-anchors-only',observedAnchors:2,
+  routedAnchors:1,unroutedAnchors:1,observedDocuments:2,pools:[{planSha256:'fixture-plan',candidateSetSha256:'fixture-pool',candidateCount:40,observedAnchors:1}],
+  anchors:[],eligibleCorpusDocuments:null,scoredDocuments:null,filtering:'none',semanticVerified:false,answerCorrectness:'unassessed'};
+ let calls=0;
+ try{
+  process.env.STUDY_ANSWER_BACKEND='kernel';process.env.OPENAI_MODEL='gpt-5.4-mini';for(const n of names.slice(2))process.env[n]='off';
+  globalThis.fetch=async()=>{throw Error('Routing metadata fixture cannot contact a provider');};kernel.listCourses=async()=>[];
+  kernel.answerStudyContent=async()=>{calls++;return {answer:{status:'insufficient-evidence',message:'Synthetic transport fixture.',claims:[]},
+   selectedUnits:[],sourceDocuments:[],warnings:[],textEvidenceCount:2,imageEvidenceCount:0,model:null,contentTagRouting:diagnostic} as any;};
+  const thread=await tutor.createTutorThread('routing-meta-owner',''),requestId='routing-meta-request01';
+  await tutor.sendTutor('routing-meta-owner',thread,requestId,'Explain gravitational force',[],false);
+  await tutor.sendTutor('routing-meta-owner',thread,requestId,'Explain gravitational force',[],false);
+  const state=await tutor.tutorState('routing-meta-owner',thread),reply=state.messages[1];
+  assert.equal(calls,1);assert.deepEqual(reply.meta.study.contentTagRouting,diagnostic);
+  assert.deepEqual(reply.meta.citations,[]);assert.equal(reply.meta.study.semanticVerified,false);
+ }finally{
+  kernel.answerStudyContent=saved.answer;kernel.listCourses=saved.courses;globalThis.fetch=saved.fetch;
+  for(const n of names)if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];
+ }
+});
