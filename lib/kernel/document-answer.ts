@@ -11,6 +11,7 @@ import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQuer
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
+import {assertPdfNavigationContext,projectPdfNavigationRequest,type PdfNavigationContext} from './pdf-navigation-projection.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,nativeTableObservationWire,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,sourceValueQuestionContract,
@@ -37,6 +38,7 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
  /** Kernel configuration only; original page boundaries and bodies stay intact. */
  textQuotePolicy?:'stored-page-v1';
  textContextWindows?:PreparedDoclingTextContextWindows[];
+ pdfNavigation?:PdfNavigationContext;
  pdfPageRegionReads?:StudyPdfPageRegionRead[];
  completeSourceProof?:CompleteStudySourceProof;
  imageSelection?:DocumentImageSelection;
@@ -427,6 +429,7 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
   if(!documentTitleMention(question,context.completeSourceProof.selectedDocumentTitle))
    throw Error('Complete source title must occur in the original question');}
  const supports=supportFor(context);
+ if(context.pdfNavigation)assertPdfNavigationContext(context.pdfNavigation,supports);
  for(const hint of context.textContextWindows??[]){
   const binding=hint.binding,support=supports.find(s=>s.kind==='text'&&s.documentId===binding.documentId&&
    s.documentVersionId===binding.currentVersionId&&s.sourceVersionId===binding.sourceVersionId&&
@@ -506,10 +509,12 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
   }
  }
  const fingerprintInput=boundReads.length?{input,sourceObservations:boundReads}:input;
+ const baseFingerprint=sourceIdentityBindings.length?{input:fingerprintInput,sourceIdentityBindings}:fingerprintInput;
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,...(visualUnitManifest?{visualUnitManifest}:{}),input,warnings,unavailableParents,
+  ...(context.pdfNavigation?{pdfNavigation:context.pdfNavigation}:{}),
   ...(regionReads.length?{pdfPageRegionReads:structuredClone(regionReads)}:{}),
   ...(sourceIdentityBindings.length?{sourceIdentityBindings}:{}),
-  fingerprint:sha(JSON.stringify(sourceIdentityBindings.length?{input:fingerprintInput,sourceIdentityBindings}:fingerprintInput))};
+  fingerprint:sha(JSON.stringify(context.pdfNavigation?.pages.length?{input:baseFingerprint,navigationObservations:context.pdfNavigation.pages.map(p=>p.observationSha256)}:baseFingerprint))};
 }
 
 /** Optional metadata never displaces original text or PNGs. Source drift uses
@@ -1159,7 +1164,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  }
  const sourceValueGeneration=sourceGenerationRoute==='source-values'&&referenceIds?prepareSelectedSourceValueGeneration(prepared,referenceIds,settings,policy):undefined;
  const sourceQuantityGeneration=sourceGenerationRoute==='source-quantities'&&referenceIds?prepareSelectedSourceQuantityGeneration(prepared,referenceIds,settings,policy):undefined;
- const request=sourceQuantityGeneration?.request??sourceValueGeneration?.request??(referenceIds?buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy));
+ const baseRequest=sourceQuantityGeneration?.request??sourceValueGeneration?.request??(referenceIds?buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy));
+ const navigationProjection=projectPdfNavigationRequest(baseRequest,prepared.pdfNavigation,prepared.supports,generationQuoteUnits(prepared),referenceIds),request=navigationProjection.request;
  const providerRequestSha256=sha(JSON.stringify(request));
  const identity=sha(JSON.stringify({model,effort,maxOutput:request.max_output_tokens,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,
   quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,fingerprint:prepared.fingerprint}));
@@ -1207,6 +1213,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    ({tableId,physicalPage,result,captionLinkStatus}))??[]:[])}:undefined;
  if(boundSourceQuantityDerivation)await policy.recordSourceQuantityDerivation?.(boundSourceQuantityDerivation);
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
+  ...(navigationProjection.receipt?{sourceNavigation:navigationProjection.receipt}:{}),
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
   sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,
   ...(prepared.pdfPageRegionReads?.length?{pdfPageRegionTransport:pdfPageRegionTransport(prepared,request)}:{}),

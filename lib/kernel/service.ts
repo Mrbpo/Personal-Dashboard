@@ -29,6 +29,7 @@ import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvi
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
 import {readPdfNavigationTextContainers} from './pdf-navigation-text.ts';
+import {pdfNavigationProjectionEnabled,withPdfNavigationContext} from './pdf-navigation-projection.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
  searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
@@ -1317,6 +1318,7 @@ export class KernelService {
   async answerStudyContent(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean;retrievalQuestion?:string}={},policy:DocumentAnswerPolicy={}){
     await documentAnswerSettings(policy);
+    const navigationEnabled=pdfNavigationProjectionEnabled();
     const {retrievalQuestion,...searchOptions}={...options,
       ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
@@ -1447,6 +1449,8 @@ export class KernelService {
         return {...context,...(textContextWindows.length?{textContextWindows}:{})};
       };
     }
+    if(navigationEnabled&&policy.scope==='application'&&policy.evidenceSelection==='select-then-answer')
+      read=withPdfNavigationContext(read,(source,page)=>this.readPdfNavigationTextContainers(owner,source,page));
     if(searchOptions.routingScope){
       const readOriginal=read;
       read=async()=>{

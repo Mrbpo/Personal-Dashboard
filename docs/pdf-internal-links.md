@@ -69,4 +69,33 @@ It does not fill gaps, including whitespace gaps, or import additional text.
 That is a group relation: it does not assign the native link to an individual
 word or one arbitrarily chosen quote unit. Caller quote IDs are not accepted as
 current model references by this reader. This slice is not connected to the
-generator yet; answer accuracy and final website API acceptance are still open.
+generator in that reader slice; answer accuracy and final website API acceptance remain separate gates.
+
+## Selected-container generation transport (Issue205)
+
+`STUDY_PDF_NAVIGATION=selected-native-containers-v1` opts the application
+select-then-answer path into bounded native-navigation context. Unset or `off`
+performs no navigation reads and retains the original generation request.
+Invalid modes fail explicitly. There is no client-supplied observation field.
+Kernel reads at most16 distinct current anchor pages per context read, with a
+request-local cache keyed by document/version/source hash/page/evidence/body hash.
+Missing observations keep the ordinary answer path; integrity mismatches reject.
+No target page, new text, embedding or citation permission is fetched or added.
+
+Preparation checks current support/body and canonical observation hashes and
+binds available observations into the input fingerprint. After ordinary or typed
+generation routing, only actual selected quote IDs with gap-free container
+coverage enter `sourceNavigationContainers`. Members retain their exact overlap
+with the container, not a claim that all their words belong to an annotation.
+Shared native names/targets group navigation observations, not verified semantic
+equivalence. Unknown geometry/relations remain unknown. The existing selector,
+answer schema, citation ID enum, model settings and local checks are retained;
+no model phase, automatic rewrite or semantic-review layer is added.
+
+Transport is bounded to32 groups,64 containers and30,000 serialized group bytes,
+with explicit omission/unknown/unavailable counts in the optional
+`answer.meta.study.sourceNavigation` receipt. This metadata consumes generation
+input tokens when enabled. Default off avoids that cost. Engineering/replay
+checks establish transport and identity boundaries only; answer correctness
+still requires source review and real website API content acceptance. No
+production switch, historical source rewrite or final acceptance is implied.

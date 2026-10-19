@@ -213,6 +213,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     contextExpansion:result.contextExpansion,
     ...('contentTagRouting' in result&&result.contentTagRouting?{contentTagRouting:result.contentTagRouting}:{}),
     ...('sourceIdentityContext' in result&&result.sourceIdentityContext?{sourceIdentityContext:result.sourceIdentityContext}:{}),
+    ...('sourceNavigation' in result?{sourceNavigation:result.sourceNavigation}:{}),
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
