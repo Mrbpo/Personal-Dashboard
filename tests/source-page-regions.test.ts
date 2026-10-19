@@ -170,6 +170,36 @@ test('PDF region context budget keeps whole first-fit observations, later small 
  assert.equal(result.pdfPageRegionReads[4].reason,'page-observation-byte-limit');assert.ok(size(added)<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
  assert.deepEqual(result.images.map(({pageRegions:unused,...image})=>{void unused;return image;}),inputSnapshot);
  assert.deepEqual(images,inputSnapshot);assert.deepEqual(dbs.map(db=>db.f.body),bodies);
+
+ // A request has its own smaller remaining budget even when the complete
+ // source context fits. Keep a later small observation after a large skip.
+ const selected=[0,1,3,4],context:DocumentAnswerContext={sourceContentIsUntrusted:true,parents:[],
+  images:selected.map(i=>result.images[i]),anchors:selected.map(i=>{const f=dbs[i].f;return {
+   id:`pg:${f.source.currentVersionId}:1`,document_id:f.source.documentId,source_version_id:f.source.sourceVersionId,source_hash:f.source.sourceHash,
+   course_id:'',name:'Budget fixture',origin:'fixture',origin_key:f.source.documentId,body:f.body,locator:'page:1',page_number:1,
+   evidence_id:f.evidenceId,parser_version:'fixture-v1',score:1,evidence_body:'full-page' as const};})},
+  question='What do these pages report?',policy={scope:'application' as const,evidenceSelection:'select-then-answer' as const},
+  settings={model:'gpt-5.4-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:1000},
+  prepared=prepareDocumentAnswerForPolicy(question,context,policy),ids=[prepared.quoteUnits[0].id,...prepared.supports.filter(s=>s.image).map(s=>s.id)],
+  originalRequest=buildSelectedDocumentAnswerRequest(prepared,ids,settings,policy),target=structuredClone(originalRequest),
+  targetPart=(target.input.at(-1)!.content as any[])[0],packet=JSON.parse(targetPart.text),targetImages=packet.evidence.filter((e:any)=>e.pageRegions);
+ targetImages[1].pageRegions=unavailableStudyPdfPageRegions(targetImages[1].pageRegions,'request-input-limit');targetPart.text=JSON.stringify(packet);
+ const nonImage=(r:unknown)=>Buffer.byteLength(JSON.stringify(r,(k,v)=>k==='image_url'?'data:image/png;base64,':v)),
+  imageTokens=prepared.supports.filter(s=>s.image).reduce((n,s)=>n+2*Math.ceil(s.image!.width/32)*Math.ceil(s.image!.height/32)+1,0),
+  padding=COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens-COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens-imageTokens-nonImage(target)-256;
+ assert.ok(padding>0);
+ const padded=prepareDocumentAnswerForPolicy(question,{...context,anchors:context.anchors.map((a,i)=>i===0?{...a,parser_warnings:['x'.repeat(padding)]}:a)},policy),
+  projected=buildSelectedDocumentAnswerRequest(padded,ids,settings,policy),projectedPacket=JSON.parse((projected.input.at(-1)!.content as any[])[0].text),
+  projectedImages=projectedPacket.evidence.filter((e:any)=>e.pageRegions);
+ assert.deepEqual(projectedImages.map((e:any)=>e.pageRegions.status),['available','unavailable','available','unavailable']);
+ assert.equal(projectedImages[1].pageRegions.reason,'request-input-limit');
+ assert.equal(projectedImages[3].pageRegions.reason,'page-observation-byte-limit','retain prior source-level reason');
+ for(const i of [0,2,3])assert.deepEqual(projectedImages[i].pageRegions,packet.evidence.filter((e:any)=>e.pageRegions)[i].pageRegions);
+ assert.ok(nonImage(projected)+imageTokens+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens<=COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens);
+ assert.deepEqual(projectedPacket.quoteUnits,packet.quoteUnits);
+ assert.deepEqual((projected.input.at(-1)!.content as any[]).filter(b=>b.type==='input_image'),
+  (originalRequest.input.at(-1)!.content as any[]).filter(b=>b.type==='input_image'));
+ assert.deepEqual(images,inputSnapshot);assert.deepEqual(dbs.map(db=>db.f.body),bodies);
 });
 
 test('PDF regions study input: bound full observations survive actual builders; optional bytes never displace original evidence or enter local support',async()=>{

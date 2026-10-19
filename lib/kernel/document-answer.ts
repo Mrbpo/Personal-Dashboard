@@ -473,7 +473,7 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
 
 /** Optional metadata never displaces original text or PNGs. Source drift uses
  * the full prepared fingerprint; this projection describes actual wire only. */
-function projectPdfPageRegionRequest<T extends {input:unknown[]}>(original:T,prepared:ReturnType<typeof prepareDocumentAnswer>):T{
+export function projectPdfPageRegionRequest<T extends {input:unknown[]}>(original:T,prepared:ReturnType<typeof prepareDocumentAnswer>):T{
  if(!prepared.supports.some(s=>s.pageRegions))return original;
  const request=structuredClone(original),user=request.input.at(-1) as {content?:Array<{type:string;text?:string}>};
  const part=user?.content?.[0];if(part?.type!=='input_text'||typeof part.text!=='string')throw new Error('Missing actual study input');
@@ -485,9 +485,20 @@ function projectPdfPageRegionRequest<T extends {input:unknown[]}>(original:T,pre
   return Buffer.byteLength(nonImage)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+
    images.reduce((sum,s)=>sum+2*Math.ceil(s.image!.width/32)*Math.ceil(s.image!.height/32)+1,0)<=COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens;};
  if(fits())return request;
- for(const evidence of packet.evidence)if(evidence.pageRegions)evidence.pageRegions=unavailableStudyPdfPageRegions(evidence.pageRegions,'request-input-limit');
- if(fits())return request;
- for(const evidence of packet.evidence)delete evidence.pageRegions;
+ const candidates=packet.evidence.filter(e=>e.pageRegions).map(evidence=>({evidence,original:evidence.pageRegions!}));
+ for(const {evidence}of candidates)delete evidence.pageRegions;
+ // Keep source-unavailability reasons intact. Reserve small complete wrappers,
+ // then admit whole payloads in evidence order; a large item must not prevent
+ // a later smaller observation from using the remaining request capacity.
+ for(const {evidence,original:observation}of candidates){
+  evidence.pageRegions=observation.status==='available'?unavailableStudyPdfPageRegions(observation,'request-input-limit'):observation;
+  if(!fits())delete evidence.pageRegions;
+ }
+ for(const {evidence,original:observation}of candidates){
+  if(observation.status!=='available'||!evidence.pageRegions)continue;
+  const stub=evidence.pageRegions;evidence.pageRegions=observation;
+  if(!fits())evidence.pageRegions=stub;
+ }
  part.text=JSON.stringify(packet);return request;
 }
 export function pdfPageRegionTransport(prepared:ReturnType<typeof prepareDocumentAnswer>,request:{input:unknown[]}){
