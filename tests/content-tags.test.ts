@@ -69,8 +69,8 @@ test('Kernel ingestion tags are idempotent, source/version/owner bound, historic
   assert.deepEqual((await kernel.documentMetadataTags(owner,id)).map(t=>t.id),[current.id]);
   // Composite FK rejects a cross-owner snapshot even outside KernelService.
   await assert.rejects(kernelPool().query(`INSERT INTO document_tag_sets SELECT $1,$2,document_id,version_id,source_version_id,source_hash,
-   taxonomy_version,producer,input_sha256,classification_sha256,metadata,tags,unknown_facets,coverage,semantic_verified,filter_authorization,created_at
-   FROM document_tag_sets WHERE id=$3`,[hash('foreign:'+uid),'foreign-owner',current.id]),{code:'23503'});
+   taxonomy_version,producer,$4,classification_sha256,metadata,tags,unknown_facets,coverage,semantic_verified,filter_authorization,created_at
+   FROM document_tag_sets WHERE id=$3`,[hash('foreign:'+uid),'foreign-owner',current.id,hash('foreign-input:'+uid)]),{code:'23503'});
   const replacement={...doc,id:`${id}:replacement`,hash:hash('replacement:'+uid),createdAt:'2099-01-01T00:00:00Z'};
   await kernel.ingestParsedDocument(replacement,pages,{parserVersion:'tag-fixture'});
   assert.equal((await kernel.documentMetadataTags(owner,id)).length,0,'superseded logical sources cannot supply current tags');
