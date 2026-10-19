@@ -87,5 +87,9 @@ export async function recordContentMetadataTags(client:PoolClient,owner:string,d
 export async function readContentMetadataTags(pool:Pool,owner:string,documentId:string){
  return (await pool.query(`SELECT t.* FROM document_tag_sets t JOIN document_texts d ON d.id=t.document_id
   AND d.owner_id=t.owner_id AND d.source_hash=t.source_hash AND d.current_version_id=t.version_id
-  WHERE d.owner_id=$1 AND d.id=$2 AND NOT d.hidden ORDER BY t.created_at,t.id`,[owner,documentId])).rows;
+  WHERE d.owner_id=$1 AND d.id=$2 AND NOT d.hidden
+   AND NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin
+    AND newer.origin_key=d.origin_key AND NOT newer.hidden AND
+    (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+  ORDER BY t.created_at,t.id`,[owner,documentId])).rows;
 }

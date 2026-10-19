@@ -10,7 +10,7 @@ An assignment records exact metadata witnesses, method, confidence, document sco
 
 Migration015 adds immutable-by-writer `document_tag_sets` snapshots with source/document/version/owner/hash binding, metadata and classification digests, unknown facets and a GIN tag index. Composite foreign keys prevent cross-owner/source/version combinations. This additive numbering leaves013/014 reserved for independent PR186. Existing evidence/source records and files are untouched.
 
-Kernel reads original version metadata, not a changed library display title or caller-supplied label. Identical replay inserts nothing new. Changed source versions preserve old snapshots; a changed canonical term may produce another source-bound metadata revision. `documentMetadataTags` returns only owner-visible, current-version observations and intentionally does not elect a winner among revisions. Corrections/manual taxonomy management and exclusive route decisions are not implemented yet; archived snapshots are not a current-truth projection.
+Kernel reads original version metadata, not a changed library display title or caller-supplied label. Identical replay inserts nothing new. Changed source versions preserve old snapshots; a changed canonical term may produce another source-bound metadata revision. `documentMetadataTags` returns only owner-visible, current-version observations of the latest logical source (owner/origin/origin-key), and intentionally does not elect a winner among metadata revisions. Corrections/manual taxonomy management and exclusive route decisions are not implemented yet; archived snapshots are not a current-truth projection.
 
 ## Following slices, not delivered yet
 
