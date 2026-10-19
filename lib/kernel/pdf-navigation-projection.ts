@@ -18,24 +18,35 @@ export function pdfNavigationProjectionEnabled(value=process.env.STUDY_PDF_NAVIG
 
 /** Request-local cache only. Repeated source rechecks still bind each returned
  * observation to the newly read page; stale versions never share a cache key. */
-export function withPdfNavigationContext<T extends {anchors:DocumentEvidenceHit[]}>(read:()=>Promise<T>,
+type ExistingPageNode={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;evidenceId:string;
+ body:string;bodySha256:string;kind?:string;ordinal?:number};
+export function withPdfNavigationContext<T extends {anchors:DocumentEvidenceHit[];parents?:{nodes:ExistingPageNode[]}[]}>(read:()=>Promise<T>,
  readPage:(source:DocumentContextSource,page:number)=>ReturnType<typeof readPdfNavigationTextContainers>){
  const cache=new Map<string,ReturnType<typeof readPdfNavigationTextContainers>>();
  return async()=>{
   const context=await read(),pages:PdfNavigationPage[]=[],seen=new Set<string>();let omittedPages=0,unavailablePages=0;
-  for(const anchor of context.anchors){
+  const existingPages=context.anchors.flatMap(anchor=>{
    const version=/^pg:(.+):([0-9]+)$/.exec(anchor.id);
-   if(!version||Number(version[2])!==anchor.page_number)continue;
-   const source={documentId:anchor.document_id,currentVersionId:version[1],sourceVersionId:anchor.source_version_id,sourceHash:anchor.source_hash},
-    bodySha256=sha(anchor.body),key=JSON.stringify([source,anchor.page_number,anchor.evidence_id,bodySha256]);
+   return !version||Number(version[2])!==anchor.page_number?[]:[{source:{documentId:anchor.document_id,currentVersionId:version[1],
+    sourceVersionId:anchor.source_version_id,sourceHash:anchor.source_hash},page:anchor.page_number,evidenceId:anchor.evidence_id,bodySha256:sha(anchor.body)}];
+  });
+  for(const parent of context.parents??[])for(const node of parent.nodes){
+   const ordinal=node.ordinal;
+   if(node.kind!=='page'||typeof ordinal!=='number'||!Number.isSafeInteger(ordinal)||ordinal<0)continue;
+   if(sha(node.body)!==node.bodySha256)throw Error('Navigation existing page body hash differs');
+   existingPages.push({source:{documentId:node.documentId,currentVersionId:node.documentVersionId,sourceVersionId:node.sourceVersionId,
+    sourceHash:node.sourceHash},page:ordinal+1,evidenceId:node.evidenceId,bodySha256:node.bodySha256});
+  }
+  for(const {source,page:physicalPage,evidenceId,bodySha256} of existingPages){
+   const key=JSON.stringify([source,physicalPage,evidenceId,bodySha256]);
    if(seen.has(key))continue;seen.add(key);
    if(seen.size>16){omittedPages++;continue;}
-   let pending=cache.get(key);if(!pending){pending=readPage(source,anchor.page_number);cache.set(key,pending);}
+   let pending=cache.get(key);if(!pending){pending=readPage(source,physicalPage);cache.set(key,pending);}
    const page=await pending;
    if(page.status!=='available'){unavailablePages++;continue;}
    if(page.source.documentId!==source.documentId||page.source.currentVersionId!==source.currentVersionId||
     page.source.sourceVersionId!==source.sourceVersionId||page.source.sourceHash!==source.sourceHash||
-    page.physicalPage!==anchor.page_number||page.pageEvidenceId!==anchor.evidence_id||page.pageBodySha256!==bodySha256)
+    page.physicalPage!==physicalPage||page.pageEvidenceId!==evidenceId||page.pageBodySha256!==bodySha256)
     throw Error('Navigation current anchor binding differs');
    pages.push(page);
   }

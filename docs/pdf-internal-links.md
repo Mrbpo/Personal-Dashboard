@@ -77,7 +77,8 @@ generator in that reader slice; answer accuracy and final website API acceptance
 select-then-answer path into bounded native-navigation context. Unset or `off`
 performs no navigation reads and retains the original generation request.
 Invalid modes fail explicitly. There is no client-supplied observation field.
-Kernel reads at most16 distinct current anchor pages per context read, with a
+Kernel reads at most16 distinct current pages already present in ranked anchors
+or expanded original page nodes per context read, with a
 request-local cache keyed by document/version/source hash/page/evidence/body hash.
 Missing observations keep the ordinary answer path; integrity mismatches reject.
 No target page, new text, embedding or citation permission is fetched or added.

@@ -97,6 +97,17 @@ test('prepared fingerprint binds observations, empty context preserves baseline'
  assert.equal(prepareDocumentAnswer('Which method?',{...c,pdfNavigation:{...f.context,pages:[]}}).fingerprint,before.fingerprint);
 });
 
+test('already retrieved parent pages receive navigation even when not initial ranked anchors',async()=>{
+ const f=fixture(),c=answerContext();c.anchors=[];
+ c.parents=[{parentId:'expanded-page',status:'available',sourceNodeCount:1,sourceBodyCodepoints:body.length,nodes:[{
+  documentId:source.documentId,documentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,sourceHash:source.sourceHash,
+  evidenceId:'evidence',locator:'original:1',ordinal:0,kind:'page',body,bodySha256:sha(body)}]}];
+ const calls:number[]=[];
+ const read=withPdfNavigationContext(async()=>c,async(_source,page)=>{calls.push(page);return f.page;});
+ const context=await read();assert.deepEqual(calls,[1]);assert.equal(context.pdfNavigation.pages.length,1);
+ assert.doesNotThrow(()=>prepareDocumentAnswer('Which method?',context));
+});
+
 test('large native annotation sets keep bounded wire and explicit omissions',()=>{
  const f=fixture(),{observationSha256:_,...raw}=f.page,first=raw.observations[0];
  raw.observations=Array.from({length:128},(_,i)=>({...structuredClone(first),link:{...structuredClone(first.link),annotationIndex:i,destinationName:'cite.'+i}}));
