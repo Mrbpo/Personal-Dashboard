@@ -91,8 +91,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const sourceValueContract=studySourceValues();
  const quantityConsistency=studyQuantityConsistency();
  const sourceQuantityContract=studySourceQuantities();
- if(sourceQuantityContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'||sourceValueContract))
-  throw new StudyAnswerError('configuration','source-quantities-require-selection-check','来源数值绑定需要内核、证据选择和引用核对，并与旧差值契约互斥');
+ if(sourceQuantityContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','source-quantities-require-selection-check','来源数值绑定需要内核、证据选择和引用核对');
  if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','text-context-requires-selection-check','原文上下文窗口需要内核、证据选择和引用核对');
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))

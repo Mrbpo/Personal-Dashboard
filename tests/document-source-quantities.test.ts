@@ -5,7 +5,7 @@ import {readFile} from 'node:fs/promises';
 import {prepareSourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
 import {prepareSourceQuantityCatalog,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAnswerSchema,SourceQuantityOperationError} from '../lib/kernel/document-source-quantities.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceQuantityGeneration,buildSelectedDocumentAnswerRequest,
- synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext,type DocumentSourceQuantityDerivation,type DocumentSourceQuantityRawResponse} from '../lib/kernel/document-answer.ts';
+ synthesizeDocumentAnswer,documentAnswerSettings,documentSourceGenerationRoute,type DocumentAnswerContext,type DocumentSourceQuantityDerivation,type DocumentSourceQuantityRawResponse} from '../lib/kernel/document-answer.ts';
 process.env.DATABASE_URL=':memory:';process.env.AI_BUDGET_TEST_BYPASS='true';process.env.OPENAI_API_KEY='fixture-never-sent';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 const unit=(text:string)=>({id:'q:synthetic',supportId:'e0',text,quoteSha256:sha(text)});
@@ -66,8 +66,40 @@ test('off/ordinary routes retain the original generator wire and policies stay e
    proposed=prepareSelectedSourceQuantityGeneration(p,ids,settings,policy);
   assert.equal(proposed.applied,false);assert.deepEqual(proposed.request,buildSelectedDocumentAnswerRequest(p,ids,settings,policy));
  }
- await assert.rejects(documentAnswerSettings({...policy,sourceValueContract:'difference-v1'}),/Source quantities require/);
+ await assert.rejects(documentAnswerSettings({...policy,sourceValueContract:'difference-v1'}),/Source values require/);
  await assert.rejects(documentAnswerSettings({...policy,recordSourceQuantityRawResponse:undefined}),/Source quantities require/);
+});
+
+test('one combined configuration preserves scalar, exact-difference and ordinary multi-source routes',async()=>{
+ const combined={...policy,sourceValueContract:'difference-v1' as const,recordSourceValueDerivation:async()=>{},recordSourceValueRawResponse:async()=>{}};
+ await documentAnswerSettings(combined);
+ for(const question of ['What mean AUC is reported for humans?','How quickly is this model trained?','What percentage of human judgment agreement?'])
+  assert.equal(documentSourceGenerationRoute(question,combined),'source-quantities',question);
+ assert.equal(documentSourceGenerationRoute('By how much does one system outperform another?',combined),'source-values');
+ for(const question of ['Compare AUC and rater agreement.','Explain the training setup.','Calculate the mean AUC of the models.',
+  'By how much is the relative score higher?','What is the improvement from pruning on a simple EM algorithm?'])
+  assert.equal(documentSourceGenerationRoute(question,combined),'ordinary');
+ assert.equal(documentSourceGenerationRoute('Explain the training setup.',{sourceValueContract:'difference-v1'}),'source-values','retain existing value-only policy');
+ assert.equal(documentSourceGenerationRoute('How many epochs?',{}),'ordinary','opt-ins stay off by default');
+});
+
+test('combined contracts preserve ordinary multi-source generation without an extra model or scalar rewrite',async()=>{
+ const combined={...policy,sourceValueContract:'difference-v1' as const,
+  recordSourceQuantityRawResponse:async()=>{assert.fail('ordinary question must not record scalar operations');},
+  recordSourceQuantityDerivation:async()=>{assert.fail('ordinary question must not record scalar operations');},
+  recordSourceValueRawResponse:async()=>{assert.fail('ordinary question must not record arithmetic operations');},
+  recordSourceValueDerivation:async()=>{assert.fail('ordinary question must not record arithmetic operations');}};
+ const c=context();c.anchors.push({...c.anchors[0],id:'pg:other-v:1',document_id:'other',source_version_id:'other-sv',
+  source_hash:sha('other-pdf'),evidence_id:'other-page',name:'Another source',body:'A second source describes a different setup.'});
+ const question='Compare the training setups in these two documents.',p=prepareDocumentAnswerForPolicy(question,c,combined),
+  ids=p.quoteUnits.map(q=>q.id),expected=buildSelectedDocumentAnswerRequest(p,ids,settings,combined),saved=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+  if(calls===2)assert.deepEqual(request,expected,'the ordinary request retains both selected sources and its original schema');
+  const output=calls===1?{referenceIds:ids}:{status:'answered',message:'',claims:[{text:p.quoteUnits[0].text,citations:[{id:ids[0]}]}]};
+  return Response.json({status:'completed',model:'gpt-5.4-mini',output_text:JSON.stringify(output)});};
+ try{const result=await synthesizeDocumentAnswer(question,async()=>c,combined);assert.equal(calls,2);
+  assert.equal(result.answer.status,'answered');assert.equal('sourceValueDerivation'in result,false);assert.equal('sourceQuantityDerivation'in result,false);
+ }finally{globalThis.fetch=saved;}
 });
 
 test('original numerical prose preserves multiple entities and values without inventing a value binding',()=>{
@@ -86,13 +118,18 @@ test('original numerical prose preserves multiple entities and values without in
 });
 
 test('the application generator records the actual raw and compiles a mismatched source unit to neutral refusal without a third model call',async()=>{
- raw.length=0;derivations.length=0;const c=context(),question='How quickly is this model trained?',p=prepareDocumentAnswerForPolicy(question,c,policy),saved=globalThis.fetch;let calls=0;
+ const combined={...policy,sourceValueContract:'difference-v1' as const,
+  recordSourceValueDerivation:async()=>{assert.fail('scalar question must not invoke difference recording');},
+  recordSourceValueRawResponse:async()=>{assert.fail('scalar question must not invoke difference recording');}};
+ raw.length=0;derivations.length=0;const c=context(),question='How quickly is this model trained?',p=prepareDocumentAnswerForPolicy(question,c,combined),saved=globalThis.fetch;let calls=0;
+ assert.deepEqual(prepareSelectedSourceQuantityGeneration(p,[p.quoteUnits[0].id],settings,combined).request,
+  prepareSelectedSourceQuantityGeneration(p,[p.quoteUnits[0].id],settings,policy).request,'combined policy keeps the scalar model request byte-equivalent');
  globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));let output;
   if(calls===1)output={referenceIds:[p.quoteUnits[0].id]};
   else{assert.equal(request.text.format.name,'grounded_document_source_quantities_v1');const packet=JSON.parse(request.input.at(-1).content[0].text),o=packet.sourceQuantityCatalog.observations.find((o:any)=>o.family==='iteration-count');
    output={status:'answered',message:'',values:[{valueId:o.id}]};}
   return Response.json({status:'completed',model:'gpt-5.4-mini',output_text:JSON.stringify(output)});};
- try{const result=await synthesizeDocumentAnswer(question,async()=>c,policy);
+ try{const result=await synthesizeDocumentAnswer(question,async()=>c,combined);
   assert.equal(calls,2);assert.equal(result.answer.status,'insufficient-evidence');assert.deepEqual(result.selectedUnits,[]);
   assert.equal(raw.length,1);assert.equal(derivations.length,1);assert.equal(derivations[0].outcome,'source-metric-not-established');
   assert.deepEqual(JSON.parse(JSON.parse(raw[0].rawBody).output_text),derivations[0].rawProviderResult);

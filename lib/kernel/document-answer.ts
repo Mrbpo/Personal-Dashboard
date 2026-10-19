@@ -875,9 +875,9 @@ export function prepareSelectedSourceQuantityGeneration(prepared:PreparedAnswer,
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  if(policy.sourceQuantityContract!==undefined&&(policy.sourceQuantityContract!=='bound-value-v1'||policy.scope!=='application'||
-  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||policy.sourceValueContract!==undefined||
+  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||
   typeof policy.recordSourceQuantityRawResponse!=='function'||typeof policy.recordSourceQuantityDerivation!=='function'))
-  throw new Error('Source quantities require exclusive application selection/check and raw derivation recording');
+  throw new Error('Source quantities require application selection/check and raw derivation recording');
  if((policy.recordSourceQuantityRawResponse!==undefined||policy.recordSourceQuantityDerivation!==undefined)&&policy.sourceQuantityContract!=='bound-value-v1')
   throw new Error('Source quantity recording requires its explicit contract');
  if(policy.quantityConsistency!==undefined&&(policy.quantityConsistency!=='explicit-unit-v1'||policy.scope!=='application'))
@@ -942,6 +942,16 @@ export async function planDocumentQueryScope(question:string,source:ResolvedDocu
   model:actualModel,usage:payload.usage,fallible:true as const,inputScope:'question-and-canonical-metadata-only' as const};
 }
 
+/** One generator per question. Combining the existing opt-ins must not replace
+ * a scalar binding with an arithmetic operation, or force ordinary synthesis
+ * into a scalar/statement contract. The legacy value-only policy is retained. */
+export function documentSourceGenerationRoute(question:string,policy:Pick<DocumentAnswerPolicy,'sourceQuantityContract'|'sourceValueContract'>){
+ if(policy.sourceQuantityContract&&sourceQuantityQuestionFamily(question))return 'source-quantities' as const;
+ if(policy.sourceValueContract&&(!policy.sourceQuantityContract||sourceValueQuestionContract(question)==='required-difference-v1'))
+  return 'source-values' as const;
+ return 'ordinary' as const;
+}
+
 /** Read-only synthesis. No extraction, candidate or canonical state is written.
  * The same Kernel callback revalidates all sources before returning an answer. */
 export async function synthesizeDocumentAnswer(question:string,readContext:()=>Promise<DocumentAnswerContext>,policy:DocumentAnswerPolicy={}){
@@ -963,13 +973,12 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   model:null,providerRequestSha256:null,providerResponseId:null,usage:null,sourceDocuments:prepared.input.documentMetadata,
   promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt,...(policy.sourceValueContract?{sourceValueContract:{policy:policy.sourceValueContract,
    newContractApplied:false,reason:'no-selected-evidence',catalogSha256:null}}:{})};
- const settings={model,reasoningEffort:effort,maxOutputTokens:maxOutput};
+ const settings={model,reasoningEffort:effort,maxOutputTokens:maxOutput},sourceGenerationRoute=documentSourceGenerationRoute(question,policy);
  if(policy.evidenceSelection==='select-then-answer'){
   const request=buildDocumentEvidenceSelectionRequest(prepared,settings,policy),providerRequestSha256=sha(JSON.stringify(request));
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
-  const sourceValueSelection=policy.sourceValueContract==='difference-v1'||
-   (policy.sourceQuantityContract==='bound-value-v1'&&sourceQuantityQuestionFamily(question))?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
+  const sourceValueSelection=sourceGenerationRoute!=='ordinary'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
   const textSelection=sourceValueSelection?undefined:retainSelectedNativeTablePages(retainDocumentSelectionContext(decoded,prepared),prepared);
   referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
   if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
@@ -988,8 +997,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,...receipt,evidenceSelection:selectionReceipt,
    ...(policy.sourceValueContract?{sourceValueContract:{policy:policy.sourceValueContract,newContractApplied:false,reason:'no-selected-evidence',catalogSha256:null}}:{})};
  }
- const sourceValueGeneration=policy.sourceValueContract&&referenceIds?prepareSelectedSourceValueGeneration(prepared,referenceIds,settings,policy):undefined;
- const sourceQuantityGeneration=policy.sourceQuantityContract&&referenceIds?prepareSelectedSourceQuantityGeneration(prepared,referenceIds,settings,policy):undefined;
+ const sourceValueGeneration=sourceGenerationRoute==='source-values'&&referenceIds?prepareSelectedSourceValueGeneration(prepared,referenceIds,settings,policy):undefined;
+ const sourceQuantityGeneration=sourceGenerationRoute==='source-quantities'&&referenceIds?prepareSelectedSourceQuantityGeneration(prepared,referenceIds,settings,policy):undefined;
  const request=sourceQuantityGeneration?.request??sourceValueGeneration?.request??(referenceIds?buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy):buildDocumentAnswerRuntimeRequest(prepared,settings,policy));
  const providerRequestSha256=sha(JSON.stringify(request));
  const identity=sha(JSON.stringify({model,effort,maxOutput,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,

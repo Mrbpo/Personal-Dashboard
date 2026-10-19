@@ -8,6 +8,22 @@ const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
 
+test('application accepts both source contracts together and preserves the shared bounded policy',async()=>{
+ const values={STUDY_ANSWER_BACKEND:'kernel',STUDY_EVIDENCE_SELECTION:'select-then-answer',STUDY_CITATION_CHECK:'selected-once',
+  STUDY_SOURCE_VALUES:'difference-v1',STUDY_SOURCE_QUANTITIES:'bound-value-v1',STUDY_SOURCE_SCOPE:'off',
+  STUDY_TEXT_CONTEXT_WINDOWS:'off',OPENAI_MODEL:'gpt-5.4-mini',STUDY_CITATION_TRACE_DIR:`${process.cwd()}/data/contract-fixture-never-written`};
+ const env=Object.fromEntries(Object.keys(values).concat('STUDY_DEVELOPMENT_DAILY_LIMIT').map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;
+ let calls=0;
+ try{
+  Object.assign(process.env,values);delete process.env.STUDY_DEVELOPMENT_DAILY_LIMIT;
+  kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;
+   assert.equal(policy?.sourceValueContract,'difference-v1');assert.equal(policy?.sourceQuantityContract,'bound-value-v1');
+   await documentAnswerSettings(policy);
+   return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},selectedUnits:[],sourceDocuments:[],warnings:[],textEvidenceCount:0,imageEvidenceCount:0,model:null} as any;};
+  await answerKernelStudy('owner','Synthetic arithmetic or scalar question','',[]);assert.equal(calls,1);
+ }finally{kernel.answerStudyContent=saved;for(const [k,v] of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
+});
+
 test('source header argument failures are attributed to generation, not PDF parsing or citation validation',async()=>{
  const names=['STUDY_DEVELOPMENT_DAILY_LIMIT','STUDY_CITATION_CHECK','STUDY_SOURCE_VALUES','STUDY_SOURCE_SCOPE','STUDY_TEXT_CONTEXT_WINDOWS','OPENAI_MODEL'] as const,
   env=Object.fromEntries(names.map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;

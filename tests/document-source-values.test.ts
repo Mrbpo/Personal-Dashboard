@@ -298,7 +298,12 @@ test('required difference: closed answered operations, preserved statements/refu
   assert.deepEqual(events,['raw']);assert.equal(records[0].questionContract,contract);
   assert.deepEqual(JSON.parse(JSON.parse(records[0].rawBody).output_text).result.comparisons,[]);
   invalid=false;events.length=0;records.length=0;
-  const result=await synthesizeDocumentAnswer(question,async()=>context,runPolicy);
+  const combinedPolicy={...runPolicy,sourceQuantityContract:'bound-value-v1' as const,
+   recordSourceQuantityRawResponse:async()=>{assert.fail('difference question must not invoke scalar recording');},
+   recordSourceQuantityDerivation:async()=>{assert.fail('difference question must not invoke scalar recording');}};
+  assert.deepEqual(prepareSelectedSourceValueGeneration(p,ids,settings,combinedPolicy).request,g.request,
+   'combined policy preserves the existing difference model request');
+  const result=await synthesizeDocumentAnswer(question,async()=>context,combinedPolicy);
   assert.equal(calls,4);assert.deepEqual(events,['raw','derived']);assert.ok('sourceValueDerivation' in result&&result.sourceValueDerivation);
   assert.equal(result.sourceValueDerivation.questionContract,contract);assert.equal(result.sourceValueContract?.questionContract,contract);
   assert.deepEqual(result.sourceValueDerivation.rawProviderResult,value);assert.equal(result.providerSelections,null);
