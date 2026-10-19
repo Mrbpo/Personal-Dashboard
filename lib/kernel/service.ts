@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
@@ -19,7 +20,7 @@ import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readD
  readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
-import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
+import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type DocumentVectorScope} from './document-vector.ts';
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
@@ -939,7 +940,7 @@ export class KernelService {
     });
   }
 
-  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
+  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string;routingScope?:DocumentRoutingScope}={}){
     return resolveDocumentSource(kernelPool(),owner,hint,options);
   }
 
@@ -994,7 +995,7 @@ export class KernelService {
 
   nativeTableBlobHashes(){return nativeTableBlobHashes(kernelPool());}
 
-  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}){
+  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;strict?:boolean}={}){
     return searchNativeTableCandidates(kernelPool(),owner,question,scope);
   }
 
@@ -1120,7 +1121,7 @@ export class KernelService {
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
-    const {includeParents=false,includeImages=false,...searchOptions}=options;
+    const {includeParents=false,includeImages=false,...searchOptions}={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
       !Number.isInteger(limit)||limit<1||limit>14)throw new Error('Invalid study answer evidence options');
@@ -1128,14 +1129,14 @@ export class KernelService {
     if(anchors.some(hit=>hit.retrieval_mode==='keyword-fallback'||hit.degraded_reason))
       throw new Error('Study answer retrieval was degraded; no answer was generated');
     const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
-      {courseId:searchOptions.courseId})):undefined;
+      {courseId:searchOptions.courseId,routingScope:searchOptions.routingScope})):undefined;
     const tableCandidates=includeImages&&nativeTables?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
-      documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
+      documentId:selected?.documentId??searchOptions.documentId,routingScope:searchOptions.routingScope,strict:searchOptions.strict}):[];
     return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
         const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
-          {courseId:searchOptions.courseId}));
+          {courseId:searchOptions.courseId,routingScope:searchOptions.routingScope}));
         if(current.some(hit=>hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||
           hit.source_version_id!==selected.sourceVersionId||hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`)||
           tableCandidates.some(item=>item.source.documentId!==selected.documentId||item.source.currentVersionId!==selected.currentVersionId||
@@ -1145,11 +1146,14 @@ export class KernelService {
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
       const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
-      if(!tableCandidates.length)return context;
+      const checkScope=()=>assertDocumentRoutingScope(kernelPool(),owner,[...current.map(hit=>hit.document_id),
+        ...tableCandidates.map(item=>item.source.documentId)],searchOptions);
+      if(!tableCandidates.length){await checkScope();return context;}
       const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
         imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined);
       const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
       const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
+      await checkScope();
       return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
         images,...(imageBudget?{imageSelection:imageBudget.snapshot()}:{}),
         ...('accounting' in context?{accounting:{...context.accounting,imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
@@ -1336,11 +1340,15 @@ export class KernelService {
     return readContentMetadataTags(kernelPool(),owner,documentId);
   }
 
-  queueDocumentVectorJobs(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+  documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){
+    return documentRoutingScopeCounts(kernelPool(),owner,scope);
+  }
+
+  queueDocumentVectorJobs(owner:string,scope:DocumentVectorScope={}) {
     return queueDocumentVectorJobs(kernelPool(),owner,scope);
   }
 
-  documentVectorCoverage(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+  documentVectorCoverage(owner:string,scope:DocumentVectorScope={}) {
     return documentVectorCoverage(kernelPool(),owner,scope);
   }
 

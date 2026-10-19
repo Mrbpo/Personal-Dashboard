@@ -126,6 +126,9 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  const pages=decoded.pages;
  await kernel.ingestParsedDocument(doc,pages,{parserVersion:'saved-real-native',pdfVisuals:visuals,nativeTables});
  const hits=await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox');assert.equal(hits.length,1);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{origins:['public-fixture']}}),hits);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{origins:['gmail']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[]}}),[]);
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'what is the of'),[]);
  const {courseId:_course,...omittedCourse}=hits[0].source;
  await kernelTransaction(client=>commitNativeTableCandidates(client,nativeTables,omittedCourse,[hits[0].anchorEvidenceId]));
