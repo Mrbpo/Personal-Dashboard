@@ -4,6 +4,7 @@ import type {Pool,PoolClient} from 'pg';
 import {readBlob,saveBlob} from '../library.ts';
 import {isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {validateAndSerialize} from './visible-table-grid-v1.mjs';
+import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import type {DoclingNativeTable} from './docling-result.ts';
 import {decodeDoclingResult} from './docling-result.ts';
 import {readDocumentImages,readDocumentOutline,type DocumentContextSource,type DocumentImageEvidence} from './document-context.ts';
@@ -282,15 +283,16 @@ function candidate(row:CandidateRow,allowIncompleteGrid=false):DerivedTableCandi
 
 /** FTS uses the same current corpus scope, without changing protected text ranks.
  * At most two distinct page anchors supplement a normal answer. */
-export async function searchNativeTableCandidates(pool:Pool,owner:string,query:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}):Promise<DerivedTableCandidate[]>{
+export async function searchNativeTableCandidates(pool:Pool,owner:string,query:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;strict?:boolean}={}):Promise<DerivedTableCandidate[]>{
  const {normalized,words}=documentSearchTerms(query);
  if(!words.length)return [];
  const args:unknown[]=[owner,scope.strict?normalized:words.map(word=>`"${word}"`).join(' OR ')];
  const course=scope.courseId?`AND d.course_id=$${args.push(scope.courseId)}`:'';
  const document=scope.documentId?`AND d.id=$${args.push(scope.documentId)}`:'';
+ const routing=documentRoutingScopeSql(scope.routingScope,args);
  const querySQL=scope.strict?`plainto_tsquery('simple',$2)||plainto_tsquery('english',$2)`:
   `websearch_to_tsquery('simple',$2)||websearch_to_tsquery('english',$2)`;
- const rows=(await pool.query<CandidateRow>(`WITH hits AS (${candidateSQL()} ${course} ${document}
+ const rows=(await pool.query<CandidateRow>(`WITH hits AS (${candidateSQL()} ${course} ${document} ${routing}
   AND t.search_vector @@ (${querySQL})), ranked AS (SELECT hits.*,ts_rank_cd(search_vector,(${querySQL})) match_rank,row_number() OVER
   (PARTITION BY version_id,page_number ORDER BY ts_rank_cd(search_vector,(${querySQL})) DESC,id) page_rank FROM hits)
   SELECT * FROM ranked WHERE page_rank=1 ORDER BY match_rank DESC,id LIMIT ${NATIVE_TABLE_LIMITS.supplementalPages}`,args)).rows;
@@ -302,7 +304,7 @@ export async function searchNativeTableCandidates(pool:Pool,owner:string,query:s
   jsonb_array_elements(artifact::jsonb->'native'->'cellTexts') c),'')||' '||coalesce((SELECT string_agg(
   coalesce(nullif(btrim(c->'raw'->>'text'),''),c->'raw'->>'orig',''),' ') FROM jsonb_array_elements(artifact::jsonb->'native'->'captions') c),'')`,
   fallbackVector=`to_tsvector('simple',${literalText})||to_tsvector('english',${literalText})`;
- const fallback=(await pool.query<CandidateRow>(`WITH candidates AS (${candidateSQL(true)} ${course} ${document}
+ const fallback=(await pool.query<CandidateRow>(`WITH candidates AS (${candidateSQL(true)} ${course} ${document} ${routing}
   AND t.status='unavailable' AND NOT(t.page_number=ANY($${excluded}::int[]))), hints AS
   (SELECT candidates.*,(${fallbackVector}) fallback_vector FROM candidates), ranked AS
   (SELECT hints.*,ts_rank_cd(fallback_vector,(${querySQL})) match_rank,row_number() OVER

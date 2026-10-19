@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
+import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
@@ -20,7 +22,7 @@ import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readD
  readCompleteDocumentSource,readCompleteDocumentText,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
-import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
+import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type DocumentVectorScope} from './document-vector.ts';
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
@@ -869,6 +871,7 @@ export class KernelService {
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
       nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence;sourceMath?:PreparedDoclingSourceMath}={}) {
+    const tagMetadata=contentTagIngestionEnabled();
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -1016,6 +1019,7 @@ export class KernelService {
         }
       }
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
+      if(tagMetadata)await recordContentMetadataTags(client,owner,document.id,parsedVersion);
       if(options.pdfVisuals||options.sourceMath){
         const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
         if(options.pdfVisuals)await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
@@ -1038,7 +1042,7 @@ export class KernelService {
       authority:'unverified-retrieval-hint' as const}};
   }
 
-  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
+  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string;routingScope?:DocumentRoutingScope}={}){
     return resolveDocumentSource(kernelPool(),owner,hint,options);
   }
 
@@ -1112,7 +1116,7 @@ export class KernelService {
     return readAuthorImageTableCandidateEvidence(kernelPool(),owner,candidates);
   }
 
-  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}){
+  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;strict?:boolean}={}){
     return searchNativeTableCandidates(kernelPool(),owner,question,scope);
   }
 
@@ -1241,7 +1245,7 @@ export class KernelService {
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
-    const {includeParents=false,includeImages=false,...searchOptions}=options;
+    const {includeParents=false,includeImages=false,...searchOptions}={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
       !Number.isInteger(limit)||limit<1||limit>14)throw new Error('Invalid study answer evidence options');
@@ -1249,16 +1253,16 @@ export class KernelService {
     if(anchors.some(hit=>hit.retrieval_mode==='keyword-fallback'||hit.degraded_reason))
       throw new Error('Study answer retrieval was degraded; no answer was generated');
     const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
-      {courseId:searchOptions.courseId})):undefined;
+      {courseId:searchOptions.courseId,routingScope:searchOptions.routingScope})):undefined;
     // A resolved document already fixes the source; requiring every question
     // word in a table caption/cell would discard its complementary original page.
     const tableCandidates=includeImages&&nativeTables?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
-      documentId:selected?.documentId??searchOptions.documentId,strict:selected?false:searchOptions.strict}):[];
+      documentId:selected?.documentId??searchOptions.documentId,routingScope:searchOptions.routingScope,strict:selected?false:searchOptions.strict}):[];
     return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
         const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
-          {courseId:searchOptions.courseId}));
+          {courseId:searchOptions.courseId,routingScope:searchOptions.routingScope}));
         if(current.some(hit=>hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||
           hit.source_version_id!==selected.sourceVersionId||hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`)||
           tableCandidates.some(item=>item.source.documentId!==selected.documentId||item.source.currentVersionId!==selected.currentVersionId||
@@ -1303,15 +1307,15 @@ export class KernelService {
   async answerStudyContent(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean;retrievalQuestion?:string}={},policy:DocumentAnswerPolicy={}){
     await documentAnswerSettings(policy);
-    const {retrievalQuestion,...searchOptions}=options;
+    const {retrievalQuestion,...searchOptions}={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
     if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
       throw new Error('Invalid study retrieval question');
     let routedOptions=searchOptions,sourceRouting:Awaited<ReturnType<typeof planDocumentQueryScope>>|undefined;
     if(policy.sourceRouting&&!searchOptions.sourceHint&&!searchOptions.documentId){
-      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
       if(mentioned.status==='resolved'){
         sourceRouting=await planDocumentQueryScope(question,mentioned.matches[0],policy,async()=>{
-          const current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+          const current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
           if(JSON.stringify(current)!==JSON.stringify(mentioned))throw new DocumentEvidenceChangedError();
         });
         if(sourceRouting.decision.scope==='named-document')routedOptions={...searchOptions,
@@ -1323,11 +1327,11 @@ export class KernelService {
     let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
     let read:()=>Promise<DocumentAnswerContext>=rankedRead;
     if(policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages){
-      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
       if(mentioned.status==='resolved'){
         const selected=mentioned.matches[0];
         read=async()=>{
-          const ranked=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId});
+          const ranked=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
           if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
           const base=await this.authorImageTableContext(owner,retrievalQuestion??question,ranked,selected);
           const complete=await this.readCompleteDocumentSource(owner,selected);
@@ -1419,6 +1423,16 @@ export class KernelService {
           const hint=await pending;if(hint?.windows.length)textContextWindows.push(hint);
         }
         return {...context,...(textContextWindows.length?{textContextWindows}:{})};
+      };
+    }
+    if(searchOptions.routingScope){
+      const readOriginal=read;
+      read=async()=>{
+        const context=await readOriginal();
+        await assertDocumentRoutingScope(kernelPool(),owner,[...context.anchors.map(hit=>hit.document_id),
+          ...context.imageAnchors?.map(hit=>hit.document_id)??[],...context.parents.flatMap(parent=>parent.nodes.map(node=>node.documentId)),
+          ...context.images.map(image=>image.source.documentId)],searchOptions);
+        return context;
       };
     }
     const generated=await synthesizeDocumentAnswer(question,read,policy);
@@ -1609,11 +1623,19 @@ export class KernelService {
     return searchDocumentText(kernelPool(),owner,query,options);
   }
 
-  queueDocumentVectorJobs(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+  documentMetadataTags(owner:string,documentId:string){
+    return readContentMetadataTags(kernelPool(),owner,documentId);
+  }
+
+  documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){
+    return documentRoutingScopeCounts(kernelPool(),owner,scope);
+  }
+
+  queueDocumentVectorJobs(owner:string,scope:DocumentVectorScope={}) {
     return queueDocumentVectorJobs(kernelPool(),owner,scope);
   }
 
-  documentVectorCoverage(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+  documentVectorCoverage(owner:string,scope:DocumentVectorScope={}) {
     return documentVectorCoverage(kernelPool(),owner,scope);
   }
 

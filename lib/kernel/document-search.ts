@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import {createHash} from 'node:crypto';
+import {normalizeDocumentRoutingScope,documentRoutingScopeSql,assertDocumentRoutingScope,type DocumentRoutingScope} from './document-routing-scope.ts';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
@@ -132,7 +133,7 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   refinement_seeds?:Array<{document_id:string;page_number:number;source_version_id:string;evidence_id:string}>;
   retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
 
-export type DocumentSearchOptions={courseId?:string;documentId?:string;sourceHint?:DocumentSourceHint;
+export type DocumentSearchOptions={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;sourceHint?:DocumentSourceHint;
  limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean;
  refineAdjacent?:boolean;
  evidenceBody?:'snippet'|'full-page'};
@@ -220,26 +221,29 @@ function rankingFailure(error:unknown):string{
 }
 
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
+  options={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
   const {evidenceBody,...rankingOptions}=options;
   if(evidenceBody!==undefined&&evidenceBody!=='snippet'&&evidenceBody!=='full-page')
     throw new Error('Invalid document evidence body mode');
   if(options.refineAdjacent!==undefined&&typeof options.refineAdjacent!=='boolean')
     throw new Error('Invalid adjacent PDF refinement option');
   const hits=await searchDocumentSnippets(pool,owner,query,rankingOptions);
-  if(evidenceBody!=='full-page')return hits;
+  if(evidenceBody!=='full-page'){
+    await assertDocumentRoutingScope(pool,owner,hits.map(hit=>hit.document_id),options);return hits;
+  }
   const full=await readFullDocumentEvidence(pool,owner,hits);
   if(options.sourceHint&&full.length){
-    const current=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId});
+    const current=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId,routingScope:options.routingScope});
     if(current.status!=='resolved'||full.some(hit=>hit.document_id!==current.document.documentId
       ||hit.source_hash!==current.document.sourceHash||hit.source_version_id!==current.document.sourceVersionId))
       throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Full evidence differs from the current selected source',current);
   }
-  return full;
+  await assertDocumentRoutingScope(pool,owner,full.map(hit=>hit.document_id),options);return full;
 }
 
 async function searchDocumentSnippets(pool:Pool,owner:string,query:string,options:DocumentSearchOptions):Promise<DocumentTextHit[]> {
   if(options.sourceHint!==undefined){
-    const resolution=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId});
+    const resolution=await resolveDocumentSource(pool,owner,options.sourceHint,{courseId:options.courseId,routingScope:options.routingScope});
     const selected=requireResolvedDocumentSource(resolution);
     if(options.documentId&&options.documentId!==selected.documentId)
       throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_SCOPE_CONFLICT','Document ID conflicts with the selected title',resolution);
@@ -247,7 +251,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
     // The original relevance query passes through unchanged. Only a uniquely
     // resolved visible title can become this internal document scope.
     const hits=await searchDocumentText(pool,owner,query,{...scopedOptions,documentId:selected.documentId});
-    const current=await resolveDocumentSource(pool,owner,sourceHint,{courseId:options.courseId});
+    const current=await resolveDocumentSource(pool,owner,sourceHint,{courseId:options.courseId,routingScope:options.routingScope});
     if(current.status!=='resolved'||current.document.documentId!==selected.documentId
       ||current.document.currentVersionId!==selected.currentVersionId
       ||current.document.sourceVersionId!==selected.sourceVersionId||current.document.sourceHash!==selected.sourceHash)
@@ -270,24 +274,25 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
   // Dense recall and keyword scoring are independent. Start the bounded query
   // embedding concurrently; document embeddings are prepared by the worker.
   const dense=hybrid?(async()=>{
-    const scope={courseId:options.courseId,documentId:options.documentId};
+    const scope={courseId:options.courseId,documentId:options.documentId,routingScope:options.routingScope};
     const coverage=await documentVectorCoverage(pool,owner,scope);
     if(!coverage.complete||coverage.totalPages===0)return {hits:[],coverage};
     const input=Array.from(query.normalize('NFKC').replace(/\s+/gu,' ').trim()).slice(0,4000).join('');
     const embedding=await documentQueryVector(pool,owner,input,Date.now()+30000);
     return searchDocumentVectorText(pool,owner,embedding,{courseId:options.courseId,
-      documentId:options.documentId,limit:DOCUMENT_SEMANTIC_CANDIDATE_LIMIT});
+      documentId:options.documentId,routingScope:options.routingScope,limit:DOCUMENT_SEMANTIC_CANDIDATE_LIMIT});
   })().then(value=>({value,error:undefined}),error=>({value:undefined,error})):null;
   const args:unknown[]=[owner,options.strict?normalized:words.join(' '),words.map(word=>`"${word}"`).join(' OR '),semantic?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:limit,words];
   const course=options.courseId?`AND d.course_id=$${args.push(options.courseId)}`:'';
   const document=options.documentId?`AND d.id=$${args.push(options.documentId)}`:'';
+  const routing=documentRoutingScopeSql(options.routingScope,args);
   const match=options.strict?'c.search_vector @@ q.exact':'c.search_vector @@ q.broad';
   const rows=await pool.query<DocumentTextHit&{orig_provenance?:DocumentOrigSearchProvenance|null;orig_version_id:string;orig_page_count:number;orig_body_sha256:string;orig_search_sha256:string}>(`
     WITH q AS (SELECT
       plainto_tsquery('english',$2) || plainto_tsquery('simple',$2) AS exact,
       websearch_to_tsquery('english',$3) || websearch_to_tsquery('simple',$3) AS broad),
     visible_documents AS MATERIALIZED (SELECT d.id,d.current_version_id FROM document_texts d
-      WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document}
+      WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document} ${routing}
       AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
         AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
         AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))),
@@ -329,7 +334,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       pageCount:orig_page_count,physicalPage:row.page_number},orig_body_sha256,orig_search_sha256)}:{}),score:Number(row.score),
     lexical_support:row.lexical_support===undefined?undefined:Number(row.lexical_support),retrieval_mode:'keyword' as const}));
   if(options.relatedDocuments&&!options.strict&&!options.documentId)
-    hits=await recallReferencedDocuments(pool,owner,query,hits,semantic?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:limit,options.courseId);
+    hits=await recallReferencedDocuments(pool,owner,query,hits,semantic?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:limit,options.courseId,options.routingScope);
   if(semantic&&(hits.length||hybrid)){
     // A model request can outlive the parsed version used for its candidates.
     // Re-read current evidence once, retaining the scope and making no AI calls.
