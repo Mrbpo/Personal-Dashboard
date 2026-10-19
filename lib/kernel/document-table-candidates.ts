@@ -181,7 +181,7 @@ export type DerivedTableCandidate={kind:'derived-native-table';id:string;source:
 export type NativeTableObservation={version:'docling-native-observation-v1';producer:typeof NATIVE_TABLE_PRODUCER;
  authority:'parser-declared-untrusted';semanticVerified:false;relationshipVerified:false;visibilityVerified:false;
  rawProvenancePageBasis:'derived-input-local';rawProvenanceCoordinateMapping:'unverified';
- status:'available'|'unavailable';reason:null|'observation-byte-limit';candidate:DerivedTableCandidate;attachmentId:string;
+ status:'available'|'unavailable';reason:null|'observation-byte-limit'|'incomplete-grid';candidate:DerivedTableCandidate;attachmentId:string;
  nativeReference:string;nativeSha256:string;nativeByteLength:number;result:NonNullable<DoclingNativeTable['result']>;
  native?:DoclingNativeTable;observationSha256:string};
 export type NativeTableObservedImage=PdfVisualImageEvidence&{tableObservations?:NativeTableObservation[]};
@@ -190,11 +190,13 @@ const availableObservationBytes=(value:Omit<NativeTableObservation,'observationS
  return Buffer.byteLength(canonical({...envelope,status:'available',reason:null,observationSha256:'0'.repeat(64)}))+
   Buffer.byteLength(',"native":')+value.nativeByteLength;
 };
+const incompleteGridOnly=(artifact:NativeTableArtifact)=>artifact.status==='unavailable'&&
+ artifact.reasons.length===1&&artifact.reasons[0]==='incomplete-grid';
 
 /** Bounded transport of an existing declaration, never a new grid or text source. */
 export function prepareNativeTableObservation(item:DerivedTableCandidate,artifact:NativeTableArtifact,image:PdfVisualImageEvidence):NativeTableObservation{
  const rebuilt=prepareNativeTableArtifact(artifact.native);
- if(artifact.status!=='available'||canonical(rebuilt)!==canonical(artifact)||artifact.artifactSha256!==item.artifactSha256)
+ if((artifact.status!=='available'&&!incompleteGridOnly(artifact))||canonical(rebuilt)!==canonical(artifact)||artifact.artifactSha256!==item.artifactSha256)
   throw new DocumentEvidenceChangedError();
  const native=structuredClone(artifact.native),value:Omit<NativeTableObservation,'observationSha256'>={
   version:'docling-native-observation-v1',producer:NATIVE_TABLE_PRODUCER,authority:'parser-declared-untrusted',
@@ -202,7 +204,11 @@ export function prepareNativeTableObservation(item:DerivedTableCandidate,artifac
   rawProvenancePageBasis:'derived-input-local',rawProvenanceCoordinateMapping:'unverified',
   candidate:structuredClone(item),attachmentId:image.attachmentId,nativeReference:native.reference,nativeSha256:sha(canonical(native)),
   nativeByteLength:Buffer.byteLength(canonical(native)),result:structuredClone(native.result!),native};
- if(availableObservationBytes(value)>NATIVE_TABLE_OBSERVATION_LIMITS.bytes){
+ if(incompleteGridOnly(artifact)){
+  // The page remains original evidence; the incomplete grid is never offered
+  // as usable cells, even when it would fit the observation byte allowance.
+  delete value.native;value.status='unavailable';value.reason='incomplete-grid';
+ }else if(availableObservationBytes(value)>NATIVE_TABLE_OBSERVATION_LIMITS.bytes){
   delete value.native;value.status='unavailable';value.reason='observation-byte-limit';
  }
  const observation={...value,observationSha256:sha(canonical(value))};
@@ -234,14 +240,14 @@ export function assertNativeTableObservation(observation:NativeTableObservation,
    canonical(value.native.result)!==canonical(result)||canonical(value.native.pageNumbers)!==canonical([item.pageNumber])||
    Buffer.byteLength(canonical(value.native))!==value.nativeByteLength||sha(canonical(value.native))!==value.nativeSha256||
    prepareNativeTableArtifact(value.native).artifactSha256!==item.artifactSha256)throw new DocumentEvidenceChangedError();
- }else if(value.status!=='unavailable'||value.reason!=='observation-byte-limit'||value.native!==undefined||
-  availableObservationBytes(value)<=NATIVE_TABLE_OBSERVATION_LIMITS.bytes)throw new DocumentEvidenceChangedError();
+ }else if(value.status!=='unavailable'||!['observation-byte-limit','incomplete-grid'].includes(value.reason??'')||value.native!==undefined||
+  (value.reason==='observation-byte-limit'&&availableObservationBytes(value)<=NATIVE_TABLE_OBSERVATION_LIMITS.bytes))throw new DocumentEvidenceChangedError();
 }
 type CandidateRow={id:string;document_id:string;version_id:string;source_version_id:string;source_hash:string;course_id:string;
  page_number:number;anchor_evidence_id:string;manifest_sha256:string;asset_sha256:string;artifact_sha256:string;artifact:NativeTableArtifact;
  raw_result_sha256:string;input_sha256:string;options_sha256:string};
 
-const candidateSQL=`SELECT t.id,t.document_id,t.version_id,t.source_version_id,t.source_hash,coalesce(d.course_id,'') course_id,
+const candidateSQL=(includeIncompleteGrid=false)=>`SELECT t.id,t.document_id,t.version_id,t.source_version_id,t.source_hash,coalesce(d.course_id,'') course_id,
  t.page_number,t.anchor_evidence_id,t.manifest_sha256,t.asset_sha256,t.artifact_sha256,t.artifact,t.search_vector,
  t.raw_result_sha256,t.input_sha256,t.options_sha256
  FROM document_table_candidates t
@@ -252,14 +258,15 @@ const candidateSQL=`SELECT t.id,t.document_id,t.version_id,t.source_version_id,t
  JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=t.source_version_id AND e.source_item_id=d.source_item_id
  JOIN document_pdf_visual_manifests m ON m.version_id=t.version_id AND m.source_version_id=t.source_version_id
   AND m.source_hash=t.source_hash AND m.manifest_sha256=t.manifest_sha256
- WHERE d.owner_id=$1 AND NOT d.hidden AND t.status='available' AND t.namespace='${NATIVE_TABLE_NAMESPACE}'
+ WHERE d.owner_id=$1 AND NOT d.hidden AND ${includeIncompleteGrid?
+  "(t.status='available' OR (t.status='unavailable' AND t.artifact->>'status'='unavailable' AND t.artifact->'reasons'='[\"incomplete-grid\"]'::jsonb))":"t.status='available'"} AND t.namespace='${NATIVE_TABLE_NAMESPACE}'
  AND t.producer='${NATIVE_TABLE_PRODUCER}' AND NOT EXISTS(SELECT 1 FROM document_texts n WHERE n.owner_id=d.owner_id
   AND n.origin=d.origin AND n.origin_key=d.origin_key AND NOT n.hidden
   AND(n.created_at>d.created_at OR(n.created_at=d.created_at AND n.id>d.id)))`;
 
-function candidate(row:CandidateRow):DerivedTableCandidate{
+function candidate(row:CandidateRow,allowIncompleteGrid=false):DerivedTableCandidate{
  const {artifactSha256,...artifact}=row.artifact;
- if(row.artifact.status!=='available'||artifactSha256!==row.artifact_sha256||sha(canonical(artifact))!==artifactSha256||
+ if((row.artifact.status!=='available'&&!(allowIncompleteGrid&&incompleteGridOnly(row.artifact)))||artifactSha256!==row.artifact_sha256||sha(canonical(artifact))!==artifactSha256||
   row.artifact.namespace!==NATIVE_TABLE_NAMESPACE||row.artifact.producer!==NATIVE_TABLE_PRODUCER||
   row.artifact.native.result?.resultBlobSha256!==row.raw_result_sha256||row.artifact.native.result?.derivedInputSha256!==row.input_sha256||
   row.artifact.native.result?.optionsHash!==row.options_sha256||
@@ -283,11 +290,26 @@ export async function searchNativeTableCandidates(pool:Pool,owner:string,query:s
  const document=scope.documentId?`AND d.id=$${args.push(scope.documentId)}`:'';
  const querySQL=scope.strict?`plainto_tsquery('simple',$2)||plainto_tsquery('english',$2)`:
   `websearch_to_tsquery('simple',$2)||websearch_to_tsquery('english',$2)`;
- const rows=(await pool.query<CandidateRow>(`WITH hits AS (${candidateSQL} ${course} ${document}
+ const rows=(await pool.query<CandidateRow>(`WITH hits AS (${candidateSQL()} ${course} ${document}
   AND t.search_vector @@ (${querySQL})), ranked AS (SELECT hits.*,ts_rank_cd(search_vector,(${querySQL})) match_rank,row_number() OVER
   (PARTITION BY version_id,page_number ORDER BY ts_rank_cd(search_vector,(${querySQL})) DESC,id) page_rank FROM hits)
   SELECT * FROM ranked WHERE page_rank=1 ORDER BY match_rank DESC,id LIMIT ${NATIVE_TABLE_LIMITS.supplementalPages}`,args)).rows;
- return rows.map(candidate);
+ // A named source can have a readable original page but an incomplete parser
+ // grid. Fill only unused supplemental slots. These literal strings are search
+ // hints, never a repaired grid, original quotation or canonical fact.
+ if(!scope.documentId||rows.length>=NATIVE_TABLE_LIMITS.supplementalPages)return rows.map(row=>candidate(row));
+ const excluded=args.push(rows.map(row=>row.page_number)),literalText=`coalesce((SELECT string_agg(c->>'text',' ') FROM
+  jsonb_array_elements(artifact::jsonb->'native'->'cellTexts') c),'')||' '||coalesce((SELECT string_agg(
+  coalesce(nullif(btrim(c->'raw'->>'text'),''),c->'raw'->>'orig',''),' ') FROM jsonb_array_elements(artifact::jsonb->'native'->'captions') c),'')`,
+  fallbackVector=`to_tsvector('simple',${literalText})||to_tsvector('english',${literalText})`;
+ const fallback=(await pool.query<CandidateRow>(`WITH candidates AS (${candidateSQL(true)} ${course} ${document}
+  AND t.status='unavailable' AND NOT(t.page_number=ANY($${excluded}::int[]))), hints AS
+  (SELECT candidates.*,(${fallbackVector}) fallback_vector FROM candidates), ranked AS
+  (SELECT hints.*,ts_rank_cd(fallback_vector,(${querySQL})) match_rank,row_number() OVER
+   (PARTITION BY version_id,page_number ORDER BY ts_rank_cd(fallback_vector,(${querySQL})) DESC,id) page_rank FROM hints
+   WHERE fallback_vector @@ (${querySQL})) SELECT * FROM ranked WHERE page_rank=1 ORDER BY match_rank DESC,id
+  LIMIT ${NATIVE_TABLE_LIMITS.supplementalPages-rows.length}`,args)).rows;
+ return [...rows.map(row=>candidate(row)),...fallback.map(row=>candidate(row,true))];
 }
 
 /** Cached candidate identities are rechecked before AND after rereading actual
@@ -299,8 +321,8 @@ export async function readNativeTableCandidateEvidence(pool:Pool,owner:string,re
   throw new Error('Invalid bounded native table selections');
  const verify=async()=>{
   if(!expected.length)return new Map<string,CandidateRow>();
-  const rows=(await pool.query<CandidateRow>(`${candidateSQL} AND t.id=ANY($2::text[])`,[owner,expected.map(value=>value.id)])).rows;
-  const actual=new Map(rows.map(row=>[row.id,candidate(row)]));
+  const rows=(await pool.query<CandidateRow>(`${candidateSQL(true)} AND t.id=ANY($2::text[])`,[owner,expected.map(value=>value.id)])).rows;
+  const actual=new Map(rows.map(row=>[row.id,candidate(row,true)]));
   if(rows.length!==expected.length||expected.some(value=>canonical(actual.get(value.id))!==canonical(value)))throw new DocumentEvidenceChangedError();
   return new Map(rows.map(row=>[row.id,row]));
  };
