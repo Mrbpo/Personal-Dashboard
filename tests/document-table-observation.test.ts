@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {decodeDerivedDoclingResult} from '../lib/kernel/docling-batches.ts';
 import {prepareNativeTableArtifact,prepareNativeTableObservation,NATIVE_TABLE_NAMESPACE,NATIVE_TABLE_PRODUCER,
- NATIVE_TABLE_OBSERVATION_LIMITS,type DerivedTableCandidate,type NativeTableObservedImage} from '../lib/kernel/document-table-candidates.ts';
+ NATIVE_TABLE_OBSERVATION_LIMITS,nativeTableObservationWire,nativeCellDeclarationMode,type DerivedTableCandidate,type NativeTableObservedImage} from '../lib/kernel/document-table-candidates.ts';
 import {prepareDocumentAnswer,buildDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
 import {mergeStudyEvidence} from '../lib/kernel/service.ts';
@@ -113,4 +113,78 @@ test('native observations: merge retains base observation without changing origi
  const plain=prepareDocumentAnswer('What?',f.context(f.image)),explicit=prepareDocumentAnswer('What?',f.context({...f.image,tableObservations:undefined}));
  assert.equal(JSON.stringify(plain.input),JSON.stringify(explicit.input));assert.equal(plain.fingerprint,explicit.fingerprint);
  assert.equal('tableObservations' in plain.input.evidence[0],false);
+});
+
+test('native cell declarations preserve every original field and missing position without making a grid usable',async()=>{
+ const {studyNativeCellObservations}=await import('../lib/study-answer.ts');
+ assert.equal(studyNativeCellObservations('off'),undefined);assert.equal(studyNativeCellObservations('declared-v1'),'declared-v1');
+ assert.throws(()=>studyNativeCellObservations('unknown'),(e:any)=>e.stage==='configuration'&&e.code==='invalid-native-cell-observations');
+ const f=await fixture(),partial=structuredClone(f.table),data=partial.raw.data as {table_cells:Record<string,unknown>[]};
+ data.table_cells.shift();partial.cellTexts=partial.cellTexts.slice(1).map((cell,index)=>({...cell,cellIndex:index}));
+ const artifact=prepareNativeTableArtifact(partial);assert.deepEqual(artifact.reasons,['incomplete-grid']);
+ const candidate=f.candidateFor(artifact),off=prepareNativeTableObservation(candidate,artifact,f.image),
+  observation=prepareNativeTableObservation(candidate,artifact,f.image,'declared-v1'),cells=observation.cellDeclarations;
+ assert.equal(nativeCellDeclarationMode('off'),undefined);assert.throws(()=>nativeCellDeclarationMode('unknown'));
+ assert.equal(off.cellDeclarations,undefined);assert.equal(off.cellDeclarationWitness,undefined);
+ assert.equal(observation.status,'unavailable');assert.equal(observation.reason,'incomplete-grid');assert.equal(observation.native,undefined);
+ assert.equal(cells?.status,'available');if(!cells||cells.status!=='available')throw Error('Expected complete declared fields');
+ assert.equal(cells.cells.length,data.table_cells.length);assert.ok(cells.unknownPositions.length>0);
+ assert.equal(cells.relationshipVerified,false);assert.equal(cells.coordinateMapping,'unverified');
+ for(const [i,cell]of cells.cells.entries()){
+  const raw=data.table_cells[i];assert.equal(cell.rawCellSha256,sha(canonical(raw)));
+  assert.deepEqual(cell.row,[raw.start_row_offset_idx,raw.end_row_offset_idx??null,raw.row_span??null]);
+  assert.deepEqual(cell.column,[raw.start_col_offset_idx,raw.end_col_offset_idx??null,raw.col_span??null]);
+  assert.deepEqual(cell.headerFlags,[raw.row_header??null,raw.column_header??null,raw.row_section??null]);
+  assert.deepEqual(cell.texts,[partial.cellTexts[i].text,typeof raw.text==='string'?raw.text:null,typeof raw.orig==='string'?raw.orig:null]);
+  assert.deepEqual(cell.bbox,raw.bbox??null);
+ }
+ const observed=prepareDocumentAnswer('What does this original table report?',f.context({...f.image,tableObservations:[observation]})),
+  legacy=prepareDocumentAnswer('What does this original table report?',f.context({...f.image,tableObservations:[off]})),
+  settings={model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000} as const,
+  request=buildDocumentAnswerRequest(observed,settings),oldRequest=buildDocumentAnswerRequest(legacy,settings);
+ assert.ok(JSON.stringify(request).includes('native-cell-declarations-v1'));assert.equal(JSON.stringify(request).includes('cellDeclarationWitness'),false);
+ const imageParts=(r:typeof request)=>r.input.flatMap(m=>Array.isArray(m.content)?m.content:[]).filter(p=>p.type==='input_image');
+ assert.deepEqual(imageParts(request),imageParts(oldRequest));assert.deepEqual(observed.quoteUnits,legacy.quoteUnits);
+ assert.ok(Buffer.byteLength(canonical(nativeTableObservationWire(observation)))<=NATIVE_TABLE_OBSERVATION_LIMITS.bytes);
+ const local=prepareDocumentCitationAudit('What does this original table report?',f.context({...f.image,tableObservations:[observation]}),{
+  inputFingerprint:observed.fingerprint,quoteUnitManifestSha256:observed.quoteUnitManifestSha256,
+  providerSelections:{status:'answered',message:'',claims:[{text:'Fixture assertion only.',citations:[{id:'i0'}]}]},claimIndex:0});
+ assert.equal(JSON.stringify(buildDocumentCitationAuditRequest(local.packet)).includes('cellDeclarations'),false,'source declarations cannot self-certify original-image entailment');
+ assert.equal(JSON.stringify(buildDocumentCitationAuditRequest(local.packet)).includes('cellDeclarationWitness'),false);
+ for(const change of [
+  (o:any)=>o.cellDeclarations.cells[0].texts[0]='invented',
+  (o:any)=>o.cellDeclarations.cells[0].bbox={invented:true},
+  (o:any)=>o.cellDeclarations.unknownPositions=[],
+  (o:any)=>o.cellDeclarationWitness.native.cellTexts[0].text='changed raw witness',
+  (o:any)=>delete o.cellDeclarationWitness,
+  (o:any)=>o.cellDeclarations.semanticVerified=true,
+ ]){
+  const changed=structuredClone(observation);change(changed);
+  const {observationSha256:_old,...wire}=nativeTableObservationWire(changed);changed.observationSha256=sha(canonical(wire));
+  assert.throws(()=>prepareDocumentAnswer('What?',f.context({...f.image,tableObservations:[changed]})));
+ }
+ assert.deepEqual(artifact.native,partial);assert.deepEqual(observation.cellDeclarationWitness?.native,partial);
+});
+
+test('native cell declarations stay whole under byte/cell limits and preserve the default observation',async()=>{
+ const f=await fixture(),large=structuredClone(f.table);
+ (large.raw.data as Record<string,unknown>).grid=Array(500).fill((large.raw.data as Record<string,unknown>).grid??'duplicated grid fixture');
+ const artifact=prepareNativeTableArtifact(large);assert.equal(artifact.status,'available');
+ const off=prepareNativeTableObservation(f.candidateFor(artifact),artifact,f.image),
+  on=prepareNativeTableObservation(f.candidateFor(artifact),artifact,f.image,'declared-v1');
+ assert.equal(off.reason,'observation-byte-limit');assert.equal(on.reason,'observation-byte-limit');assert.equal(on.cellDeclarations?.status,'available');
+ assert.equal(JSON.stringify(nativeTableObservationWire(on)).includes('duplicated grid fixture'),false);
+ assert.deepEqual(prepareNativeTableObservation(f.candidateFor(artifact),artifact,f.image),off,'off remains byte-identical after opt-in calls');
+ const overflow=structuredClone(f.table);overflow.raw.padding='x'.repeat(40000);
+ const oversized=prepareNativeTableArtifact(overflow),limited=prepareNativeTableObservation(f.candidateFor(oversized),oversized,f.image,'declared-v1');
+ assert.equal(limited.cellDeclarations?.status,'unavailable');assert.equal(limited.cellDeclarations?.reason,'byte-limit');
+ assert.equal('cells' in limited.cellDeclarations!,false,'no prefix clipping when complete fields cannot fit');
+ const many=structuredClone(f.table),data=many.raw.data as Record<string,unknown>,template=(data.table_cells as Record<string,unknown>[])[0];
+ data.num_rows=2;data.num_cols=129;data.grid=[];
+ data.table_cells=Array.from({length:257},(_,i)=>({...template,start_row_offset_idx:Math.floor(i/129),end_row_offset_idx:Math.floor(i/129)+1,
+  start_col_offset_idx:i%129,end_col_offset_idx:i%129+1,row_span:1,col_span:1,row_header:false,column_header:false,row_section:false,text:String(i)}));
+ many.cellTexts=Array.from({length:257},(_,cellIndex)=>({cellIndex,text:String(cellIndex)}));
+ const tooMany=prepareNativeTableArtifact(many),bounded=prepareNativeTableObservation(f.candidateFor(tooMany),tooMany,f.image,'declared-v1');
+ assert.equal(bounded.cellDeclarations?.status,'unavailable');assert.equal(bounded.cellDeclarations?.reason,'cell-limit');
+ assert.equal('cells' in bounded.cellDeclarations!,false);
 });

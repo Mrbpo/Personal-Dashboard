@@ -7,6 +7,7 @@ import {validateAndSerialize} from './visible-table-grid-v1.mjs';
 import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import type {DoclingNativeTable} from './docling-result.ts';
 import {decodeDoclingResult} from './docling-result.ts';
+import {prepareNativeCellDeclarations,type NativeCellDeclarations} from './document-native-cells.ts';
 import {readDocumentImages,readDocumentOutline,type DocumentContextSource,type DocumentImageEvidence} from './document-context.ts';
 import {documentSearchText,documentSearchTerms} from './document-search.ts';
 import {readDocumentNodes} from './document-nodes.ts';
@@ -184,18 +185,36 @@ export type NativeTableObservation={version:'docling-native-observation-v1';prod
  rawProvenancePageBasis:'derived-input-local';rawProvenanceCoordinateMapping:'unverified';
  status:'available'|'unavailable';reason:null|'observation-byte-limit'|'incomplete-grid';candidate:DerivedTableCandidate;attachmentId:string;
  nativeReference:string;nativeSha256:string;nativeByteLength:number;result:NonNullable<DoclingNativeTable['result']>;
- native?:DoclingNativeTable;observationSha256:string};
+ native?:DoclingNativeTable;observationSha256:string;cellDeclarations?:NativeCellDeclarations;
+ /** Internal current-source witness, excluded from model/citation metadata. */
+ cellDeclarationWitness?:NativeTableArtifact};
 export type NativeTableObservedImage=PdfVisualImageEvidence&{tableObservations?:NativeTableObservation[]};
 const availableObservationBytes=(value:Omit<NativeTableObservation,'observationSha256'>)=>{
- const {native:_native,...envelope}=value;
+ const {native:_native,cellDeclarationWitness:_witness,cellDeclarations:_cells,...envelope}=value;
  return Buffer.byteLength(canonical({...envelope,status:'available',reason:null,observationSha256:'0'.repeat(64)}))+
   Buffer.byteLength(',"native":')+value.nativeByteLength;
 };
 const incompleteGridOnly=(artifact:NativeTableArtifact)=>artifact.status==='unavailable'&&
  artifact.reasons.length===1&&artifact.reasons[0]==='incomplete-grid';
 
+export function nativeCellDeclarationMode(value=process.env.KERNEL_NATIVE_CELL_OBSERVATIONS??'off'){
+ if(value!=='off'&&value!=='declared-v1')throw Error('Invalid native cell observation mode');
+ return value==='off'?undefined:value;
+}
+/** The internal raw witness must never enter provider input or persisted citations. */
+export function nativeTableObservationWire(observation:NativeTableObservation){
+ const {cellDeclarationWitness:_witness,...wire}=observation;return wire;
+}
+function cellDeclarationAllowance(value:Omit<NativeTableObservation,'observationSha256'>){
+ const {cellDeclarations:_cells,cellDeclarationWitness:_witness,...base}=value;
+ return NATIVE_TABLE_OBSERVATION_LIMITS.bytes-Buffer.byteLength(canonical({...base,observationSha256:'0'.repeat(64)}))-
+  Buffer.byteLength(',"cellDeclarations":');
+}
+
 /** Bounded transport of an existing declaration, never a new grid or text source. */
-export function prepareNativeTableObservation(item:DerivedTableCandidate,artifact:NativeTableArtifact,image:PdfVisualImageEvidence):NativeTableObservation{
+export function prepareNativeTableObservation(item:DerivedTableCandidate,artifact:NativeTableArtifact,image:PdfVisualImageEvidence,
+ mode=nativeCellDeclarationMode()):NativeTableObservation{
+ if(mode!==undefined&&mode!=='declared-v1')throw Error('Invalid native cell observation mode');
  const rebuilt=prepareNativeTableArtifact(artifact.native);
  if((artifact.status!=='available'&&!incompleteGridOnly(artifact))||canonical(rebuilt)!==canonical(artifact)||artifact.artifactSha256!==item.artifactSha256)
   throw new DocumentEvidenceChangedError();
@@ -212,20 +231,25 @@ export function prepareNativeTableObservation(item:DerivedTableCandidate,artifac
  }else if(availableObservationBytes(value)>NATIVE_TABLE_OBSERVATION_LIMITS.bytes){
   delete value.native;value.status='unavailable';value.reason='observation-byte-limit';
  }
- const observation={...value,observationSha256:sha(canonical(value))};
+ if(mode==='declared-v1'&&value.status==='unavailable'){
+  value.cellDeclarations=prepareNativeCellDeclarations(artifact,cellDeclarationAllowance(value));
+  value.cellDeclarationWitness=structuredClone(artifact);
+ }
+ const {cellDeclarationWitness:_witness,...wire}=value;
+ const observation={...value,observationSha256:sha(canonical(wire))};
  assertNativeTableObservation(observation,image);return observation;
 }
 
 /** Check the declaration against this exact original page asset. Hashes bind
  * saved parser observations, not their semantic or visual correctness. */
 export function assertNativeTableObservation(observation:NativeTableObservation,image:PdfVisualImageEvidence){
- const {observationSha256,...value}=observation,item=value.candidate,source=item?.source,result=value.result;
+ const {observationSha256,cellDeclarationWitness,...value}=observation,item=value.candidate,source=item?.source,result=value.result;
  const identity=source&&{namespace:NATIVE_TABLE_NAMESPACE,producer:NATIVE_TABLE_PRODUCER,source,artifactSha256:item.artifactSha256,
   manifestSha256:item.manifestSha256,assetSha256:item.assetSha256,anchor:item.anchorEvidenceId};
  if(value.version!=='docling-native-observation-v1'||value.producer!==NATIVE_TABLE_PRODUCER||value.authority!=='parser-declared-untrusted'||
   value.semanticVerified!==false||value.relationshipVerified!==false||value.visibilityVerified!==false||!isSha(observationSha256)||
   value.rawProvenancePageBasis!=='derived-input-local'||value.rawProvenanceCoordinateMapping!=='unverified'||
-  sha(canonical(value))!==observationSha256||Buffer.byteLength(canonical(observation))>NATIVE_TABLE_OBSERVATION_LIMITS.bytes||
+  sha(canonical(value))!==observationSha256||Buffer.byteLength(canonical(nativeTableObservationWire(observation)))>NATIVE_TABLE_OBSERVATION_LIMITS.bytes||
   item?.kind!=='derived-native-table'||!source||sha(canonical(identity))!==item.id||
   ![item.id,item.assetSha256,item.artifactSha256,item.manifestSha256,source.sourceHash,value.nativeSha256].every(isSha)||
   image.kind!=='pdf-page'||value.attachmentId!==image.attachmentId||item.pageNumber!==image.physicalPage||
@@ -243,6 +267,17 @@ export function assertNativeTableObservation(observation:NativeTableObservation,
    prepareNativeTableArtifact(value.native).artifactSha256!==item.artifactSha256)throw new DocumentEvidenceChangedError();
  }else if(value.status!=='unavailable'||!['observation-byte-limit','incomplete-grid'].includes(value.reason??'')||value.native!==undefined||
   (value.reason==='observation-byte-limit'&&availableObservationBytes(value)<=NATIVE_TABLE_OBSERVATION_LIMITS.bytes))throw new DocumentEvidenceChangedError();
+ if(value.cellDeclarations!==undefined){
+  if(!cellDeclarationWitness||value.status!=='unavailable'||
+   canonical(prepareNativeTableArtifact(cellDeclarationWitness.native))!==canonical(cellDeclarationWitness)||
+   cellDeclarationWitness.artifactSha256!==item.artifactSha256||sha(canonical(cellDeclarationWitness.native))!==value.nativeSha256||
+   Buffer.byteLength(canonical(cellDeclarationWitness.native))!==value.nativeByteLength||
+   canonical(cellDeclarationWitness.native.result)!==canonical(result)||cellDeclarationWitness.native.reference!==value.nativeReference||
+   canonical(cellDeclarationWitness.native.pageNumbers)!==canonical([item.pageNumber])||
+   (cellDeclarationWitness.status!=='available'&&!incompleteGridOnly(cellDeclarationWitness))||
+   canonical(prepareNativeCellDeclarations(cellDeclarationWitness,cellDeclarationAllowance(value)))!==canonical(value.cellDeclarations))
+   throw new DocumentEvidenceChangedError();
+ }else if(cellDeclarationWitness!==undefined)throw new DocumentEvidenceChangedError();
 }
 type CandidateRow={id:string;document_id:string;version_id:string;source_version_id:string;source_hash:string;course_id:string;
  page_number:number;anchor_evidence_id:string;manifest_sha256:string;asset_sha256:string;artifact_sha256:string;artifact:NativeTableArtifact;

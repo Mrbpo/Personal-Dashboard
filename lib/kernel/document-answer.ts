@@ -10,7 +10,7 @@ import {validateCompleteStudySource,type CompleteStudySourceProof} from './docum
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
-import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
+import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,nativeTableObservationWire,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,sourceValueQuestionContract,
  type SourceValueDerivation,type SourceValueQuestionContract,type SourceValueCatalog,type SourceValueTableContext} from './document-source-values.ts';
@@ -303,7 +303,9 @@ export function resolveGroundedDocumentAnswerReferences(value:unknown,supports:r
 }
 
 const supportMetadata=({text,image,textContextWindows,...support}:Support)=>{
- void text;void image;void textContextWindows;return support;
+ void text;void image;void textContextWindows;
+ return support.tableObservations?{...support,tableObservations:support.tableObservations.map(observation=>
+  observation.version==='docling-native-observation-v1'?nativeTableObservationWire(observation):observation)}:support;
 };
 
 /** Preserve the original lossless partition, with optional declared literal

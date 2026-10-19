@@ -9,6 +9,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {mkdir,open} from 'node:fs/promises';
 import {isAbsolute,join} from 'node:path';
 import {normalizeDocumentRoutingScope,DOCUMENT_ROUTING_SCOPE_VERSION,type DocumentRoutingScope} from './kernel/document-routing-scope.ts';
+import {nativeCellDeclarationMode} from './kernel/document-table-candidates.ts';
 
 export const STUDY_APPLICATION_VERSION='kernel-study-http-v1';
 export type StudyFailureStage='configuration'|'parsing'|'structure-storage'|'retrieval'|'evidence-selection'|'generation'|'citation-validation';
@@ -69,6 +70,10 @@ export function studyCourseRouting(value=process.env.STUDY_COURSE_ROUTING??'off'
  if(value!=='off'&&value!=='explicit-codes-v1')throw new StudyAnswerError('configuration','invalid-course-routing','课程路由配置无效');
  return value==='off'?undefined:value;
 }
+export function studyNativeCellObservations(value=process.env.KERNEL_NATIVE_CELL_OBSERVATIONS??'off'){
+ try{return nativeCellDeclarationMode(value);}
+ catch(cause){throw new StudyAnswerError('configuration','invalid-native-cell-observations','原生单元格观察配置无效',{cause});}
+}
 export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REASONING??'low'){
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
  return value==='low'?undefined:value;
@@ -109,6 +114,7 @@ export function studyFailure(error:unknown){
 }
 export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>,requestedScope?:DocumentRoutingScope){
  const routingScope=studyRoutingScope(requestedScope),routingWitness=studyRoutingScopeWitness(routingScope);
+ const nativeCellObservations=studyNativeCellObservations();
  const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
@@ -167,6 +173,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
     ...(explicitRouting?{explicitRouting}:{}),
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
+     ...(nativeCellObservations?{nativeCellObservations}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
