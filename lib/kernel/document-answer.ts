@@ -9,6 +9,7 @@ import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudy
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
+import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,nativeTableObservationWire,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
@@ -24,7 +25,7 @@ export const DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16=8192;
 export const DOCUMENT_ANSWER_VISUAL_UNIT_POLICY='author-image-caption-v1';
 export const DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE='I cannot provide a sufficiently supported answer.';
 type Node={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
- evidenceId:string;locator:string;body:string;bodySha256:string};
+ evidenceId:string;locator:string;body:string;bodySha256:string;ordinal?:number;kind?:'paragraph'|'abstract'|'caption'|'page'};
 type AuthorImage={attachmentId:string;assetId:string;captionEvidenceId:string;sha256:string;byteLength:number;
  width:number;height:number;mime:'image/png';bytes:Uint8Array;source:{documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string};
  tableObservations?:TableObservation[]};
@@ -72,6 +73,9 @@ function mentionedSourceIdentity(question:string,documents:{documentId:string;na
  return {policy:'exact-mentioned-source-attribution-v1',documentId,documentVersionId,sourceVersionId,sourceHash,title:document.name};
 }
 type Citation={id:string;quote:string};
+type SourceIdentityBinding={supportId:string;bodySha256:string;sourceKey:string;matchedCodes:string[]};
+const supportSourceKey=(s:Pick<Support,'documentId'|'documentVersionId'|'sourceVersionId'|'sourceHash'>)=>
+ JSON.stringify([s.documentId,s.documentVersionId,s.sourceVersionId,s.sourceHash]);
 type Claim={text:string;citations:Citation[]};
 export type GroundedDocumentAnswer={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Claim[]};
 export type DocumentAnswerSelections=Omit<GroundedDocumentAnswer,'claims'>&{claims:{text:string;citations:{id:string}[]}[]};
@@ -471,9 +475,41 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
   (read.originalObservationSha256&&!/^[a-f0-9]{64}$/.test(read.originalObservationSha256))||
   supports.some(s=>s.image?.attachmentId===read.attachmentId&&s.pageRegions&&s.pageRegions.originalObservationSha256!==read.originalObservationSha256))||
   new Set(regionReads.map(read=>read.attachmentId)).size!==regionReads.length)throw new Error('Invalid PDF observation read receipts');
+ const sourceIdentityBindings:SourceIdentityBinding[]=[],identity=context.sourceIdentityContext;
+ if(identity){
+  const codes=[...new Set(observeLiteralCourseCodes(question).map(o=>o.code))].sort();let points=0;
+  if(identity.version!=='literal-course-frontpage-v1'||identity.coverage!=='first-persisted-pdf-page-only'||
+   identity.courseOwnershipVerified!==false||identity.semanticVerified!==false||JSON.stringify(identity.requestedCodes)!==JSON.stringify(codes)||
+   !Array.isArray(identity.additions)||identity.additions.length>4||!Array.isArray(identity.omissions))throw Error('Invalid original source identity binding');
+  const identityNodes=[...identity.additions];
+  for(const omission of identity.omissions.filter(o=>o.reason==='already-in-context')){
+   const source=omission.source,node=context.parents.flatMap(p=>p.nodes).find(n=>n.documentId===source.documentId&&n.documentVersionId===source.currentVersionId&&
+    n.sourceVersionId===source.sourceVersionId&&n.sourceHash===source.sourceHash&&n.kind==='page'&&n.ordinal===0);
+   if(!node)throw Error('Existing original identity node differs');
+   identityNodes.push({source,evidenceId:node.evidenceId,locator:node.locator,physicalPage:1,bodySha256:node.bodySha256,
+    observations:observeLiteralCourseCodes(node.body).filter(o=>codes.includes(o.code))});
+  }
+  for(const addition of identityNodes){
+   const source=addition.source,matching=supports.filter(s=>s.kind==='text'&&s.documentId===source.documentId&&
+    s.documentVersionId===source.currentVersionId&&s.sourceVersionId===source.sourceVersionId&&s.sourceHash===source.sourceHash&&
+    s.evidenceId===addition.evidenceId&&s.locator===addition.locator&&s.sha256===addition.bodySha256);
+   if(addition.physicalPage!==1||matching.length!==1)throw Error('Original source identity evidence differs');
+   const support=matching[0],node=context.parents.flatMap(p=>p.nodes).find(n=>n.documentId===support.documentId&&
+    n.documentVersionId===support.documentVersionId&&n.sourceVersionId===support.sourceVersionId&&n.sourceHash===support.sourceHash&&
+    n.evidenceId===support.evidenceId&&n.locator===support.locator&&n.kind==='page'&&n.ordinal===0&&
+    n.body===support.text&&n.bodySha256===support.sha256),body=support.text!,size=Array.from(body).length;
+   if(!node||size>8192||(points+=size)>16384||sourceIdentityBindings.some(b=>b.sourceKey===supportSourceKey(support)))
+    throw Error('Invalid original identity node or bound');
+   const observations=observeLiteralCourseCodes(body).filter(o=>codes.includes(o.code));
+   if(!observations.length||JSON.stringify(observations)!==JSON.stringify(addition.observations))throw Error('Original identity span differs');
+   sourceIdentityBindings.push({supportId:support.id,bodySha256:support.sha256,sourceKey:supportSourceKey(support),matchedCodes:observations.map(o=>o.code)});
+  }
+ }
+ const fingerprintInput=boundReads.length?{input,sourceObservations:boundReads}:input;
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,...(visualUnitManifest?{visualUnitManifest}:{}),input,warnings,unavailableParents,
   ...(regionReads.length?{pdfPageRegionReads:structuredClone(regionReads)}:{}),
-  fingerprint:sha(JSON.stringify(boundReads.length?{input,sourceObservations:boundReads}:input))};
+  ...(sourceIdentityBindings.length?{sourceIdentityBindings}:{}),
+  fingerprint:sha(JSON.stringify(sourceIdentityBindings.length?{input:fingerprintInput,sourceIdentityBindings}:fingerprintInput))};
 }
 
 /** Optional metadata never displaces original text or PNGs. Source drift uses
@@ -613,9 +649,13 @@ export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_S
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
  sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected'|'provided-with-system-retention';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;
  pdfPageRegionTransport?:ReturnType<typeof pdfPageRegionTransport>;
+ sourceIdentityRetention?:Omit<SourceIdentitySelection,'referenceIds'>;
  textNodeRetention?:Omit<StoredNodeTextSelection,'referenceIds'>}&
  Partial<Omit<SourceValueEvidenceSelection,'referenceIds'>>;
 type PreparedAnswer=ReturnType<typeof prepareDocumentAnswer>;
+type SourceIdentitySelection={policy:'selected-source-identity-text-v1';referenceIds:string[];addedReferenceIds:string[];
+ decisions:Array<{supportId:string;status:'retained'|'already-selected'|'source-not-selected'|'size-limit'|'reference-limit';referenceIds:string[]}>;
+ inputScope:'already-available-original-text';courseOwnershipVerified:false;coverage:'unassessed'};
 const selectableIds=(prepared:PreparedAnswer)=>[...prepared.quoteUnits.filter(unit=>unit.selectable).map(unit=>unit.id),
  ...prepared.supports.filter(support=>support.kind==='image').map(support=>support.id)];
 const selectorIds=(prepared:PreparedAnswer)=>[...prepared.quoteUnits.filter(unit=>unit.selectable&&!unit.pageContext).map(unit=>unit.id),
@@ -656,6 +696,28 @@ export function validateDocumentEvidenceSelection(value:unknown,prepared:Prepare
  if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id))||new Set(ids).size!==ids.length)
   throw new Error('Invalid original evidence selection');
  return [...ids];
+}
+
+/** A common bounded projection after either selector lane. Only already
+ * available identity text of an actually selected current source may survive;
+ * it remains ordinary original evidence, never verified course ownership. */
+export function retainSelectedSourceIdentity(referenceIds:string[],providerReferenceIds:string[],prepared:PreparedAnswer):SourceIdentitySelection|undefined{
+ if(!prepared.sourceIdentityBindings?.length)return;
+ const refs=validateDocumentEvidenceSelection({referenceIds},prepared),provider=validateDocumentEvidenceSelection({referenceIds:[...new Set(providerReferenceIds)]},prepared),
+  selectedSupportIds=new Set(prepared.quoteUnits.filter(q=>provider.includes(q.id)).map(q=>q.supportId)),
+  selectedSources=new Set(prepared.supports.filter(s=>selectedSupportIds.has(s.id)||s.kind==='image'&&provider.includes(s.id)).map(supportSourceKey)),
+  result:SourceIdentitySelection={policy:'selected-source-identity-text-v1',referenceIds:refs,addedReferenceIds:[],decisions:[],
+   inputScope:'already-available-original-text',courseOwnershipVerified:false,coverage:'unassessed'};
+ let bytes=0;
+ for(const binding of prepared.sourceIdentityBindings){
+  const units=generationQuoteUnits(prepared).filter(q=>q.supportId===binding.supportId),additions=units.filter(q=>!result.referenceIds.includes(q.id)),
+   size=units.reduce((n,q)=>n+Buffer.byteLength(q.text),0),status=!selectedSources.has(binding.sourceKey)?'source-not-selected':
+    !additions.length?'already-selected':bytes+size>32768?'size-limit':result.referenceIds.length+additions.length>64?'reference-limit':'retained';
+  result.decisions.push({supportId:binding.supportId,status,referenceIds:status==='retained'?additions.map(q=>q.id):[]});
+  if(status!=='retained')continue;
+  bytes+=size;result.referenceIds.push(...additions.map(q=>q.id));result.addedReferenceIds.push(...additions.map(q=>q.id));
+ }
+ return result;
 }
 
 export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';providerReferenceIds:string[];
@@ -1075,13 +1137,17 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   const sourceValueSelection=sourceGenerationRoute!=='ordinary'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
   const textSelection=sourceValueSelection?undefined:retainSelectedNativeTablePages(retainDocumentSelectionContext(decoded,prepared),prepared);
   referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
+  const identitySelection=retainSelectedSourceIdentity(referenceIds,sourceValueSelection?.normalizedProviderReferenceIds??textSelection!.providerReferenceIds,prepared);
+  if(identitySelection)referenceIds=identitySelection.referenceIds;
   if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
    throw new Error('Document evidence changed during evidence selection');
   selectionReceipt={version:DOCUMENT_EVIDENCE_SELECTION_VERSION,coverage:'unassessed',referenceIds,
    requestedModel:model,model:actualModel,providerRequestSha256,providerResponseId:payload.id??null,usage:payload.usage??null,
-   sourceInputFingerprint:prepared.fingerprint,outcome:sourceValueSelection?.systemRetainedReferenceIds.length||textSelection?.systemRetainedReferenceIds.length?
+   sourceInputFingerprint:prepared.fingerprint,outcome:sourceValueSelection?.systemRetainedReferenceIds.length||textSelection?.systemRetainedReferenceIds.length||identitySelection?.addedReferenceIds.length?
     'provided-with-system-retention':referenceIds.length?'selected':'no-evidence-selected',
-   ...(sourceValueSelection??{}),
+   ...(sourceValueSelection?{...sourceValueSelection,referenceIds,systemRetainedReferenceIds:[...new Set([
+    ...sourceValueSelection.systemRetainedReferenceIds,...(identitySelection?.addedReferenceIds??[])])]}:{}),
+   ...(identitySelection?{sourceIdentityRetention:(({referenceIds:_,...identity})=>identity)(identitySelection)}:{}),
    ...(textSelection?{textNodeRetention:(({referenceIds:_,...retention})=>retention)(textSelection)}:{}),
    ...(prepared.pdfPageRegionReads?.length?{pdfPageRegionTransport:pdfPageRegionTransport(prepared,request)}:{}),
    ...(prepared.input.unitPolicy?{unitPolicy:prepared.input.unitPolicy}:{})};

@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRuntimeRequest,buildDocumentEvidenceSelectionRequest,
- buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,retainSelectedSourceIdentity,synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 
 process.env.DATABASE_URL=':memory:';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'selection-test-'+randomUUID());
@@ -21,6 +21,77 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
   width:1,height:1,mime:'image/png',bytes:png,source:{documentId:id,currentVersionId:`v${id}`,sourceVersionId:`sv-${id}`,sourceHash:`hash-${id}`}}))};}
 const output=(value:unknown)=>new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:100,output_tokens:20},output_text:JSON.stringify(value)}),{status:200});
 const claim=(id:string)=>({status:'answered',message:'',claims:[{text:'The count is two.',citations:[{id}]}]});
+
+function identityContext():DocumentAnswerContext{
+ const c=context(),body='CS229. Machine Learning course information.',bodySha256=sha(body),source={documentId:'a',currentVersionId:'va',sourceVersionId:'sv-a',sourceHash:'hash-a'};
+ c.images=[];c.anchors[0]={...c.anchors[0],id:'pg:va:2',page_number:2,locator:'original:2'};
+ c.parents=[{parentId:'original-identity-a',status:'available',sourceNodeCount:1,sourceBodyCodepoints:Array.from(body).length,
+  nodes:[{documentId:'a',documentVersionId:'va',sourceVersionId:'sv-a',sourceHash:'hash-a',evidenceId:'identity-a',locator:'original:1',
+   ordinal:0,kind:'page',body,bodySha256}]}];
+ c.sourceIdentityContext={version:'literal-course-frontpage-v1',requestedCodes:['CS229'],coverage:'first-persisted-pdf-page-only',
+  courseOwnershipVerified:false,semanticVerified:false,omissions:[],additions:[{source,evidenceId:'identity-a',locator:'original:1',physicalPage:1,bodySha256,
+   observations:[{raw:'CS229',code:'CS229',startUtf16:0,endUtf16:5}]}]};
+ return c;
+}
+
+test('same-source identity survives ordinary and typed fallback selection in actual generation payloads',async()=>{
+ const c=identityContext(),question='Compare CS229 textbooks.',p=prepareDocumentAnswer(question,c),
+  material=p.quoteUnits.find(q=>q.supportId==='e0')!.id,identity=p.quoteUnits.find(q=>q.text.startsWith('CS229.'))!,saved=globalThis.fetch;
+ const check={mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}};
+ try{
+  for(const sourceValues of [false,true]){
+   let calls=0;
+   globalThis.fetch=async(_url,init)=>{calls++;const req=JSON.parse(String(init?.body));
+    if(calls===1)return output({referenceIds:[material]});
+    const input=JSON.parse(req.input.at(-1).content[0].text);
+    assert.ok(input.quoteUnits.some((q:any)=>q.id===identity.id&&q.text===identity.text&&q.quoteSha256===identity.quoteSha256));
+    assert.ok(req.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum.includes(identity.id));
+    assert.doesNotMatch(JSON.stringify(req.input),/hidden-marker-947|input_image/);
+    return output(claim(identity.id));};
+   const result=await synthesizeDocumentAnswer(question,async()=>c,{...policy,citationCheck:check,sourceIdentityContext:'literal-course-frontpage-v1',
+    ...(sourceValues?{sourceValueContract:'cell-bindings-v2' as const,recordSourceValueRawResponse:async()=>{},recordSourceValueDerivation:async()=>{}}:{})});
+   assert.equal(calls,2,'no additional model phase');assert.ok('evidenceSelection' in result);
+   assert.equal(result.evidenceSelection?.outcome,'provided-with-system-retention');
+   assert.ok(result.evidenceSelection?.referenceIds.includes(identity.id));
+   assert.deepEqual(result.evidenceSelection?.sourceIdentityRetention?.addedReferenceIds,[identity.id]);
+   assert.equal(result.evidenceSelection?.sourceIdentityRetention?.courseOwnershipVerified,false);
+   if(sourceValues)assert.ok(result.evidenceSelection?.systemRetainedReferenceIds?.includes(identity.id),'typed receipt cannot overwrite common references');
+  }
+ }finally{globalThis.fetch=saved;}
+});
+
+test('identity retention rejects stale bindings and does not rescue empty or foreign-source selections',()=>{
+ const c=identityContext(),q='Compare CS229 textbooks.',p=prepareDocumentAnswer(q,c),foreign=p.quoteUnits.find(u=>u.supportId==='e1')!.id;
+ assert.deepEqual(retainSelectedSourceIdentity([],[],p)!.referenceIds,[]);
+ const none=retainSelectedSourceIdentity([foreign],[foreign],p)!;assert.deepEqual(none.referenceIds,[foreign]);
+ assert.equal(none.decisions[0].status,'source-not-selected');
+ const invalid=structuredClone(c);invalid.sourceIdentityContext!.additions[0].source.sourceVersionId='stale';
+ assert.throws(()=>prepareDocumentAnswer(q,invalid),/identity evidence differs/);
+ const wrongSpan=structuredClone(c);wrongSpan.sourceIdentityContext!.additions[0].observations[0].endUtf16=4;
+ assert.throws(()=>prepareDocumentAnswer(q,wrongSpan),/identity span differs/);
+ const unverified=structuredClone(c);(unverified.sourceIdentityContext as any).courseOwnershipVerified=true;
+ assert.throws(()=>prepareDocumentAnswer(q,unverified),/identity binding/);
+ const plain=structuredClone(c);delete plain.sourceIdentityContext;
+ const before=prepareDocumentAnswer(q,plain);assert.equal(retainSelectedSourceIdentity([before.quoteUnits[0].id],[before.quoteUnits[0].id],before),undefined);
+ assert.notEqual(before.fingerprint,p.fingerprint,'validated identity binding participates in source rechecks');
+});
+
+test('identity retention preserves the existing reference capacity atomically',()=>{
+ const c=identityContext();
+ for(let i=3;i<=65;i++)c.anchors.push({...c.anchors[0],id:`pg:va:${i}`,page_number:i,evidence_id:`material-${i}`,locator:`original:${i}`,body:`Original material ${i}.`});
+ const p=prepareDocumentAnswer('Compare CS229 textbooks.',c),materialSupports=new Set(p.supports.filter(s=>s.kind==='text'&&s.documentId==='a'&&s.evidenceId!=='identity-a').map(s=>s.id)),
+  ids=p.quoteUnits.filter(q=>materialSupports.has(q.supportId)).map(q=>q.id);
+ assert.equal(ids.length,64);
+ const result=retainSelectedSourceIdentity(ids,ids,p)!;
+ assert.deepEqual(result.referenceIds,ids);assert.deepEqual(result.addedReferenceIds,[]);assert.equal(result.decisions[0].status,'reference-limit');
+ const existing=identityContext(),page=existing.parents[0].nodes[0];
+ existing.anchors.push({...existing.anchors[0],id:'pg:va:1',page_number:1,locator:page.locator,evidence_id:page.evidenceId,body:page.body});
+ const source=existing.sourceIdentityContext!.additions[0].source;
+ existing.sourceIdentityContext!.additions=[];existing.sourceIdentityContext!.omissions=[{source,reason:'already-in-context'}];
+ const prepared=prepareDocumentAnswer('Compare CS229 textbooks.',existing),material=prepared.quoteUnits.find(q=>q.supportId==='e0')!,
+  identity=prepared.quoteUnits.find(q=>q.text.startsWith('CS229.'))!,retained=retainSelectedSourceIdentity([material.id],[material.id],prepared)!;
+ assert.ok(retained.referenceIds.includes(identity.id),'an existing first page is retained too; not only newly added reader nodes');
+});
 
 test('application generation effort changes only generation and preserves the original selection request',()=>{
  const p=prepareDocumentAnswer('What did Original a test?',context()),ids=[p.quoteUnits[0].id],
