@@ -31,6 +31,10 @@ export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
  if(value!=='off'&&value!=='difference-v1')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
  return value==='off'?undefined:value;
 }
+export function studyQuantityConsistency(value=process.env.STUDY_QUANTITY_CONSISTENCY??'off'){
+ if(value!=='off'&&value!=='explicit-unit-v1')throw new StudyAnswerError('configuration','invalid-quantity-consistency','数值类型核对配置无效');
+ return value==='off'?undefined:value;
+}
 export function studySourceScope(value=process.env.STUDY_SOURCE_SCOPE??'off'){
  if(value!=='off'&&value!=='question-scope')throw new StudyAnswerError('configuration','invalid-source-scope','问题来源范围配置无效');
  return value==='off'?undefined:value;
@@ -78,6 +82,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const generationReasoningEffort=studyGenerationReasoning();
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
+ const quantityConsistency=studyQuantityConsistency();
  if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','text-context-requires-selection-check','原文上下文窗口需要内核、证据选择和引用核对');
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
@@ -96,6 +101,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(quantityConsistency?{quantityConsistency}:{}),
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
@@ -129,6 +135,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
+    ...('quantityConsistency' in result?{quantityConsistency:result.quantityConsistency}:{}),
     ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
     ...('sourceValueDerivation' in result&&result.sourceValueDerivation?{sourceValueDerivation:result.sourceValueDerivation,answerContract:'difference-v1',
      claimOrigins:result.answer.claims.map((_claim,index)=>result.sourceValueDerivation!.operations.some(op=>op.claimIndex===index)?

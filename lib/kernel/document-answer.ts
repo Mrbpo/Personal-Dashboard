@@ -87,6 +87,7 @@ export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequest
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
+ quantityConsistency?:'explicit-unit-v1';
  textContextWindows?:'producer-neighbors-v1'|'stored-page-v1';
  sourceRouting?:{mode:'question-scope';beforeAttempt:(identity:string)=>Promise<void>;
   recordResponse:(response:Readonly<DocumentQueryScopeResponse>)=>Promise<void>};
@@ -829,6 +830,8 @@ async function documentModelPayload(response:Response,model:DocumentAnswerModel,
 
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
+ if(policy.quantityConsistency!==undefined&&(policy.quantityConsistency!=='explicit-unit-v1'||policy.scope!=='application'))
+  throw new Error('Invalid application quantity consistency policy');
  if(policy.textContextWindows!==undefined&&(!['producer-neighbors-v1','stored-page-v1'].includes(policy.textContextWindows)||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
   throw new Error('Text context windows require application/select-then-answer/selected-once');

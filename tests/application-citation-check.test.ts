@@ -55,3 +55,22 @@ test('complementary actual citations can pass once; source drift stops after pre
   }finally{globalThis.fetch=saved;}
  }
 });
+
+test('opt-in explicit quantity mismatch preserves generation evidence and refuses before citation calls; off keeps the existing path',async()=>{
+ for(const enabled of [false,true]){
+  const kernel=new KernelService(),q='How long did training take?',c=context();c.anchors[0].body='Each model was trained for 100 epochs.';
+  const prepared=prepareDocumentAnswer(q,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch;
+  (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+  let calls=0;globalThis.fetch=async()=>{calls++;return calls===1?response({status:'answered',message:'',claims:[
+   {text:'Each model was trained for 100 epochs.',citations:[{id:prepared.quoteUnits[0].id}]}]}):response(diagnostic('supported',1));};
+  try{const result=await kernel.answerStudyContent('owner',q,{},
+   {scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts),...(enabled?{quantityConsistency:'explicit-unit-v1' as const}:{})});
+   if(enabled){assert.equal(result.answer.status,'insufficient-evidence');assert.deepEqual(result.selectedUnits,[]);
+    assert.equal(calls,1);assert.equal(raw.length,0);assert.equal(attempts.length,0);
+    assert.ok('quantityConsistency' in result);const receipt=result.quantityConsistency;
+    assert.equal(receipt?.status,'explicit-incompatible-quantity');assert.equal(receipt?.originalAnswer?.claims[0].text,'Each model was trained for 100 epochs.');
+    assert.equal(receipt?.originalSelectedUnits?.length,1);assert.equal(receipt?.inputFingerprint,result.inputFingerprint);
+   }else{assert.equal(result.answer.status,'answered');assert.equal(calls,2);assert.equal(raw.length,1);assert.equal('quantityConsistency' in result,false);}
+  }finally{globalThis.fetch=saved;}
+ }
+});

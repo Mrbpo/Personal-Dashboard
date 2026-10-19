@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyGenerationReasoning,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyQuantityConsistency,studyGenerationReasoning,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
@@ -27,6 +27,9 @@ test('legacy is the default, invalid configuration fails closed and application 
  assert.throws(()=>studyEvidenceSelection('typo'),StudyAnswerError);
  assert.equal(studyCitationCheck('off'),undefined);assert.equal(studyCitationCheck('selected-once'),'selected-once');
  assert.throws(()=>studyCitationCheck('typo'),StudyAnswerError);
+ assert.equal(studyQuantityConsistency('off'),undefined);assert.equal(studyQuantityConsistency('explicit-unit-v1'),'explicit-unit-v1');
+ assert.throws(()=>studyQuantityConsistency('typo'),StudyAnswerError);
+ await assert.rejects(documentAnswerSettings({scope:'development',quantityConsistency:'explicit-unit-v1'}),/quantity consistency policy/);
  assert.equal(studySourceScope('off'),undefined);assert.equal(studySourceScope('question-scope'),'question-scope');
  assert.throws(()=>studySourceScope('typo'),StudyAnswerError);
  assert.equal(studyGenerationReasoning('low'),undefined);assert.equal(studyGenerationReasoning('medium'),'medium');

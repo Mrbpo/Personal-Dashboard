@@ -10,6 +10,7 @@ import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvide
 import {readDocumentNodes} from './document-nodes.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
+import {checkDocumentQuantityConsistency} from './document-quantity-consistency.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareCompleteStudyEvidenceRoute,
@@ -1420,12 +1421,17 @@ export class KernelService {
         return {...context,...(textContextWindows.length?{textContextWindows}:{})};
       };
     }
-    const result=await synthesizeDocumentAnswer(question,read,policy);
+    const generated=await synthesizeDocumentAnswer(question,read,policy);
+    const quantityCheck=policy.quantityConsistency?checkDocumentQuantityConsistency(question,generated.answer):undefined;
+    const blocked=quantityCheck?.status==='explicit-incompatible-quantity';
+    const result=quantityCheck?{...generated,answer:quantityCheck.answer,
+      ...(blocked?{selectedUnits:[]}:{}),quantityConsistency:{...quantityCheck,
+        ...(blocked?{originalSelectedUnits:generated.selectedUnits}:{}),inputFingerprint:generated.inputFingerprint}}:generated;
     if('pdfPageRegionTransport'in result&&result.pdfPageRegionTransport)
       contextExpansion={...contextExpansion,pdfPageRegions:result.pdfPageRegionTransport};
     let citationCheck:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>|undefined;
     const auditSelections='sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
-    if(policy.citationCheck&&auditSelections?.claims.length){
+    if(result.answer.claims.length&&policy.citationCheck&&auditSelections?.claims.length){
       policy.onStage?.('citation-validation');
       citationCheck=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
         quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
