@@ -1,43 +1,128 @@
-# Course Radar
+# Personal Dashboard · 学习工作台
 
-Course Radar 是一个本地优先、只读连接 Quercus / Canvas LMS 的私人学习数据库。它同步课程内容和提交状态，保留来源与变更历史，并生成每日行动清单。
+> **本项目主要由 ChatGPT 编写，开发过程中使用 Codex 完成代码实现、修复与测试。** 项目维护者负责提出需求、决定方向和实际使用验收。AI 生成的代码与回答仍需验证。
 
-## 本地运行
+一个面向个人学习的自托管工作台：将 Quercus / Canvas、Piazza、邮件和课程文件集中归档，查看作业截止时间，并根据资料进行检索与问答。项目早期名为 **Course Radar**，代码和数据库文件名中仍保留这一名称。
 
-```powershell
-npm install
-npm run dev
+项目正在从分散的功能模块迁移到统一内核。当前仓库同时包含既有网站与持续开发的 PDF 检索、问答能力；**代码合并、CI 通过、实际部署和内容验收是不同的状态**，不能据此假定所有新能力已在生产启用。
+
+## 主要功能
+
+| 功能 | 内容与入口 |
+| --- | --- |
+| 课程与作业 | 同步 Canvas 课程、公告、页面、资料和提交状态，查看截止日期与日历。首页 `/`、课程 `/courses/[courseId]`。 |
+| 学习问答 | 查询课程资料，保存会话与来源引用。入口 `/study`；v1 接口 `/api/v1/study`。 |
+| 资料库与 PDF | 保存原件和版本、解析与索引文档，阅读 PDF 并做批注。入口 `/library`。 |
+| Piazza 与邮件 | 归档帖子和邮件，提供检索、摘要及课程关联。入口 `/piazza`、`/mail`；连接需单独配置。 |
+| 手写学习 | 分页绘画、文字记录、向 AI 提问与画册保存。入口 `/sketch`。 |
+| 内核管理 | 查看课程、任务、事件、事实证据，处理候选事实。入口 `/kernel`。 |
+| 课程录像工具 | 管理员按需发起课程录像归档，保留视角、清单及可用字幕。工具位于 `scripts/course-video/`，不是安装后自动可用的通用下载服务。 |
+
+Canvas 同步不替用户提交作业或修改成绩；任务完成操作在支持时会同步 Canvas Planner。Piazza 使用非官方读取接口，学校登录、Duo 或平台验证仍可能需要人工完成。
+
+## 核心架构
+
+应用使用 **Next.js + React + TypeScript**，内核是应用内的 `KernelService`，不另拆网络微服务。
+
+下图描述统一内核的数据流，部分旧模块仍在迁移接入中。
+
+```text
+Canvas / Piazza / Gmail / Calendar / 文件
+                  ↓
+       来源适配与标准化、版本记录
+                  ↓
+        证据 → 候选事实 → 裁决
+                  ↓
+      PostgreSQL：确定性事实与历史
+                  ↓
+          KernelService → 网站 / API
+
+PDF 原件 → Docling 等解析流程 → 页面文本 / 结构 / 图像证据
+                                      ↓
+                               检索索引 → 问答与引用
 ```
 
-默认打开 `http://localhost:3000`，数据保存在 `data/course-radar-v2.db`。开发启动器会在没有设置 `CANVAS_TOKEN` 时读取相邻的 `QuercusModuleDownloader/.env`，只把 Token 注入本地服务进程，不复制到项目、数据库或浏览器。只要本地服务保持运行，它会在启动后自动同步，并每 15 分钟再次检查；可用 `AUTO_SYNC_INTERVAL_MINUTES` 调整间隔。
+- **PostgreSQL 是核心事实的权威存储**：课程、学期、任务、事件、实体、事实、证据及来源状态。冲突和历史保留在内核中，来源消失不直接等同于任务取消。
+- **SQLite 与文件存储仍在使用**：保存邮件、帖子等原文，以及绘画、批注、设置和部分旧索引；不能只备份 PostgreSQL。
+- **检索索引可以重建**：全文与向量检索用于定位内容，不替代确定性事实的存储。
+- **PDF 原件是内容依据**：解析文本、表格、公式及图形关系均为衍生表示。复杂内容可能解析不完整，来源定位和原图证据用于核查，不能把模型重写当作原文。
+- **AI 不直接拥有业务状态**：负责提取、候选生成和回答；核心事实通过内核验证与裁决后更新。
 
-也可以复制 `.env.example` 为 `.env.local` 并自行配置。`OPENAI_API_KEY` 不存在时，确定的截止日期、提交状态和基础 To-do 仍然正常工作。
+本阶段不要求部署 RAGFlow 或 Graphiti。PDF 结构忠实度、跨文档问答和引用准确性仍在专项验收中，项目不承诺所有文档均可无误解析或回答。
 
-## 独立部署与在线数据库
+## 本地开发
 
-项目不依赖 GPT Sites。默认数据库是本地 SQLite；以后将 `DATABASE_URL` 和 `DATABASE_AUTH_TOKEN` 指向远端 libSQL/Turso 即可让同一套界面和 API 使用在线数据库。
+### 1. 准备依赖
 
-生产环境必须设置：
+- Node.js **22.13 或更新版本**、npm。
+- 一个可连接的 PostgreSQL 数据库，安装 `pgvector` 扩展，并允许迁移账号创建该扩展。仓库的容器构建使用 PostgreSQL 18.6，见 [数据库镜像](deploy/postgres-vector.Dockerfile)。
+- 完整 PDF 解析需要额外启动 Docling Serve；部署配置见 [内核运行手册](docs/v1-kernel-runbook.md)。
 
-- `OWNER_ACCESS_KEY`：网页登录密码
-- `SESSION_SECRET`：登录 Cookie 签名密钥
-- `DASHBOARD_API_TOKEN`：外部数据库/API 客户端的 Bearer Token
-- `CANVAS_TOKEN`：Quercus 只读访问 Token
-- `OPENAI_API_KEY`：可选的 AI 内容分析密钥
-- `LOCAL_DEV_BYPASS_AUTH=false`
+```sh
+git clone https://github.com/Mrbpo/Personal-Dashboard.git
+cd Personal-Dashboard
+npm ci
+```
 
-接口说明见 `docs/api.md`，完整验收范围见 `docs/acceptance-matrix.md`。
+### 2. 配置本地环境
 
-首页月历会显示 Canvas 截止日期；AI 能给出合理开工建议的任务会以横条展示“建议开始 → 截止”。Canvas 的 `unlock_at` 只用于判断能否开始，不会被误画成学习开始日。“导入日程”支持 `.ics`（Canvas、Google Calendar、Outlook 等可导出）和带有 `title,start,end,description` 列的 `.csv` 文件。
+在项目根目录自行创建 `.env.local`，将以下示例替换为自己的数据库连接。仓库没有 `.env.example`。
 
-首页“直接问课程内容”会先检索本地保存的公告、Modules、Pages、作业说明与文件分析结果，再把命中的少量原文交给 AI 生成带来源编号的回答。回答中的来源可以直接打开 Canvas 原文；资料不足或课程存在歧义时不会自动猜测。
+```dotenv
+KERNEL_DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5432/study_kernel
+DATABASE_URL=file:./data/course-radar-v2.db
+LOCAL_DEV_BYPASS_AUTH=true
+AUTO_SYNC_ENABLED=false
+```
 
-设置页可以连接使用 Piazza 内部账号登录的账户。连接器只调用读取课程、Feed 和帖子的接口，按课程基础代码自动匹配（例如 `CHMA10H3` 与 `CHMA10`），并把最近帖子放入对应课程和课程问答搜索。勾选自动重登后，服务器使用独立密钥加密保存 Piazza 邮箱和密码；会话失效时每轮最多重登一次，失败后至少等待 15 分钟再试。关闭自动重登或断开连接会删除保存的凭据；不勾选时密码只用于当次登录。数据库中的会话仍由 `SESSION_SECRET` 加密。不会读取成员名单，也不会发布、回复或修改内容。由于这是 Piazza 的非官方接口，遇到验证码、多因素认证或接口变化时仍可能需要手动重新连接；本地服务连接后默认每 30 分钟同步一次。
+以上仅用于本机开发。开发服务绕过登录时应仅监听本机地址；部署时必须关闭绕过，并配置访问控制。
 
-`/piazza` 提供按网站时区保存的每日摘要及当天全部帖子，并可按课程搜索历史问答。未匹配 Canvas 的 Piazza 课程也会独立归档。问答结果只包含 Piazza 明确标记的教师回答，其他学生回复和未回答问题不会被当作确切答案。摘要在同步后自动刷新；已有旧归档需要后续同步重新读取，才能识别回答类型。历史帖子仍按每轮最多 90 条逐步补齐。
+可按需要补充：
 
-Piazza 的 AI 页面按周一至周日整理所有已归档帖子，可逐周或一次生成全部周报，并为结论附原帖。当前周在同步后交由后台自动更新；历史各周可在页面补齐。AI 问答只使用教师明确回答的问答帖和普通课程消息，引用原帖；证据不足时不生成确定答案。AI 功能需要在服务设置中配置可用的 AI 服务，并受现有月度预算限制。
+| 配置 | 用途 |
+| --- | --- |
+| `CANVAS_TOKEN` | 连接 Quercus / Canvas；需要自动同步时再启用 `AUTO_SYNC_ENABLED`。 |
+| `DOCLING_URL` | 可访问的 Docling Serve 地址，用于 PDF 解析。 |
+| `OPENAI_API_KEY` | 部分 AI、向量及重排功能使用；服务与预算也可在网站设置中管理。 |
+| `OWNER_ACCESS_KEY`、`SESSION_SECRET` | 部署时的访问密码与会话签名密钥。 |
+| `DASHBOARD_API_TOKEN` | 外部 API 客户端认证，具体接口见 API 文档。 |
 
-任务完成状态默认同时更新 Course Radar 与 Canvas Planner；它不会替你提交作业或修改成绩。不支持 Planner 勾选的内容只会保存在本站，并在界面上明确提示。
+不配置 AI 不等于停用课程和任务数据库，但 AI 问答及相关索引功能需要可用服务。邮件 OAuth、Piazza 和录像授权各有单独的连接步骤。
 
-首页现在是整个私人工作台的总 Dashboard：全站检索会覆盖 Canvas、Piazza 和已导入日程；学习中心只是其中一个模块。快捷入口可以自行添加网站，并直接尝试显示网站自己的 favicon。AI 用量区支持 OpenAI、DeepSeek 与 xAI：DeepSeek 普通 API Key 可以显示余额；OpenAI 的组织累计用量需要 `OPENAI_ADMIN_KEY`；xAI 的完整余额与账单用量需要 `XAI_MANAGEMENT_KEY` 和 `XAI_TEAM_ID`。所有密钥仍只从服务器环境变量读取。
+### 3. 初始化与启动
+
+首次使用空数据库时执行迁移，准备绘图字体资源，再启动网站：
+
+```sh
+node --env-file=.env.local --experimental-strip-types scripts/kernel-migrate.ts
+node scripts/copy-excalidraw-assets.mjs
+node --env-file=.env.local scripts/dev-local.mjs --hostname 127.0.0.1
+```
+
+这里显式执行通常由 `npm run dev` 的 `predev` 完成的资源准备，并加载 `.env.local`，让开发启动器也能读取同步开关。打开 <http://127.0.0.1:3000>。另开终端，在同一项目目录启动后台 worker，处理摄取、解析与索引任务：
+
+```sh
+node --env-file=.env.local --experimental-strip-types scripts/worker.ts
+```
+
+以上步骤初始化本地环境，不会迁移线上数据。旧数据导入、生产认证、备份和切换请按运行手册操作。
+
+## 文档导航
+
+| 文档 | 用途 |
+| --- | --- |
+| [API 说明](docs/api.md) | 网站与外部客户端接口。 |
+| [内核运行手册](docs/v1-kernel-runbook.md) | PostgreSQL、Docling、迁移、事实裁决、备份与生产切换。 |
+| [PDF 转写](docs/pdf-transcription.md) / [内容忠实度](docs/pdf-source-fidelity.md) | PDF 解析、来源证据及验证边界。 |
+| [后台任务](docs/worker-queue.md) | 租约、恢复、重试及索引调度。 |
+| [课程录像归档](docs/course-recording-archive.md) | 授权、原片归档、字幕与覆盖限制；其中批次记录不代表当前全量状态。 |
+| [协作流程](docs/project-workflow.md) | Issue → 独立分支 / 工作树 → PR → CI 与评审。 |
+| [发布指南](docs/release-guide.md) | 正式发布与部署步骤。 |
+
+专题文档可能记录某次实验或历史部署，阅读时请核对日期、分支和适用范围。普通 PR 不等于生产发布，CI 也不等于 PDF 内容正确率达标。
+
+## 参与与使用
+
+建议先用 Issue 描述问题或需求，再通过独立分支提交 PR。请附验证方法、实际结果和仍未解决的问题；不要提交课程原件、数据库、登录会话或 API 密钥。
+
+本仓库是个人学习项目，不是 Quercus、Canvas、Piazza 或 Kaltura 的官方产品。源码公开不代表课程资料公开；连接与归档功能应只用于自己有权访问的内容。
