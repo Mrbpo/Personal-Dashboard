@@ -65,6 +65,10 @@ export function studySourceScope(value=process.env.STUDY_SOURCE_SCOPE??'off'){
  if(value!=='off'&&value!=='question-scope')throw new StudyAnswerError('configuration','invalid-source-scope','问题来源范围配置无效');
  return value==='off'?undefined:value;
 }
+export function studyCourseRouting(value=process.env.STUDY_COURSE_ROUTING??'off'){
+ if(value!=='off'&&value!=='explicit-codes-v1')throw new StudyAnswerError('configuration','invalid-course-routing','课程路由配置无效');
+ return value==='off'?undefined:value;
+}
 export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REASONING??'low'){
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
  return value==='low'?undefined:value;

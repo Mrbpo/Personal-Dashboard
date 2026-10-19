@@ -41,6 +41,13 @@ test('keyword/dense/title/linked fallback share explicit intersections and candi
  for(const d of docs)await ingest(d);
  await ingest({...docs[0],id:`foreign:${uid}`},`foreign:${uid}`);
  await ingest({...docs[0],id:`hidden:${uid}`});await pool.query('UPDATE document_texts SET hidden=true WHERE id=$1',[`hidden:${uid}`]);
+ assert.equal(await kernel.hasUnmappedCourseDocuments(owner,[a,b]),false,'foreign and hidden sources do not broaden this owner');
+ assert.equal(await kernel.hasUnmappedCourseDocuments(owner,[a]),true,'an unmapped/disabled catalog association keeps broad retrieval');
+ await ingest({...docs[0],id:`unassigned:${uid}`,courseId:''});
+ assert.equal(await kernel.hasUnmappedCourseDocuments(owner,[a,b]),true,'an unassigned upload must not be silently excluded');
+ await pool.query('UPDATE document_texts SET hidden=true WHERE id=$1',[`unassigned:${uid}`]);
+ assert.equal(await kernel.hasUnmappedCourseDocuments(owner,[a,b]),false);
+ assert.equal(await kernel.hasUnmappedCourseDocuments(`empty:${uid}`,[a,b]),false);
  const routingScope={courseIds:[a],origins:['canvas'],termIds:[fall]},base={semantic:false,aiRerank:false,hybrid:false,limit:14};
  assert.deepEqual(await kernel.documentRoutingCounts(owner,{routingScope}),{eligibleDocuments:4,routedDocuments:1,eligiblePages:4,routedPages:1});
  const lexical=await kernel.searchDocumentText(owner,'nebula',{...base,routingScope});assert.deepEqual(lexical.map(h=>h.document_id),[ids[0]]);

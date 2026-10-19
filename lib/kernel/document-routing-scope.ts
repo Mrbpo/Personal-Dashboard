@@ -38,6 +38,17 @@ const currentSource=`NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.o
  AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
  AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))`;
 
+/** Cheap existence guard for automatic code routing. It never loads page bodies,
+ * vectors or all-page counters; a first unmapped current source keeps broad search. */
+export async function hasUnmappedCourseDocuments(pool:Pool,owner:string,courseIds:readonly string[]){
+ if(!owner?.trim())throw Error('Document routing owner is required');
+ const ids=normalizeDocumentRoutingScope({courseIds})!.courseIds!;
+ return Boolean((await pool.query(`SELECT EXISTS(SELECT 1 FROM document_texts d
+  JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+  WHERE d.owner_id=$1 AND NOT d.hidden AND ${currentSource}
+   AND (d.course_id IS NULL OR NOT(d.course_id=ANY($2::text[])))) unmapped`,[owner,ids])).rows[0].unmapped);
+}
+
 /** Recheck scope after expansion/fallback, including changes to course terms.
  * Unscoped legacy requests add no query. Source hashes are checked by readers. */
 export async function assertDocumentRoutingScope(pool:Pool,owner:string,documentIds:readonly string[],scope:LegacyScope){

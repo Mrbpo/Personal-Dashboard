@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
-import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,type DocumentRoutingScope} from './document-routing-scope.ts';
+import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
@@ -1632,6 +1632,10 @@ export class KernelService {
 
   documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){
     return documentRoutingScopeCounts(kernelPool(),owner,scope);
+  }
+
+  hasUnmappedCourseDocuments(owner:string,courseIds:readonly string[]){
+    return hasUnmappedCourseDocuments(kernelPool(),owner,courseIds);
   }
 
   queueDocumentVectorJobs(owner:string,scope:DocumentVectorScope={}) {
