@@ -3,6 +3,7 @@ import {serviceValue} from './service-vault.ts';
 import type {DocumentAnswerModel} from './kernel/document-answer.ts';
 import {DocumentCitationCheckError} from './kernel/document-citation-audit.ts';
 import {SourceValueHeaderError} from './kernel/document-source-values.ts';
+import {SourceCellBindingError} from './kernel/document-source-cell-bindings.ts';
 import {SourceQuantityOperationError} from './kernel/document-source-quantities.ts';
 import {assertDocumentDevelopmentRun} from './kernel/document-rerank.ts';
 import {randomUUID,createHash} from 'node:crypto';
@@ -51,7 +52,7 @@ export function studyCitationCheck(value=process.env.STUDY_CITATION_CHECK??'off'
  return value==='off'?undefined:value;
 }
 export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
- if(value!=='off'&&value!=='difference-v1')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
+ if(value!=='off'&&value!=='difference-v1'&&value!=='cell-bindings-v2')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
  return value==='off'?undefined:value;
 }
 export function studyQuantityConsistency(value=process.env.STUDY_QUANTITY_CONSISTENCY??'off'){
@@ -121,6 +122,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const generationReasoningEffort=studyGenerationReasoning();
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
+ if(sourceValueContract==='cell-bindings-v2'&&nativeCellObservations!=='declared-v1')
+  throw new StudyAnswerError('configuration','cell-bindings-require-native-declarations','单元格绑定需要启用原生单元格观察');
  const quantityConsistency=studyQuantityConsistency();
  const sourceQuantityContract=studySourceQuantities();
  if(sourceQuantityContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
@@ -187,14 +190,16 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...('sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?{sourceQuantityDerivation:result.sourceQuantityDerivation,
      answerContract:result.sourceQuantityDerivation.method,claimOrigins:result.answer.claims.map(()=> 'program-rendered-source-quantity')}:{}),
     ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
-    ...('sourceValueDerivation' in result&&result.sourceValueDerivation?{sourceValueDerivation:result.sourceValueDerivation,answerContract:'difference-v1',
+    ...('sourceValueDerivation' in result&&result.sourceValueDerivation?{sourceValueDerivation:result.sourceValueDerivation,
+     answerContract:result.sourceValueDerivation.method==='source-cell-bindings-v2'?'cell-bindings-v2':'difference-v1',
      claimOrigins:result.answer.claims.map((_claim,index)=>result.sourceValueDerivation!.operations.some(op=>op.claimIndex===index)?
-      'program-rendered-difference':'provider-statement')}:{}),
+      (result.sourceValueDerivation!.method==='source-cell-bindings-v2'?'program-rendered-source-cell':'program-rendered-difference'):'provider-statement')}:{}),
     promptVersion:result.promptVersion,referencePolicyVersion:result.referencePolicyVersion,
     selectedUnits:result.selectedUnits,evidence:result.evidence,warnings:result.warnings,
     semanticVerified:false,wholeAnswerVerified:false}}};
  }catch(error){
   if(error instanceof StudyAnswerError)throw error;
+  if(error instanceof SourceCellBindingError)throw new StudyAnswerError(error.stage,error.code,'来源单元格或完整标签路径未通过绑定验证，本轮未发布答案',{cause:error});
   if(error instanceof SourceValueHeaderError)throw new StudyAnswerError('generation',error.code,
    '表格比较缺少完整且明确的列标题关系，本轮未发布答案',{cause:error});
   if(error instanceof SourceQuantityOperationError)throw new StudyAnswerError('generation',error.code,

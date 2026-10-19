@@ -14,6 +14,7 @@ import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TA
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,sourceValueQuestionContract,
  type SourceValueDerivation,type SourceValueQuestionContract,type SourceValueCatalog,type SourceValueTableContext} from './document-source-values.ts';
+import {prepareSourceCellBindingCatalog,sourceCellBindingAnswerSchema,deriveSourceCellBindingAnswer,type SourceCellDerivation} from './document-source-cell-bindings.ts';
 import {prepareSourceQuantityCatalog,sourceQuantityAnswerSchema,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAggregations} from './document-source-quantities.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v7';
@@ -83,7 +84,7 @@ export type DocumentCitationRepair={claimIndex:number;citationIndex:number;origi
  originalEvidence:Omit<Support,'text'|'image'>;resolvedEvidence:Omit<Support,'text'|'image'>;
  quoteSha256:string;reason:'unique-exact-text-match'};
 export type DocumentAnswerModel='gpt-5-mini'|'gpt-5.4-mini'|'gpt-6-astra';
-export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequestSha256:string;sourceInputFingerprint:string;
+export type DocumentSourceValueDerivation=(SourceValueDerivation|SourceCellDerivation)&{providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;selectedReferenceIds:string[];normalizedAnswer:GroundedDocumentAnswer};
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
@@ -101,7 +102,7 @@ export type DocumentAnswerPolicy={scope?:'development'|'application';model?:Docu
  textContextWindows?:'producer-neighbors-v1'|'stored-page-v1';
  sourceRouting?:{mode:'question-scope';beforeAttempt:(identity:string)=>Promise<void>;
   recordResponse:(response:Readonly<DocumentQueryScopeResponse>)=>Promise<void>};
- sourceValueContract?:'difference-v1';
+ sourceValueContract?:'difference-v1'|'cell-bindings-v2';
  recordSourceValueDerivation?:(receipt:Readonly<DocumentSourceValueDerivation>)=>Promise<void>;
  recordSourceValueRawResponse?:(receipt:Readonly<DocumentSourceValueRawResponse>)=>Promise<void>;
  dailyLimit?:number;reasoningEffort?:'low'|'medium'|'high';generationReasoningEffort?:'low'|'medium';maxOutputTokens?:number;timeoutMs?:number;
@@ -821,7 +822,39 @@ export function buildSelectedDocumentAnswerRequest(prepared:PreparedAnswer,refer
 
 /** The selector is unchanged. Only its actually selected generator can opt in;
  * no usable complete catalog means the original generation request is retained. */
-export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy){
+type SourceValueGenerationV1=ReturnType<typeof prepareSelectedSourceValueGenerationV1>&{kind:'difference-v1'};
+type SourceValueGenerationV2=ReturnType<typeof prepareSelectedSourceValueGenerationV2>;
+export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy&{sourceValueContract:'difference-v1'}):SourceValueGenerationV1;
+export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy&{sourceValueContract:'cell-bindings-v2'}):SourceValueGenerationV2;
+export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy):SourceValueGenerationV1|SourceValueGenerationV2;
+export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy):SourceValueGenerationV1|SourceValueGenerationV2{
+ return policy.sourceValueContract==='cell-bindings-v2'?prepareSelectedSourceValueGenerationV2(prepared,referenceIds,settings,policy):
+  {...prepareSelectedSourceValueGenerationV1(prepared,referenceIds,settings,policy),kind:'difference-v1'};
+}
+function prepareSelectedSourceValueGenerationV2(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy){
+ if(policy.scope!=='application'||policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once')
+  throw new Error('Cell bindings require the application selector and selected-once check');
+ const originalRequest=buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy),ids=new Set(referenceIds),
+  catalog=prepareSourceCellBindingCatalog(prepared.supports.filter(s=>s.kind==='image'&&ids.has(s.id)));
+ if(catalog.status!=='available')return {kind:'cell-bindings-v2' as const,request:originalRequest,catalog,applied:false as const,reason:catalog.reason,questionContract:null};
+ const request=structuredClone(originalRequest),part=request.input.at(-1)!.content[0] as {type:string;text:string};
+ part.text=JSON.stringify({...JSON.parse(part.text),sourceCellBindings:catalog.wire});
+ request.input[0].content+=' This generation uses cell-bindings-v2. For indexed table values return table-value with only its cell ID; '+
+  'for an explicit printed-value subtraction use table-difference with only left/right cell IDs. '+
+  'Do not write labels, values, results, units or free text in those operations. The server restores complete declared row/column label paths and original values. '+
+  'A difference requires one table, a common row or column context and matching printed metric labels; missing/ambiguous relationships must remain unknown. '+
+  'Cell references index original observations; they are not new evidence or verified semantic facts. '+
+  'Ordinary sourced statements and multi-source synthesis remain available using selected references outside indexed table images. '+
+  'Use the typed operations when reading indexed table images; do not replace a table value with a free statement. Do not infer missing cells or treat dashes as zero.';
+ const proposed=projectPdfPageRegionRequest({...request,text:{...request.text,format:{...request.text.format,
+  name:'grounded_document_cell_bindings_v2',schema:sourceCellBindingAnswerSchema(catalog,referenceIds)}}},prepared);
+ const nonImage=JSON.stringify(proposed,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value),
+  imageTokens=prepared.supports.filter(s=>s.image&&ids.has(s.id)).reduce((sum,s)=>sum+2*Math.ceil(s.image!.width/32)*Math.ceil(s.image!.height/32)+1,0);
+ if(Buffer.byteLength(nonImage)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+imageTokens>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens)
+  return {kind:'cell-bindings-v2' as const,request:originalRequest,catalog,applied:false as const,reason:'selected-request-input-limit',questionContract:null};
+ return {kind:'cell-bindings-v2' as const,request:proposed,catalog,applied:true as const,reason:null,questionContract:null};
+}
+function prepareSelectedSourceValueGenerationV1(prepared:PreparedAnswer,referenceIds:string[],settings:DocumentAnswerRequestSettings,policy:DocumentAnswerPolicy){
  if(policy.sourceValueContract!=='difference-v1'||policy.scope!=='application'||policy.evidenceSelection!=='select-then-answer'||
   policy.citationCheck?.mode!=='selected-once')throw new Error('Source values require the application selector and selected-once check');
  const originalRequest=buildSelectedDocumentAnswerRequest(prepared,referenceIds,settings,policy),ids=new Set(referenceIds);
@@ -929,13 +962,13 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
   !exactKeys(policy.sourceRouting,['mode','beforeAttempt','recordResponse'])||policy.sourceRouting.mode!=='question-scope'||
   typeof policy.sourceRouting.beforeAttempt!=='function'||typeof policy.sourceRouting.recordResponse!=='function'))
   throw new Error('Invalid application source routing policy');
- if(policy.sourceValueContract!==undefined&&(policy.sourceValueContract!=='difference-v1'||policy.scope!=='application'||
+ if(policy.sourceValueContract!==undefined&&(!['difference-v1','cell-bindings-v2'].includes(policy.sourceValueContract)||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||
   typeof policy.recordSourceValueDerivation!=='function'||typeof policy.recordSourceValueRawResponse!=='function'))
   throw new Error('Source values require application/select-then-answer/selected-once');
- if(policy.recordSourceValueDerivation!==undefined&&(policy.sourceValueContract!=='difference-v1'||typeof policy.recordSourceValueDerivation!=='function'))
+ if(policy.recordSourceValueDerivation!==undefined&&(!policy.sourceValueContract||!['difference-v1','cell-bindings-v2'].includes(policy.sourceValueContract)||typeof policy.recordSourceValueDerivation!=='function'))
   throw new Error('Source value recording requires its explicit contract');
- if(policy.recordSourceValueRawResponse!==undefined&&(policy.sourceValueContract!=='difference-v1'||typeof policy.recordSourceValueRawResponse!=='function'))
+ if(policy.recordSourceValueRawResponse!==undefined&&(!policy.sourceValueContract||!['difference-v1','cell-bindings-v2'].includes(policy.sourceValueContract)||typeof policy.recordSourceValueRawResponse!=='function'))
   throw new Error('Source value raw recording requires its explicit contract');
  const model=policy.model??'gpt-5-mini',dailyLimit=policy.dailyLimit??200,
   effort=policy.reasoningEffort??'low',maxOutput=policy.maxOutputTokens??4000,timeout=policy.timeoutMs??30000;
@@ -985,7 +1018,7 @@ export async function planDocumentQueryScope(question:string,source:ResolvedDocu
  * into a scalar/statement contract. The legacy value-only policy is retained. */
 export function documentSourceGenerationRoute(question:string,policy:Pick<DocumentAnswerPolicy,'sourceQuantityContract'|'sourceValueContract'>){
  if(policy.sourceQuantityContract&&sourceQuantityQuestionFamily(question))return 'source-quantities' as const;
- if(policy.sourceValueContract&&(!policy.sourceQuantityContract||sourceValueQuestionContract(question)==='required-difference-v1'))
+ if(policy.sourceValueContract&&(policy.sourceValueContract==='cell-bindings-v2'||!policy.sourceQuantityContract||sourceValueQuestionContract(question)==='required-difference-v1'))
   return 'source-values' as const;
  return 'ordinary' as const;
 }
@@ -1057,8 +1090,9 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  }
  const {payload,actualModel,decoded,rawOutputText}=await documentModelPayload(response,model,policy);
  policy.onStage?.('citation-validation');
- const sourceValueDerivation:SourceValueDerivation|undefined=sourceValueGeneration?.applied?
-  deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!,sourceValueGeneration.questionContract):undefined;
+ const sourceValueDerivation:SourceValueDerivation|SourceCellDerivation|undefined=sourceValueGeneration?.applied?
+  sourceValueGeneration.kind==='cell-bindings-v2'?deriveSourceCellBindingAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!):
+   deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!,sourceValueGeneration.questionContract):undefined;
  const sourceQuantityDerivation=sourceQuantityGeneration?.applied?deriveSourceQuantityAnswer(question,decoded,rawOutputText,
   sourceQuantityGeneration.catalog,sourceQuantityGeneration.table,sourceQuantityGeneration.units,referenceIds!):undefined;
  const {answer,providerSelections:normalizedSelections,selectedUnits}=resolveDocumentAnswerSelections(sourceQuantityDerivation?.normalizedSelections??sourceValueDerivation?.normalizedSelections??decoded,prepared.supports);
@@ -1087,7 +1121,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
   sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,
   ...(prepared.pdfPageRegionReads?.length?{pdfPageRegionTransport:pdfPageRegionTransport(prepared,request)}:{}),
-  ...(sourceValueGeneration?{sourceValueContract:{policy:'difference-v1' as const,newContractApplied:sourceValueGeneration.applied,
+  ...(sourceValueGeneration?{sourceValueContract:{policy:sourceValueGeneration.kind,newContractApplied:sourceValueGeneration.applied,
    ...(sourceValueGeneration.questionContract==='required-difference-v1'?{questionContract:sourceValueGeneration.questionContract}:{}),
    reason:sourceValueGeneration.reason,catalogSha256:sourceValueGeneration.catalog.catalogSha256},
    ...(boundSourceValueDerivation?{sourceValueDerivation:boundSourceValueDerivation}:{})}:{}),
