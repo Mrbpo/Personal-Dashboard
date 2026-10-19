@@ -124,6 +124,18 @@ test('large native annotation sets keep bounded wire and explicit omissions',()=
  assert.ok(groups.length<=32);assert.ok(Buffer.byteLength(JSON.stringify(groups))<=30000);assert.ok(result.receipt!.omitted>0);
 });
 
+test('selected reference priority protects later-page links from retained-context wire exhaustion',()=>{
+ const f=fixture(),{observationSha256:_,...raw}=f.page,first=raw.observations[0];
+ raw.observations=Array.from({length:100},(_,i)=>({...structuredClone(first),link:{...structuredClone(first.link),annotationIndex:i,destinationName:'early.'+i}}));
+ const later=structuredClone(raw);later.physicalPage=2;later.pageEvidenceId='later';later.observations=[{
+  ...structuredClone(first),link:{...structuredClone(first.link),sourcePageNumber:2,destinationName:'late-priority'}}];
+ const laterSupport={...f.support,id:'e1',evidenceId:'later'},laterUnits=f.units.map(u=>({...u,id:u.id+'-later',supportId:'e1'}));
+ const result=projectPdfNavigationRequest(f.request,{...f.context,pages:[signed(raw),signed(later)]},[f.support,laterSupport],
+  [...f.units,...laterUnits],[...laterUnits.map(u=>u.id),...f.units.map(u=>u.id)]);
+ const groups=JSON.parse(result.request.input[0].content[0].text).sourceNavigationContainers.groups;
+ assert.equal(groups[0].destinationName,'late-priority');assert.ok(result.receipt!.omitted>0);
+});
+
 test('ordinary and typed fallback actual synthesis transports navigation only to generation, with no new model phase',async()=>{
  const f=fixture(),c={...answerContext(),pdfNavigation:f.context},question='Which method?',prepared=prepareDocumentAnswer(question,c),
   ids=prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),saved=globalThis.fetch;

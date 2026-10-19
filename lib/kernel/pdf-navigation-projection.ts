@@ -9,6 +9,7 @@ export type PdfNavigationPage=Extract<Awaited<ReturnType<typeof readPdfNavigatio
 export type PdfNavigationContext={policy:typeof PDF_NAVIGATION_PROJECTION_POLICY;pages:PdfNavigationPage[];omittedPages:number;unavailablePages:number};
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;evidenceId:string;sha256:string;text?:string};
 type Unit={id:string;supportId:string;startUtf16:number;endUtf16:number;quoteSha256:string;text:string};
+type Candidate=Extract<PdfNavigationPage['observations'][number],{status:'candidate'}>;
 const sha=(text:string)=>createHash('sha256').update(text).digest('hex');
 export function pdfNavigationProjectionEnabled(value=process.env.STUDY_PDF_NAVIGATION){
  if(value===undefined||value===''||value==='off')return false;
@@ -92,6 +93,8 @@ export function projectPdfNavigationRequest<T extends {input:Array<{role:string;
  const selected=new Set(referenceIds??[]),allowed=new Set([...units.map(u=>u.id),...supports.filter(s=>s.kind==='image').map(s=>s.id)]);
  if(selected.size>64||referenceIds&&selected.size!==referenceIds.length||[...selected].some(id=>!allowed.has(id)))throw Error('Invalid navigation selected reference');
  const groups:any[]=[],byTarget=new Map<string,number>();let candidateCount=0,notCovered=0,unknownCount=0,omitted=0;
+ const selectedOrder=new Map((referenceIds??[]).map((id,index)=>[id,index]));
+ const candidates:Array<{page:PdfNavigationPage;item:Candidate;selectedUnits:Unit[];indices:number[];priority:number}>=[];
  for(const page of context.pages){
   const support=supports.find(s=>sourceSupport(page,s))!;
   const selectedUnits=units.filter(u=>u.supportId===support.id&&selected.has(u.id));
@@ -105,6 +108,15 @@ export function projectPdfNavigationRequest<T extends {input:Array<{role:string;
    if(!indices){notCovered++;continue;}
    const link=item.link;
    if(link.target.status!=='resolved-page'||!link.destinationName){unknownCount++;continue;}
+   candidates.push({page,item,selectedUnits,indices,priority:Math.min(...indices.map(i=>selectedOrder.get(selectedUnits[i].id)!))});
+  }
+ }
+ // Final reference order begins with provider choices before system-retained
+ // context. Spend bounded metadata on their covered containers first, rather
+ // than letting unrelated early-page links consume the entire wire budget.
+ candidates.sort((a,b)=>a.priority-b.priority);
+ for(const {page,item,selectedUnits,indices} of candidates){
+   const link=item.link;
    const key=JSON.stringify([page.source.documentId,page.source.currentVersionId,page.source.sourceVersionId,page.source.sourceHash,link.destinationName,link.target]);
    const descriptor={source:{...page.source,physicalPage:page.physicalPage,pageEvidenceId:page.pageEvidenceId,pageBodySha256:page.pageBodySha256},
     result:page.result,container:item.container,members:indices.map(index=>{const u=selectedUnits[index];return {id:u.id,quoteSha256:u.quoteSha256,
@@ -120,7 +132,6 @@ export function projectPdfNavigationRequest<T extends {input:Array<{role:string;
    }
    if(next.reduce((n,g)=>n+g.containers.length,0)>64||Buffer.byteLength(JSON.stringify(next))>30000){omitted++;continue;}
    if(existing===undefined)byTarget.set(key,next.length-1);groups.splice(0,groups.length,...next);
-  }
  }
  const wire=groups.length?{policy:PDF_NAVIGATION_PROJECTION_POLICY,semantics:'navigation-only',coverage:'bounded-selected-container-groups',
   semanticRelationsVerified:false,wordLevelLinkPositionVerified:false,groups,

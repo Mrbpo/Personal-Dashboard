@@ -100,3 +100,12 @@ input tokens when enabled. Default off avoids that cost. Engineering/replay
 checks establish transport and identity boundaries only; answer correctness
 still requires source review and real website API content acceptance. No
 production switch, historical source rewrite or final acceptance is implied.
+
+The page-read cap prioritizes already expanded original page nodes, then ranked
+pages. Within the wire cap, covered containers follow final selected-reference
+order (provider choices precede system-retained context), not source page order.
+This prevents early-page metadata from consuming all space before the selected
+cross-page relation. The unchanged size caps can still omit observations; that
+is reported rather than treated as completeness. Enabling observations also
+changes their bound `sourceInputFingerprint`; it does not change source text,
+quote IDs, citation enums, model configuration or output schema.
