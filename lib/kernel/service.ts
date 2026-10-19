@@ -4,6 +4,7 @@ import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
+import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
@@ -1079,7 +1080,7 @@ export class KernelService {
     return readDocumentOutline(kernelPool(),owner,source);
   }
 
-  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
+  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean;identityCourseCodes?:string[]}={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
     return readDocumentParents(kernelPool(),owner,anchors,options,imageBudget);
   }
 
@@ -1245,7 +1246,7 @@ export class KernelService {
   /** Shared existing retrieval/current-source callback; the default answering
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true,identityCourseCodes?:string[]){
     const {includeParents=false,includeImages=false,...searchOptions}={...options,
       ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     const limit=searchOptions.limit??14;
@@ -1272,7 +1273,7 @@ export class KernelService {
           throw new DocumentEvidenceChangedError();
       }
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
-      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages},imageBudget):
+      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
       if(!tableCandidates.length)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
       const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
@@ -1327,11 +1328,15 @@ export class KernelService {
       }
     }
     if(sourceRouting)policy.onStage?.('retrieval');
-    const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions);
+    if(policy.sourceIdentityContext&&!searchOptions.includeParents)throw new Error('Source identity context requires the original parent reader');
+    const identityCourseCodes=policy.sourceIdentityContext?[...new Set(observeLiteralCourseCodes(question).map(observation=>observation.code))]:undefined;
+    const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes);
     let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
+    let sourceIdentityContext:DocumentAnswerContext['sourceIdentityContext'];
     const rankedRead=async()=>{
       const context=await originalRankedRead();
       contentTagRouting=contentTagAnswerObservation(context.anchors);
+      sourceIdentityContext='sourceIdentityContext' in context?context.sourceIdentityContext:undefined;
       return context;
     };
     let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
@@ -1463,7 +1468,7 @@ export class KernelService {
         ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
     }
     return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
-      ...(contentTagRouting?{contentTagRouting}:{})};
+      ...(contentTagRouting?{contentTagRouting}:{}),...(sourceIdentityContext?{sourceIdentityContext}:{})};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

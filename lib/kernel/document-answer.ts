@@ -5,7 +5,7 @@ import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evide
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudyPdfPageRegions,unavailableStudyPdfPageRegions,
- type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead} from './document-context.ts';
+ type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead,type LiteralCourseIdentityContext} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
@@ -32,6 +32,7 @@ type Image=AuthorImage|(NativeTableObservedImage&{pageRegions?:StudyPdfPageRegio
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ sourceIdentityContext?:LiteralCourseIdentityContext;
  /** Kernel configuration only; original page boundaries and bodies stay intact. */
  textQuotePolicy?:'stored-page-v1';
  textContextWindows?:PreparedDoclingTextContextWindows[];
@@ -95,6 +96,7 @@ export type DocumentSourceQuantityDerivation=ReturnType<typeof deriveSourceQuant
  sourceTables:SourceValueCatalog['tables'];tableProvenance:Array<Pick<SourceValueTableContext,'tableId'|'physicalPage'|'result'|'captionLinkStatus'>>};
 export type DocumentSourceQuantityRawResponse=Omit<DocumentSourceValueRawResponse,'method'|'questionContract'>&{method:'source-quantity-response-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
+ sourceIdentityContext?:'literal-course-frontpage-v1';
  quantityConsistency?:'explicit-unit-v1';
  sourceQuantityContract?:'bound-value-v1';
  recordSourceQuantityRawResponse?:(receipt:Readonly<DocumentSourceQuantityRawResponse>)=>Promise<void>;
@@ -976,6 +978,9 @@ export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
  if(policy.generationVerbosity!==undefined&&(policy.generationVerbosity!=='medium'||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
   throw new Error('Generation verbosity requires application selection/check and medium');
+ if(policy.sourceIdentityContext!==undefined&&(policy.sourceIdentityContext!=='literal-course-frontpage-v1'||policy.scope!=='application'||
+  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'))
+  throw new Error('Source identity context requires application selection/check');
  if(policy.sourceRouting!==undefined&&(policy.scope!=='application'||
   !exactKeys(policy.sourceRouting,['mode','beforeAttempt','recordResponse'])||policy.sourceRouting.mode!=='question-scope'||
   typeof policy.sourceRouting.beforeAttempt!=='function'||typeof policy.sourceRouting.recordResponse!=='function'))

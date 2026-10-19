@@ -10,6 +10,7 @@ import {assertDoclingMathProvenance,assertPreparedDoclingSourceMath,doclingMathF
  type DoclingMathProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
 import {doclingPageResultReferences,readDoclingPageRegions,doclingPageImageTransform,type DoclingRegionResultReference} from './docling-source-regions.ts';
 import {DoclingPageRegionError,DOCLING_PAGE_REGION_LIMITS} from './docling-result.ts';
+import {observeLiteralCourseCodes} from './question-course-routing.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -34,8 +35,14 @@ export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
  sourceNodeCount:number;sourceBodyCodepoints:number;nodeManifest:Array<{evidenceId:string;locator:string;bodySha256:string}>;nodes:DocumentEvidenceNode[]};
 export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:Array<DocumentImageEvidence|PdfVisualImageEvidence>;
  imageSelection?:DocumentImageSelection;
+ sourceIdentityContext?:LiteralCourseIdentityContext;
  accounting:{anchorCount:number;parentCount:number;contextNodeCount:number;contextBodyCodepoints:number;imageCount:number;imageBytes:number};
  sourceContentIsUntrusted:true};
+export type LiteralCourseIdentityContext={version:'literal-course-frontpage-v1';requestedCodes:string[];
+ coverage:'first-persisted-pdf-page-only';courseOwnershipVerified:false;semanticVerified:false;
+ additions:Array<{source:DocumentContextSource;evidenceId:string;locator:string;physicalPage:1;bodySha256:string;
+  observations:ReturnType<typeof observeLiteralCourseCodes>}>;
+ omissions:Array<{source:DocumentContextSource;reason:'not-pdf-first-page'|'no-literal-match'|'already-in-context'|'addition-limit'}>};
 /** A separate whole-source reader; these limits do not change ranked readers. */
 export const COMPLETE_DOCUMENT_SOURCE_LIMITS=Object.freeze({nodes:512,bodyCodepoints:131072,bodyUtf8Bytes:262144,
  images:64,imageBytes:32*1024*1024,imageInputTokens:65536,requestInputTokens:300000,framingTokens:16384});
@@ -458,10 +465,13 @@ export async function readDocumentImages(db:Queryable,owner:string,source:Docume
  }
  await currentSource(db,owner,identity(current));return images;
 }
-export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},
+export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean;identityCourseCodes?:string[]}={},
  imageBudget?:DocumentImageBudget):Promise<DocumentContextRead>{
- if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>key!=='includeImages')
+ if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>!['includeImages','identityCourseCodes'].includes(key))
   ||(options.includeImages!==undefined&&typeof options.includeImages!=='boolean'))invalid('At most 14 original ranked anchors are allowed');
+ if(options.identityCourseCodes!==undefined&&(!Array.isArray(options.identityCourseCodes)||options.identityCourseCodes.length>32||
+  options.identityCourseCodes.some(code=>typeof code!=='string'||observeLiteralCourseCodes(code).length!==1||observeLiteralCourseCodes(code)[0].code!==code)))
+  invalid('Identity context requires at most32 normalized literal course codes');
  const loaded=new Map<string,Awaited<ReturnType<typeof structuredSource>>>(),parents=new Map<string,DocumentParentContext>();
  for(const [anchorIndex,anchor] of anchors.entries()){
   let data=loaded.get(anchor.document_id);
@@ -492,6 +502,30 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
    status:points<=8192?'available':'unavailable-size-exceeds-8192',sourceNodeCount:nodes.length,sourceBodyCodepoints:points,
    nodeManifest:nodes.map(node=>({evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256})),nodes:points<=8192?nodes:[]});
  }
+ let sourceIdentityContext:LiteralCourseIdentityContext|undefined;
+ if(options.identityCourseCodes!==undefined){
+  const codes=[...new Set(options.identityCourseCodes)].sort();let addedPoints=0;
+  sourceIdentityContext={version:'literal-course-frontpage-v1',requestedCodes:codes,coverage:'first-persisted-pdf-page-only',
+   courseOwnershipVerified:false,semanticVerified:false,additions:[],omissions:[]};
+  for(const data of loaded.values()){
+   const node=data.nodes[0],source=identity(data.current),omit=(reason:LiteralCourseIdentityContext['omissions'][number]['reason'])=>sourceIdentityContext!.omissions.push({source,reason});
+   if(data.current.mime!=='application/pdf'||!node||node.kind!=='page'||node.ordinal!==0){omit('not-pdf-first-page');continue;}
+   const points=Array.from(node.body).length;
+   if(points>8192){omit('addition-limit');continue;}
+   const observations=observeLiteralCourseCodes(node.body).filter(observation=>codes.includes(observation.code));
+   if(!observations.length){omit('no-literal-match');continue;}
+   if([...parents.values()].some(parent=>parent.nodes.some(n=>n.evidenceId===node.evidenceId&&n.documentId===node.documentId))){omit('already-in-context');continue;}
+   if(sourceIdentityContext.additions.length>=4||addedPoints+points>16384){omit('addition-limit');continue;}
+   const parentId=canonical([node.documentId,node.documentVersionId,'single-node',node.evidenceId]);
+   // Original page as a separate node, not a fabricated cross-page section,
+   // inferred owner-course relation, rewritten identity or additional image.
+   parents.set(parentId,{parentId,kind:'single-node',source,manifestSha256:data.manifestSha256,
+    firstAnchorRank:0,anchorRanks:[],status:'available',sourceNodeCount:1,sourceBodyCodepoints:points,
+    nodeManifest:[{evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256}],nodes:[node]});
+   sourceIdentityContext.additions.push({source,evidenceId:node.evidenceId,locator:node.locator,physicalPage:1,bodySha256:node.bodySha256,observations});
+   addedPoints+=points;
+  }
+ }
  const images:Array<DocumentImageEvidence|PdfVisualImageEvidence>=[],budget=options.includeImages?(imageBudget??createDocumentImageBudget()):undefined;
  if(budget)for(const [index,anchor] of anchors.entries()){
   const data=loaded.get(anchor.document_id)!,rank=index+1;
@@ -507,7 +541,8 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
   }catch(error){if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();throw error;}
  }
  for(const data of loaded.values())await currentSource(db,owner,identity(data.current));
- const packets=[...parents.values()];return {anchors,parents:packets,images,...(budget?{imageSelection:budget.snapshot()}:{}),accounting:{anchorCount:anchors.length,parentCount:packets.length,
+ const packets=[...parents.values()];return {anchors,parents:packets,images,...(budget?{imageSelection:budget.snapshot()}:{}),
+  ...(sourceIdentityContext?{sourceIdentityContext}:{}),accounting:{anchorCount:anchors.length,parentCount:packets.length,
   contextNodeCount:packets.reduce((sum,parent)=>sum+parent.nodes.length,0),contextBodyCodepoints:packets.reduce((sum,parent)=>sum+parent.nodes.reduce((n,node)=>n+Array.from(node.body).length,0),0),
   imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)},sourceContentIsUntrusted:true};
 }

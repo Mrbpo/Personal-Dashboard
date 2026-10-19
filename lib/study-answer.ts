@@ -89,6 +89,10 @@ export function studyGenerationVerbosity(value=process.env.STUDY_GENERATION_VERB
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-verbosity','答案详略仅允许 low 或 medium');
  return value==='low'?undefined:value;
 }
+export function studySourceIdentityContext(value=process.env.STUDY_SOURCE_IDENTITY_CONTEXT??'off'){
+ if(value!=='off'&&value!=='literal-course-frontpage-v1')throw new StudyAnswerError('configuration','invalid-source-identity-context','来源身份原文配置无效');
+ return value==='off'?undefined:value;
+}
 export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WINDOWS??'off'){
  if(value!=='off'&&value!=='producer-neighbors-v1'&&value!=='stored-page-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
  return value==='off'?undefined:value;
@@ -132,10 +136,13 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const generationReasoningEffort=studyGenerationReasoning();
  const generationOutputTokens=studyGenerationOutputTokens();
  const generationVerbosity=studyGenerationVerbosity();
+ const sourceIdentityContext=studySourceIdentityContext();
  if(generationOutputTokens&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','generation-output-requires-selection-check','独立生成输出额度需要内核、证据选择和引用核对');
  if(generationVerbosity&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','generation-verbosity-requires-selection-check','答案详略需要内核、证据选择和引用核对');
+ if(sourceIdentityContext&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','source-identity-requires-selection-check','来源身份原文需要内核、证据选择和引用核对');
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
  if(sourceValueContract==='cell-bindings-v2'&&nativeCellObservations!=='declared-v1')
@@ -170,6 +177,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(generationOutputTokens?{generationOutputTokens}:{}),
     ...(generationVerbosity?{generationVerbosity}:{}),
+    ...(sourceIdentityContext?{sourceIdentityContext}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
@@ -196,6 +204,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:generationOutputTokens??3000,timeoutMs:55000,
      ...(generationOutputTokens?{generationOutputTokens,evidenceSelectionMaxOutputTokens:3000}:{}),
      ...(generationVerbosity?{generationVerbosity,evidenceSelectionVerbosity:'low'}:{}),
+     ...(sourceIdentityContext?{sourceIdentityContext}:{}),
      ...(nativeCellObservations?{nativeCellObservations}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
@@ -203,6 +212,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
     ...('contentTagRouting' in result&&result.contentTagRouting?{contentTagRouting:result.contentTagRouting}:{}),
+    ...('sourceIdentityContext' in result&&result.sourceIdentityContext?{sourceIdentityContext:result.sourceIdentityContext}:{}),
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),

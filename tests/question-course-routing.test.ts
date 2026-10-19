@@ -1,11 +1,23 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {routeQuestionCourseCodes} from '../lib/kernel/question-course-routing.ts';
+import {routeQuestionCourseCodes,observeLiteralCourseCodes} from '../lib/kernel/question-course-routing.ts';
 
 const catalog=[{id:'chem-fall',code:'CHMA10H3 F 20269 All Sections'},
  {id:'chem-spring',code:'CHMA10H3 S 20271 All Sections'},
  {id:'stats',code:'STAB22H3'},{id:'calc',code:'MATA29H3'},
  {id:'old',code:'PHYB10H3',enabled:false}];
+
+test('literal institution identifiers retain their entire numeric component without prefix matches',()=>{
+ const courses=[...catalog,{id:'cmu',code:'CMU 15-213'},{id:'mit',code:'MIT 6.006'},{id:'spurious',code:'CMU15'}];
+ assert.deepEqual(routeQuestionCourseCodes('CMU 15-213 syllabus',courses).courseIds,['cmu']);
+ assert.deepEqual(routeQuestionCourseCodes('Compare MIT 6.006 and CMU15-213',courses).courseIds,['cmu','mit']);
+ assert.deepEqual(routeQuestionCourseCodes('CMU 15-2134',courses).courseIds,[]);
+ const observed=observeLiteralCourseCodes('📚 CS229; CMU 15-213; MIT6.006; chma 10');
+ assert.deepEqual(observed.map(o=>o.code),['CS229','CMU15-213','MIT6.006','CHMA10']);
+ const text='📚 CS229; CMU 15-213; MIT6.006; chma 10';
+ for(const o of observed)assert.equal(text.slice(o.startUtf16,o.endUtf16),o.raw);
+ assert.ok(observed.every(o=>!Object.hasOwn(o,'courseId')&&!Object.hasOwn(o,'ownerCourse')),'literal mentions do not bind a source to a course');
+});
 test('literal course routing preserves all courses/terms and does not match code prefixes',()=>{
  const multi=routeQuestionCourseCodes('Compare CHMA10 and STAB22 syllabus requirements',catalog);
  assert.equal(multi.status,'resolved');assert.deepEqual(multi.courseIds,['chem-fall','chem-spring','stats']);

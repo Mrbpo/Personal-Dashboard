@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 process.env.DATABASE_URL=':memory:';
 process.env.OPENAI_API_KEY='test-key-never-sent';
 const {kernel}=await import('../lib/kernel/service.ts');
-const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyQuantityConsistency,studyGenerationReasoning,studyGenerationOutputTokens,studyGenerationVerbosity,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
+const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyQuantityConsistency,studyGenerationReasoning,studyGenerationOutputTokens,studyGenerationVerbosity,studySourceIdentityContext,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings,DocumentModelResponseError}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
@@ -93,6 +93,33 @@ test('application generation verbosity is opt-in, recorded and rejects wrong cha
   assert.equal(response.meta.study.settings.evidenceSelectionVerbosity,'low');
   process.env.STUDY_EVIDENCE_SELECTION='single-pass';
   await assert.rejects(answerKernelStudy('owner','Synthetic verbosity question','',[]),(e:any)=>e.code==='generation-verbosity-requires-selection-check');
+  assert.equal(calls,1);
+ }finally{kernel.answerStudyContent=saved;for(const [k,v]of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
+});
+
+test('source identity context is explicit, application guarded and recorded without becoming truth',async()=>{
+ assert.equal(studySourceIdentityContext('off'),undefined);
+ assert.equal(studySourceIdentityContext('literal-course-frontpage-v1'),'literal-course-frontpage-v1');
+ assert.throws(()=>studySourceIdentityContext('auto'),StudyAnswerError);
+ await assert.rejects(documentAnswerSettings({scope:'development',sourceIdentityContext:'literal-course-frontpage-v1'}),/Source identity context/);
+ const values={STUDY_SOURCE_IDENTITY_CONTEXT:'literal-course-frontpage-v1',STUDY_ANSWER_BACKEND:'kernel',STUDY_DEVELOPMENT_DAILY_LIMIT:undefined,
+  STUDY_EVIDENCE_SELECTION:'select-then-answer',STUDY_CITATION_CHECK:'selected-once',STUDY_SOURCE_VALUES:'off',
+  STUDY_SOURCE_QUANTITIES:'off',STUDY_SOURCE_SCOPE:'off',STUDY_TEXT_CONTEXT_WINDOWS:'off',OPENAI_MODEL:'gpt-5.4-mini',
+  STUDY_CITATION_TRACE_DIR:`${process.cwd()}/data/identity-fixture-never-written`},
+  env=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;
+ let calls=0;
+ try{
+  for(const [k,v]of Object.entries(values))if(v===undefined)delete process.env[k];else process.env[k]=v;
+  kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;
+   assert.equal(policy?.sourceIdentityContext,'literal-course-frontpage-v1');await documentAnswerSettings(policy);
+   return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},selectedUnits:[],sourceDocuments:[],warnings:[],
+    sourceIdentityContext:{version:'literal-course-frontpage-v1',courseOwnershipVerified:false,semanticVerified:false,additions:[]},
+    textEvidenceCount:0,imageEvidenceCount:0,model:null} as any;};
+  const response=await answerKernelStudy('owner','Synthetic source identity question','',[]);
+  assert.equal(response.meta.study.settings.sourceIdentityContext,'literal-course-frontpage-v1');
+  assert.equal(response.meta.study.sourceIdentityContext!.courseOwnershipVerified,false);
+  process.env.STUDY_EVIDENCE_SELECTION='single-pass';
+  await assert.rejects(answerKernelStudy('owner','Synthetic source identity question','',[]),(e:any)=>e.code==='source-identity-requires-selection-check');
   assert.equal(calls,1);
  }finally{kernel.answerStudyContent=saved;for(const [k,v]of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
 });
