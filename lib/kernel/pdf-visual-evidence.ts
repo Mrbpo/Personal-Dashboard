@@ -9,6 +9,7 @@ import {localPdfPageImage} from '../local-ocr.ts';
 import type {DoclingVisualLayout} from './docling-result.ts';
 import type {DocumentContextSource} from './document-context.ts';
 import {DOCUMENT_IMAGE_LIMITS,type DocumentImageBudget} from './document-image-budget.ts';
+import {observePdfInternalLinks,type PdfInternalLinks} from './pdf-internal-links.ts';
 
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 export const pdfVisualCanonical=(value:unknown):string=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)
@@ -30,7 +31,7 @@ export type PdfVisualAsset={kind:'pdf-page'|'pdf-region';physicalPage:number;sha
    bbox:{l:number;t:number;r:number;b:number;coord_origin:'BOTTOMLEFT'|'TOPLEFT'};cropPixelBox:[number,number,number,number];
    pointToPixelScaleX:number;pointToPixelScaleY:number;rounding:'outward-floor-ceil';textReferences:unknown[]}}};
 type ContentManifest={schema:1;rawPdfSha256:string;pageCount:number;layout:DoclingVisualLayout;layoutStatus:'available'|'unavailable';layoutReason?:string;
- renderStatus:'available'|'unavailable';renderReason?:string;assets:PdfVisualAsset[]};
+ renderStatus:'available'|'unavailable';renderReason?:string;assets:PdfVisualAsset[];internalLinks?:PdfInternalLinks};
 export type PreparedPdfVisualEvidence={owner:string;documentId:string;sourceHash:string;contentSha256:string;content:ContentManifest};
 const prepared=new WeakSet<PreparedPdfVisualEvidence>();
 const freeze=(value:unknown):void=>{if(value&&typeof value==='object'){Object.freeze(value);for(const child of Object.values(value))freeze(child);}};
@@ -82,6 +83,9 @@ export async function preparePdfVisualEvidence(input:{owner:string;documentId:st
  }
  const content:ContentManifest={schema:1,rawPdfSha256:input.sourceHash,pageCount:count,layout:structuredClone(input.layout),layoutStatus:input.layout.status,
   ...(input.layout.reason?{layoutReason:input.layout.reason}:{}),renderStatus:'available',assets:[]};
+ const linkPolicy=process.env.PDF_INTERNAL_LINK_OBSERVATIONS;
+ if(linkPolicy&&linkPolicy!=='off'&&linkPolicy!=='goto-v1')throw new PdfVisualEvidenceError('invalid','Unknown PDF internal-link observation policy');
+ if(linkPolicy==='goto-v1')content.internalLinks=observePdfInternalLinks(pdf);
  const rendererPolicy=renderer===localPdfPageImage?'localPdfPageImage-pdftoppm-max2500-sharp0354-v1':'injected-offline-renderer-v1';
  const cacheIdentity={owner:input.owner,documentId:input.documentId,sourceHash:input.sourceHash,count,rendererPolicy,layoutSha256:sha(pdfVisualCanonical(input.layout))};
  const cachePath=resolve(root(),`.pdf-visual-${sha(pdfVisualCanonical(cacheIdentity))}.json`);
@@ -176,6 +180,23 @@ async function current(db:Queryable,owner:string,source:DocumentContextSource){
  const row=rows[0];
  return {documentId:row.documentId,currentVersionId:row.currentVersionId,sourceVersionId:row.sourceVersionId,
   sourceHash:row.sourceHash,courseId:row.courseId};
+}
+/** Read navigation observations independently of image loading/input budgets.
+ * Original PDF/source version and immutable manifest hashes still bind them. */
+export async function readPdfInternalLinkEvidence(db:Queryable,owner:string,source:DocumentContextSource){
+ source=await current(db,owner,{...source});
+ const row=(await db.query<{manifest:{content:ContentManifest};manifest_sha256:string;content_sha256:string}>(
+  'SELECT manifest,manifest_sha256,content_sha256 FROM document_pdf_visual_manifests WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3',
+  [source.currentVersionId,source.sourceVersionId,source.sourceHash])).rows[0];
+ if(row&&(sha(pdfVisualCanonical(row.manifest))!==row.manifest_sha256||sha(pdfVisualCanonical(row.manifest.content))!==row.content_sha256||
+  row.manifest.content.rawPdfSha256!==source.sourceHash))throw new PdfVisualEvidenceError('invalid','PDF link manifest identity differs');
+ const observations=row?.manifest.content.internalLinks;
+ if(observations&&(observations.policy!=='pdf-native-goto-v1'||observations.semanticVerified!==false||observations.semantics!=='navigation-only'||
+  observations.pageCount!==row!.manifest.content.pageCount||!Array.isArray(observations.links)||observations.links.length>2000||
+  !['available','partial','unavailable'].includes(observations.status)))throw new PdfVisualEvidenceError('invalid','PDF native-link observation policy differs');
+ await current(db,owner,source);
+ return {source,manifestSha256:row?.manifest_sha256??null,status:observations?.status??'unavailable' as const,
+  reason:observations?null:'not-recorded',observations:observations??null,semanticVerified:false as const};
 }
 /** Multiple real regions may share one real page; never invent caption nodes. */
 export async function readPdfVisualEvidence(db:Queryable,owner:string,source:DocumentContextSource,pageEvidenceIds?:string[],

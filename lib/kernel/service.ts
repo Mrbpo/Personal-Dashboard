@@ -25,7 +25,7 @@ import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readD
  type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type DocumentVectorScope} from './document-vector.ts';
-import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
+import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,readPdfInternalLinkEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
@@ -1099,6 +1099,9 @@ export class KernelService {
 
   readPdfVisualEvidence(owner:string,source:DocumentContextSource,pageEvidenceIds?:string[]){
     return readPdfVisualEvidence(kernelPool(),owner,source,pageEvidenceIds);
+  }
+  readPdfInternalLinks(owner:string,source:DocumentContextSource){
+    return readPdfInternalLinkEvidence(kernelPool(),owner,source);
   }
 
   nativeTableBlobHashes(){return nativeTableBlobHashes(kernelPool());}

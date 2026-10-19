@@ -7,6 +7,7 @@ import type {DoclingVisualLayout,DoclingNativeTable} from './docling-result.ts';
 import {preparePdfVisualEvidence,pdfVisualCanonical} from './pdf-visual-evidence.ts';
 import {prepareNativeTableCandidates} from './document-table-candidates.ts';
 import {bindDoclingSourceMath,prepareDoclingSourceMath,type DoclingSourceMath,type PreparedDoclingSourceMath} from './docling-source-math.ts';
+import {PDF_INTERNAL_LINK_POLICY,type PdfInternalLinks} from './pdf-internal-links.ts';
 
 export const CACHED_DOCLING_REPLAY_VERSION='docling-cached-replay-v2-list-markers';
 const rawMethods=new Set(['docling-text','docling-original-text-fallback','cached-docling-redecode']);
@@ -19,7 +20,8 @@ export type CachedDoclingAudit={schema:1;owner:string;documentId:string;sourceHa
  decision:'eligible'|'unchanged';pageCount:number;changedPages:number[];warnings:string[];pages:Array<{pageNumber:number;locator:string;text:string}>;
  pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[];
  sourceMath?:PreparedDoclingSourceMath;
- visualEvidence:{status:'missing'|'matching'|'layout-changed'|'render-incomplete';manifestSha256:string|null;contentSha256:string|null;layoutSha256:string};visualOnly:boolean;reviewHash:string};
+ visualEvidence:{status:'missing'|'matching'|'layout-changed'|'render-incomplete';manifestSha256:string|null;contentSha256:string|null;layoutSha256:string;
+ internalLinks?:'recorded'|'not-recorded'};visualOnly:boolean;reviewHash:string};
 const normalizedWarnings=(warnings:string[])=>[...new Set(warnings.map(w=>w.trim()).filter(Boolean))].sort();
 
 /** No remote fallback: missing/corrupt drafts must fail, never request parsing. */
@@ -135,7 +137,7 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
  const changedPages=old.filter((page,i)=>page.body!==decoded.pages[i].text).map(page=>page.page_number);
  const candidateWarnings=normalizedWarnings([...document.warnings,...decoded.warnings]);
  const qualityChanged=JSON.stringify(candidateWarnings)!==JSON.stringify(normalizedWarnings(document.warnings));
- const visualRow=(await pool.query<{manifest_sha256:string;content_sha256:string;manifest:{content:{layout:DoclingVisualLayout;renderStatus:string}}}>(
+ const visualRow=(await pool.query<{manifest_sha256:string;content_sha256:string;manifest:{content:{layout:DoclingVisualLayout;renderStatus:string;internalLinks?:PdfInternalLinks}}}>(
   'SELECT manifest_sha256,content_sha256,manifest FROM document_pdf_visual_manifests WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3',
   [document.current_version_id,document.source_version_id,document.source_hash])).rows[0];
  if(visualRow&&(digest(pdfVisualCanonical(visualRow.manifest))!==visualRow.manifest_sha256||
@@ -144,7 +146,11 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
  const visualStatus:CachedDoclingAudit['visualEvidence']['status']=!visualRow?'missing':
   digest(pdfVisualCanonical(visualRow.manifest.content.layout))!==layoutSha256?'layout-changed':
   visualRow.manifest.content.renderStatus!=='available'?'render-incomplete':'matching';
- const textChanged=Boolean(changedPages.length||qualityChanged),decision=textChanged||mathChanged||visualStatus!=='matching'?'eligible':'unchanged';
+ const linkPolicy=process.env.PDF_INTERNAL_LINK_OBSERVATIONS;
+ if(linkPolicy&&linkPolicy!=='off'&&linkPolicy!=='goto-v1')throw Error('Unknown PDF internal-link observation policy');
+ const hasLinks=visualRow?.manifest.content.internalLinks?.policy===PDF_INTERNAL_LINK_POLICY&&visualRow.manifest.content.internalLinks.semanticVerified===false,
+  linksNeeded=linkPolicy==='goto-v1'&&!hasLinks;
+ const textChanged=Boolean(changedPages.length||qualityChanged),decision=textChanged||mathChanged||visualStatus!=='matching'||linksNeeded?'eligible':'unchanged';
  const warnings=textChanged?normalizedWarnings([...candidateWarnings,
   '缓存 Docling 原始结果重读；公式、符号、上下标及 LaTeX 未完全核验，请保留原 PDF 为证据']):candidateWarnings;
  const pageProvenance=old.map(page=>({pageNumber:page.page_number,
@@ -155,7 +161,9 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
  const audit={schema:1 as const,owner,documentId,sourceHash:document.source_hash,expectedCurrentVersion:document.current_version_id,
   decision:decision as CachedDoclingAudit['decision'],pageCount:document.page_count,changedPages,warnings,
   pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress,visualLayout:decoded.visualLayout,nativeTables:decoded.nativeTables,...(sourceMath?{sourceMath}:{}),
-  visualEvidence:{status:visualStatus,manifestSha256:visualRow?.manifest_sha256??null,contentSha256:visualRow?.content_sha256??null,layoutSha256},visualOnly:!textChanged&&!mathChanged&&visualStatus!=='matching'};
+  visualEvidence:{status:visualStatus,manifestSha256:visualRow?.manifest_sha256??null,contentSha256:visualRow?.content_sha256??null,layoutSha256,
+   ...(linkPolicy==='goto-v1'?{internalLinks:hasLinks?'recorded' as const:'not-recorded' as const}:{})},
+  visualOnly:!textChanged&&!mathChanged&&(visualStatus!=='matching'||linksNeeded)};
  return {...audit,reviewHash:digest(JSON.stringify(audit))};
 }
 
