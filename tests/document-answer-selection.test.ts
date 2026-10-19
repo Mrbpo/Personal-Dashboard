@@ -73,7 +73,7 @@ test('generation verbosity preserves the exact source request and selector, with
   check={mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}},base={...policy,citationCheck:check},
   medium={...base,generationVerbosity:'medium' as const},before=buildSelectedDocumentAnswerRequest(p,ids,settings,base),
   after=buildSelectedDocumentAnswerRequest(p,ids,settings,medium);
- assert.equal(after.text.verbosity,'medium');assert.equal(before.text.verbosity,'low');
+ assert.equal((after.text as {verbosity?:string}).verbosity,'medium');assert.equal((before.text as {verbosity?:string}).verbosity,'low');
  assert.deepEqual({...after,text:{...after.text,verbosity:'low'}},before,'only generation text.verbosity changes');
  assert.deepEqual(buildDocumentEvidenceSelectionRequest(p,settings,medium),buildDocumentEvidenceSelectionRequest(p,settings,base));
  await documentAnswerSettings(medium);
