@@ -1,6 +1,7 @@
 import type { Pool } from 'pg';
 import {createHash} from 'node:crypto';
 import {normalizeDocumentRoutingScope,documentRoutingScopeSql,assertDocumentRoutingScope,type DocumentRoutingScope} from './document-routing-scope.ts';
+import {contentTagRoutingMode,routeDocumentContentTagCandidates,type ContentTagRoutingReceipt} from './content-tag-routing.ts';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
@@ -126,6 +127,7 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   evidence_body?:'full-page';
   retrieval_hint?:ReturnType<typeof documentOrigSearchMetadata>;
   retrieval_scope?:'selected-title-scoped';
+  content_tag_routing?:ContentTagRoutingReceipt;
   rerank_model?:'gpt-5-mini'|'gpt-6-astra';rerank_reasoning_effort?:'low'|'medium'|'high'|'xhigh'|'max';
   rerank_max_output_tokens?:number;
   refinement_mode?:'adjacent-pages'|'no-new-neighbors';refinement_candidate_count?:number;
@@ -221,6 +223,7 @@ function rankingFailure(error:unknown):string{
 }
 
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
+  contentTagRoutingMode();
   options={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
   const {evidenceBody,...rankingOptions}=options;
   if(evidenceBody!==undefined&&evidenceBody!=='snippet'&&evidenceBody!=='full-page')
@@ -271,6 +274,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
   const hybrid=Boolean((options.hybrid??(process.env.KERNEL_DOCUMENT_HYBRID==='true'))&&!options.strict);
   if(options.refineAdjacent&&(!hybrid||!aiRerank))throw new Error('Adjacent PDF refinement requires hybrid AI retrieval');
   const semantic=Boolean((options.semantic||aiRerank||hybrid)&&!options.strict);
+  const route=(candidates:DocumentTextHit[])=>options.strict?Promise.resolve(candidates):routeDocumentContentTagCandidates(pool,owner,query,candidates);
   // Dense recall and keyword scoring are independent. Start the bounded query
   // embedding concurrently; document embeddings are prepared by the worker.
   const dense=hybrid?(async()=>{
@@ -367,9 +371,10 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
             }
           }
         }
-        const ranked=hybrid?await selectSupportedHybridDocumentPages(pool,owner,query,hits,[...candidates.values()],limit):
+        const routed=await route([...candidates.values()]);
+        const ranked=hybrid?await selectSupportedHybridDocumentPages(pool,owner,query,hits,routed,limit):
           fuseLexicallySupportedAIRanks(hits,
-            await rerankDocumentPagesWithAI(pool,owner,query,[...candidates.values()],candidates.size),limit);
+            await rerankDocumentPagesWithAI(pool,owner,query,routed,candidates.size),limit);
         const seeds=options.refineAdjacent?independentDocumentRefinementSeeds(ranked,hits,independentDense,[...candidates.values()]):[];
         const refined=options.refineAdjacent?await refineSelectedDocumentPages(pool,owner,query,ranked,Math.min(5,limit),seeds):ranked;
         return refined
@@ -395,7 +400,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
           source_version_id:hit.source_version_id,evidence_id:hit.evidence_id})))]);
       if(Number(current.rows[0].n)!==reordered.length)return keywordFallback('semantic:stale-version');
     }
-    return reordered.slice(0,limit).map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
+    return (await route(reordered)).slice(0,limit).map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
   }
-  return hits.slice(0,limit);
+  return (await route(hits)).slice(0,limit);
 }
