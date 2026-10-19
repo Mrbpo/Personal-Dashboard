@@ -1317,6 +1317,7 @@ export class KernelService {
           sourceHint:{selectedDocumentTitle:mentioned.matches[0].title},strict:true,relatedDocuments:false};
       }
     }
+    if(sourceRouting?.requestTarget)policy={...policy,requestTarget:sourceRouting.requestTarget};
     if(sourceRouting)policy.onStage?.('retrieval');
     const rankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions);
     let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
@@ -1427,7 +1428,9 @@ export class KernelService {
         quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
         ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
     }
-    return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{})};
+    return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
+      ...(policy.questionTarget?{questionTargetBinding:{policy:policy.questionTarget,applied:!!policy.requestTarget,
+       reason:policy.requestTarget?'question-only-target-frozen':'no-single-question-target-from-existing-routing',semanticVerified:false}}:{})};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;

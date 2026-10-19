@@ -42,6 +42,10 @@ export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WIN
  if(value!=='off'&&value!=='producer-neighbors-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
  return value==='off'?undefined:value;
 }
+export function studyQuestionTarget(value=process.env.STUDY_QUESTION_TARGET??'off'){
+ if(value!=='off'&&value!=='explicit-attribute-v1')throw new StudyAnswerError('configuration','invalid-question-target','问题目标配置无效');
+ return value==='off'?undefined:value;
+}
 /** Process-only development setting; even a lower explicit limit needs isolation. */
 export function studyDevelopmentDailyLimit(value=process.env.STUDY_DEVELOPMENT_DAILY_LIMIT){
  if(value===undefined)return undefined;
@@ -75,8 +79,11 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const generationReasoningEffort=studyGenerationReasoning();
- const textContextWindows=studyTextContextWindows();
+ const textContextWindows=studyTextContextWindows(),questionTarget=studyQuestionTarget();
  const sourceValueContract=studySourceValues();
+ if(questionTarget&&(studyAnswerBackend()!=='kernel'||sourceScope!=='question-scope'||evidenceSelection!=='select-then-answer'||
+  citationMode!=='selected-once'||sourceValueContract!==undefined))
+  throw new StudyAnswerError('configuration','question-target-requires-routing-selection-check','问题目标需要内核、范围判断、证据选择和引用核对，暂不能与来源值协议同时启用');
  if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','text-context-requires-selection-check','原文上下文窗口需要内核、证据选择和引用核对');
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
@@ -96,6 +103,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
     ...(textContextWindows?{textContextWindows}:{}),
+    ...(questionTarget?{questionTarget}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
@@ -121,11 +129,14 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
      ...(textContextWindows?{textContextWindows}:{}),
+     ...(questionTarget?{questionTarget}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
+    ...('questionTargetBinding' in result?{questionTargetBinding:result.questionTargetBinding}:{}),
+    ...('questionTargetAnswer' in result?{questionTargetAnswer:result.questionTargetAnswer}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
     ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
