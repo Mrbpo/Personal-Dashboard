@@ -106,6 +106,14 @@ test('already retrieved parent pages receive navigation even when not initial ra
  const read=withPdfNavigationContext(async()=>c,async(_source,page)=>{calls.push(page);return f.page;});
  const context=await read();assert.deepEqual(calls,[1]);assert.equal(context.pdfNavigation.pages.length,1);
  assert.doesNotThrow(()=>prepareDocumentAnswer('Which method?',context));
+ // Ranked unrelated pages must not exhaust the metadata budget before this
+ // explicitly expanded source page, which can already be selected for answers.
+ c.anchors=Array.from({length:16},(_,i)=>({...answerContext().anchors[0],id:`pg:other:${i+2}`,page_number:i+2,document_id:'other'}));
+ calls.length=0;
+ const bounded=withPdfNavigationContext(async()=>c,async(s,p)=>{calls.push(p);return s.documentId===source.documentId?f.page:
+  {policy:PDF_NAVIGATION_TEXT_POLICY,status:'unavailable',source:s,physicalPage:p,reason:'native-navigation-not-recorded',semanticRelationsVerified:false};});
+ const result=await bounded();assert.equal(calls[0],1);assert.equal(calls.length,16);assert.equal(result.pdfNavigation.pages.length,1);
+ assert.equal(result.pdfNavigation.omittedPages,1);
 });
 
 test('large native annotation sets keep bounded wire and explicit omissions',()=>{

@@ -25,11 +25,15 @@ export function withPdfNavigationContext<T extends {anchors:DocumentEvidenceHit[
  const cache=new Map<string,ReturnType<typeof readPdfNavigationTextContainers>>();
  return async()=>{
   const context=await read(),pages:PdfNavigationPage[]=[],seen=new Set<string>();let omittedPages=0,unavailablePages=0;
-  const existingPages=context.anchors.flatMap(anchor=>{
+  const rankedPages=context.anchors.flatMap(anchor=>{
    const version=/^pg:(.+):([0-9]+)$/.exec(anchor.id);
    return !version||Number(version[2])!==anchor.page_number?[]:[{source:{documentId:anchor.document_id,currentVersionId:version[1],
     sourceVersionId:anchor.source_version_id,sourceHash:anchor.source_hash},page:anchor.page_number,evidenceId:anchor.evidence_id,bodySha256:sha(anchor.body)}];
   });
+  // Expanded original page nodes are the explicit source context. Prioritize
+  // their bounded observations before unrelated ranked pages can exhaust the
+  // metadata-read cap; this does not alter evidence or citation selection.
+  const existingPages:typeof rankedPages=[];
   for(const parent of context.parents??[])for(const node of parent.nodes){
    const ordinal=node.ordinal;
    if(node.kind!=='page'||typeof ordinal!=='number'||!Number.isSafeInteger(ordinal)||ordinal<0)continue;
@@ -37,6 +41,7 @@ export function withPdfNavigationContext<T extends {anchors:DocumentEvidenceHit[
    existingPages.push({source:{documentId:node.documentId,currentVersionId:node.documentVersionId,sourceVersionId:node.sourceVersionId,
     sourceHash:node.sourceHash},page:ordinal+1,evidenceId:node.evidenceId,bodySha256:node.bodySha256});
   }
+  existingPages.push(...rankedPages);
   for(const {source,page:physicalPage,evidenceId,bodySha256} of existingPages){
    const key=JSON.stringify([source,physicalPage,evidenceId,bodySha256]);
    if(seen.has(key))continue;seen.add(key);
