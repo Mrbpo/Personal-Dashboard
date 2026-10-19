@@ -38,10 +38,6 @@ export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REAS
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
  return value==='low'?undefined:value;
 }
-export function studyGenerationModel(value=process.env.STUDY_GENERATION_MODEL??'inherit'){
- if(value!=='inherit'&&value!=='gpt-5.6-terra')throw new StudyAnswerError('configuration','invalid-generation-model','答案模型配置无效');
- return value==='inherit'?undefined:value;
-}
 export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WINDOWS??'off'){
  if(value!=='off'&&value!=='producer-neighbors-v1'&&value!=='stored-page-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
  return value==='off'?undefined:value;
@@ -79,7 +75,6 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const generationReasoningEffort=studyGenerationReasoning();
- const generationModel=studyGenerationModel();
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
  if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
@@ -102,7 +97,6 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
-    ...(generationModel?{generationModel}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
@@ -124,10 +118,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
   return {answer,citations,meta:{valuable:false,takeaway:'',topic:'',assessment:'explored',evidence:'',vocabulary:[],
    citations,memories:[],web:[],webQuery:'',question,
    contextNote:`Kernel 当前证据：${result.textEvidenceCount} 条文本、${result.imageEvidenceCount} 张原图；历史对话仅用于理解追问。`,
-   study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:result.requestedModel??model,model:result.model,
+   study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
      ...(textContextWindows?{textContextWindows}:{}),
-     ...(generationModel?{generationModel,evidenceSelectionModel:model}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,

@@ -3,7 +3,6 @@ import { serviceValue } from './service-vault.ts';
 const baseRates: Record<string,{input:number;output:number;context:number}> = {
   'gpt-5-mini': {input:0.25,output:2,context:400000},
   'gpt-5.4-mini': {input:0.75,output:4.5,context:400000},
-  'gpt-5.6-terra': {input:2,output:12,context:1050000},
   'gpt-6-astra': {input:10,output:50,context:1050000},
   'text-embedding-3-small': {input:0.02,output:0,context:8192},
 };
@@ -59,25 +58,7 @@ export async function reserveBudget(amount:number,kind:string,dailyLimit?:number
   }
   return id;
 }
-export function terraAnswerReservation(inputUpper:number,maxOutput:number){
-  if(!Number.isInteger(inputUpper)||inputUpper<1||inputUpper>272000||!Number.isInteger(maxOutput)||maxOutput<1||maxOutput>4000)
-    throw Error('Terra answer input/output bound is invalid');
-  return (inputUpper*2.5+maxOutput*12)/1e6;
-}
-export function terraAnswerCharge(payload:any,inputUpper:number,maxOutput:number){
-  terraAnswerReservation(inputUpper,maxOutput);
-  const input=payload?.usage?.input_tokens,output=payload?.usage?.output_tokens,details=payload?.usage?.input_tokens_details,
-    cached=details?.cached_tokens??0,written=details?.cache_write_tokens??0;
-  if(payload?.model!=='gpt-5.6-terra'||!['completed','incomplete'].includes(payload.status)||
-    ![input,output,cached,written].every(n=>typeof n==='number'&&Number.isInteger(n)&&n>=0)||
-    input>inputUpper||output>maxOutput||cached+written>input)throw Error('Unverified Terra usage; reservation retained');
-  return ((input-cached-written)*2+cached*.2+written*2.5+output*12)/1e6;
-}
-export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,signal?:AbortSignal|null,policy?:{kind:string;dailyLimit:number;inputTokenUpper?:number}) {
-  const terra=body.model==='gpt-5.6-terra';
-  if(terra&&(endpoint!=='responses'||policy?.kind!=='document-answer'||body.tools?.length||process.env.AI_BUDGET_TEST_BYPASS==='true'))
-    throw Error('Terra requires the bounded document answer path');
-  const terraReserved=terra?terraAnswerReservation(policy?.inputTokenUpper!,body.max_output_tokens):undefined;
+export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,signal?:AbortSignal|null,policy?:{kind:string;dailyLimit:number}) {
   if(process.env.AI_BUDGET_TEST_BYPASS==='true' && process.env.NODE_ENV!=='production') return fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const rate=configuredRate(body.model);
   if(!serviceValue('OPENAI_API_KEY')) throw new Error('请先配置 OpenAI API Key');
@@ -94,16 +75,11 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
     Math.min(rate.context,Buffer.byteLength(JSON.stringify(body))+4096):Math.min(rate.context,Math.max(1000,Math.ceil(inputBytes/2)));
   const longInput=astra&&tokens>272000;
   const toolMax=body.tools?.length ? Math.max(1,body.max_tool_calls || 1) * 0.02 : 0;
-  const reserved=terraReserved??Math.max(0.000001,(tokens*rate.input*(astra?1.25:1)*(longInput?2:1)+maxOutput*rate.output*(longInput?1.5:1))/1e6+toolMax);
+  const reserved=Math.max(0.000001,(tokens*rate.input*(astra?1.25:1)*(longInput?2:1)+maxOutput*rate.output*(longInput?1.5:1))/1e6+toolMax);
   const id=await reserveBudget(reserved,policy?.kind||endpoint,policy?.dailyLimit);
   // On an ambiguous timeout keep the reservation: provider may have already billed it.
   const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
   const p=await response.clone().json().catch(()=>null);
-  if(terra&&response.ok){
-    const charged=terraAnswerCharge(p,policy!.inputTokenUpper!,maxOutput);
-    await db.prepare("UPDATE ai_ledger SET charged=?,status='settled' WHERE id=?").bind(charged,id).run();
-    return response;
-  }
   if(response.ok && p?.usage) {
     // An unverified model must not be settled at the requested mini rate.
     // Preserve its reservation for reconciliation; the answer layer rejects it.
