@@ -1245,7 +1245,8 @@ export class KernelService {
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
-    const {includeParents=false,includeImages=false,...searchOptions}={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
+    const {includeParents=false,includeImages=false,...searchOptions}={...options,
+      ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
       !Number.isInteger(limit)||limit<1||limit>14)throw new Error('Invalid study answer evidence options');
@@ -1307,7 +1308,8 @@ export class KernelService {
   async answerStudyContent(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean;retrievalQuestion?:string}={},policy:DocumentAnswerPolicy={}){
     await documentAnswerSettings(policy);
-    const {retrievalQuestion,...searchOptions}={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
+    const {retrievalQuestion,...searchOptions}={...options,
+      ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
       throw new Error('Invalid study retrieval question');
     let routedOptions=searchOptions,sourceRouting:Awaited<ReturnType<typeof planDocumentQueryScope>>|undefined;
