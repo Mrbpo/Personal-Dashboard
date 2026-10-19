@@ -35,6 +35,24 @@ async function fixture(){
    reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'}]};
  return {meta,image,context,sourceImage:{...meta,image} as SourceValueImage,base};
 }
+async function nativeContextFixture(alter?: (n:import('../lib/kernel/docling-result.ts').DoclingNativeTable)=>void){
+ const dir=new URL('./fixtures/native-table-mit-class5/',import.meta.url),nativeRaw=await readFile(new URL('result.json',dir)),png=await readFile(new URL('source-page.png',dir)),
+  meta=JSON.parse(await readFile(new URL('provenance.json',dir),'utf8'));
+ const n=decodeDerivedDoclingResult(JSON.parse(nativeRaw.toString()),{start:1,end:1,totalPages:1,copyIndices:[0]},{verifiedBlankPages:[],formulaEnriched:false}).nativeTables[0];
+ n.result={resultBlobSha256:sha(nativeRaw),derivedInputSha256:meta.sourcePdfSha256,optionsHash:sha('saved-options'),copyIndices:[0]};
+ alter?.(n);
+ const artifact=prepareNativeTableArtifact(n),source={documentId:'saved-native-fixture',currentVersionId:'saved-current',sourceVersionId:'saved-source',sourceHash:meta.sourcePdfSha256,courseId:''};
+ const img:any={kind:'pdf-page',source,attachmentId:sha('native-attachment'),anchorEvidenceId:'native-page',physicalPage:1,rawPdfSha256:source.sourceHash,
+  manifestSha256:sha('saved-manifest'),sha256:sha(png),width:png.readUInt32BE(16),height:png.readUInt32BE(20)};
+ const identity={namespace:artifact.namespace,producer:artifact.producer,source,artifactSha256:artifact.artifactSha256,manifestSha256:img.manifestSha256,
+  assetSha256:img.sha256,anchor:img.anchorEvidenceId};
+ const candidate:DerivedTableCandidate={kind:'derived-native-table',id:sha(canonical(identity)),source,pageNumber:1,anchorEvidenceId:img.anchorEvidenceId,
+  manifestSha256:img.manifestSha256,assetSha256:img.sha256,artifactSha256:artifact.artifactSha256};
+ const observed={id:'i9',kind:'image' as const,documentId:source.documentId,documentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,
+  sourceHash:source.sourceHash,evidenceId:img.anchorEvidenceId,sha256:img.sha256,image:img,tableObservations:[prepareNativeTableObservation(candidate,artifact,img)]};
+ return {observed,n};
+}
+
 function operation(c:SourceValueCatalog){
  const at=(row:number,col:number)=>c.cells.find(cell=>cell.row===row&&cell.column===col)!;
  return {kind:'difference' as const,leftValueRef:at(10,3).id,rightValueRef:at(9,3).id,leftRowLabelRef:at(10,0).id,rightRowLabelRef:at(9,0).id,
@@ -70,19 +88,7 @@ test('source values: cell/source mutations, wrong columns/missing values, foreig
  const limited=prepareSourceValueCatalog(many);assert.equal(limited.status,'unavailable');assert.equal(limited.reason,'catalog-cell-limit');
  assert.equal(limited.complete,false);assert.deepEqual(limited.cells,[]);
  const byteLimited=prepareSourceValueCatalog(many.slice(0,4));assert.equal(byteLimited.status,'unavailable');assert.equal(byteLimited.reason,'catalog-byte-limit');assert.deepEqual(byteLimited.cells,[]);
- const dir=new URL('./fixtures/native-table-mit-class5/',import.meta.url),nativeRaw=await readFile(new URL('result.json',dir)),png=await readFile(new URL('source-page.png',dir)),
-  meta=JSON.parse(await readFile(new URL('provenance.json',dir),'utf8'));
- const n=decodeDerivedDoclingResult(JSON.parse(nativeRaw.toString()),{start:1,end:1,totalPages:1,copyIndices:[0]},{verifiedBlankPages:[],formulaEnriched:false}).nativeTables[0];
- n.result={resultBlobSha256:sha(nativeRaw),derivedInputSha256:meta.sourcePdfSha256,optionsHash:sha('saved-options'),copyIndices:[0]};
- const artifact=prepareNativeTableArtifact(n),source={documentId:'saved-native-fixture',currentVersionId:'saved-current',sourceVersionId:'saved-source',sourceHash:meta.sourcePdfSha256,courseId:''};
- const img:any={kind:'pdf-page',source,attachmentId:sha('native-attachment'),anchorEvidenceId:'native-page',physicalPage:1,rawPdfSha256:source.sourceHash,
-  manifestSha256:sha('saved-manifest'),sha256:sha(png),width:png.readUInt32BE(16),height:png.readUInt32BE(20)};
- const identity={namespace:artifact.namespace,producer:artifact.producer,source,artifactSha256:artifact.artifactSha256,manifestSha256:img.manifestSha256,
-  assetSha256:img.sha256,anchor:img.anchorEvidenceId};
- const candidate:DerivedTableCandidate={kind:'derived-native-table',id:sha(canonical(identity)),source,pageNumber:1,anchorEvidenceId:img.anchorEvidenceId,
-  manifestSha256:img.manifestSha256,assetSha256:img.sha256,artifactSha256:artifact.artifactSha256};
- const observed={id:'i9',kind:'image' as const,documentId:source.documentId,documentVersionId:source.currentVersionId,sourceVersionId:source.sourceVersionId,
-  sourceHash:source.sourceHash,evidenceId:img.anchorEvidenceId,sha256:img.sha256,image:img,tableObservations:[prepareNativeTableObservation(candidate,artifact,img)]};
+ const {observed,n}=await nativeContextFixture();
  const both=prepareSourceValueCatalog([f.sourceImage,observed]);assert.equal(both.status,'available');assert.equal(both.tables[1].producer,'docling-native-table-v1');
  assert.deepEqual(both.cells.filter(x=>x.tableId===both.tables[1].id).map(x=>x.text),n.cellTexts.map(x=>x.text));
  const foreign={...op,rightValueRef:both.cells.find(cell=>cell.tableId===both.tables[1].id)!.id};
@@ -263,4 +269,39 @@ test('required difference: closed answered operations, preserved statements/refu
   assert.deepEqual(result.sourceValueDerivation.rawProviderResult,value);assert.equal(result.providerSelections,null);
   assert.deepEqual(result.sourceValueDerivation.normalizedSelections,d.normalizedSelections);
  }finally{globalThis.fetch=saved;}
+});
+
+
+test('native table context preserves verbatim caption declarations and unknown provenance without changing cell IDs or legacy schema',async()=>{
+ const f=await nativeContextFixture(n=>{
+  n.raw.captions=[{$ref:'#/texts/900'}];
+  n.captions=[{reference:'#/texts/900',raw:{label:'caption',text:'  Reported latency (seconds).\n',orig:'Original latency (seconds).',
+   parent:{$ref:n.reference},prov:[]}}];
+ });
+ const before=JSON.stringify(f.observed),c=prepareSourceValueCatalog([f.observed]),ctx=c.tableContexts![0];
+ assert.equal(c.status,'available');assert.equal(ctx.captionLinkStatus,'resolved-parser-reference');
+ assert.deepEqual(ctx.captions,f.n.captions);assert.deepEqual(ctx.rawCaptionDeclarations,f.n.raw.captions);
+ assert.deepEqual(ctx.captions[0].raw.prov,[]);assert.equal(ctx.coordinateMapping,'unverified');
+ assert.equal(ctx.semanticVerified,false);assert.equal(ctx.relationshipVerified,false);assert.equal(ctx.visibilityVerified,false);
+ assert.deepEqual(ctx.result,f.n.result);assert.equal(ctx.physicalPage,1);assert.equal(JSON.stringify(f.observed),before);
+ const legacy=structuredClone(c);delete legacy.tableContexts;
+ const {catalogSha256:ignored,...oldShape}=legacy;void ignored;legacy.catalogSha256=sha(canonical(oldShape));
+ assert.deepEqual(sourceValueAnswerSchema(c,[f.observed.id]),sourceValueAnswerSchema(legacy,[f.observed.id]));
+ assert.deepEqual(legacy.cells.map(x=>x.id),c.cells.map(x=>x.id));
+});
+
+test('native caption links remain unknown on missing declarations or conflicting parents, and context tampering cannot claim verification',async()=>{
+ for(const conflicting of [false,true]){
+  const f=await nativeContextFixture(n=>{
+   n.raw.captions=conflicting?[{$ref:'#/texts/900'}]:undefined;
+   n.captions=[{reference:'#/texts/900',raw:{text:'An observation, not a verified metric.',
+    ...(conflicting?{parent:{$ref:'#/tables/999'}}:{})}}];
+  });
+  const c=prepareSourceValueCatalog([f.observed]);assert.equal(c.tableContexts![0].captionLinkStatus,'unknown');
+  assert.equal(c.tableContexts![0].captions[0].raw.text,'An observation, not a verified metric.');
+  for(const change of [(x:any)=>x.tableId='foreign-table',(x:any)=>x.semanticVerified=true,(x:any)=>x.physicalPage=2]){
+   const changed=structuredClone(c);change(changed.tableContexts![0]);const {catalogSha256:ignored,...rest}=changed;void ignored;
+   changed.catalogSha256=sha(canonical(rest));assert.throws(()=>sourceValueAnswerSchema(changed,[f.observed.id]),/context/);
+  }
+ }
 });

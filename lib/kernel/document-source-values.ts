@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,type TableObservation} from './document-table-candidates.ts';
 import type {DocumentContextSource,DocumentImageEvidence} from './document-context.ts';
 import type {PdfVisualImageEvidence} from './pdf-visual-evidence.ts';
+import type {DoclingNativeTable} from './docling-result.ts';
 
 export const SOURCE_VALUE_CONTRACT='difference-v1';
 export const SOURCE_VALUE_LIMITS=Object.freeze({cells:256,bytes:32768});
@@ -35,25 +36,42 @@ type Cell={id:string;tableId:string;row:number;column:number;rowSpan:number;colu
 type Table={id:string;imageId:string;source:DocumentContextSource;evidenceId:string;imageSha256:string;attachmentId:string;
  artifactSha256:string;observationSha256:string;producer:string;tableReference:string;
  semanticVerified:false;relationshipVerified:false;visibilityVerified:false};
+export type SourceValueTableContext={version:'native-table-context-v1';tableId:string;tableReference:string;physicalPage:number;
+ result:NonNullable<DoclingNativeTable['result']>;rawTableProvenance:unknown;rawCaptionDeclarations:unknown;
+ captions:DoclingNativeTable['captions'];captionLinkStatus:'resolved-parser-reference'|'empty-parser-list'|'unknown';
+ rawPageBasis:'derived-input-local';coordinateMapping:'unverified';semanticVerified:false;relationshipVerified:false;visibilityVerified:false};
 export type SourceValueCatalog={version:'source-value-catalog-v1';complete:boolean;status:'available'|'unavailable';
  reason:null|'no-table-observations'|'observation-unavailable'|'catalog-cell-limit'|'catalog-byte-limit';
- sourceInputSha256:string;tables:Table[];cells:Cell[];limits:typeof SOURCE_VALUE_LIMITS;catalogSha256:string};
+ sourceInputSha256:string;tables:Table[];cells:Cell[];tableContexts?:SourceValueTableContext[];limits:typeof SOURCE_VALUE_LIMITS;catalogSha256:string};
 type Selections={status:'answered'|'insufficient-evidence'|'conflicting-evidence';message:string;claims:Array<{text:string;citations:{id:string}[]}>};
 type Difference={kind:'difference';leftValueRef:string;rightValueRef:string;leftRowLabelRef:string;rightRowLabelRef:string;columnLabelRefs:string[]};
 export type SourceValueDerivation={method:'source-value-difference-v1';rawProviderResult:unknown;rawOutputText:string;rawOutputSha256:string;
  questionContract?:'required-difference-v1';
  rawOperationSha256:string;catalogSha256:string;normalizedSelections:Selections;normalizedSelectionsSha256:string;
  operations:Array<{claimIndex:number;operation:Difference;sourceCells:Cell[];sourceTable:Table;difference:string;arithmetic:'exact-fixed-decimal';
-  arithmeticVerified:true;semanticVerified:false;relationshipVerified:false;visibilityVerified:false}>;
+  sourceTableContext?:SourceValueTableContext;arithmeticVerified:true;semanticVerified:false;relationshipVerified:false;visibilityVerified:false}>;
  semanticVerified:false;coverage:'unassessed'};
+
+function captionLinkStatus(declarations:unknown,captions:DoclingNativeTable['captions'],tableReference:string):SourceValueTableContext['captionLinkStatus']{
+ if(!Array.isArray(declarations))return 'unknown';
+ if(!declarations.length&&!captions.length)return 'empty-parser-list';
+ const refs=declarations.map(value=>value&&typeof value==='object'&&!Array.isArray(value)?value.$ref:undefined);
+ if(refs.length!==captions.length||new Set(refs).size!==refs.length||refs.some(ref=>typeof ref!=='string'||
+  !/^#\/texts\/\d+$/.test(ref)||captions.filter(c=>c.reference===ref).length!==1)||captions.some(c=>
+   !c.raw||typeof c.raw!=='object'||Array.isArray(c.raw)||
+   (c.raw.parent!==undefined&&(!c.raw.parent||typeof c.raw.parent!=='object'||Array.isArray(c.raw.parent)||
+    (c.raw.parent as {$ref?:unknown}).$ref!==tableReference))))return 'unknown';
+ return 'resolved-parser-reference';
+}
 
 /** Only metadata of the actually selected, already verified Kernel PNGs enters
  * this catalog. Entire tables are retained or the whole catalog is unavailable. */
 export function prepareSourceValueCatalog(images:readonly SourceValueImage[]):SourceValueCatalog{
- const sourceInputSha256=sha(canonical(images.filter(s=>s.kind==='image').map(({image,...s})=>s))),tables:Table[]=[],cells:Cell[]=[];
+ const sourceInputSha256=sha(canonical(images.filter(s=>s.kind==='image').map(({image,...s})=>s))),tables:Table[]=[],cells:Cell[]=[],tableContexts:SourceValueTableContext[]=[];
  const finish=(reason:SourceValueCatalog['reason'])=>{
   const value={version:'source-value-catalog-v1' as const,complete:reason===null,status:reason===null?'available' as const:'unavailable' as const,
-   reason,sourceInputSha256,tables:reason?[]:tables,cells:reason?[]:cells,limits:SOURCE_VALUE_LIMITS};
+   reason,sourceInputSha256,tables:reason?[]:tables,cells:reason?[]:cells,
+   ...(tableContexts.length?{tableContexts:reason?[]:tableContexts}:{}),limits:SOURCE_VALUE_LIMITS};
   return {...value,catalogSha256:sha(canonical(value))};
  };
  for(const s of images){
@@ -87,6 +105,16 @@ export function prepareSourceValueCatalog(images:readonly SourceValueImage[]):So
      artifactSha256:c.artifactSha256,observationSha256:observation.observationSha256,producer:observation.producer,tableReference:group.reference,
      semanticVerified:false as const,relationshipVerified:false as const,visibilityVerified:false as const};
     const table={id:'t:'+sha(canonical(tableValue)).slice(0,40),...tableValue};tables.push(table);
+    // Raw caption nodes carry metric names and qualifiers absent from grid
+    // headers. Retain parser declarations, including unresolved/conflicting
+    // links, without promoting them to verified metric or semantic relations.
+    if(native){
+     const declarations=structuredClone(native.raw.captions??null),captions=structuredClone(native.captions);
+     tableContexts.push({version:'native-table-context-v1',tableId:table.id,tableReference:group.reference,
+      physicalPage:native.pageNumbers[0],result:structuredClone(native.result!),rawTableProvenance:structuredClone(native.raw.prov??null),
+      rawCaptionDeclarations:declarations,captions,captionLinkStatus:captionLinkStatus(declarations,captions,group.reference),
+      rawPageBasis:'derived-input-local',coordinateMapping:'unverified',semanticVerified:false,relationshipVerified:false,visibilityVerified:false});
+    }
     for(const raw of group.cells){
      const value={tableId:table.id,...raw};cells.push({id:'v:'+sha(canonical({table,...raw})).slice(0,40),...value} as Cell);
     }
@@ -110,6 +138,19 @@ function assertCatalog(c:SourceValueCatalog){
  }
  for(const cell of c.cells){const {id,tableId,...rest}=cell,table=c.tables.find(t=>t.id===tableId);
   if(!table||id!=='v:'+sha(canonical({table,...rest})).slice(0,40))throw new Error('Source cell identity changed');
+ }
+ if(c.tableContexts!==undefined){
+  if(!Array.isArray(c.tableContexts)||new Set(c.tableContexts.map(x=>x.tableId)).size!==c.tableContexts.length)
+   throw new Error('Invalid source table context');
+  for(const context of c.tableContexts){const table=c.tables.find(t=>t.id===context.tableId);
+   if(!table||table.producer!=='docling-native-table-v1'||context.version!=='native-table-context-v1'||
+    context.tableReference!==table.tableReference||!Number.isSafeInteger(context.physicalPage)||context.physicalPage<1||
+    !context.result||!Array.isArray(context.result.copyIndices)||!context.result.copyIndices.includes(context.physicalPage-1)||
+    !Array.isArray(context.captions)||context.rawPageBasis!=='derived-input-local'||context.coordinateMapping!=='unverified'||
+    context.semanticVerified!==false||context.relationshipVerified!==false||context.visibilityVerified!==false||
+    context.captionLinkStatus!==captionLinkStatus(context.rawCaptionDeclarations,context.captions,context.tableReference))
+    throw new Error('Invalid source table context');
+  }
  }
 }
 export function sourceValueAnswerSchema(catalog:SourceValueCatalog,selectedIds:string[],questionContract:SourceValueQuestionContract='mixed-v1'){
@@ -197,7 +238,9 @@ export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catal
    `${JSON.stringify(rightRow.text)} [${header}]: ${right.text}; printed-value difference (left minus right) = ${difference}.`;
   if(text.length>3000)throw new Error('Derived source value claim exceeds the answer bound');
   claims.push({text,citations:[{id:table.imageId}]});operations.push({claimIndex,operation:structuredClone(op),sourceCells:structuredClone([left,right,leftRow,rightRow,...columns]),
-   sourceTable:structuredClone(table),difference,arithmetic:'exact-fixed-decimal',arithmeticVerified:true,semanticVerified:false,relationshipVerified:false,visibilityVerified:false});
+   sourceTable:structuredClone(table),...(catalog.tableContexts?.some(c=>c.tableId===table.id)?{
+    sourceTableContext:structuredClone(catalog.tableContexts.find(c=>c.tableId===table.id)!)}:{}),
+   difference,arithmetic:'exact-fixed-decimal',arithmeticVerified:true,semanticVerified:false,relationshipVerified:false,visibilityVerified:false});
  }
  const normalizedSelections={status:v.status,message:v.message,claims};
  return {method:'source-value-difference-v1',...(questionContract==='required-difference-v1'?{questionContract}:{}),
