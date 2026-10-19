@@ -132,7 +132,7 @@ test('reasoned-v1 local profile changes only execution settings and binds them w
  assert.equal(JSON.stringify(buildDocumentCitationAuditRequest(local.packet,undefined)),JSON.stringify(legacy));
  assert.deepEqual(request,{...legacy,reasoning:{effort:'medium'},max_output_tokens:4000});
  const old=documentCitationAuditRequestIdentity(legacy,local.bindingSha256),next=documentCitationAuditRequestIdentity(request,local.bindingSha256,'reasoned-v1');
- assert.equal(old.requestIdentity,hash(JSON.stringify({version:'citation-local-audit-v3',providerRequestSha256:old.providerRequestSha256,bindingSha256:local.bindingSha256})));
+ assert.equal(old.requestIdentity,hash(JSON.stringify({version:'citation-local-audit-v4',providerRequestSha256:old.providerRequestSha256,bindingSha256:local.bindingSha256})));
  assert.notEqual(old.providerRequestSha256,next.providerRequestSha256);assert.notEqual(old.requestIdentity,next.requestIdentity);
  assert.throws(()=>documentCitationAuditRequestIdentity(legacy,local.bindingSha256,'reasoned-v1'),/settings changed/);
  assert.throws(()=>buildDocumentCitationAuditRequest(local.packet,'other' as 'reasoned-v1'),/profile/);
@@ -215,7 +215,7 @@ test('Kernel policy and current-source binding fail before fetch; valid calls re
    const result=await kernel.auditSelectedStudySourceClaim('owner',question,source,original,policy(raw,async identity=>{attempts++;identities.push(identity);}));
    assert.equal(result.status,'available');if(result.status!=='available')throw new Error('Expected audit');
    assert.deepEqual(result.result.diagnostics,diagnostics());assert.equal(reads,3);assert.equal(calls,1);assert.equal(attempts,1);
-   assert.equal(result.result.version,'citation-local-audit-v3');
+   assert.equal(result.result.version,'citation-local-audit-v4');
    assert.equal(result.result.requestIdentity,identities[0]);assert.equal(result.result.requestIdentity,raw[0].requestIdentity);
    assert.equal(result.result.providerRequestSha256,raw[0].providerRequestSha256);assert.equal(result.result.rawResponseSha256,hash(raw[0].rawBody));
    assert.equal(raw[0].httpStatus,200);assert.equal(JSON.stringify(original),saved);
