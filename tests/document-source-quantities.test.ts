@@ -77,5 +77,10 @@ test('the application generator records the actual raw and compiles a mismatched
   assert.equal(raw.length,1);assert.equal(derivations.length,1);assert.equal(derivations[0].outcome,'source-metric-not-established');
   assert.deepEqual(JSON.parse(JSON.parse(raw[0].rawBody).output_text),derivations[0].rawProviderResult);
   assert.equal(derivations[0].sourceInputFingerprint,result.inputFingerprint);
+  assert.equal(derivations[0].sourceBindings[0].source.sourceHash,c.anchors[0].source_hash);
+  assert.equal(derivations[0].sourceBindings[0].source.documentVersionId,'source-v');
+  assert.equal(derivations[0].sourceBindings[0].source.evidenceId,'page-1');
+  assert.equal(derivations[0].sourceBindings[0].quoteUnit?.quoteSha256,p.quoteUnits[0].quoteSha256);
+  assert.equal(derivations[0].textUnitManifestSha256.length,64);
  }finally{globalThis.fetch=saved;}
 });

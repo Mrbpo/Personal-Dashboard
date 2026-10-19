@@ -13,7 +13,7 @@ import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextW
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
 import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswer,sourceValueQuestionContract,
- type SourceValueDerivation,type SourceValueQuestionContract} from './document-source-values.ts';
+ type SourceValueDerivation,type SourceValueQuestionContract,type SourceValueCatalog,type SourceValueTableContext} from './document-source-values.ts';
 import {prepareSourceQuantityCatalog,sourceQuantityAnswerSchema,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily} from './document-source-quantities.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v7';
@@ -88,7 +88,10 @@ export type DocumentSourceValueDerivation=SourceValueDerivation&{providerRequest
 export type DocumentSourceValueRawResponse={method:'source-value-response-v1';providerRequestSha256:string;sourceInputFingerprint:string;
  quoteUnitManifestSha256:string;catalogSha256:string;httpStatus:number;rawBody:string;rawSha256:string;questionContract?:'required-difference-v1'};
 export type DocumentSourceQuantityDerivation=ReturnType<typeof deriveSourceQuantityAnswer>&{providerRequestSha256:string;sourceInputFingerprint:string;
- quoteUnitManifestSha256:string;selectedReferenceIds:string[];normalizedAnswer:GroundedDocumentAnswer};
+ quoteUnitManifestSha256:string;selectedReferenceIds:string[];normalizedAnswer:GroundedDocumentAnswer;
+ sourceBindings:Array<{selectionId:string;kind:'text'|'image';source:Pick<Support,'documentId'|'documentVersionId'|'sourceVersionId'|'sourceHash'|'evidenceId'|'locator'>;
+  sourceSha256:string;quoteUnit?:Pick<DocumentQuoteUnit,'startUtf16'|'endUtf16'|'quoteSha256'>}>;
+ sourceTables:SourceValueCatalog['tables'];tableProvenance:Array<Pick<SourceValueTableContext,'tableId'|'physicalPage'|'result'|'captionLinkStatus'>>};
 export type DocumentSourceQuantityRawResponse=Omit<DocumentSourceValueRawResponse,'method'|'questionContract'>&{method:'source-quantity-response-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
  quantityConsistency?:'explicit-unit-v1';
@@ -1022,7 +1025,15 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  if(boundSourceValueDerivation)await policy.recordSourceValueDerivation?.(boundSourceValueDerivation);
  const boundSourceQuantityDerivation:DocumentSourceQuantityDerivation|undefined=sourceQuantityDerivation?{...sourceQuantityDerivation,providerRequestSha256,
   sourceInputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,
-  selectedReferenceIds:[...referenceIds!],normalizedAnswer:structuredClone(answer)}:undefined;
+  selectedReferenceIds:[...referenceIds!],normalizedAnswer:structuredClone(answer),
+  sourceBindings:referenceIds!.map(selectionId=>{const unit=prepared.quoteUnits.find(u=>u.id===selectionId),support=prepared.supports.find(s=>s.id===(unit?.supportId??selectionId));
+   if(!support)throw new Error('Source quantity witness is unavailable');
+   return {selectionId,kind:support.kind,source:{documentId:support.documentId,documentVersionId:support.documentVersionId,sourceVersionId:support.sourceVersionId,
+    sourceHash:support.sourceHash,evidenceId:support.evidenceId,locator:support.locator},sourceSha256:support.sha256,
+    ...(unit?{quoteUnit:{startUtf16:unit.startUtf16,endUtf16:unit.endUtf16,quoteSha256:unit.quoteSha256}}:{})};}),
+  sourceTables:structuredClone(sourceQuantityGeneration!.applied?sourceQuantityGeneration.table.tables:[]),
+  tableProvenance:structuredClone(sourceQuantityGeneration!.applied?sourceQuantityGeneration.table.tableContexts?.map(({tableId,physicalPage,result,captionLinkStatus})=>
+   ({tableId,physicalPage,result,captionLinkStatus}))??[]:[])}:undefined;
  if(boundSourceQuantityDerivation)await policy.recordSourceQuantityDerivation?.(boundSourceQuantityDerivation);
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,

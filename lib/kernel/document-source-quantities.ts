@@ -107,6 +107,7 @@ export function deriveSourceQuantityAnswer(question:string,value:unknown,rawOutp
  if(claims.some(c=>c.text.length>3000))throw new SourceQuantityOperationError('Bound source quantity claim exceeds bound');
  const normalizedSelections:DocumentAnswerSelections=compatible?{status:v.status as 'answered'|'conflicting-evidence',message:'',claims}:{status:'insufficient-evidence',message:DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE,claims:[]};
  return {method:'source-bound-quantity-v1' as const,questionSha256:sha(question),requestedFamily:requested,catalogSha256:catalog.catalogSha256,
+  sourceTableCatalogSha256:catalog.sourceTableCatalogSha256,textUnitManifestSha256:catalog.textUnitManifestSha256,
   rawProviderResult:structuredClone(value),rawOutputText,rawOutputSha256:sha(rawOutputText),operations:structuredClone(selected),
   outcome:compatible?'compatible-source-label' as const:v.status==='insufficient-evidence'?'provider-insufficient' as const:'source-metric-not-established' as const,
   normalizedSelections,semanticVerified:false as const,scopeVerified:false as const,coverage:'unassessed' as const};
