@@ -8,6 +8,7 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {PDFDocument,PDFArray,PDFRawStream,PDFName,PDFNumber,degrees,rgb,type PDFPage} from 'pdf-lib';
+import {encodeVisualBlockCache} from '../lib/pdf-visual-blocks.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'pdf-tiled-image-tests-'));
 process.env.DATABASE_URL=':memory:';
@@ -40,6 +41,7 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
  // Direct replacement also removes execFile's built-in promisify.custom hook,
  // which a proxy around the original would otherwise still execute.
  childProcess.execFile=((file:string,args:string[],_options:unknown,callback:(error:Error|null,stdout?:string,stderr?:string)=>void)=>{
+  if(file==='tesseract'){callback(Error('OCR unavailable in geometry-only fixture'));return {};}
   void (async()=>{
    assert.equal(file,'pdftoppm');
    assert.equal(args.length,8);
@@ -70,8 +72,8 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
   const oldKey=(imageInput:boolean,tiled:boolean)=>'pdf-visual-selected-v3:'+createHash('sha256')
    .update(JSON.stringify({sourceHash,model:'gpt-5-mini',imageInput,tiled,promptVersion:3})).digest('hex');
   for(const [imageInput,tiled] of [[false,false],[false,true],[true,false]])
-   assert.equal(selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',imageInput,tiled),oldKey(imageInput,tiled),'existing reachable mode keys stay byte-compatible');
-  const singleKey=oldKey(true,false),fileKey=oldKey(false,true),newKey=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',true,true);
+   assert.notEqual(selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',imageInput,tiled),oldKey(imageInput,tiled),'selected v4 cannot certify a legacy flat cache');
+  const singleKey=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',true,false),fileKey=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',false,true),newKey=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',true,true);
   assert.notEqual(newKey,oldKey(true,true),'combined mode explicitly adds the crop/render/prompt identity');
   const {VISUAL_CROP_VIEWS}=await import('../lib/pdf-visual-tiles.ts');
   const previousPngKey='pdf-visual-selected-v3:'+createHash('sha256').update(JSON.stringify({sourceHash,model:'gpt-5-mini',imageInput:true,tiled:true,promptVersion:3,
@@ -79,7 +81,9 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
   assert.notEqual(newKey,previousPngKey,'rotation-aware geometry has a new identity even for a zero-degree source');
   await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,previousPngKey,28,'old zero-only PNG tiles').run();
   for(const [key,body] of [[singleKey,'old single image'],[fileKey,'old four-page PDF']])
-   await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,key,28,body).run();
+   await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,key,28,encodeVisualBlockCache(
+    {sourceHash,physicalPage:29,model:'gpt-5-mini',parser:key},'a'.repeat(64),{status:'unavailable',image:null,reason:'fixture'},
+    JSON.stringify({complete:true,uncertain_spans:[],blocks:[{kind:'text',text:body}]}))).run();
   const originalText='Source typo competition; worksheet _____; original matrix \\(0\\).';
   globalThis.fetch=async(input,init)=>{
    calls++;
@@ -87,7 +91,7 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
    const request=JSON.parse(String(init?.body)),content=request.input[0].content;
    assert.equal(request.model,'gpt-5-mini');assert.equal(request.max_output_tokens,9000);
    assert.deepEqual(request.reasoning,{effort:'low'});
-   assert.equal(content.length,9);
+   assert.equal(content.length,10);
    const images=content.filter((part:{type:string})=>part.type==='input_image');
    assert.equal(images.length,4);assert.equal(content.some((part:{type:string})=>part.type==='input_file'),false);
    for(const [index,label] of ['左上','右上','左下','右下'].entries()){
@@ -95,7 +99,7 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
     assert.equal(images[index].image_url,`data:image/png;base64,${pngs[index]}`);
     assert.equal(images[index].detail,'high');
    }
-   return Response.json({output_text:JSON.stringify({text:originalText,complete:true,uncertain_spans:[]})});
+   return Response.json({output_text:JSON.stringify({blocks:[{kind:'text',text:originalText}],complete:true,uncertain_spans:[]})});
   };
   const options={pageNumbers:[29],expectedSourceHash:sourceHash,model:'gpt-5-mini',imageInput:true};
   const result=await transcribePdfVisualPages(id,bytes,options);
@@ -104,15 +108,17 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
    {x:10,y:20,width:220,height:308},{x:190,y:20,width:220,height:308}];
   for(const [index,expected] of expectedBoxes.entries())
    for(const key of ['x','y','width','height'] as const)assert.ok(Math.abs(renderedBoxes[index][key]-expected[key])<1e-8);
-  assert.equal(calls,1);assert.equal(renders,4);
+  assert.deepEqual(renderedBoxes[4],{x:10,y:20,width:400,height:560},'OCR observation uses one full visible source frame, never a cropped detail');
+  assert.equal(calls,1);assert.equal(renders,5);
   assert.deepEqual(await transcribePdfVisualPages(id,bytes,options),result);
-  assert.equal(calls,1);assert.equal(renders,4,'completed same-mode cache avoids rendering and provider work');
-  assert.equal((await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=28').bind(id,newKey).first<{body:string}>())?.body,originalText);
+  assert.equal(calls,1);assert.equal(renders,5,'completed same-mode cache avoids rendering and provider work');
+  const saved=(await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=28').bind(id,newKey).first<{body:string}>())!.body;
+  assert.equal(JSON.parse(saved).searchText,originalText);
   process.env.PDF_VISUAL_TILED_INPUT='false';
   assert.equal((await transcribePdfVisualPages(id,bytes,options))[0].text,'old single image');
   process.env.PDF_VISUAL_TILED_INPUT='true';
   assert.equal((await transcribePdfVisualPages(id,bytes,{...options,imageInput:false}))[0].text,'old four-page PDF');
-  assert.equal(calls,1);assert.equal(renders,4);
+  assert.equal(calls,1);assert.equal(renders,5);
 
   failAtRender=renders+3;
   await assert.rejects(transcribePdfVisualPages('failed-crop',bytes,options),/左下视图渲染失败/);
@@ -128,7 +134,7 @@ test('selected tiled PNGs preserve source geometry, orthogonal rotation and cach
    pdf.getPage(28).setRotation(degrees(angle));
    const rotatedBytes=await pdf.save(),rotatedHash=createHash('sha256').update(rotatedBytes).digest('hex');
    assert.deepEqual(await transcribePdfVisualPages(`rotated-${angle}`,rotatedBytes,{...options,expectedSourceHash:rotatedHash}),result);
-   assert.equal(renders,4);
+   assert.equal(renders,5);
    for(const [index,[x,y]] of rotatedPositions[angle].entries()){
     const actual=renderedBoxes[index];
     for(const [key,value] of Object.entries({x,y,width:220,height:308}))

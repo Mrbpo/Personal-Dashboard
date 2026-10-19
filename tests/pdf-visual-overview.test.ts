@@ -8,6 +8,7 @@ import {readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {PDFDocument,PDFArray,PDFRawStream,degrees,rgb,type PDFPage} from 'pdf-lib';
+import {encodeVisualBlockCache} from '../lib/pdf-visual-blocks.ts';
 
 const directory=mkdtempSync(join(tmpdir(),'pdf-overview-tests-'));
 process.env.DATABASE_URL=':memory:';
@@ -51,18 +52,20 @@ test('optional overview binds the full original page before details, preserves o
   const oldKey=selectedVisualPageCacheParser(sourceHash,'gpt-5.4-mini',true,true);
   const newKey=selectedVisualPageCacheParser(sourceHash,'gpt-5.4-mini',true,true,true);
   assert.notEqual(newKey,oldKey);
-  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind('overview',oldKey,1,'original tile-only cache').run();
+  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind('overview',oldKey,1,encodeVisualBlockCache(
+   {sourceHash,physicalPage:2,model:'gpt-5.4-mini',parser:oldKey},'a'.repeat(64),{status:'unavailable',image:null,reason:'fixture'},
+   JSON.stringify({complete:true,uncertain_spans:[],blocks:[{kind:'text',text:'original tile-only cache'}]}))).run();
   globalThis.fetch=async(_input,init)=>{
    calls++;const request=JSON.parse(String(init?.body)),content=request.input[0].content;
    assert.equal(request.model,'gpt-5.4-mini');assert.equal(request.max_output_tokens,9000);
-   assert.deepEqual(request.reasoning,{effort:'low'});assert.equal(content.length,11);
+   assert.deepEqual(request.reasoning,{effort:'low'});assert.equal(content.length,12);
    assert.ok(content[0].text.startsWith('第一幅 PNG 是完整原始页总览'));
    const labels=['原始第 2 页：完整页面总览',...['左上','右上','左下','右下'].map(label=>`同一原始第 2 页：${label}视图`)];
    for(const [i,label] of labels.entries()){
     assert.deepEqual(content[1+i*2],{type:'input_text',text:label});
     assert.deepEqual(content[2+i*2],{type:'input_image',image_url:`data:image/png;base64,${png.toString('base64')}`,detail:'original'});
    }
-   return Response.json({output_text:JSON.stringify({text:'Original full page with conditions.',complete:true,uncertain_spans:[]})});
+   return Response.json({output_text:JSON.stringify({blocks:[{kind:'text',text:'Original full page with conditions.'}],complete:true,uncertain_spans:[]})});
   };
   const options={pageNumbers:[2],expectedSourceHash:sourceHash,model:'gpt-5.4-mini',imageInput:true,overviewImage:true};
   const result=await transcribePdfVisualPages('overview',bytes,options);

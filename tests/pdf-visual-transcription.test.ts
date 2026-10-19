@@ -70,16 +70,19 @@ test('incomplete visual pages are not cached or published and leave the prior in
  const publish=t.mock.method(kernel,'ingestParsedDocument',async()=>{throw new Error('Incomplete text must not be published');});
  let calls=0;
  try{
-  for(const result of [
-   {output_text:JSON.stringify({text:'Partial visible equation',complete:false,uncertain_spans:[]})},
-   {status:'incomplete',output_text:JSON.stringify({text:'Looks complete but provider was truncated',complete:true,uncertain_spans:[]})},
+  for(const {result,reason} of [
+   {result:{output_text:JSON.stringify({blocks:[{kind:'text',text:'Partial visible equation'}],complete:false,uncertain_spans:[]})},reason:/Incomplete selected page/},
+   {result:{status:'incomplete',output_text:JSON.stringify({blocks:[{kind:'text',text:'Looks complete but provider was truncated'}],complete:true,uncertain_spans:[]})},reason:/视觉转写不完整/},
   ]){
    globalThis.fetch=async input=>{
     assert.equal(String(input),'https://api.openai.com/v1/responses');
     calls++;return Response.json(result);
    };
-   await assert.rejects(convertDocumentWithDocling('visual-test-owner',id),/第 1 页视觉转写不完整/);
-   assert.equal(await db.prepare("SELECT 1 FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1'").bind(id).first(),null);
+   await assert.rejects(convertDocumentWithDocling('visual-test-owner',id),error=>{
+    assert.ok(error instanceof PdfVisualStructureError);assert.equal(error.code,'PDF_VISUAL_TEXT_STRUCTURE_INVALID');
+    assert.match(error.message,reason);assert.equal(error.rawOutput,result.output_text);assert.equal(error.rawFormat,'provider-output-json');return true;
+   });
+   assert.equal(await db.prepare("SELECT 1 FROM library_parse_pages WHERE document_id=? AND (parser='pdf-visual-v1' OR parser LIKE 'pdf-visual-selected-v4:%')").bind(id).first(),null);
    assert.equal(publish.mock.callCount(),0);
    assert.equal((await db.prepare('SELECT body FROM library_chunks WHERE document_id=?').bind(id).first<{body:string}>())?.body,'Previous complete text');
    assert.equal((await db.prepare('SELECT status FROM library_documents WHERE id=?').bind(id).first<{status:string}>())?.status,'ready');
@@ -94,7 +97,7 @@ test('incomplete visual pages are not cached or published and leave the prior in
  }
 });
 
-test('formal visual conversion uses source-bound faithful v3 and never certifies an old v1 cache',async t=>{
+test('formal visual conversion uses source-bound faithful blocks v4 and never certifies an old v1 cache',async t=>{
  const {database:db}=await import('../lib/database.ts');
  const {kernel}=await import('../lib/kernel/service.ts');
  const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
@@ -120,13 +123,13 @@ test('formal visual conversion uses source-bound faithful v3 and never certifies
   assert.ok(content[0].text.includes('忠实版本 v3'));
   assert.ok(content[0].text.includes('严禁根据知识、常见公式或上下文纠正'));
   assert.equal((await PDFDocument.load(Buffer.from(content[1].file_data.split(',')[1],'base64'))).getPageCount(),1);
-  return Response.json({output_text:JSON.stringify({text:'Faithful source typo \\(\\psi\\)',complete:true,uncertain_spans:[]})});
+  return Response.json({output_text:JSON.stringify({blocks:[{kind:'text',text:'Faithful source typo \\(\\psi\\)'}],complete:true,uncertain_spans:[]})});
  };
  try{
   await convertDocumentWithDocling('visual-test-owner',id);
   const parser=selectedVisualPageCacheParser(sourceHash,'gpt-5-mini',false);
-  assert.equal((await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=0')
-   .bind(id,parser).first<{body:string}>())?.body,'Faithful source typo \\(\\psi\\)');
+  const boundCache=(await db.prepare('SELECT body FROM library_parse_pages WHERE document_id=? AND parser=? AND page=0')
+   .bind(id,parser).first<{body:string}>())!.body;assert.equal(JSON.parse(boundCache).searchText,'Faithful source typo \\(\\psi\\)');
   assert.equal((await db.prepare("SELECT body FROM library_parse_pages WHERE document_id=? AND parser='pdf-visual-v1' AND page=0")
    .bind(id).first<{body:string}>())?.body,old);
   await convertDocumentWithDocling('visual-test-owner',id);
@@ -280,7 +283,7 @@ test('selected visual pages copy the exact original page, keep global numbering 
  const hash=createHash('sha256').update(bytes).digest('hex');
  const oldCache='pdf-visual-selected-v2:'+createHash('sha256').update(JSON.stringify({sourceHash:hash,model:'gpt-5-mini',imageInput:false,tiled:false,promptVersion:2})).digest('hex');
  await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,?,?)').bind(id,oldCache,28,'Previous inline-only result').run();
- assert.equal(SELECTED_VISUAL_PARSER_VERSION,'pdf-visual-selected-v3');
+ assert.equal(SELECTED_VISUAL_PARSER_VERSION,'pdf-visual-selected-v4');
  assert.notEqual(selectedVisualPageCacheParser(hash,'gpt-5-mini',false),oldCache);
  const original=globalThis.fetch;let calls=0;
  globalThis.fetch=async(_input,init)=>{
@@ -295,7 +298,7 @@ test('selected visual pages copy the exact original page, keep global numbering 
   assert.match(prompt,/不能用行内分隔符代替/);
   assert.match(prompt,/不进行数学纠错/);
   calls++;
-  return Response.json({output_text:JSON.stringify({text:'Faithful selected-page text \\(\\psi\\)',complete:true,uncertain_spans:[]})});
+  return Response.json({output_text:JSON.stringify({blocks:[{kind:'text',text:'Faithful selected-page text \\(\\psi\\)'}],complete:true,uncertain_spans:[]})});
  };
  try{
   const options={pageNumbers:[29],imageInput:false};

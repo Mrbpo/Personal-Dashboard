@@ -19,6 +19,7 @@ test('structure profile isolates medium request/cache, preserves default five-im
  const savedExec=childProcess.execFile,savedFetch=globalThis.fetch,pdf=await PDFDocument.create();pdf.addPage([200,300]);
  const bytes=await pdf.save(),sourceHash=sha(bytes),requests:any[]=[];let renders=0,controlled=false;
  childProcess.execFile=((binary:string,args:string[],_options:unknown,callback:(error:Error|null,stdout?:string,stderr?:string)=>void)=>{
+  if(binary==='tesseract'){callback(Error('OCR unavailable in render-only fixture'));return {};}
   assert.equal(binary,'pdftoppm');renders++;void writeFile(args[7]+'.png',png).then(()=>callback(null,'',''),e=>callback(e));return {};
  }) as unknown as typeof childProcess.execFile;syncBuiltinESMExports();
  try{
@@ -27,15 +28,15 @@ test('structure profile isolates medium request/cache, preserves default five-im
    oldKey=selectedVisualPageCacheParser(sourceHash,options.model,true,true,true),newKey=selectedVisualPageCacheParser(sourceHash,options.model,true,true,true,'structure-v1');
   assert.notEqual(oldKey,newKey);assert.equal(selectedVisualPageCacheParser(sourceHash,options.model,true,true,true,undefined),oldKey);
   globalThis.fetch=async(_url,init)=>{requests.push(JSON.parse(String(init?.body)));return Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',
-   output_text:JSON.stringify({text:controlled?'Visible bullet\u0007 remains invalid.':'Original unchanged text.',complete:true,uncertain_spans:[]})});};
+   output_text:JSON.stringify({blocks:[{kind:'text',text:controlled?'Visible bullet\u0007 remains invalid.':'Original unchanged text.'}],complete:true,uncertain_spans:[]})});};
   const original=await transcribePdfVisualPages('profile',bytes,options);
   const profiled=await transcribePdfVisualPages('profile',bytes,{...options,fidelityProfile:'structure-v1'});
   assert.equal(requests.length,2);assert.equal(renders,10);assert.deepEqual(profiled,original);
   const [oldBody,newBody]=requests;assert.deepEqual(oldBody.reasoning,{effort:'low'});assert.deepEqual(newBody.reasoning,{effort:'medium'});
   assert.equal(newBody.model,'gpt-5.4-mini');assert.equal(newBody.max_output_tokens,9000);assert.deepEqual(newBody.text,oldBody.text);
   const oldContent=oldBody.input[0].content,newContent=newBody.input[0].content;
-  assert.equal(newContent.length,11);assert.deepEqual(newContent.slice(1),oldContent.slice(1));
-  assert.equal(newContent.filter((p:any)=>p.type==='input_image').length,5);assert.ok(newContent[0].text.startsWith(oldContent[0].text));
+  assert.equal(newContent.length,12);assert.deepEqual(newContent.slice(1),oldContent.slice(1));
+  assert.equal(newContent.filter((p:any)=>p.type==='input_image').length,5);assert.ok(newContent[0].text.startsWith(oldContent[0].text.split('\n选页结构协议 v4')[0]));assert.ok(newContent[0].text.endsWith(oldContent[0].text.slice(oldContent[0].text.indexOf('\n选页结构协议 v4'))));
   assert.ok(!oldContent[0].text.includes('结构保真 structure-v1'));assert.ok(newContent[0].text.includes('运算符各自的上下限和完整作用范围'));
   assert.ok(newContent[0].text.includes('每条实际可见箭头的起点、终点'));assert.ok(newContent[0].text.includes('不补造隐含原子'));
   assert.equal(await db.prepare('SELECT count(*) n FROM library_parse_pages WHERE document_id=?').bind('profile').first<{n:number}>().then(r=>r?.n),2);
