@@ -799,6 +799,8 @@ export function prepareSelectedSourceValueGeneration(prepared:PreparedAnswer,ref
   'For a difference return only the listed value/row-label/column-label cell IDs: left minus right. '+
   'Do not write a result, unit, citation ID or extra assertion in a difference operation. '+
   'Use only actually selected tables and explicit plain decimals from one table and one numeric column. '+
+  'Include every declared column heading in its complete metric/dataset path; do not drop a parent or leaf label. '+
+  'The numeric operator cannot establish header inheritance across repeated header blocks; do not use it for those comparisons. '+
   'Missing cells, dashes, scientific notation and units cannot become zero or be inferred. '+
   'The server restores original labels and values, computes the decimal difference and cites that original PNG. '+
   'Catalog observations, geometry and header roles are fallible source declarations, not verified semantic relationships. '+

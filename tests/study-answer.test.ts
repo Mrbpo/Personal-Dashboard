@@ -6,6 +6,19 @@ const {kernel}=await import('../lib/kernel/service.ts');
 const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceScope,studyGenerationReasoning,studyDevelopmentDailyLimit,answerKernelStudy,StudyAnswerError}=await import('../lib/study-answer.ts');
 const {documentAnswerSettings}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
+const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
+
+test('source header argument failures are attributed to generation, not PDF parsing or citation validation',async()=>{
+ const names=['STUDY_DEVELOPMENT_DAILY_LIMIT','STUDY_CITATION_CHECK','STUDY_SOURCE_VALUES','STUDY_SOURCE_SCOPE','STUDY_TEXT_CONTEXT_WINDOWS','OPENAI_MODEL'] as const,
+  env=Object.fromEntries(names.map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;
+ try{
+  delete process.env.STUDY_DEVELOPMENT_DAILY_LIMIT;process.env.STUDY_CITATION_CHECK='off';process.env.STUDY_SOURCE_VALUES='off';
+  process.env.STUDY_SOURCE_SCOPE='off';process.env.STUDY_TEXT_CONTEXT_WINDOWS='off';process.env.OPENAI_MODEL='gpt-5.4-mini';
+  kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{policy?.onStage?.('citation-validation');throw new SourceValueHeaderError();};
+  await assert.rejects(answerKernelStudy('owner','Synthetic header arguments','',[]),(e:any)=>e instanceof StudyAnswerError&&
+   e.stage==='generation'&&e.code==='source-value-header-path-not-established'&&e.cause instanceof SourceValueHeaderError);
+ }finally{kernel.answerStudyContent=saved;for(const k of names){if(env[k]===undefined)delete process.env[k];else process.env[k]=env[k];}}
+});
 
 test('legacy is the default, invalid configuration fails closed and application policy stays bounded',async()=>{
  assert.equal(studyAnswerBackend('legacy'),'legacy');assert.equal(studyAnswerBackend('kernel'),'kernel');

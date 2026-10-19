@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
-import {prepareSourceValueCatalog,deriveSourceValueAnswer,sourceDecimalDifference,sourceValueQuestionContract,sourceValueAnswerSchema,
+import {prepareSourceValueCatalog,deriveSourceValueAnswer,sourceDecimalDifference,sourceValueQuestionContract,sourceValueAnswerSchema,SourceValueHeaderError,
  type SourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,buildSelectedDocumentAnswerRequest,buildDocumentEvidenceSelectionRequest,
  synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
@@ -71,6 +71,41 @@ test('source values: actual saved generation AST yields exact .14 and original P
  assert.equal(sourceDecimalDifference('66.31','65.36'),'0.95');
  for(const bad of ['-','','1e2','1,000','2%',' 1'])assert.throws(()=>sourceDecimalDifference(bad,'0'));
  assert.equal(r.operations[0].sourceCells.at(-2)!.headerRole,'section','explicit section text is retained without inferring a hierarchy or unit conversion');
+});
+
+test('source values: actual metric/dataset header omissions reject while the complete declared path stays byte-identical',async()=>{
+ const f=await fixture(),catalog=prepareSourceValueCatalog([f.sourceImage]),op=operation(catalog),before=canonical(catalog),
+  complete=deriveSourceValueAnswer(raw(op),JSON.stringify(raw(op)),catalog,[f.meta.id]);
+ for(const columnLabelRefs of [[op.columnLabelRefs[0]],[op.columnLabelRefs[1]]]){
+  const value=raw({...op,columnLabelRefs});assert.throws(()=>deriveSourceValueAnswer(value,JSON.stringify(value),catalog,[f.meta.id]),SourceValueHeaderError);
+ }
+ const reversed=raw({...op,columnLabelRefs:[...op.columnLabelRefs].reverse()}),normalized=deriveSourceValueAnswer(reversed,JSON.stringify(reversed),catalog,[f.meta.id]);
+ assert.deepEqual(normalized.normalizedSelections,complete.normalizedSelections);
+ assert.match(complete.normalizedSelections.claims[0].text,/Accuracy\/%.*VQA-2\.0.*0\.14/);
+ assert.equal(complete.operations[0].relationshipVerified,false);assert.equal(canonical(catalog),before);
+});
+
+test('source values: repeated header blocks remain unresolved rather than inherit a prior metric',()=>{
+ // A synthetic layout counterexample, not modified original PDF/test material.
+ const source={documentId:'synthetic',currentVersionId:'synthetic-v',sourceVersionId:'synthetic-sv',sourceHash:sha('synthetic')},
+  tableValue={imageId:'i0',source,evidenceId:'synthetic-page',imageSha256:sha('image'),attachmentId:'synthetic-image',artifactSha256:sha('artifact'),
+   observationSha256:sha('observation'),producer:'synthetic-layout-fixture',tableReference:'tables/0',semanticVerified:false as const,relationshipVerified:false as const,visibilityVerified:false as const},
+  table={id:'t:'+sha(canonical(tableValue)).slice(0,40),...tableValue},
+  rows=[{row:0,column:1,headerRole:'column',text:'Metric A'},
+   {row:1,column:0,headerRole:'row',text:'Model A'},{row:1,column:1,headerRole:'none',text:'9'},
+   {row:2,column:0,headerRole:'row',text:'Model B'},{row:2,column:1,headerRole:'none',text:'7'},
+   {row:3,column:1,headerRole:'column',text:'Metric B'},
+   {row:4,column:0,headerRole:'row',text:'Model C'},{row:4,column:1,headerRole:'none',text:'3'},
+   {row:5,column:0,headerRole:'row',text:'Model D'},{row:5,column:1,headerRole:'none',text:'2'}],
+  cells=rows.map(cell=>{const raw={...cell,rowSpan:1,columnSpan:1,rawCellSha256:sha(canonical(cell))};return {id:'v:'+sha(canonical({table,...raw})).slice(0,40),tableId:table.id,...raw};}),
+  value={version:'source-value-catalog-v1',complete:true,status:'available',reason:null,sourceInputSha256:sha('synthetic-input'),tables:[table],cells,limits:{cells:256,bytes:32768}},
+  catalog={...value,catalogSha256:sha(canonical(value))} as SourceValueCatalog,at=(row:number,col:number)=>catalog.cells.find(c=>c.row===row&&c.column===col)!,
+  comparison=(left:number,right:number,header:number)=>({kind:'difference',leftValueRef:at(left,1).id,rightValueRef:at(right,1).id,
+   leftRowLabelRef:at(left,0).id,rightRowLabelRef:at(right,0).id,columnLabelRefs:[at(header,1).id]});
+ const valid=raw(comparison(1,2,0));assert.equal(deriveSourceValueAnswer(valid,JSON.stringify(valid),catalog,['i0']).operations[0].difference,'2');
+ for(const op of [comparison(1,4,0),comparison(4,5,3)]){
+  const response=raw(op);assert.throws(()=>deriveSourceValueAnswer(response,JSON.stringify(response),catalog,['i0']),SourceValueHeaderError);
+ }
 });
 test('source values: cell/source mutations, wrong columns/missing values, foreign tables and complete catalog bounds fail closed',async()=>{
  const f=await fixture(),c=prepareSourceValueCatalog([f.sourceImage]),op=operation(c);

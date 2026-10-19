@@ -6,6 +6,10 @@ import type {DoclingNativeTable} from './docling-result.ts';
 
 export const SOURCE_VALUE_CONTRACT='difference-v1';
 export const SOURCE_VALUE_LIMITS=Object.freeze({cells:256,bytes:32768});
+export class SourceValueHeaderError extends Error{
+ readonly code='source-value-header-path-not-established';
+ constructor(){super('Source difference requires a complete unambiguous declared column header path');this.name='SourceValueHeaderError';}
+}
 export type SourceValueQuestionContract='mixed-v1'|'required-difference-v1';
 /** A deliberately narrow intent gate, not a model or a semantic guarantee.
  * Ambiguous/non-subtraction operators keep the existing mixed contract. */
@@ -183,6 +187,21 @@ export function sourceDecimalDifference(left:string,right:string){
  const sign=n<BigInt(0)?'-':'',digits=(n<BigInt(0)?-n:n).toString().padStart(scale+1,'0');
  return sign+(scale?`${digits.slice(0,-scale)}.${digits.slice(-scale)}`.replace(/0+$/u,'').replace(/\.$/u,''):digits);
 }
+/** Preserve every declared metric/dataset header, without guessing inheritance
+ * across repeated header blocks. The original catalog and semantic flags stay
+ * unchanged; an argument check does not verify the parser's relationships. */
+function completeColumnHeaders(cells:Cell[],left:Cell,right:Cell,selected:Cell[]){
+ const covers=(c:Cell)=>c.tableId===left.tableId&&c.column<=left.column&&c.column+c.columnSpan>left.column,
+  column=cells.filter(covers),minimum=Math.min(left.row,right.row),maximum=Math.max(left.row,right.row),
+  headers=column.filter(c=>['column','section'].includes(c.headerRole)&&c.text.trim()&&c.row<=maximum)
+   .sort((a,b)=>a.row-b.row||a.column-b.column||a.id.localeCompare(b.id));
+ if(headers.some(h=>h.row+h.rowSpan>minimum||column.some(c=>c.headerRole==='none'&&c.text.trim()&&c.row+c.rowSpan<=h.row)))
+  throw new SourceValueHeaderError();
+ if(headers.length!==selected.length||headers.some(h=>!selected.some(c=>c.id===h.id))||headers.some((h,i)=>i>0&&
+  (headers[i-1].column>h.column||headers[i-1].column+headers[i-1].columnSpan<h.column+h.columnSpan)))
+  throw new SourceValueHeaderError();
+ return headers;
+}
 /** This decodes a NEW operation response. It never repairs an old free-form
  * assertion or adds references to a statement. Semantic flags remain false. */
 export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catalog:SourceValueCatalog,selectedIds:string[],
@@ -233,11 +252,11 @@ export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catal
     (r.column<=c.column&&r.column+r.columnSpan>c.column);}))throw new Error('Difference requires one table, one numeric column and explicit positioned row/column labels');
   const table=catalog.tables.find(t=>t.id===left.tableId)!;
   if(!selectedIds.includes(table.imageId))throw new Error('Difference cannot cite an unselected image');
-  const header=columns.map(column=>JSON.stringify(column.text)).join(' / ');
+  const headerPath=completeColumnHeaders(catalog.cells,left,right,columns),header=headerPath.map(column=>JSON.stringify(column.text)).join(' / ');
   const difference=sourceDecimalDifference(left.text,right.text),text=`${JSON.stringify(leftRow.text)} [${header}]: ${left.text}; `+
    `${JSON.stringify(rightRow.text)} [${header}]: ${right.text}; printed-value difference (left minus right) = ${difference}.`;
   if(text.length>3000)throw new Error('Derived source value claim exceeds the answer bound');
-  claims.push({text,citations:[{id:table.imageId}]});operations.push({claimIndex,operation:structuredClone(op),sourceCells:structuredClone([left,right,leftRow,rightRow,...columns]),
+  claims.push({text,citations:[{id:table.imageId}]});operations.push({claimIndex,operation:structuredClone(op),sourceCells:structuredClone([left,right,leftRow,rightRow,...headerPath]),
    sourceTable:structuredClone(table),...(catalog.tableContexts?.some(c=>c.tableId===table.id)?{
     sourceTableContext:structuredClone(catalog.tableContexts.find(c=>c.tableId===table.id)!)}:{}),
    difference,arithmetic:'exact-fixed-decimal',arithmeticVerified:true,semanticVerified:false,relationshipVerified:false,visibilityVerified:false});

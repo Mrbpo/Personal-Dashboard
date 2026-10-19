@@ -2,6 +2,7 @@ import {kernel} from './kernel/service.ts';
 import {serviceValue} from './service-vault.ts';
 import type {DocumentAnswerModel} from './kernel/document-answer.ts';
 import {DocumentCitationCheckError} from './kernel/document-citation-audit.ts';
+import {SourceValueHeaderError} from './kernel/document-source-values.ts';
 import {assertDocumentDevelopmentRun} from './kernel/document-rerank.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import {mkdir,open} from 'node:fs/promises';
@@ -137,6 +138,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     semanticVerified:false,wholeAnswerVerified:false}}};
  }catch(error){
   if(error instanceof StudyAnswerError)throw error;
+  if(error instanceof SourceValueHeaderError)throw new StudyAnswerError('generation',error.code,
+   '表格比较缺少完整且明确的列标题关系，本轮未发布答案',{cause:error});
   if(error instanceof DocumentCitationCheckError)throw new StudyAnswerError('citation-validation',error.code,
    error.code==='citation-support-not-established'?'回答的引用未通过核对，本轮未发布答案':'引用核对未完成，本轮未发布答案',{cause:error});
   throw new StudyAnswerError(stage,'kernel-answer-failed','内核问答未完成，请查看来源或稍后重试',{cause:error});
