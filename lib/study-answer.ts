@@ -26,10 +26,6 @@ export function studyCitationCheck(value=process.env.STUDY_CITATION_CHECK??'off'
  if(value!=='off'&&value!=='selected-once')throw new StudyAnswerError('configuration','invalid-citation-check','引用核对配置无效');
  return value==='off'?undefined:value;
 }
-export function studySelectionEligibility(value=process.env.STUDY_SELECTION_ELIGIBILITY??'off'){
- if(value!=='off'&&value!=='question-evidence-v1')throw new StudyAnswerError('configuration','invalid-selection-eligibility','证据适用性配置无效');
- return value==='off'?undefined:value;
-}
 export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
  if(value!=='off'&&value!=='difference-v1')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
  return value==='off'?undefined:value;
@@ -77,7 +73,6 @@ export function studyFailure(error:unknown){
 export async function answerKernelStudy(owner:string,question:string,courseId:string,history:Array<{role:string;body:string}>){
  const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
- const selectionEligibility=studySelectionEligibility();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const generationReasoningEffort=studyGenerationReasoning();
  const textContextWindows=studyTextContextWindows();
@@ -100,7 +95,6 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
-    ...(selectionEligibility?{selectionEligibility}:{}),
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
@@ -126,7 +120,6 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    contextNote:`Kernel 当前证据：${result.textEvidenceCount} 条文本、${result.imageEvidenceCount} 张原图；历史对话仅用于理解追问。`,
    study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
-     ...(selectionEligibility?{selectionEligibility}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
