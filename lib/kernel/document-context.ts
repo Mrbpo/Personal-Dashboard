@@ -8,6 +8,8 @@ import {readPdfVisualEvidence,PdfVisualEvidenceError,type PdfVisualImageEvidence
 import {createDocumentImageBudget,type DocumentImageBudget,type DocumentImageSelection} from './document-image-budget.ts';
 import {assertDoclingMathProvenance,assertPreparedDoclingSourceMath,doclingMathForPage,
  type DoclingMathProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
+import {doclingPageResultReferences,readDoclingPageRegions,doclingPageImageTransform,type DoclingRegionResultReference} from './docling-source-regions.ts';
+import {DoclingPageRegionError,DOCLING_PAGE_REGION_LIMITS} from './docling-result.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -107,6 +109,58 @@ export async function readDocumentSourcePages(db:Queryable,owner:string,source:D
  const current=await currentSource(db,owner,source),pages=await sourcePages(db,current);
  await currentSource(db,owner,identity(current));
  return {source:identity(current),nodes:pages.map(page=>evidenceNode(current,page)),sourceContentIsUntrusted:true as const};
+}
+
+/** An explicit one-page observation reader. Existing bodies, quotation IDs,
+ * ranked readers and complete-source contracts are not changed or upgraded. */
+export async function readDocumentPageRegions(db:Queryable,owner:string,source:DocumentContextSource,physicalPage:number){
+ source={...source};const current=await currentSource(db,owner,source);
+ if(!Number.isInteger(physicalPage)||physicalPage<1)invalid('One explicit physical page is required');
+ const pageCount=(await db.query<{page_count:number}>('SELECT page_count FROM document_text_versions WHERE id=$1',[current.currentVersionId])).rows[0]?.page_count??0;
+ if(!Number.isInteger(pageCount)||pageCount<1||physicalPage>pageCount)invalid('Requested page is outside the current source');
+ if(current.rawSourceHash!==current.sourceHash)changed();
+ const readProgress=async()=>(await db.query<{batch_provenance:unknown}>(
+  `SELECT raw_value->'batchProvenance' batch_provenance FROM source_item_versions WHERE id=$1`,[current.sourceVersionId])).rows[0]?.batch_provenance??null;
+ const progress=await readProgress(),progressSha256=hash(canonical(progress));
+ const finish=async()=>{await currentSource(db,owner,identity(current));if(hash(canonical(await readProgress()))!==progressSha256)changed();
+  await currentSource(db,owner,identity(current));};
+ const unavailable=async(reason:string,reference?:DoclingRegionResultReference)=>{
+  await finish();return {status:'unavailable' as const,reason,source:identity(current),physicalPage,
+   policy:'docling-source-page-regions-v1' as const,...(reference?{result:reference}:{}),sourceContentIsUntrusted:true as const};
+ };
+ if(current.mime!=='application/pdf')return unavailable('not-pdf');
+ if(pageCount>DOCLING_PAGE_REGION_LIMITS.pages)return unavailable('source-page-count-limit');
+ const page=(await db.query<PageRow>(`SELECT p.page_number,p.evidence_id,p.locator,p.body FROM document_text_pages p
+ JOIN evidence e ON e.id=p.evidence_id JOIN document_texts d ON d.current_version_id=p.version_id
+ WHERE d.id=$1 AND p.version_id=$2 AND e.source_version_id=$3 AND e.source_item_id=d.source_item_id AND p.page_number=$4`,
+ [current.documentId,current.currentVersionId,current.sourceVersionId,physicalPage])).rows;
+ if(page.length!==1||page[0].page_number!==physicalPage)changed();
+ try{
+  // Empty selection validates the saved layout/manifest without loading PNGs.
+  const metadata=await readPdfVisualEvidence(db,owner,identity(current),[]);
+  const refs=doclingPageResultReferences({owner,documentId:current.documentId,sourceHash:current.sourceHash,pageCount,physicalPage},progress,metadata.layout);
+  if(!refs.length)return unavailable('saved-docling-result-unavailable');
+  const reference=refs[0],index=await readDoclingPageRegions({owner,documentId:current.documentId,sourceHash:current.sourceHash,pageCount,physicalPage},reference);
+  if(!metadata.registered||metadata.renderStatus!=='available')return unavailable('original-page-image-unavailable',reference);
+  const visuals=await readPdfVisualEvidence(db,owner,identity(current),[page[0].evidence_id],undefined,{pageAssetsOnly:true});
+  if(visuals.manifestSha256!==metadata.manifestSha256)changed();
+  const images=visuals.images.filter(image=>image.kind==='pdf-page'&&image.physicalPage===physicalPage);
+  if(images.length!==1)return unavailable('original-page-image-unavailable-or-ambiguous',reference);
+  const {bytes:discarded,...image}=images[0];void discarded;
+  const coordinateTransform=doclingPageImageTransform(index.pageSize,image);
+  await finish();
+  return {status:'available' as const,source:identity(current),physicalPage,pageEvidenceId:page[0].evidence_id,
+   pageBodySha256:hash(page[0].body),parserVersion:current.parserVersion,progressSha256,
+   visualManifestSha256:visuals.manifestSha256,image,coordinateTransform,index};
+ }catch(error){
+  if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();
+  if(error instanceof DoclingPageRegionError){
+   if(error.code==='limit'||error.code==='unavailable')return unavailable(error.message);
+   invalid(error.message);
+  }
+  if(error instanceof PdfVisualEvidenceError&&error.code==='unavailable')return unavailable(error.message);
+  throw error;
+ }
 }
 function validateStructure(input:DocumentStructureInput,current:SourceRow,pages:PageRow[]):void{
  if(!input||!isSha(input.rawSourceHash)||input.rawSourceHash!==current.rawSourceHash||input.rawSourceHash!==current.sourceHash
