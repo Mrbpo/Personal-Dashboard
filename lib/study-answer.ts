@@ -79,6 +79,12 @@ export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REAS
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
  return value==='low'?undefined:value;
 }
+/** Server-only, explicit generation envelope. Selection/defaults stay unchanged. */
+export function studyGenerationOutputTokens(value=process.env.STUDY_GENERATION_OUTPUT_TOKENS){
+ if(value===undefined||value==='3000')return undefined;
+ if(value!=='6000')throw new StudyAnswerError('configuration','invalid-generation-output','生成输出上限仅允许 3000 或 6000');
+ return 6000 as const;
+}
 export function studyTextContextWindows(value=process.env.STUDY_TEXT_CONTEXT_WINDOWS??'off'){
  if(value!=='off'&&value!=='producer-neighbors-v1'&&value!=='stored-page-v1')throw new StudyAnswerError('configuration','invalid-text-context-windows','原文上下文窗口配置无效');
  return value==='off'?undefined:value;
@@ -120,6 +126,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
  const generationReasoningEffort=studyGenerationReasoning();
+ const generationOutputTokens=studyGenerationOutputTokens();
+ if(generationOutputTokens&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','generation-output-requires-selection-check','独立生成输出额度需要内核、证据选择和引用核对');
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
  if(sourceValueContract==='cell-bindings-v2'&&nativeCellObservations!=='declared-v1')
@@ -152,6 +161,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...(sourceQuantityContract?{sourceQuantityContract,recordSourceQuantityRawResponse:recorder!.recordSourceQuantityRaw,recordSourceQuantityDerivation:recorder!.recordSourceQuantities}:{}),
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
+    ...(generationOutputTokens?{generationOutputTokens}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
      ...(dailyLimit===undefined?{}:{dailyLimit}),
     ...(sourceValueContract?{sourceValueContract,recordSourceValueDerivation:recorder!.recordSourceValues,recordSourceValueRawResponse:recorder!.recordSourceValueRaw}:{}),
@@ -175,7 +185,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    contextNote:`Kernel 当前证据：${result.textEvidenceCount} 条文本、${result.imageEvidenceCount} 张原图；历史对话仅用于理解追问。`,
    study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
     ...(explicitRouting?{explicitRouting}:{}),
-    retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:3000,timeoutMs:55000,
+    retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:generationOutputTokens??3000,timeoutMs:55000,
+     ...(generationOutputTokens?{generationOutputTokens,evidenceSelectionMaxOutputTokens:3000}:{}),
      ...(nativeCellObservations?{nativeCellObservations}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},

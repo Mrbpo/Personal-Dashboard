@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRuntimeRequest,buildDocumentEvidenceSelectionRequest,
- buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,synthesizeDocumentAnswer,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 
 process.env.DATABASE_URL=':memory:';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'selection-test-'+randomUUID());
@@ -30,6 +30,42 @@ test('application generation effort changes only generation and preserves the or
  assert.equal(mediumRequest.max_output_tokens,3000);
  assert.deepEqual({...mediumRequest,reasoning:lowRequest.reasoning},lowRequest,'source, prompt, schema and other settings stay identical');
  assert.deepEqual(buildDocumentEvidenceSelectionRequest(p,settings,medium),buildDocumentEvidenceSelectionRequest(p,settings,policy));
+});
+
+test('generation output envelope changes only generation while preserving selection and validates its explicit chain',async()=>{
+ const p=prepareDocumentAnswer('What did Original a test?',context()),ids=[p.quoteUnits[0].id],
+  check={mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}},
+  base={...policy,citationCheck:check,generationReasoningEffort:'medium' as const},
+  extended={...base,generationOutputTokens:6000 as const},
+  before=buildSelectedDocumentAnswerRequest(p,ids,settings,base),after=buildSelectedDocumentAnswerRequest(p,ids,settings,extended);
+ assert.equal(after.max_output_tokens,6000);assert.equal(before.max_output_tokens,3000);
+ assert.deepEqual({...after,max_output_tokens:before.max_output_tokens},before,'source/model/prompt/schema/effort remain identical');
+ assert.deepEqual(buildDocumentEvidenceSelectionRequest(p,settings,extended),buildDocumentEvidenceSelectionRequest(p,settings,base));
+ assert.equal((await documentAnswerSettings(extended)).maxOutput,3000,'base selector bound stays unchanged');
+ for(const invalid of [{...extended,generationOutputTokens:6001},{...extended,scope:'development',generationReasoningEffort:undefined},
+  {...extended,evidenceSelection:undefined},{...extended,citationCheck:undefined}])
+  await assert.rejects(documentAnswerSettings(invalid as any),/Generation output envelope/);
+});
+
+test('larger generation output reserves its real cost and retains ambiguous outcome without retry',async()=>{
+ const {paidOpenAI}=await import('../lib/ai-budget.ts'),{database}=await import('../lib/database.ts'),original=globalThis.fetch,
+  names=['AI_BUDGET_TEST_BYPASS','AI_MODEL_RATES'] as const,saved=Object.fromEntries(names.map(n=>[n,process.env[n]])),
+  p=prepareDocumentAnswer('What did Original a test?',context()),ids=[p.quoteUnits[0].id],
+  before=buildSelectedDocumentAnswerRequest(p,ids,settings,policy),after={...before,max_output_tokens:6000},rows:Array<{reserved:number;charged:number|null;status:string}>=[];
+ let calls=0,ambiguous=false;
+ const latest=async()=>database.prepare('SELECT reserved,charged,status FROM ai_ledger ORDER BY rowid DESC LIMIT 1').first<{reserved:number;charged:number|null;status:string}>();
+ try{
+  process.env.AI_BUDGET_TEST_BYPASS='false';delete process.env.AI_MODEL_RATES;
+  globalThis.fetch=async()=>{calls++;rows.push((await latest())!);if(ambiguous)throw Error('Synthetic ambiguous transport');
+   return Response.json({status:'incomplete',model:'gpt-5.4-mini',usage:{input_tokens:100,output_tokens:3000},output:[]});};
+  await paidOpenAI('responses',before,undefined,{kind:'document-answer',dailyLimit:200});
+  await paidOpenAI('responses',after,undefined,{kind:'document-answer',dailyLimit:200});
+  assert.ok(Math.abs(rows[1].reserved-rows[0].reserved-.0135)<1e-10,'additional3000 output is reserved at the configured base mini rate');
+  assert.equal((await latest())!.status,'settled');assert.equal((await latest())!.charged,(100*.75+3000*4.5)/1e6);
+  ambiguous=true;await assert.rejects(paidOpenAI('responses',after,undefined,{kind:'document-answer',dailyLimit:200}),/ambiguous transport/);
+  const held=(await latest())!;assert.equal(held.status,'reserved');assert.equal(held.charged,null);assert.equal(held.reserved,rows[1].reserved);
+  assert.equal(calls,3,'no automatic retry');
+ }finally{globalThis.fetch=original;for(const n of names)if(saved[n]===undefined)delete process.env[n];else process.env[n]=saved[n];}
 });
 
 test('mentioned source attribution survives selection without suppressing complementary sources',()=>{
