@@ -36,6 +36,12 @@ Docling 正文、表格引用和图片区域文字引用的 formula 节点共用
 
 历史预览先按页选定一个缓存版本，再限制最多 1000 页，多个版本不挤掉后页。两个当前 Docling 版本均可阻止就绪文档因预览而重复排队；旧 v2 不算当前版本。未完成或显式重解析尚未结束时，仍保留原先 `pdf-page-v2` 预览优先级。
 
+## 原生列表编号保留（Issue #202）
+
+正文投影保留 Docling `list_item.marker` 的字面值；不根据相邻条目、数组位置或 `enumerated` 推断缺失编号。正文已有相同前缀时不重复。跨页条目先按原始字符范围切页，仅在第一段加一次编号，不能将新增字符用于原始页定位。表格引用和图片文字引用使用相同规则。原始 JSON/PDF、bbox 与 charspan 不修改；这仅保留解析器观察，不能证明书目关联或答案引用语义正确。
+
+新解析身份为 `docling-v4-list-markers-search` / `docling-v4-list-markers-text-search`，缓存重解派生为 `docling-cached-replay-v2-list-markers`。历史 v3 就绪缓存仍可预览且不会仅因本次版本变化自动排队；它们不冒认为已补编号的新输出。新解析或管理员显式缓存重解才生成新派生，不触发全库重解析、重向量化或回写旧版本。
+
 ## Type1 singleton 占位映射（Issue #187）
 
 原 Type1 预检仍按嵌入 FontFile 的 literal Encoding 认定 `prime`／

@@ -8,7 +8,7 @@ import {preparePdfVisualEvidence,pdfVisualCanonical} from './pdf-visual-evidence
 import {prepareNativeTableCandidates} from './document-table-candidates.ts';
 import {bindDoclingSourceMath,prepareDoclingSourceMath,type DoclingSourceMath,type PreparedDoclingSourceMath} from './docling-source-math.ts';
 
-export const CACHED_DOCLING_REPLAY_VERSION='docling-cached-replay-v1';
+export const CACHED_DOCLING_REPLAY_VERSION='docling-cached-replay-v2-list-markers';
 const rawMethods=new Set(['docling-text','docling-original-text-fallback','cached-docling-redecode']);
 type Document={id:string;owner_id:string;course_id:string|null;name:string;source_hash:string;origin:string;origin_key:string;
  created_at:Date;current_version_id:string;source_version_id:string;page_count:number;parser_version:string;warnings:string[];raw_sha256:string;raw_value:Record<string,unknown>};

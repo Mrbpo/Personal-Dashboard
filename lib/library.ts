@@ -63,11 +63,12 @@ export async function previewDocument(owner:string,id:string) {
     const parsed=(await db.prepare(`WITH ranked AS (
       SELECT page,body,parser,ROW_NUMBER() OVER (PARTITION BY page ORDER BY CASE
         WHEN ?=1 AND parser='pdf-page-v2' THEN -1 WHEN parser=? THEN 0 WHEN parser=? THEN 1
-        WHEN parser='docling-v2-search' THEN 2 WHEN parser='docling-v2-text-search' THEN 3
-        WHEN parser='docling-v1' THEN 4 WHEN parser=? THEN 5 ELSE 6 END) preference,
+        WHEN parser='docling-v3-source-preserved-search' THEN 2 WHEN parser='docling-v3-source-preserved-text-search' THEN 3
+        WHEN parser='docling-v2-search' THEN 4 WHEN parser='docling-v2-text-search' THEN 5
+        WHEN parser='docling-v1' THEN 6 WHEN parser=? THEN 7 ELSE 8 END) preference,
         MAX(CASE WHEN parser='pdf-page-v2' THEN 1 ELSE 0 END) OVER () hasOld,
-        MAX(CASE WHEN parser IN (?,?,?,'docling-v1') THEN 1 ELSE 0 END) OVER () hasCurrent
-      FROM library_parse_pages WHERE document_id=? AND parser IN (?,?, 'docling-v2-search', 'docling-v2-text-search', 'docling-v1',?,'pdf-page-v2')
+        MAX(CASE WHEN parser IN (?,?,?,'docling-v1','docling-v3-source-preserved-search','docling-v3-source-preserved-text-search') THEN 1 ELSE 0 END) OVER () hasCurrent
+      FROM library_parse_pages WHERE document_id=? AND parser IN (?,?, 'docling-v3-source-preserved-search', 'docling-v3-source-preserved-text-search', 'docling-v2-search', 'docling-v2-text-search', 'docling-v1',?,'pdf-page-v2')
     ) SELECT page,body,parser,hasOld,hasCurrent FROM ranked WHERE preference=1 ORDER BY page LIMIT 1000`)
       .bind(preserveOld?1:0,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,
         DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,id,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION)

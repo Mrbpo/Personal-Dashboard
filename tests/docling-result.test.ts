@@ -13,6 +13,61 @@ function result(pages = 1) {
   }}};
 }
 
+test('native bibliography marker remains bound to its own source text without changing raw provenance',()=>{
+ // Public KALM saved result 6b23b249... /texts/5; local page 1 maps to original page 7.
+ const value=result(),doc=value.document.json_content;
+ const bibliography='Yuyu Zhang, Hanjun Dai, Zornitsa Kozareva, Alexander J. Smola & Le Song (2018): Variational Reasoning forQuestionAnsweringWithKnowledgeGraph. InSheilaA.McIlraith&KilianQ.Weinberger,editors: Proceedings of the 32nd AAAI Conference on Artificial Intelligence (AAAI-18), AAAI Press, New Orleanz, LA, pp. 6069-6076.';
+ doc.texts=[item(bibliography,1,{label:'list_item',marker:'[20]',enumerated:true,
+  prov:[{page_no:1,charspan:[0,bibliography.length],bbox:{l:79.228,t:588.312,r:532.776,b:543.725,coord_origin:'BOTTOMLEFT'}}]})];
+ const before=JSON.stringify(value);
+ const decoded=decodeDoclingResult(value,1,{formulaEnriched:false});
+ assert.equal(decoded.pages[0].text,`[20] ${bibliography}`);
+ assert.equal(decoded.pages[0].pageNumber,1,'Physical mapping remains the derived-page adapter responsibility');
+ assert.equal(JSON.stringify(value),before,'Native marker, text, ranges and bbox remain immutable');
+});
+
+test('list projection neither invents numbering nor duplicates embedded markers',()=>{
+ const value=result(),doc=value.document.json_content;
+ doc.texts=[item('[7] Existing reference',1,{label:'list_item',marker:'[7]',enumerated:true}),
+  item('[8]Attached reference',1,{label:'list_item',marker:'[8]'}),
+  item('Unnumbered reference',1,{label:'list_item',enumerated:true}),
+  item('Ordinary text',1,{label:'text',marker:'[99]'}),
+  item('Bullet text',1,{label:'list_item',marker:'•',enumerated:false}),
+  item('10 samples',1,{label:'list_item',marker:'1'}),
+  item('Fallback text',1,{label:'list_item',marker:'[9]',text:'',orig:'Fallback text'})];
+ doc.body.children=doc.texts.map((_,index)=>ref(`texts/${index}`));
+ assert.equal(decodeDoclingResult(value).pages[0].text,
+  '[7] Existing reference\n\n[8]Attached reference\n\nUnnumbered reference\n\nOrdinary text\n\n• Bullet text\n\n1 10 samples\n\n[9] Fallback text');
+});
+
+test('list markers do not shift native spanning character ranges or repeat on continuation pages',()=>{
+ for(const [body,cut,expected]of [
+  ['firstsecond',5,['[20] first','second']],
+  ['[20] firstsecond',2,['[2','0] firstsecond']],
+ ] as const){
+  const value=result(2);
+  value.document.json_content.texts=[{label:'list_item',marker:'[20]',text:body,
+   prov:[{page_no:1,charspan:[0,cut]},{page_no:2,charspan:[cut,body.length]}]}];
+  const before=JSON.stringify(value);
+  assert.deepEqual(decodeDoclingResult(value,2).pages.map(page=>page.text),expected);
+  assert.equal(JSON.stringify(value),before);
+ }
+});
+
+test('native list markers are consistent in table references and picture child text',()=>{
+ const value=result(),doc=value.document.json_content;
+ doc.texts=[item('Table entry',1,{label:'list_item',marker:'[4]'}),
+  item('Picture entry',1,{label:'list_item',marker:'[5]',parent:ref('pictures/0')})];
+ doc.tables=[{prov:[{page_no:1}],data:{num_rows:1,num_cols:1,table_cells:[{ref:ref('texts/0'),start_row_offset_idx:0,start_col_offset_idx:0}]}}];
+ doc.pictures=[{prov:[{page_no:1,bbox:{l:10,t:10,r:100,b:100,coord_origin:'TOPLEFT'}}],children:[ref('texts/1')]}];
+ doc.body.children=[ref('tables/0'),ref('pictures/0')];
+ const before=JSON.stringify(value),decoded=decodeDoclingResult(value);
+ assert.equal(decoded.pages[0].text,'| [4] Table entry |\n\n[5] Picture entry');
+ assert.equal(decoded.nativeTables[0].cellTexts[0].text,'[4] Table entry');
+ assert.equal(decoded.visualLayout.regions[0].textReferences[0].text,'[5] Picture entry');
+ assert.equal(JSON.stringify(value),before);
+});
+
 test('NUL projection marks unknown body and picture characters without altering raw or unaffected pages',()=>{
  const value=result(2),doc=value.document.json_content;
  doc.texts=[item('before\0after',1,{orig:'before\0after'}),

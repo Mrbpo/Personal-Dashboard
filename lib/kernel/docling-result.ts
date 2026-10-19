@@ -1,8 +1,8 @@
 import {assessPdfFormulaPreservation} from '../pdf-formulas.ts';
 import {DOCLING_SOURCE_MATH_VERSION,doclingMathRaw,type DoclingMathNode,type DoclingSourceMath} from './docling-source-math.ts';
 /** Decode Docling's document tree, whose references carry reading order and PDF provenance. */
-export const DOCLING_PARSER_VERSION = 'docling-v3-source-preserved-search';
-export const DOCLING_TEXT_PARSER_VERSION = 'docling-v3-source-preserved-text-search';
+export const DOCLING_PARSER_VERSION = 'docling-v4-list-markers-search';
+export const DOCLING_TEXT_PARSER_VERSION = 'docling-v4-list-markers-text-search';
 export const DOCLING_NUL_PROJECTION_VERSION = 'nul-unknown-v1';
 export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
@@ -32,6 +32,17 @@ function text(value: unknown): string { return typeof value === 'string' ? value
 // normalized text is empty; otherwise valid source content would disappear.
 function nodeContent(node: Json): string {
   return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
+}
+
+// A native marker is an observation, not inferred numbering or a verified
+// bibliography relationship. Apply only after slicing native character spans.
+function withListMarker(node: Json, value: string): string {
+  const marker = node.label === 'list_item' ? text(node.marker) : '';
+  if (!marker || !value.trim()) return value;
+  const start = value.trimStart();
+  if (start.startsWith(marker) && (start.length === marker.length ||
+    !/[\p{L}\p{N}]/u.test(marker.at(-1)!) || !/^[\p{L}\p{N}]/u.test(start.slice(marker.length)))) return value;
+  return `${marker} ${value}`;
 }
 
 const nodeReference=/^#\/(texts|tables|pictures|groups|key_value_items|form_items|field_regions|field_items)\/\d+$/;
@@ -110,18 +121,20 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (!content) return;
     const numbers = new Set(locations.map(location => location.page_no));
     if (numbers.size === 1) {
-      parts.get(locations[0].page_no as number)!.push(content);
+      parts.get(locations[0].page_no as number)!.push(withListMarker(node,content));
       return;
     }
     // Spanning text must have valid, complete character ranges; do not guess a page.
     let consumed = 0;
+    const projected=withListMarker(node,content),prefix=projected.slice(0,projected.length-content.length);
     for (const location of locations) {
       const span = list(location.charspan);
       const [start, end] = span;
       if (!Number.isInteger(start) || !Number.isInteger(end) || start !== consumed || (end as number) <= (start as number) || (end as number) > content.length) {
         throw new Error('Docling spanning item has ambiguous page character ranges');
       }
-      parts.get(location.page_no as number)!.push(content.slice(start as number, end as number));
+      const slice=content.slice(start as number,end as number);
+      parts.get(location.page_no as number)!.push((consumed===0?prefix:'')+slice);
       consumed = end as number;
     }
     if (consumed !== content.length) throw new Error('Docling spanning item loses text between pages');
@@ -199,7 +212,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
         if(node.label==='formula'||script(node)==='sub'||script(node)==='super')noteMath(ref,node,stack,
           node.label==='formula'?'unscoped-formula':'script',provenance(node).map(p=>p.page_no as number));
       }
-      return [content(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
+      return [withListMarker(node,content(node)), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
     };
     return collect(cell.ref, ancestors) || content(cell);
   }
@@ -274,7 +287,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
         regions.push({pictureRef:ref,pageNumber,derivedPageNumber:pageNumber,pageSize:{width,height},
           bbox:{l,t,r,b,coord_origin:box.coord_origin as 'BOTTOMLEFT'|'TOPLEFT'},
           textReferences:list(document!.texts).flatMap((value,index)=>{const child=object(value);
-            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:content(child),provenance:list(child.prov)}]:[];})});
+            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:withListMarker(child,content(child)),provenance:list(child.prov)}]:[];})});
       }
     } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
       const value = content(node);
