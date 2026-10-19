@@ -842,6 +842,8 @@ function prepareSelectedSourceValueGenerationV2(prepared:PreparedAnswer,referenc
  request.input[0].content+=' This generation uses cell-bindings-v2. For indexed table values return table-value with only its cell ID; '+
   'for an explicit printed-value subtraction use table-difference with only left/right cell IDs. '+
   'Do not write labels, values, results, units or free text in those operations. The server restores complete declared row/column label paths and original values. '+
+  'The parser-derived valuePath hints use that same binding validator; they remain semantically unverified. Unknown paths and headers are not value operands. '+
+  'Typed table operations inherit their original-image citation on the server; only ordinary statements supply text and citation fields. '+
   'A difference requires one table, a common row or column context and matching printed metric labels; missing/ambiguous relationships must remain unknown. '+
   'Cell references index original observations; they are not new evidence or verified semantic facts. '+
   'Ordinary sourced statements and multi-source synthesis remain available using selected references outside indexed table images. '+

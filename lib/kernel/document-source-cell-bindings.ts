@@ -18,10 +18,15 @@ type Table={id:string;imageId:string;observationIndex:number;source:DocumentCont
  evidenceId:string;imageSha256:string;artifactSha256:string;observationSha256:string;nativeSha256:string;physicalPage:number;
  rawCellReferenceBasis:'native.raw.data.table_cells[index]';unknownPositions:number[][];gridStatus:'available'|'unavailable';
  semanticVerified:false;relationshipVerified:false;visibilityVerified:false};
+export const SOURCE_CELL_VALUE_PATH_VERSION='parser-declared-cell-paths-v1';
+type ValuePath={status:'parser-derived';rowLabels:string[];columnLabels:string[]}|{status:'not-value'}|
+ {status:'unknown';reason:string;stage:SourceCellBindingError['stage']};
 export type SourceCellBindingCatalog={version:'source-cell-bindings-v2';status:'available'|'unavailable';reason:string|null;
+ valuePathVersion:typeof SOURCE_CELL_VALUE_PATH_VERSION;
  tables:Table[];cells:Cell[];catalogSha256:string;wire:{version:'source-cell-bindings-v2';status:'available'|'unavailable';reason:string|null;
   authority:'parser-declared-untrusted';coverage:'observed-cells-only';gridRepaired:false;
-  tables:Array<Table&{cells:Array<Pick<Cell,'id'|'index'|'row'|'column'|'text'|'headerRole'>>}>;catalogSha256:string};
+  valuePathVersion:typeof SOURCE_CELL_VALUE_PATH_VERSION;valuePathAuthority:'parser-derived-unverified';
+  tables:Array<Table&{cells:Array<Pick<Cell,'id'|'index'|'row'|'column'|'text'|'headerRole'>&{valuePath:ValuePath}>}>;catalogSha256:string};
  /** Private reader witnesses; never put the whole catalog into model input. */
  sources:readonly SourceValueImage[]};
 type Binding={value:Cell;rowLabels:Cell[];columnLabels:Cell[];table:Table};
@@ -39,9 +44,13 @@ export function prepareSourceCellBindingCatalog(sources:readonly SourceValueImag
  const tables:Table[]=[],cells:Cell[]=[];
  const finish=(reason:string|null):SourceCellBindingCatalog=>{
   const status=reason?'unavailable' as const:'available' as const,value={version:'source-cell-bindings-v2' as const,status,reason,
-   tables:reason?[]:tables,cells:reason?[]:cells},catalogSha256=sha(value),wire={version:value.version,status,reason,
+   valuePathVersion:SOURCE_CELL_VALUE_PATH_VERSION as typeof SOURCE_CELL_VALUE_PATH_VERSION,tables:reason?[]:tables,cells:reason?[]:cells},catalogSha256=sha(value),wire={version:value.version,status,reason,
    authority:'parser-declared-untrusted' as const,coverage:'observed-cells-only' as const,gridRepaired:false as const,
-   tables:reason?[]:tables.map(table=>({...table,cells:cells.filter(c=>c.tableId===table.id).map(({id,index,row,column,text,headerRole})=>({id,index,row,column,text,headerRole}))})),catalogSha256};
+   valuePathVersion:SOURCE_CELL_VALUE_PATH_VERSION as typeof SOURCE_CELL_VALUE_PATH_VERSION,valuePathAuthority:'parser-derived-unverified' as const,
+   tables:reason?[]:tables.map(table=>({...table,cells:cells.filter(c=>c.tableId===table.id).map(cell=>{
+    const {id,index,row,column,text,headerRole}=cell;
+    return {id,index,row,column,text,headerRole,valuePath:declaredValuePath(value,cell,table.imageId)};
+   })})),catalogSha256};
   return {...value,catalogSha256,wire,sources};
  };
  for(const support of sources){
@@ -75,15 +84,17 @@ export function prepareSourceCellBindingCatalog(sources:readonly SourceValueImag
   }
  }
  if(!cells.length)return finish('no-native-cell-declarations');
- const result=finish(null);return Buffer.byteLength(canonical(result.wire))>SOURCE_VALUE_LIMITS.bytes?finish('catalog-byte-limit'):result;
+ const result=finish(null);
+ if(Buffer.byteLength(canonical(result.wire))>SOURCE_VALUE_LIMITS.bytes)return finish('catalog-byte-limit');
+ return result.wire.tables.some(t=>t.cells.some(c=>c.valuePath.status==='parser-derived'))?result:finish('no-bindable-cell-values');
 }
 function assertCatalog(catalog:SourceCellBindingCatalog){
  const rebuilt=prepareSourceCellBindingCatalog(catalog.sources);
- if(catalog.status!=='available'||rebuilt.status!=='available'||catalog.catalogSha256!==rebuilt.catalogSha256||
+ if(catalog.status!=='available'||rebuilt.status!=='available'||catalog.valuePathVersion!==SOURCE_CELL_VALUE_PATH_VERSION||catalog.catalogSha256!==rebuilt.catalogSha256||
   canonical([catalog.tables,catalog.cells,catalog.wire])!==canonical([rebuilt.tables,rebuilt.cells,rebuilt.wire]))
   throw new SourceCellBindingError('source-cell-catalog-changed','evidence-selection');
 }
-function binding(catalog:SourceCellBindingCatalog,id:unknown,selectedIds:string[]):Binding{
+function binding(catalog:Pick<SourceCellBindingCatalog,'cells'|'tables'>,id:unknown,selectedIds:string[]):Binding{
  const value=catalog.cells.find(c=>c.id===id),table=value&&catalog.tables.find(t=>t.id===value.tableId);
  if(!value||!table||!selectedIds.includes(table.imageId))throw new SourceCellBindingError('source-cell-reference-outside-selected-input');
  if(value.headerRole!=='none'||value.rowSpan!==1||value.columnSpan!==1||!value.text.trim())
@@ -101,13 +112,26 @@ function binding(catalog:SourceCellBindingCatalog,id:unknown,selectedIds:string[
   const columnIds=completeSourceValueColumnHeaders(cells,value,value,columns).map(c=>c.id),columnLabels=columnIds.map(id=>cells.find(c=>c.id===id)!),
    rowIds=completeSourceValueColumnHeaders(rotated,rotatedValue,rotatedValue,rows).map(c=>c.id),rowLabels=rowIds.map(id=>cells.find(c=>c.id===id)!);
   if(!rowLabels.length||!columnLabels.length)throw Error('Unknown complete label path');
-  return {value:structuredClone(value),rowLabels:structuredClone(rowLabels),columnLabels:structuredClone(columnLabels),table:structuredClone(table)};
- }catch{throw new SourceCellBindingError('source-cell-header-path-unknown','structure-storage');}
+  const bound={value:structuredClone(value),rowLabels:structuredClone(rowLabels),columnLabels:structuredClone(columnLabels),table:structuredClone(table)};
+  if(render(bound).length+1>3000)throw new SourceCellBindingError('source-cell-render-limit');
+  return bound;
+ }catch(error){if(error instanceof SourceCellBindingError)throw error;
+  throw new SourceCellBindingError('source-cell-header-path-unknown','structure-storage');}
 }
 const label=(cells:Cell[])=>cells.map(c=>JSON.stringify(c.text)).join(' / '),render=(b:Binding)=>`${label(b.rowLabels)} [${label(b.columnLabels)}]: ${b.value.text}`;
+function declaredValuePath(catalog:Pick<SourceCellBindingCatalog,'cells'|'tables'>,cell:Cell,imageId:string):ValuePath{
+ if(['row','column','section'].includes(cell.headerRole))return {status:'not-value'};
+ try{const bound=binding(catalog,cell.id,[imageId]);return {status:'parser-derived',
+  rowLabels:bound.rowLabels.map(c=>c.text),columnLabels:bound.columnLabels.map(c=>c.text)};
+ }catch(error){if(!(error instanceof SourceCellBindingError))throw error;
+  return {status:'unknown',reason:error.code,stage:error.stage};}
+}
 export function sourceCellBindingAnswerSchema(catalog:SourceCellBindingCatalog,selectedIds:string[]){
  assertCatalog(catalog);
- const imageIds=new Set(catalog.tables.map(t=>t.imageId)),statementIds=selectedIds.filter(id=>!imageIds.has(id)),cell={type:'string',enum:catalog.cells.map(c=>c.id)},
+ const imageIds=new Set(catalog.tables.map(t=>t.imageId)),statementIds=selectedIds.filter(id=>!imageIds.has(id)),
+  valueIds=catalog.wire.tables.filter(t=>selectedIds.includes(t.imageId)).flatMap(t=>t.cells.filter(c=>c.valuePath.status==='parser-derived').map(c=>c.id));
+ if(!valueIds.length)throw new SourceCellBindingError('source-cell-no-selected-values','evidence-selection');
+ const cell={type:'string',enum:valueIds},
   object=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)});
  return object({status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},message:{type:'string'},claims:{type:'array',maxItems:30,items:{anyOf:[
   object({kind:{type:'string',enum:['table-value']},valueRef:cell}),
@@ -136,7 +160,6 @@ export function deriveSourceCellBindingAnswer(value:unknown,rawOutputText:string
   }
   if(op?.kind==='table-value'&&exact(op,['kind','valueRef'])){
    const bound=binding(catalog,op.valueRef,selectedIds),text=render(bound)+'.';
-   if(text.length>3000)throw new SourceCellBindingError('source-cell-render-limit');
    claims.push({text,citations:[{id:bound.table.imageId}]});
    operations.push({claimIndex,kind:'table-value',bindings:[bound],arithmeticVerified:false,semanticVerified:false,relationshipVerified:false,visibilityVerified:false});continue;
   }

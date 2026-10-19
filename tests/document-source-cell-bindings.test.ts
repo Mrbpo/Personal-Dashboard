@@ -5,14 +5,14 @@ import type {DoclingNativeTable} from '../lib/kernel/docling-result.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,synthesizeDocumentAnswer,documentSourceGenerationRoute,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex'),canonical=(v:unknown)=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 globalThis.fetch=async()=>{throw Error('Cell binding component tests forbid provider calls');};
-async function fixture(omitRowLabel=false,unknownHeader=false){
+async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknown=false){
  const png=await readFile(new URL('./fixtures/native-table-mit-class5/source-page.png',import.meta.url)),
   cell=(r:number,c:number,text:string,role='none',span=1)=>({start_row_offset_idx:r,end_row_offset_idx:r+1,start_col_offset_idx:c,end_col_offset_idx:c+span,
    row_span:1,col_span:span,row_header:role==='row',column_header:role==='column',row_section:false,text}),
   raw=[cell(0,1,'Model A','column',2),cell(0,3,'Model B','column',2),cell(1,1,'ppl','column'),cell(1,2,'BLEU','column'),cell(1,3,'ppl','column'),cell(1,4,'BLEU','column'),
    cell(2,0,'Zh','row'),cell(2,1,'8.92'),cell(2,2,'5.32'),cell(2,3,'9.53'),cell(2,4,'5.48'),
    cell(3,0,'Fr','row'),cell(3,1,'9.68'),cell(3,2,'1.95'),cell(3,3,'9.90'),cell(3,4,'2.03')].filter(c=>!omitRowLabel||c.start_row_offset_idx!==2||c.start_col_offset_idx!==0)
-    .map((c,i)=>unknownHeader&&i===0?{...c,row_header:true}:c),
+    .map((c,i)=>unknownHeader&&i===0?{...c,row_header:true}:allRowLabelsUnknown&&c.row_header?{...c,column_header:true}:c),
   native:DoclingNativeTable={reference:'#/tables/0',pageNumbers:[1],raw:{data:{num_rows:4,num_cols:5,table_cells:raw}},
    cellTexts:raw.map((c,cellIndex)=>({cellIndex,text:c.text})),captions:[],result:{resultBlobSha256:sha('synthetic-result'),derivedInputSha256:sha('synthetic-pdf'),optionsHash:sha('synthetic-options'),copyIndices:[0]}};
  // Synthetic geometry/values on an unchanged fixture PNG: never a PDF fidelity score.
@@ -35,6 +35,8 @@ async function fixture(omitRowLabel=false,unknownHeader=false){
  return {catalog,observation,support,context,native,image,candidate,at:(row:number,col:number)=>catalog.cells.find(c=>c.row===row&&c.column===col)!.id};
 }
 const result=(...claims:unknown[])=>({status:'answered',message:'',claims}),decode=(value:unknown,catalog:Awaited<ReturnType<typeof fixture>>['catalog'],ids=['i0','q:a','q:b'])=>deriveSourceCellBindingAnswer(value,JSON.stringify(value),catalog,ids);
+const schemaValueIds=(schema:ReturnType<typeof sourceCellBindingAnswerSchema>)=>(schema.properties.claims as {
+ items:{anyOf:Array<{properties:{valueRef:{enum:string[]}}}>}}).items.anyOf[0].properties.valueRef.enum;
 test('cell bindings quote complete labels/values, support both axes and preserve mixed-source statements',async()=>{
  const f=await fixture();assert.equal(f.observation.status,'unavailable');assert.equal(f.catalog.status,'available');
  const a=decode(result({kind:'table-value',valueRef:f.at(2,1)}),f.catalog),b=decode(result({kind:'table-value',valueRef:f.at(2,3)}),f.catalog);
@@ -49,6 +51,48 @@ test('cell bindings quote complete labels/values, support both axes and preserve
  assert.equal(horizontal.operations[0].bindings[0].columnLabels.length,2);
  const schema=sourceCellBindingAnswerSchema(f.catalog,['i0']);assert.equal(JSON.stringify(schema).includes('"enum":[]'),false);
 });
+test('value schema and parser-derived paths use the same binding validator while preserving original observations',async()=>{
+ const f=await fixture(),original=canonical(f.native),schema=sourceCellBindingAnswerSchema(f.catalog,['i0','q:a']),
+  valueIds=schemaValueIds(schema),
+  cells=f.catalog.wire.tables[0].cells;
+ assert.equal(f.catalog.wire.valuePathAuthority,'parser-derived-unverified');
+ assert.equal(valueIds.length,8);assert.equal(cells.length,16);
+ assert.equal(Buffer.byteLength(canonical(f.catalog.wire))<=32768,true);
+ for(const cell of cells){
+  if(cell.valuePath.status!=='parser-derived'){
+   assert.equal(valueIds.includes(cell.id),false);continue;
+  }
+  assert.equal(valueIds.includes(cell.id),true);
+  const bound=decode(result({kind:'table-value',valueRef:cell.id}),f.catalog).operations[0].bindings[0];
+  assert.deepEqual(cell.valuePath.rowLabels,bound.rowLabels.map(c=>c.text));
+  assert.deepEqual(cell.valuePath.columnLabels,bound.columnLabels.map(c=>c.text));
+  assert.equal(bound.table.gridStatus,'unavailable');assert.equal(bound.table.semanticVerified,false);
+ }
+ assert.equal(canonical(f.native),original);
+ assert.throws(()=>sourceCellBindingAnswerSchema(f.catalog,['q:a']),(e:any)=>e.code==='source-cell-no-selected-values');
+ const broken=await fixture(true),brokenSchema=sourceCellBindingAnswerSchema(broken.catalog,['i0']),
+  unknown=broken.catalog.wire.tables[0].cells.find(c=>c.id===broken.at(2,1))!;
+ assert.equal(unknown.valuePath.status,'unknown');
+ assert.equal(schemaValueIds(brokenSchema).includes(unknown.id),false);
+ const changed=structuredClone(f.catalog),value=changed.wire.tables[0].cells.find(c=>c.valuePath.status==='parser-derived')!;
+ if(value.valuePath.status!=='parser-derived')throw Error('Expected derived fixture path');
+ value.valuePath.columnLabels[0]='Foreign model';
+ assert.throws(()=>decode(result({kind:'table-value',valueRef:f.at(2,1)}),changed),(e:any)=>e.code==='source-cell-catalog-changed');
+});
+
+test('no bindable values keeps original generation and evidence instead of sending empty enums',async()=>{
+ const f=await fixture(false,false,true);
+ assert.equal(f.catalog.status,'unavailable');assert.equal(f.catalog.reason,'no-bindable-cell-values');
+ const policy={scope:'application' as const,model:'gpt-5.4-mini' as const,maxOutputTokens:3000,evidenceSelection:'select-then-answer' as const,
+  sourceValueContract:'cell-bindings-v2' as const,citationCheck:{mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}}},
+  prepared=prepareDocumentAnswerForPolicy('Read the original table.',f.context,policy),
+  generated=prepareSelectedSourceValueGeneration(prepared,['i0'],{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},policy);
+ assert.equal(generated.applied,false);assert.equal(generated.reason,'no-bindable-cell-values');
+ assert.equal(generated.request.text.format.name,'grounded_document_answer_units');
+ assert.equal(JSON.stringify(generated.request).includes('"enum":[]'),false);
+ assert.equal(JSON.stringify(generated.request).includes('native-cell-declarations-v1'),true);
+});
+
 test('cell bindings reject renamed values, unknown headers, foreign cells, changed catalogs and incompatible metrics',async()=>{
  const f=await fixture();
  for(const value of [result({kind:'table-value',valueRef:f.at(2,1),label:'Model B'}),result({kind:'table-value',valueRef:'b99/1'}),
