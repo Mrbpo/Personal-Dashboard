@@ -1430,7 +1430,8 @@ export class KernelService {
     if('pdfPageRegionTransport'in result&&result.pdfPageRegionTransport)
       contextExpansion={...contextExpansion,pdfPageRegions:result.pdfPageRegionTransport};
     let citationCheck:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>|undefined;
-    const auditSelections='sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
+    const auditSelections='sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?result.sourceQuantityDerivation.normalizedSelections:
+      'sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
     if(result.answer.claims.length&&policy.citationCheck&&auditSelections?.claims.length){
       policy.onStage?.('citation-validation');
       citationCheck=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,

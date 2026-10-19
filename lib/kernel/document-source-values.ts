@@ -130,7 +130,7 @@ export function prepareSourceValueCatalog(images:readonly SourceValueImage[]):So
  const result=finish(null);return Buffer.byteLength(canonical(result))>SOURCE_VALUE_LIMITS.bytes?finish('catalog-byte-limit'):result;
 }
 
-function assertCatalog(c:SourceValueCatalog){
+export function assertSourceValueCatalog(c:SourceValueCatalog){
  const {catalogSha256,...value}=c;
  if(c.version!=='source-value-catalog-v1'||c.status!=='available'||!c.complete||c.reason!==null||
   sha(canonical(value))!==catalogSha256||!c.cells.length||c.cells.length>SOURCE_VALUE_LIMITS.cells||Buffer.byteLength(canonical(c))>SOURCE_VALUE_LIMITS.bytes)
@@ -158,7 +158,7 @@ function assertCatalog(c:SourceValueCatalog){
  }
 }
 export function sourceValueAnswerSchema(catalog:SourceValueCatalog,selectedIds:string[],questionContract:SourceValueQuestionContract='mixed-v1'){
- assertCatalog(catalog);
+ assertSourceValueCatalog(catalog);
  if(!['mixed-v1','required-difference-v1'].includes(questionContract))throw new Error('Unknown source value question contract');
  const mixed={type:'object',additionalProperties:false,$defs:{cellId:{type:'string',enum:catalog.cells.map(c=>c.id)},
   originalId:{type:'string',enum:selectedIds}},properties:{status:{type:'string',enum:['answered','insufficient-evidence','conflicting-evidence']},
@@ -190,7 +190,7 @@ export function sourceDecimalDifference(left:string,right:string){
 /** Preserve every declared metric/dataset header, without guessing inheritance
  * across repeated header blocks. The original catalog and semantic flags stay
  * unchanged; an argument check does not verify the parser's relationships. */
-function completeColumnHeaders(cells:Cell[],left:Cell,right:Cell,selected:Cell[]){
+export function completeSourceValueColumnHeaders(cells:Cell[],left:Cell,right:Cell,selected:Cell[]){
  const covers=(c:Cell)=>c.tableId===left.tableId&&c.column<=left.column&&c.column+c.columnSpan>left.column,
   column=cells.filter(covers),minimum=Math.min(left.row,right.row),maximum=Math.max(left.row,right.row),
   headers=column.filter(c=>['column','section'].includes(c.headerRole)&&c.text.trim()&&c.row<=maximum)
@@ -206,7 +206,7 @@ function completeColumnHeaders(cells:Cell[],left:Cell,right:Cell,selected:Cell[]
  * assertion or adds references to a statement. Semantic flags remain false. */
 export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catalog:SourceValueCatalog,selectedIds:string[],
  questionContract:SourceValueQuestionContract='mixed-v1'):SourceValueDerivation{
- assertCatalog(catalog);
+ assertSourceValueCatalog(catalog);
  if(!['mixed-v1','required-difference-v1'].includes(questionContract))throw new Error('Unknown source value question contract');
  if(canonical(JSON.parse(rawOutputText))!==canonical(value))throw new Error('Invalid source value operation response');
  let v:{status:Selections['status'];message:string;claims:unknown[]};
@@ -252,7 +252,7 @@ export function deriveSourceValueAnswer(value:unknown,rawOutputText:string,catal
     (r.column<=c.column&&r.column+r.columnSpan>c.column);}))throw new Error('Difference requires one table, one numeric column and explicit positioned row/column labels');
   const table=catalog.tables.find(t=>t.id===left.tableId)!;
   if(!selectedIds.includes(table.imageId))throw new Error('Difference cannot cite an unselected image');
-  const headerPath=completeColumnHeaders(catalog.cells,left,right,columns),header=headerPath.map(column=>JSON.stringify(column.text)).join(' / ');
+  const headerPath=completeSourceValueColumnHeaders(catalog.cells,left,right,columns),header=headerPath.map(column=>JSON.stringify(column.text)).join(' / ');
   const difference=sourceDecimalDifference(left.text,right.text),text=`${JSON.stringify(leftRow.text)} [${header}]: ${left.text}; `+
    `${JSON.stringify(rightRow.text)} [${header}]: ${right.text}; printed-value difference (left minus right) = ${difference}.`;
   if(text.length>3000)throw new Error('Derived source value claim exceeds the answer bound');

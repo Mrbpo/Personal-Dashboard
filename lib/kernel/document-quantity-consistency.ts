@@ -17,6 +17,8 @@ function explicitClaimFamilies(text:string){
  if(/\d(?:[\d.,]*\d)?\s*(?:milliseconds?|seconds?|minutes?|hours?|days?)\b|\d\s*(?:毫秒|秒钟?|分钟|小时|天)/u.test(text)&&!found.includes('elapsed-time'))found.push('elapsed-time');
  return found;
 }
+/** Question-side recognition only; never use question labels as source facts. */
+export function explicitDocumentQuantityFamilies(text:string){return families(normalized(text));}
 const incompatible=(a:Quantity,b:Quantity)=>
  (a==='elapsed-time'&&b==='iteration-count')||(b==='elapsed-time'&&a==='iteration-count')||
  (a==='rater-agreement'&&b==='auc')||(b==='rater-agreement'&&a==='auc');

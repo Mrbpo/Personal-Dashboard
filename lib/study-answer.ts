@@ -3,6 +3,7 @@ import {serviceValue} from './service-vault.ts';
 import type {DocumentAnswerModel} from './kernel/document-answer.ts';
 import {DocumentCitationCheckError} from './kernel/document-citation-audit.ts';
 import {SourceValueHeaderError} from './kernel/document-source-values.ts';
+import {SourceQuantityOperationError} from './kernel/document-source-quantities.ts';
 import {assertDocumentDevelopmentRun} from './kernel/document-rerank.ts';
 import {randomUUID,createHash} from 'node:crypto';
 import {mkdir,open} from 'node:fs/promises';
@@ -33,6 +34,10 @@ export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
 }
 export function studyQuantityConsistency(value=process.env.STUDY_QUANTITY_CONSISTENCY??'off'){
  if(value!=='off'&&value!=='explicit-unit-v1')throw new StudyAnswerError('configuration','invalid-quantity-consistency','数值类型核对配置无效');
+ return value==='off'?undefined:value;
+}
+export function studySourceQuantities(value=process.env.STUDY_SOURCE_QUANTITIES??'off'){
+ if(value!=='off'&&value!=='bound-value-v1')throw new StudyAnswerError('configuration','invalid-source-quantities','来源数值绑定配置无效');
  return value==='off'?undefined:value;
 }
 export function studySourceScope(value=process.env.STUDY_SOURCE_SCOPE??'off'){
@@ -70,7 +75,9 @@ function citationRecorder(owner:string,question:string){
   routing:{mode:'question-scope' as const,beforeAttempt:async(identity:string)=>save(identity,'source-scope.attempt',{requestIdentity:identity}),
    recordResponse:async(response:Readonly<import('./kernel/document-answer.ts').DocumentQueryScopeResponse>)=>save(response.requestIdentity,'source-scope.response',response)},
   recordSourceValueRaw:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueRawResponse>)=>save(receipt.providerRequestSha256,'source-values.raw-response',receipt),
-  recordSourceValues:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueDerivation>)=>save(receipt.providerRequestSha256,'source-values',receipt)};
+  recordSourceValues:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceValueDerivation>)=>save(receipt.providerRequestSha256,'source-values',receipt),
+  recordSourceQuantityRaw:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceQuantityRawResponse>)=>save(receipt.providerRequestSha256,'source-quantities.raw-response',receipt),
+  recordSourceQuantities:async(receipt:Readonly<import('./kernel/document-answer.ts').DocumentSourceQuantityDerivation>)=>save(receipt.providerRequestSha256,'source-quantities',receipt)};
 }
 export function studyFailure(error:unknown){
  return error instanceof StudyAnswerError?{stage:error.stage,code:error.code}:undefined;
@@ -83,6 +90,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const textContextWindows=studyTextContextWindows();
  const sourceValueContract=studySourceValues();
  const quantityConsistency=studyQuantityConsistency();
+ const sourceQuantityContract=studySourceQuantities();
+ if(sourceQuantityContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'||sourceValueContract))
+  throw new StudyAnswerError('configuration','source-quantities-require-selection-check','来源数值绑定需要内核、证据选择和引用核对，并与旧差值契约互斥');
  if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','text-context-requires-selection-check','原文上下文窗口需要内核、证据选择和引用核对');
  if(sourceValueContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||studyCitationCheck()!=='selected-once'))
@@ -102,6 +112,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
     ...(quantityConsistency?{quantityConsistency}:{}),
+    ...(sourceQuantityContract?{sourceQuantityContract,recordSourceQuantityRawResponse:recorder!.recordSourceQuantityRaw,recordSourceQuantityDerivation:recorder!.recordSourceQuantities}:{}),
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
     ...(sourceScope?{sourceRouting:recorder!.routing}:{}),
@@ -136,6 +147,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
     ...('quantityConsistency' in result?{quantityConsistency:result.quantityConsistency}:{}),
+    ...('sourceQuantityContract' in result?{sourceQuantityContract:result.sourceQuantityContract}:{}),
+    ...('sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?{sourceQuantityDerivation:result.sourceQuantityDerivation,
+     answerContract:'source-bound-quantity-v1',claimOrigins:result.answer.claims.map(()=> 'program-rendered-source-quantity')}:{}),
     ...('sourceValueContract' in result?{sourceValueContract:result.sourceValueContract}:{}),
     ...('sourceValueDerivation' in result&&result.sourceValueDerivation?{sourceValueDerivation:result.sourceValueDerivation,answerContract:'difference-v1',
      claimOrigins:result.answer.claims.map((_claim,index)=>result.sourceValueDerivation!.operations.some(op=>op.claimIndex===index)?
@@ -147,6 +161,8 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
   if(error instanceof StudyAnswerError)throw error;
   if(error instanceof SourceValueHeaderError)throw new StudyAnswerError('generation',error.code,
    '表格比较缺少完整且明确的列标题关系，本轮未发布答案',{cause:error});
+  if(error instanceof SourceQuantityOperationError)throw new StudyAnswerError('generation',error.code,
+   '来源数值操作未通过绑定验证，本轮未发布答案',{cause:error});
   if(error instanceof DocumentCitationCheckError)throw new StudyAnswerError('citation-validation',error.code,
    error.code==='citation-support-not-established'?'回答的引用未通过核对，本轮未发布答案':'引用核对未完成，本轮未发布答案',{cause:error});
   throw new StudyAnswerError(stage,'kernel-answer-failed','内核问答未完成，请查看来源或稍后重试',{cause:error});
