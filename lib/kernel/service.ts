@@ -5,6 +5,7 @@ import { kernelPool, kernelTransaction } from './db.ts';
 import {contentTagIngestionMode,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
 import {recordIngestedContentClassification} from './content-classification-ingestion.ts';
 import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
+import {prepareControlledTopics,importControlledTopics} from './content-topic-classification.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
 import {classificationGuardAnswerObservation} from './classification-route-guard.ts';
@@ -1672,6 +1673,14 @@ export class KernelService {
 
   documentClassifications(owner:string,documentId:string){
     return readContentClassifications(kernelPool(),owner,documentId);
+  }
+
+  prepareDocumentTopics(owner:string,documentId:string,pages?:number[]){
+    return prepareControlledTopics(kernelPool(),owner,documentId,pages);
+  }
+
+  importDocumentTopics(owner:string,packet:unknown,rawResponse:string,actor:string,reason:string){
+    return kernelTransaction(client=>importControlledTopics(client,owner,packet,rawResponse,actor,reason));
   }
 
   documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){

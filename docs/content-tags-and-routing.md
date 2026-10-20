@@ -1,5 +1,48 @@
 # Unified content tags and retrieval routing — Issue193
 
+## Controlled content-topic proposal tool
+
+`KernelService.prepareDocumentTopics` reads at most four requested current pages
+and at most64 distinct topics from current owned manual revisions. Repeated
+labels across many reviewed documents do not exhaust the catalog; each offered
+key retains one deterministic current manual-revision witness.
+Those existing revisions are the controlled vocabulary. Model-generated labels
+never seed more labels; manual corrections can extend the catalog. There is no
+separate registry. Preparation returns unavailable rather than truncating an
+oversized catalog/source or inventing labels; source text is limited to12KiB.
+The packet binds the actual request, current source/version/evidence/body hashes,
+page scope, vocabulary revision IDs and producer correction head.
+
+An external classifier can execute the offered mini request. The existing admin
+CLI imports its raw response through Kernel, validates current source/catalog,
+offered IDs and unique exact original quotes, and records fragment-scoped model
+proposals in the same classification revisions used by retrieval. Unknown/no label
+is valid. Confidence0.5 is an uncalibrated proposal marker, not an accuracy claim;
+semantic/filter authority remains false. The audit reason retains exact request
+and raw-response hashes, vocabulary revision IDs, page scope and operator reason.
+The existing audited reason field is bounded to8192 characters so up to64
+revision IDs can be retained; this changes no database table or provider budget.
+Administrator import does not authenticate the external provider transport.
+
+```text
+node --experimental-strip-types scripts/kernel-classify.ts prepare-topics <owner> <document-id> "[1,2]"
+node --experimental-strip-types scripts/kernel-classify.ts import-topics <owner> <packet-and-response.json> "reason"
+```
+
+The import file contains only `packet` and the original `rawResponse` string.
+Exact replay returns the recorded revision without resetting a newer correction.
+Fresh stale-source/catalog/head proposals reject. Manual correction of this
+producer suppresses further automatic proposals. Course/task/fact data and original
+documents are unchanged. The existing guarded classification route consumes the
+topic revisions and retains wrong/unclassified-source recovery.
+
+This is an operational proposal/import tool, not an automatic ingestion worker,
+semantic certification or completed multilingual taxonomy. It makes no provider
+request by itself. The administrator/external runner owns its request journal,
+cost limits and model execution. Do not count packet/CI validity as topic accuracy
+or final RAG acceptance; full ingestion automation, synonyms and content tests
+remain open. It adds no question-time model/reviewer stage or production toggle.
+
 ## Course candidates with unknown sources retained
 
 The existing `STUDY_COURSE_ROUTING=explicit-codes-v1` route still requires a

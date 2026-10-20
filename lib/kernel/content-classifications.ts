@@ -3,6 +3,7 @@ import type {Pool,PoolClient} from 'pg';
 import {CONTENT_TAG_FACETS,CONTENT_TAG_TAXONOMY} from './content-tags.ts';
 
 type Facet=typeof CONTENT_TAG_FACETS[number];
+export const CONTENT_CLASSIFICATION_REASON_LIMIT=8192;
 type PageWitness={kind:'page';pageNumber:number;evidenceId:string;startUtf16:number;endUtf16:number;text:string};
 type MetadataWitness={kind:'source-metadata';field:'name'|'mime'|'origin'|'originKey'|'courseId'|'termId';value:string};
 type Tag={facet:Facet;key:string;confidence:number;evidence:PageWitness|MetadataWitness|{kind:'human-judgment'}};
@@ -54,7 +55,7 @@ const currentSource=`NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.o
 /** Check an immutable revision before allowing it to influence an index.
  * Source identity is rechecked by its reader; a digest is not semantic proof. */
 export function validateStoredContentClassification(row:Record<string,unknown>){
- if(!text(row.owner_id)||!text(row.actor,240)||!text(row.reason,2000)||row.taxonomy_version!==CONTENT_TAG_TAXONOMY||
+ if(!text(row.owner_id)||!text(row.actor,240)||!text(row.reason,CONTENT_CLASSIFICATION_REASON_LIMIT)||row.taxonomy_version!==CONTENT_TAG_TAXONOMY||
   row.filter_authorization!==false||row.semantic_verified!==false||row.coverage!=='explicit-scopes-only'||!Array.isArray(row.assignments))
   throw Error('Invalid stored classification');
  const tags=row.assignments.map((value:unknown)=>{
@@ -83,7 +84,7 @@ export function validateStoredContentClassification(row:Record<string,unknown>){
  * outside it. Serialize with ingestion on the current document; never rebase. */
 export async function recordContentClassification(client:PoolClient,owner:string,input:unknown,actor:string,reason:string){
  const request=validateContentClassification(input);
- if(!text(owner)||!text(actor,240)||!text(reason,2000))throw Error('Classification requires owner, actor and reason');
+ if(!text(owner)||!text(actor,240)||!text(reason,CONTENT_CLASSIFICATION_REASON_LIMIT))throw Error('Classification requires owner, actor and reason');
  const row=(await client.query<{source_hash:string;version_id:string;source_version_id:string;courseId:string|null;termId:string|null;
   name:string;mime:string;origin:string;originKey:string}>(`SELECT d.source_hash,v.id version_id,v.source_version_id,
    d.course_id "courseId",c.term_id "termId",coalesce(s.raw_value->>'name',d.name) name,coalesce(s.raw_value->>'mime','') mime,
