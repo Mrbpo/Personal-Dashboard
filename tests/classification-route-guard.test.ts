@@ -41,7 +41,7 @@ test('independent index coverage recovers wrong/unknown labels; narrow proof is 
   const scoped=await kernel.searchDocumentText(owner,'calculus derivative',{...opts,routingScope:{origins:['canvas']}});
   assert.ok(scoped.every(h=>h.document_id===a));assert.equal(scoped[0].classification_route_guard!.effect,'lexical-narrowing');
   const expanded=await kernel.searchDocumentText(owner,'calculus derivative',{...opts,relatedDocuments:true});
-  assert.ok(expanded.every(h=>!h.classification_route_guard),'Do not narrow a path that requires cross-source expansion');
+  assert.ok(expanded.every(h=>h.classification_route_guard?.effect==='broad-fallback'),'Outside matches retain the original expanded path');
   process.env.KERNEL_CONTENT_TAG_ROUTING='off';let failed=false;
   const rollback=await runGuardedClassification<DocumentTextHit,DocumentSearchOptions>(kernelPool(),owner,'quasarone',opts,
    {broadQuery:documentBroadSearchQuery(documentSearchTerms('quasarone').words),limit:14},async(db,o)=>{

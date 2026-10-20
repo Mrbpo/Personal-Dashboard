@@ -4,15 +4,15 @@ import{documentRoutingScopeSql,type DocumentRoutingScope}from'./document-routing
 type Scope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
 type Hit={document_id:string;page_number:number;source_version_id:string;evidence_id:string;source_hash:string};
 const key=(h:Hit)=>JSON.stringify([h.document_id,h.page_number,h.source_version_id,h.evidence_id,h.source_hash]);
-export type ClassificationGuardReceipt={version:'classification-guarded-lexical-v1';effect:'broad-fallback'|'lexical-narrowing';reason:string;
+export type ClassificationGuardReceipt={version:'classification-guarded-lexical-v1';effect:'broad-fallback'|'lexical-narrowing'|'expanded-lexical-narrowing';reason:string;
  plan:Awaited<ReturnType<typeof planClassificationBranch>>;outsideMatch:boolean|null;indexedMatchPages:number|null;baselineExecuted:boolean;branchExecuted:boolean;
- snapshot:'repeatable-read';semanticCoverage:'unassessed';filterAuthorization:false;scoredDocuments:null;scores:'original'|'branch-scope-bm25'};
+ snapshot:'repeatable-read';semanticCoverage:'unassessed';filterAuthorization:false;scoredDocuments:null;scores:'original'|'branch-scope-bm25'|'reference-merge-rank'};
 
 /** Classification alone cannot exclude evidence. Independent index membership
  * must establish every lexical match fits in the proposed result set. No model,
  * body read or BM25 scoring occurs in this guard. It does not prove semantics. */
 export async function runGuardedClassification<T extends Hit,O extends Scope>(pool:Pool,owner:string,query:string,options:O,
- spec:{broadQuery:string;limit:number},search:(db:Pool,o:O)=>Promise<T[]>){
+ spec:{broadQuery:string;limit:number;expand?:(db:Pool,base:T[])=>Promise<T[]>},search:(db:Pool,o:O,phase:'baseline'|'branch')=>Promise<T[]>){
  const client=await pool.connect(),db={query:client.query.bind(client)} as unknown as Pool;
  try{
   await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -21,10 +21,10 @@ export async function runGuardedClassification<T extends Hit,O extends Scope>(po
   const finish=(hits:T[],effect:ClassificationGuardReceipt['effect'],reason:string)=>{
    const receipt:ClassificationGuardReceipt={version:'classification-guarded-lexical-v1',effect,reason,plan,outsideMatch,indexedMatchPages,
     baselineExecuted:effect==='broad-fallback',branchExecuted,snapshot:'repeatable-read',semanticCoverage:'unassessed',filterAuthorization:false,scoredDocuments:null,
-    scores:effect==='broad-fallback'?'original':'branch-scope-bm25'};
+    scores:effect==='broad-fallback'?'original':effect==='expanded-lexical-narrowing'?'reference-merge-rank':'branch-scope-bm25'};
    return hits.map(h=>({...h,classification_route_guard:receipt}));
   };
-  const broad=async(reason:string)=>finish(await search(db,options),'broad-fallback',reason);
+  const broad=async(reason:string)=>finish(await search(db,options,'baseline'),'broad-fallback',reason);
   let result;
   if(plan.status!=='candidate'||!spec.broadQuery)result=await broad(plan.reason);
   else{
@@ -42,14 +42,22 @@ export async function runGuardedClassification<T extends Hit,O extends Scope>(po
      SELECT d.id document_id,p.page_number,v.source_version_id,p.evidence_id,d.source_hash ${from} AND d.id=ANY($5::text[]) LIMIT $${bounded.length}`,bounded)).rows;
     indexedMatchPages=proof.length;
     if(proof.length>spec.limit)result=await broad('indexed-result-capacity');
+    else if(spec.expand&&(proof.length!==1||spec.limit<5))result=await broad('reference-seed-order-unproven');
     else{
      const prior=options.routingScope?.documentIds,ids=prior?plan.documentIds.filter(id=>prior.includes(id)):plan.documentIds;
-     await client.query('SAVEPOINT classification_branch');let branch:T[]|null=null;
-     try{branchExecuted=true;branch=await search(db,{...options,routingScope:{...options.routingScope,documentIds:ids}});await client.query('RELEASE SAVEPOINT classification_branch');}
-     catch{await client.query('ROLLBACK TO SAVEPOINT classification_branch');await client.query('RELEASE SAVEPOINT classification_branch');}
-     const expected=new Set(proof.map(key));
-     result=branch&&branch.length===expected.size&&new Set(branch.map(key)).size===expected.size&&branch.every(h=>expected.has(key(h)))
-      ?finish(branch,'lexical-narrowing','all-index-matches-returned'):await broad(branch?'indexed-evidence-mismatch':'branch-search-failed');
+     await client.query('SAVEPOINT classification_branch');let output:T[]|null=null,reason='branch-search-failed';
+     try{
+      branchExecuted=true;const branch=await search(db,{...options,routingScope:{...options.routingScope,documentIds:ids}},'branch'),expected=new Set(proof.map(key));
+      if(branch.length!==expected.size||new Set(branch.map(key)).size!==expected.size||!branch.every(h=>expected.has(key(h))))reason='indexed-evidence-mismatch';
+      else{
+       reason=spec.expand?'expansion-search-failed':'all-index-matches-returned';output=spec.expand?await spec.expand(db,branch):branch;
+       if(spec.expand&&!proof.every(p=>output!.some(h=>key(h)===key(p)))){output=null;reason='expanded-evidence-mismatch';}
+       else if(spec.expand)reason='all-index-matches-expanded';
+      }
+      await client.query('RELEASE SAVEPOINT classification_branch');
+     }
+     catch{output=null;await client.query('ROLLBACK TO SAVEPOINT classification_branch');await client.query('RELEASE SAVEPOINT classification_branch');}
+     result=output?finish(output,spec.expand?'expanded-lexical-narrowing':'lexical-narrowing',reason):await broad(reason);
     }
    }
   }

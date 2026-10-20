@@ -231,20 +231,24 @@ export const documentBroadSearchQuery=(words:readonly string[])=>words.map(word=
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
   const tagMode=contentTagRoutingMode();
   options={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
+  if(options.evidenceBody!==undefined&&options.evidenceBody!=='snippet'&&options.evidenceBody!=='full-page')throw new Error('Invalid document evidence body mode');
+  if(options.refineAdjacent!==undefined&&typeof options.refineAdjacent!=='boolean')throw new Error('Invalid adjacent PDF refinement option');
   if(tagMode==='classification-guarded-lexical-v1'&&!(options as DocumentSearchOptions&{[classificationShadowActive]?:boolean})[classificationShadowActive]&&
-   !options.strict&&!options.documentId&&!options.sourceHint&&options.semantic===false&&options.hybrid===false&&options.aiRerank===false&&options.relatedDocuments===false&&options.refineAdjacent===false){
-    const guarded=await runGuardedClassification(pool,owner,query,options,{broadQuery:documentBroadSearchQuery(documentSearchTerms(query).words),limit:Math.max(1,Math.min(240,options.limit||30))},
-     (db,scoped)=>searchDocumentText(db,owner,query,{...scoped,[classificationShadowActive]:true} as DocumentSearchOptions));
+   !options.strict&&!options.documentId&&!options.sourceHint&&options.semantic===false&&options.hybrid===false&&options.aiRerank===false&&
+   (options.relatedDocuments===false||options.relatedDocuments===true)&&options.refineAdjacent===false){
+    const limit=Math.max(1,Math.min(240,options.limit||30)),guarded=await runGuardedClassification<DocumentTextHit,DocumentSearchOptions>(pool,owner,query,options,
+     {broadQuery:documentBroadSearchQuery(documentSearchTerms(query).words),limit,...(options.relatedDocuments?{expand:async(db:Pool,base:DocumentTextHit[])=>{
+      const expanded=await recallReferencedDocuments(db,owner,query,base,limit,options.courseId,options.routingScope);
+      return options.evidenceBody==='full-page'?readFullDocumentEvidence(db,owner,expanded):expanded;
+     }}:{})},
+     (db,scoped,phase)=>searchDocumentText(db,owner,query,{...scoped,...(phase==='branch'&&options.relatedDocuments?{relatedDocuments:false,evidenceBody:'snippet' as const}:{}),
+      [classificationShadowActive]:true} as DocumentSearchOptions));
     await assertDocumentRoutingScope(pool,owner,guarded.map(h=>h.document_id),options);return guarded;
   }
   if(tagMode==='classification-shadow-v1'&&!(options as DocumentSearchOptions&{[classificationShadowActive]?:boolean})[classificationShadowActive]&&
    !options.strict&&!options.documentId&&!options.sourceHint&&options.semantic===false&&options.hybrid===false&&options.aiRerank===false)
     return runClassificationShadow(pool,owner,query,options,scoped=>searchDocumentText(pool,owner,query,{...scoped,[classificationShadowActive]:true} as DocumentSearchOptions));
   const {evidenceBody,...rankingOptions}=options;
-  if(evidenceBody!==undefined&&evidenceBody!=='snippet'&&evidenceBody!=='full-page')
-    throw new Error('Invalid document evidence body mode');
-  if(options.refineAdjacent!==undefined&&typeof options.refineAdjacent!=='boolean')
-    throw new Error('Invalid adjacent PDF refinement option');
   const hits=await searchDocumentSnippets(pool,owner,query,rankingOptions);
   if(evidenceBody!=='full-page'){
     await assertDocumentRoutingScope(pool,owner,hits.map(hit=>hit.document_id),options);return hits;

@@ -141,16 +141,24 @@ must match the entire bounded source/page/evidence/hash proof, or recover to the
 original query. Check and retrieval share one repeatable-read read-only transaction;
 savepoint rollback permits broad recovery after a branch SQL error.
 
-This gate applies only to explicitly lexical requests with related-document and
-adjacent expansion disabled by the caller. It does not disable those features:
-their requests, semantic/hybrid/AI, strict and named-source reads retain their
-existing paths. Default off. No migration/backfill/production adoption is implied.
+This gate applies to explicitly lexical requests with adjacent expansion disabled.
+Related-document requests (including the website default) may use it only with
+exactly one indexed lexical page and limit>=5. The identical original snippet is
+passed to unchanged reference expansion under the ORIGINAL user scope, then the
+normal full-page reader. A single base page has no scope-dependent seed order;
+reference merging replaces its BM25 score. This preserves unclassified related
+sources outside the proposed tag files. Multiple/zero lexical pages or a smaller
+limit keep original expanded retrieval (`reference-seed-order-unproven`).
+
+It does not turn expansion off to optimize. Semantic/hybrid/AI, adjacent, strict
+and named-source reads retain existing paths. Default off; no migration/backfill
+or production adoption is implied.
 
 The proof covers indexed lexical candidates only, not semantic relevance, parsed
 fidelity or Gold recall. Scoped BM25 scores/order may differ, so narrowing is
 allowed only when all lexical pages fit, with the complete evidence set checked.
 `classification_route_guard` and optional existing reply diagnostics distinguish
-original broad recovery from narrowed retrieval, record reason/proof counts and
+original broad recovery from lexical or expanded lexical narrowing, record reason/proof counts and
 explicitly leave semantic coverage unassessed and total scoring work unknown.
 There is no blanket speedup claim: common terms may correctly force broad search.
 Automatic classification, controlled topic synonyms, semantic/expanded routes and
