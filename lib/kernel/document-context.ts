@@ -11,6 +11,7 @@ import {assertDoclingMathProvenance,assertPreparedDoclingSourceMath,doclingMathF
 import {doclingPageResultReferences,readDoclingPageRegions,doclingPageImageTransform,type DoclingRegionResultReference} from './docling-source-regions.ts';
 import {DoclingPageRegionError,DOCLING_PAGE_REGION_LIMITS} from './docling-result.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
+import{projectDoclingPageLocators,assertDoclingPageLocators,doclingPageLocatorsEnabled,type DoclingPageLocators}from'./docling-page-locators.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -222,9 +223,9 @@ export type StudyPdfPageRegionObservation={version:'study-pdf-page-regions-v1';s
  binding:{source:DocumentContextSource;physicalPage:number;anchorEvidenceId:string;attachmentId:string;imageSha256:string;
   visualManifestSha256:string;frameSha256:string;width:number;height:number};
  originalObservationSha256:string;originalObservationByteLength:number;result?:DoclingRegionResultReference;
- payload?:PageRegionRead;observationSha256:string};
+ payload?:PageRegionRead;locatorProjection?:DoclingPageLocators;observationSha256:string};
 export type StudyPdfPageRegionRead={attachmentId:string;status:'available'|'unavailable';reason:string|null;originalObservationSha256?:string;
- metadataOmissionReason?:'context-observation-byte-limit'};
+ metadataOmissionReason?:'context-observation-byte-limit';locatorProjection?:{status:'available'|'unavailable'|'omitted';reason:string|null;sourceNodeCount:number;returnedNodeCount:number}};
 export type StudyPdfPageImage=PdfVisualImageEvidence&{pageRegions?:StudyPdfPageRegionObservation};
 const pageRegionBinding=(image:PdfVisualImageEvidence)=>({source:{...image.source},physicalPage:image.physicalPage,
  anchorEvidenceId:image.anchorEvidenceId,attachmentId:image.attachmentId,imageSha256:image.sha256,
@@ -232,6 +233,11 @@ const pageRegionBinding=(image:PdfVisualImageEvidence)=>({source:{...image.sourc
 export function unavailableStudyPdfPageRegions(observation:StudyPdfPageRegionObservation,reason:string):StudyPdfPageRegionObservation{
  const {payload:discarded,observationSha256:previous,...rest}=observation;void discarded;void previous;
  const value={...rest,status:'unavailable' as const,reason};return {...value,observationSha256:hash(canonical(value))};
+}
+export function withoutStudyPdfPageLocators(observation:StudyPdfPageRegionObservation):StudyPdfPageRegionObservation{
+ if(!observation.locatorProjection)return observation;
+ const{locatorProjection:discarded,observationSha256:previous,...value}=observation;void discarded;void previous;
+ return{...value,observationSha256:hash(canonical(value))};
 }
 /** Whole observations only. The digest keeps omitted source observations bound
  * without presenting an oversized prefix as the original region index. */
@@ -268,11 +274,17 @@ export function assertStudyPdfPageRegions(observation:StudyPdfPageRegionObservat
  }
  if(observation.status==='available'?(observation.reason!==null||observation.payload?.status!=='available'):
   (observation.status!=='unavailable'||typeof observation.reason!=='string'||!observation.reason||observation.payload?.status==='available'))changed();
+ if(observation.locatorProjection){
+  if(observation.status!=='unavailable')changed();
+  assertDoclingPageLocators(observation.locatorProjection,observation.originalObservationSha256,observation.result,image.physicalPage);
+  if(canonical(observation.locatorProjection.coordinateTransform)!==canonical(doclingPageImageTransform(observation.locatorProjection.pageSize,image)))changed();
+ }
 }
 /** Enrich only retained original PDF pages. No new image/quote/body is added.
  * Missing raw results keep the old wire; the separate read receipt explains it. */
 export async function readDocumentPageRegionsForImages<T extends Pick<DocumentImageEvidence,'attachmentId'|'source'|'sha256'>|PdfVisualImageEvidence>(db:Queryable,owner:string,images:T[]){
- const reads:StudyPdfPageRegionRead[]=[],enriched:Array<T&{pageRegions?:StudyPdfPageRegionObservation}>=[];
+ const reads:StudyPdfPageRegionRead[]=[],enriched:Array<T&{pageRegions?:StudyPdfPageRegionObservation}>=[],
+  locators=new Map<string,DoclingPageLocators>(),locatorMode=doclingPageLocatorsEnabled();
  for(const image of images){
   if(!('kind'in image)||image.kind!=='pdf-page'){enriched.push(image);continue;}
   const result=await readDocumentPageRegions(db,owner,image.source,image.physicalPage);
@@ -284,8 +296,14 @@ export async function readDocumentPageRegionsForImages<T extends Pick<DocumentIm
    reads.push({attachmentId:image.attachmentId,status:result.status,reason:result.reason});enriched.push(clean);continue;
   }
   const observation=bindStudyPdfPageRegions(image,result);
-  reads.push({attachmentId:image.attachmentId,status:observation.status,reason:observation.reason,
-   originalObservationSha256:observation.originalObservationSha256});enriched.push({...image,pageRegions:observation});
+  const read:StudyPdfPageRegionRead={attachmentId:image.attachmentId,status:observation.status,reason:observation.reason,
+   originalObservationSha256:observation.originalObservationSha256};
+  if(locatorMode&&result.status==='available'){
+   try{locators.set(image.attachmentId,projectDoclingPageLocators(result,observation.originalObservationSha256));}
+   catch(error){if(!(error instanceof RangeError&&error.message==='locator-header-byte-limit'))throw error;
+    read.locatorProjection={status:'omitted',reason:error.message,sourceNodeCount:result.index.nodes.length,returnedNodeCount:0};}
+  }
+  reads.push(read);enriched.push({...image,pageRegions:observation});
  }
  const added=enriched.flatMap(image=>image.pageRegions?[image.pageRegions]:[]);
  if(Buffer.byteLength(canonical(added))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes){
@@ -308,6 +326,25 @@ export async function readDocumentPageRegionsForImages<T extends Pick<DocumentIm
    const stub=image.pageRegions;image.pageRegions=original;
    if(fits()){read.status=original.status;read.reason=original.reason;}
    else image.pageRegions=stub;
+  }
+ }
+ // Existing complete observations keep priority. Locator-only metadata uses
+ // remaining capacity and never displaces an available original observation.
+ let locatorRead=0;
+ for(const image of enriched){
+  if(!('kind'in image)||image.kind!=='pdf-page')continue;
+  const read=reads[locatorRead++],p=locators.get(image.attachmentId);
+  if(!p||image.pageRegions?.status==='available')continue;
+  const original=image.pageRegions;
+  if(!original){read.locatorProjection={status:'omitted',reason:'context-observation-byte-limit',sourceNodeCount:p.sourceNodeCount,returnedNodeCount:0};continue;}
+  const{observationSha256:unused,...value}=original;void unused;
+  const projected={...value,locatorProjection:p},next={...projected,observationSha256:hash(canonical(projected))};image.pageRegions=next;
+  if(Buffer.byteLength(canonical(next))>STUDY_PDF_PAGE_REGION_LIMITS.pageBytes||
+   Buffer.byteLength(canonical(enriched.flatMap(i=>i.pageRegions?[i.pageRegions]:[])))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes){
+   image.pageRegions=original;read.locatorProjection={status:'omitted',reason:'context-locator-byte-limit',sourceNodeCount:p.sourceNodeCount,returnedNodeCount:0};
+  }else{
+   assertStudyPdfPageRegions(next,image);
+   read.locatorProjection={status:p.status,reason:p.reason,sourceNodeCount:p.sourceNodeCount,returnedNodeCount:p.nodes.length};
   }
  }
  return {images:enriched,pdfPageRegionReads:reads};

@@ -4,7 +4,7 @@ import {withDocumentRerankRunPolicy,assertDocumentDevelopmentRun} from './docume
 import type {DocumentEvidenceHit,DocumentSelectedNodeHit} from './document-evidence.ts';
 import type {DocumentImageSelection} from './document-image-budget.ts';
 import type {FlatTextStructureProvenance,DocumentContextSource} from './document-context.ts';
-import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudyPdfPageRegions,unavailableStudyPdfPageRegions,
+import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudyPdfPageRegions,unavailableStudyPdfPageRegions,withoutStudyPdfPageLocators,
  type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead,type LiteralCourseIdentityContext} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
@@ -531,7 +531,7 @@ export function projectPdfPageRegionRequest<T extends {input:unknown[]}>(origina
   return Buffer.byteLength(nonImage)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+
    images.reduce((sum,s)=>sum+2*Math.ceil(s.image!.width/32)*Math.ceil(s.image!.height/32)+1,0)<=COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens;};
  if(fits())return request;
- const candidates=packet.evidence.filter(e=>e.pageRegions).map(evidence=>({evidence,original:evidence.pageRegions!}));
+ const candidates=packet.evidence.filter(e=>e.pageRegions).map(evidence=>({evidence,original:withoutStudyPdfPageLocators(evidence.pageRegions!),withLocators:evidence.pageRegions!}));
  for(const {evidence}of candidates)delete evidence.pageRegions;
  // Keep source-unavailability reasons intact. Reserve small complete wrappers,
  // then admit whole payloads in evidence order; a large item must not prevent
@@ -544,6 +544,10 @@ export function projectPdfPageRegionRequest<T extends {input:unknown[]}>(origina
   if(observation.status!=='available'||!evidence.pageRegions)continue;
   const stub=evidence.pageRegions;evidence.pageRegions=observation;
   if(!fits())evidence.pageRegions=stub;
+ }
+ for(const{evidence,withLocators}of candidates){
+  if(!withLocators.locatorProjection||!evidence.pageRegions||evidence.pageRegions.status!=='unavailable')continue;
+  const prior=evidence.pageRegions;evidence.pageRegions=withLocators;if(!fits())evidence.pageRegions=prior;
  }
  part.text=JSON.stringify(packet);return request;
 }
@@ -558,7 +562,10 @@ export function pdfPageRegionTransport(prepared:ReturnType<typeof prepareDocumen
    const transport=sent?sent.status:!selected?'not-selected':!read.originalObservationSha256?'unavailable-reader':
     read.reason==='context-observation-byte-limit'?'omitted-metadata-limit':'omitted-request-capacity';
    return {attachmentId:read.attachmentId,transport,reason:sent?.reason??(transport==='omitted-request-capacity'?'request-input-limit':read.reason),
-    originalObservationSha256:read.originalObservationSha256??null};})};
+    originalObservationSha256:read.originalObservationSha256??null,
+    ...(read.locatorProjection?{locatorProjection:sent?.locatorProjection?{status:sent.locatorProjection.status,
+     sourceNodeCount:sent.locatorProjection.sourceNodeCount,returnedNodeCount:sent.locatorProjection.nodes.length}:
+     {status:'omitted',reason:!selected?'not-selected':'request-input-limit',sourceNodeCount:read.locatorProjection.sourceNodeCount,returnedNodeCount:0}}:{})};})};
 }
 
 /** Use the same prepared evidence for capacity checks, selection, generation

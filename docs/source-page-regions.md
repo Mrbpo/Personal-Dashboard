@@ -98,3 +98,31 @@ unavailable result and all historical semantic failures; no new parse, rendering
 or source rewrite is involved. The observation's semantic/visibility/order
 verification flags remain false. This transport check is not website HTTP or
 content-fidelity acceptance.
+
+## Optional complete source-locator projection
+
+`STUDY_PDF_REGION_LOCATORS=source-locators-v1` (default `off`) adds a separate
+`locatorProjection` when an already-read complete page observation cannot be
+transported. The original observation remains `unavailable` with its original
+reason/digest. This projection contains the complete bounded set of original
+node references, declared paths/page membership, observed geometry/labels,
+raw-node digests and producer/result/frame bindings. It contains no raw text,
+table cells, inferred reading order or verified semantic relations. It is a
+location index into the saved original result, never a replacement text source
+or proof of a table's meaning. Unknown geometry stays unknown.
+
+Limits remain32KiB/page and64KiB/context; the locator set is at most128nodes and
+16KiB, all nodes or explicitly unavailable, with no partial prefix. Existing
+complete observations and original text/PNGs/quote IDs keep priority. Locators
+use remaining metadata capacity, with omission receipts. At the request limit,
+locator bytes are removed before original identity wrappers or complete
+observations. The full source reader and immutable original result remain
+available separately; no document is reparsed or rewritten.
+
+An actual saved website request omitted full region payloads for6of7observed
+pages (5page limits,1context limit). A read-only real-page regression recovered
+15/15original p2node locators from its57806byte full observation in an8311byte
+locator set (9769byte wrapper), with exact geometry/raw digests and unchanged
+image/body/quotation IDs. This is request-builder/source-binding verification,
+not a claim of corrected OCR, table semantics, HTTP content accuracy or final
+acceptance. No production toggle or library backfill is implied.

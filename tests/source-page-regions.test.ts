@@ -6,12 +6,13 @@ import type {Pool} from 'pg';
 import {decodeDoclingResult,indexDoclingPageRegions,DOCLING_PAGE_REGION_LIMITS} from '../lib/kernel/docling-result.ts';
 import {doclingPageResultReferences,readDoclingPageRegions} from '../lib/kernel/docling-source-regions.ts';
 import {registerDocumentStructure,readDocumentPageRegions,readDocumentPageRegionsForImages,bindStudyPdfPageRegions,unavailableStudyPdfPageRegions,
- STUDY_PDF_PAGE_REGION_LIMITS,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError} from '../lib/kernel/document-context.ts';
+ STUDY_PDF_PAGE_REGION_LIMITS,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,withoutStudyPdfPageLocators} from '../lib/kernel/document-context.ts';
 import {readPdfVisualEvidence,pdfVisualCanonical} from '../lib/kernel/pdf-visual-evidence.ts';
 import {prepareDocumentAnswerForPolicy,buildDocumentEvidenceSelectionRequest,buildSelectedDocumentAnswerRequest,pdfPageRegionTransport,
- type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ projectPdfPageRegionRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
 import {sourcePageRegionsFixture,fixtureSha} from './fixtures/source-page-regions.ts';
+import{projectDoclingPageLocators,assertDoclingPageLocators,DOCLING_PAGE_LOCATOR_LIMITS}from'../lib/kernel/docling-page-locators.ts';
 
 const base=resolve('data');await mkdir(base,{recursive:true});const directory=await mkdtemp(join(base,'source-page-regions-test-'));
 process.env.LIBRARY_DIR=directory;
@@ -101,6 +102,30 @@ test('actual context reader uses registered source/page/manifest/PNG and never p
  db.version='new-current';await assert.rejects(readDocumentPageRegions(db.db(),f.owner,f.source,1),changed);
 });
 
+test('source locators preserve complete original node identities and unknowns without text or cells; overflow is all-or-none',async()=>{
+ const db=new FixtureDb();await db.register();const f=db.f,page=await readDocumentPageRegions(db.db(),f.owner,f.source,1);
+ assert.equal(page.status,'available');if(page.status!=='available')return;
+ const before=pdfVisualCanonical(page),digest=fixtureSha(before),p=projectDoclingPageLocators(page,digest);
+ assert.equal(p.status,'available');assert.equal(p.nodes.length,page.index.nodes.length);
+ assert.deepEqual(p.nodes.map(n=>[n.reference,n.geometry,n.path,n.textScope,n.physicalPageNumbers]),
+  page.index.nodes.map(n=>[n.reference,n.geometry,n.path,n.textScope,n.physicalPageNumbers]));
+ assert.deepEqual(p.nodes.map(n=>n.rawNodeSha256),page.index.nodes.map(n=>fixtureSha(pdfVisualCanonical(n.raw))));
+ assert.ok(p.nodes.every(n=>!('raw'in n)&&!('text'in n)&&!('data'in n)));
+ assert.equal(p.nodes[1].geometry.status,'unknown');assert.equal(p.semanticRelationsVerified,false);assert.equal(p.textIncluded,false);
+ assertDoclingPageLocators(p,digest,page.index.result,1);
+ assert.throws(()=>assertDoclingPageLocators(p,fixtureSha('other observation'),page.index.result,1),/locator projection/);
+ assert.throws(()=>assertDoclingPageLocators(p,digest,{...page.index.result,optionsHash:fixtureSha('other settings')},1),/locator projection/);
+ const altered=structuredClone(p);altered.nodes[0].rawNodeSha256=fixtureSha('changed');
+ assert.throws(()=>assertDoclingPageLocators(altered,digest,page.index.result,1),/locator projection/);
+ const big=structuredClone(page);big.index.nodes[0].raw.label='x'.repeat(DOCLING_PAGE_LOCATOR_LIMITS.bytes);
+ const limited=projectDoclingPageLocators(big,fixtureSha(pdfVisualCanonical(big)));
+ assert.equal(limited.status,'unavailable');assert.equal(limited.reason,'locator-byte-limit');assert.deepEqual(limited.nodes,[]);
+ const many=structuredClone(page);many.index.nodes=Array.from({length:DOCLING_PAGE_LOCATOR_LIMITS.nodes+1},(_,i)=>({...page.index.nodes[0],reference:`#/texts/${i}`}));
+ const nodeLimit=projectDoclingPageLocators(many,fixtureSha(pdfVisualCanonical(many)));
+ assert.equal(nodeLimit.reason,'locator-node-limit');assert.equal(nodeLimit.nodes.length,0);
+ assert.equal(pdfVisualCanonical(page),before,'No current source observation was rewritten');
+});
+
 test('PDF visual identity is canonical across display metadata and omitted course while rejecting changed bindings',async()=>{
  for(const courseId of ['', 'course-A']){
   const db=new FixtureDb();db.f.source.courseId=courseId;await db.register();const f=db.f;
@@ -170,6 +195,38 @@ test('PDF region context budget keeps whole first-fit observations, later small 
  assert.equal(result.pdfPageRegionReads[4].reason,'page-observation-byte-limit');assert.ok(size(added)<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
  assert.deepEqual(result.images.map(({pageRegions:unused,...image})=>{void unused;return image;}),inputSnapshot);
  assert.deepEqual(images,inputSnapshot);assert.deepEqual(dbs.map(db=>db.f.body),bodies);
+
+ const savedMode=process.env.STUDY_PDF_REGION_LOCATORS;
+ try{
+  process.env.STUDY_PDF_REGION_LOCATORS='source-locators-v1';
+  const located=await readDocumentPageRegionsForImages(router,owner,images);
+  for(const i of [0,1,3])assert.deepEqual(located.images[i].pageRegions,added[i],'locators cannot displace any baseline complete observation');
+  const projection=located.images[4].pageRegions?.locatorProjection;
+  assert.ok(projection);assert.equal(projection.status,'available');assert.equal(projection.nodes.length,7);
+  assert.equal(located.images[4].pageRegions!.status,'unavailable','locator availability is not whole-observation availability');
+  assert.equal(located.images[4].pageRegions!.reason,'page-observation-byte-limit');
+  assert.ok(size(located.images.map(i=>i.pageRegions))<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes);
+  assert.ok(located.pdfPageRegionReads[4].locatorProjection?.returnedNodeCount===7);
+  assert.deepEqual(dbs.map(db=>db.f.body),bodies);assert.deepEqual(images,inputSnapshot);
+  const f=dbs[4].f,ctx:DocumentAnswerContext={sourceContentIsUntrusted:true,parents:[],images:[located.images[4]],anchors:[{
+   id:`pg:${f.source.currentVersionId}:1`,document_id:f.source.documentId,source_version_id:f.source.sourceVersionId,source_hash:f.source.sourceHash,
+   course_id:'',name:'Original fixture',origin:'fixture',origin_key:f.source.documentId,body:f.body,locator:'page:1',page_number:1,
+   evidence_id:f.evidenceId,parser_version:'fixture-v1',score:1,evidence_body:'full-page'}]},policy={scope:'application' as const},
+   settings={model:'gpt-5.4-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:1000},
+   prepared=prepareDocumentAnswerForPolicy('Locate source regions.',ctx,policy),request=buildDocumentEvidenceSelectionRequest(prepared,settings,policy),
+   packet=(r:typeof request)=>JSON.parse((r.input.at(-1)!.content as Array<{text:string}>)[0].text),sent=packet(request).evidence.find((e:any)=>e.pageRegions);
+  assert.equal(sent.pageRegions.locatorProjection.nodes.length,7);assert.equal(sent.pageRegions.payload,undefined);
+  const baseImage={...located.images[4],pageRegions:withoutStudyPdfPageLocators(located.images[4].pageRegions!)},
+   baseline=prepareDocumentAnswerForPolicy('Locate source regions.',{...ctx,images:[baseImage]},policy),baseRequest=buildDocumentEvidenceSelectionRequest(baseline,settings,policy),
+   nonImage=(r:unknown)=>Buffer.byteLength(JSON.stringify(r,(k,v)=>k==='image_url'?'data:image/png;base64,':v)),
+   padding=COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens-COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens-3-nonImage(baseRequest)-1,
+   tight=structuredClone(request);
+  tight.input[0].content+='x'.repeat(padding);
+  const reduced=projectPdfPageRegionRequest(tight,prepared),surviving=packet(reduced).evidence.find((e:any)=>e.pageRegions);
+  assert.ok(surviving);assert.equal(surviving.pageRegions.locatorProjection,undefined,'locator bytes cannot displace the original identity wrapper');
+  assert.equal(surviving.pageRegions.originalObservationSha256,sent.pageRegions.originalObservationSha256);
+  assert.deepEqual(packet(reduced).quoteUnits,packet(request).quoteUnits);
+ }finally{if(savedMode===undefined)delete process.env.STUDY_PDF_REGION_LOCATORS;else process.env.STUDY_PDF_REGION_LOCATORS=savedMode;}
 
  // A request has its own smaller remaining budget even when the complete
  // source context fits. Keep a later small observation after a large skip.
