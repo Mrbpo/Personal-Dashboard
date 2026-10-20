@@ -3,6 +3,7 @@ import type {Pool} from 'pg';
 import {contentTagQueryPlan} from './content-tag-routing.ts';
 import {validateStoredContentClassification} from './content-classifications.ts';
 import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
+import {CONTENT_METADATA_CATALOG_VERSION,CONTENT_METADATA_CATALOG_SHA256}from'./content-taxonomy.ts';
 
 const normalize=(s:string)=>s.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu,' '),
  sha=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -17,7 +18,8 @@ export function literalClassificationMention(query:string,key:string){
  return false;
 }
 type Scope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
-type Plan={status:'candidate'|'broad';reason:string;documentIds:string[];classificationIds:string[];querySha256:string};
+type Plan={status:'candidate'|'broad';reason:string;documentIds:string[];classificationIds:string[];querySha256:string;
+ catalogVersion:string;catalogSha256:string};
 
 /** Read current classification metadata only, never original bodies/vectors.
  * Literal hints propose an experimental branch, not permission to exclude. */
@@ -25,7 +27,8 @@ export async function planClassificationBranch(pool:Pool,owner:string,query:stri
  if(typeof query!=='string'||!query.trim()||query.length>16000||!owner?.trim())throw Error('Invalid classification routing query');
  const hints=contentTagQueryPlan(query).hints.map(({facet,key})=>({facet,key})),normalized=normalize(query),
   args:unknown[]=[owner,normalized,JSON.stringify(hints),scope.courseId||null,scope.documentId||null],where=documentRoutingScopeSql(scope.routingScope,args),
-  result=(status:Plan['status'],reason:string,documentIds:string[]=[],classificationIds:string[]=[]):Plan=>({status,reason,documentIds,classificationIds,querySha256:sha(query)});
+  result=(status:Plan['status'],reason:string,documentIds:string[]=[],classificationIds:string[]=[]):Plan=>({status,reason,documentIds,classificationIds,querySha256:sha(query),
+   catalogVersion:CONTENT_METADATA_CATALOG_VERSION,catalogSha256:CONTENT_METADATA_CATALOG_SHA256});
  const rows=(await pool.query<Record<string,unknown>>(`/* classifications:shadow-plan */ SELECT r.* FROM document_content_classification_heads h
   JOIN document_content_classifications r ON r.id=h.classification_id AND r.owner_id=h.owner_id AND r.version_id=h.version_id AND r.classifier_id=h.classifier_id
   JOIN document_texts d ON d.id=r.document_id AND d.owner_id=r.owner_id AND d.current_version_id=r.version_id AND d.source_hash=r.source_hash

@@ -1,5 +1,5 @@
 import type{PoolClient}from'pg';
-import{classifyContentMetadata,CONTENT_TAG_PRODUCER,type ContentTagMetadata}from'./content-tags.ts';
+import{classifyContentMetadata,type ContentTagMetadata}from'./content-tags.ts';
 import{recordContentClassification,validateContentClassification,validateStoredContentClassification}from'./content-classifications.ts';
 
 export const METADATA_CLASSIFIER_ID='kernel/source-metadata';
@@ -20,7 +20,7 @@ export async function recordIngestedContentClassification(client:PoolClient,owne
    SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
    AND(newer.created_at>d.created_at OR(newer.created_at=d.created_at AND newer.id>d.id))) FOR UPDATE OF d`,[owner,documentId,versionId])).rows[0];
  if(!row)return{status:'skipped' as const,reason:'not-current-owned-source' as const};
- const{sourceHash,sourceVersionId,...metadata}=row,classification=classifyContentMetadata(metadata);
+ const{sourceHash,sourceVersionId,...metadata}=row,classification=classifyContentMetadata(metadata,'catalog-v2');
  const previous=(await client.query(`SELECT r.* FROM document_content_classification_heads h JOIN document_content_classifications r
   ON r.id=h.classification_id AND r.owner_id=h.owner_id AND r.version_id=h.version_id AND r.classifier_id=h.classifier_id
   WHERE h.owner_id=$1 AND h.version_id=$2 AND h.classifier_id=$3`,[owner,versionId,METADATA_CLASSIFIER_ID])).rows[0];
@@ -28,7 +28,7 @@ export async function recordIngestedContentClassification(client:PoolClient,owne
  // An explicit correction of this producer must not be undone by a sync.
  if(old&&(old.method!=='rule'||previous.actor!==actor))return{status:'skipped' as const,reason:'externally-corrected-classifier' as const};
  const input=validateContentClassification({documentId,versionId,sourceVersionId,sourceHash,classifierId:METADATA_CLASSIFIER_ID,
-  producerVersion:CONTENT_TAG_PRODUCER,method:'rule',model:null,previousId:previous?.id??null,
+  producerVersion:classification.producer,method:'rule',model:null,previousId:previous?.id??null,
   tags:classification.tags.map(tag=>({facet:tag.facet,key:tag.key,confidence:tag.confidence,
    evidence:{kind:'source-metadata',field:fields[tag.witness.field as keyof typeof fields],value:tag.witness.value}}))});
  if(old&&stable({...old,previousId:null})===stable({...input,previousId:null}))

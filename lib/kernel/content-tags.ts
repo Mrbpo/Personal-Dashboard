@@ -1,9 +1,10 @@
 import {createHash} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
+import {CONTENT_TAXONOMY_FACETS,CONTENT_METADATA_PRODUCER,contentMetadataSource,contentMetadataFormat,contentMetadataNameTypes}from'./content-taxonomy.ts';
 
 export const CONTENT_TAG_TAXONOMY='academic-content-tags-v1';
 export const CONTENT_TAG_PRODUCER='source-metadata-rules-v1';
-export const CONTENT_TAG_FACETS=['course','term','source','format','document_type','topic','chapter','assignment'] as const;
+export const CONTENT_TAG_FACETS=CONTENT_TAXONOMY_FACETS;
 type Facet=typeof CONTENT_TAG_FACETS[number];
 export type ContentTag={id:string;facet:Facet;key:string;scope:'document';
  method:'metadata-observation'|'filename-rule';confidence:number;routingUse:'identity-only'|'soft-only';
@@ -22,7 +23,8 @@ export function contentTagIngestionEnabled(){return contentTagIngestionMode()!==
 
 /** Tags describe stored metadata, never canonical truth or answer evidence.
  * Confidence 1 means an exact metadata observation, not verified relevance. */
-export function classifyContentMetadata(input:ContentTagMetadata){
+export function classifyContentMetadata(input:ContentTagMetadata,ruleVersion:'legacy-v1'|'catalog-v2'='legacy-v1'){
+ if(ruleVersion!=='legacy-v1'&&ruleVersion!=='catalog-v2')throw Error('Invalid metadata rule version');
  const metadata=structuredClone(input);
  if(Object.keys(metadata).sort().join(',')!=='courseId,mime,name,origin,originKey,termId'||
   ['name','mime','origin','originKey'].some(key=>typeof metadata[key as keyof ContentTagMetadata]!=='string')||
@@ -36,25 +38,19 @@ export function classifyContentMetadata(input:ContentTagMetadata){
  };
  if(metadata.courseId)add('course',metadata.courseId,'course_id',metadata.courseId);
  if(metadata.termId)add('term',metadata.termId,'courses.term_id',metadata.termId);
- const source=({canvas:'canvas',quercus:'canvas',piazza:'piazza',gmail:'gmail',kaltura:'kaltura',upload:'upload'} as Record<string,string>)[metadata.origin.toLowerCase()]??'other';
+ const source=contentMetadataSource(metadata.origin);
  add('source',source,'origin',metadata.origin);
- const mime=metadata.mime.toLowerCase().split(';')[0].trim(),format=mime==='application/pdf'?'pdf':
-  ['text/vtt','application/x-subrip','application/ttml+xml'].includes(mime)?'subtitle':
-  mime.startsWith('text/')?'text':mime.startsWith('image/')?'image':
-  ['application/vnd.ms-powerpoint','application/vnd.openxmlformats-officedocument.presentationml.presentation'].includes(mime)?'slides':
-  ['application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document'].includes(mime)?'word':null;
+ const format=contentMetadataFormat(metadata.mime);
  if(format)add('format',format,'mime',metadata.mime);
  const name=metadata.name.normalize('NFKC').toLowerCase();
- const rules:Array<[string,RegExp]>=[['syllabus',/\bsyllabus\b|课程大纲/u],['assignment',/\b(?:assignments?|problem[ _-]*sets?|homework|tutorials?|labs?)\b|作业|实验说明/u],
-  ['lecture-notes',/\b(?:lecture[ _-]*notes?|notes?)\b|讲义/u],['slides',/\bslides?\b|课件/u],['announcement',/\bannouncements?\b|公告/u]];
- for(const [key,pattern]of rules)if(pattern.test(name))add('document_type',key,'name',metadata.name,'filename-rule');
+ for(const key of contentMetadataNameTypes(name,ruleVersion))add('document_type',key,'name',metadata.name,'filename-rule');
  // An origin key is a naming observation too, not evidence of document content.
  if(source==='canvas'&&/(?:^|:)announcement(?::|$)/u.test(metadata.originKey))
   add('document_type','announcement','origin_key',metadata.originKey,'filename-rule');
  if(source==='piazza')add('document_type','discussion','origin',metadata.origin,'filename-rule');
  if(format==='subtitle')add('document_type','transcript','mime',metadata.mime,'filename-rule');
  tags.sort((a,b)=>a.facet<b.facet?-1:a.facet>b.facet?1:a.key<b.key?-1:a.key>b.key?1:0);
- const payload={taxonomyVersion:CONTENT_TAG_TAXONOMY,producer:CONTENT_TAG_PRODUCER,coverage:'source-metadata-only' as const,
+ const payload={taxonomyVersion:CONTENT_TAG_TAXONOMY,producer:ruleVersion==='legacy-v1'?CONTENT_TAG_PRODUCER:CONTENT_METADATA_PRODUCER,coverage:'source-metadata-only' as const,
   metadata,tags,unknownFacets:CONTENT_TAG_FACETS.filter(facet=>!tags.some(tag=>tag.facet===facet)),
   semanticVerified:false as const,filterAuthorization:false as const};
  return {...payload,inputSha256:sha(canonical(metadata)),classificationSha256:sha(canonical(payload))};

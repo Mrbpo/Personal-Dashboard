@@ -3,25 +3,14 @@ import {isDeepStrictEqual} from 'node:util';
 import type {Pool} from 'pg';
 import {classifyContentMetadata,CONTENT_TAG_PRODUCER,CONTENT_TAG_TAXONOMY,type ContentTagMetadata} from './content-tags.ts';
 import {DocumentEvidenceChangedError} from './document-evidence.ts';
+import {contentMetadataQueryAliases,CONTENT_METADATA_CATALOG_VERSION,CONTENT_METADATA_CATALOG_SHA256}from'./content-taxonomy.ts';
 
 export const CONTENT_TAG_ROUTE_VERSION='metadata-candidate-priority-v1';
 const WINDOW=8;
 type Hint={facet:'document_type'|'source';key:string;alias:string;start:number;end:number};
 // Controlled query aliases refer to the existing ingestion keys. They are
 // navigation observations, not subject classification or explicit scope.
-const aliases:Array<[Hint['facet'],string,RegExp]>=[
- ['document_type','syllabus',/\bsyllabus\b|\bcourse\s+outline\b|课程大纲/giu],
- ['document_type','assignment',/\b(?:assignments?|homework|problem\s+sets?|tutorials?|labs?)\b|作业|实验说明/giu],
- ['document_type','lecture-notes',/\blecture\s+notes?\b|讲义/giu],
- ['document_type','slides',/\bslides?\b|课件/giu],
- ['document_type','announcement',/\bannouncements?\b|公告/giu],
- ['document_type','discussion',/\bdiscussions?\b|论坛|讨论/giu],
- ['document_type','transcript',/\b(?:transcripts?|subtitles?)\b|字幕|转写/giu],
- ['source','canvas',/\b(?:canvas|quercus)\b/giu],
- ['source','piazza',/\bpiazza\b/giu],
- ['source','gmail',/\b(?:gmail|emails?)\b|邮件/giu],
- ['source','kaltura',/\bkaltura\b/giu],
-];
+const aliases=contentMetadataQueryAliases();
 const sha=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 
 export function contentTagRoutingMode(){
@@ -38,7 +27,8 @@ export function contentTagQueryPlan(question:string){
   for(const match of question.matchAll(pattern))hints.push({facet,key,alias:match[0],start:match.index,end:match.index+match[0].length});
  }
  hints.sort((a,b)=>a.start-b.start||a.end-b.end||a.key.localeCompare(b.key));
- const identity={version:CONTENT_TAG_ROUTE_VERSION,questionSha256:sha(question),hints};
+ const identity={version:CONTENT_TAG_ROUTE_VERSION,questionSha256:sha(question),hints,
+  catalogVersion:CONTENT_METADATA_CATALOG_VERSION,catalogSha256:CONTENT_METADATA_CATALOG_SHA256};
  return {...identity,planSha256:sha(identity),filterAuthorization:false as const,
   coverage:'literal-document-type-and-source-only' as const};
 }

@@ -1,5 +1,27 @@
 # Unified content tags and retrieval routing — Issue193
 
+## Shared metadata catalog and preserved legacy revisions
+
+`content-taxonomy.ts` now owns the existing facet/source/format/document-type
+keys, query aliases and versioned filename rules. Its serializable catalog has
+a stable SHA256; query plans/route diagnostics retain that catalog identity.
+No topic ontology, course ownership or semantic relationship is inferred from it.
+
+The existing opt-in `metadata-classifications-v1` ingestion uses producer
+`source-metadata-rules-v2/<catalog-sha256>`. In addition to the original rules,
+Course Outline, Discussion and Transcript filenames can produce soft observations
+with exact original metadata witnesses. They never authorize exclusion or become
+answer evidence. Manual corrections, old producer revisions and source history
+remain in the same store; replay may append the new rule revision without
+overwriting a previous one. This is not an automatic whole-library backfill.
+
+The separate legacy `metadata-v1` snapshot path and default
+`classifyContentMetadata(metadata)` still reproduce old v1 hashes byte for byte.
+Historical snapshots must not be reinterpreted with new rules. No new environment
+switch, database table, model call or service is added. Default ingestion/routing
+remain off. Full controlled subject/chapter taxonomy, page-number disambiguation,
+semantic routing and large-corpus answer/performance acceptance are still open.
+
 An explicit nonempty `routingScope.documentIds` uses the same bounded original
 table-page recovery as legacy `documentId`. Parser grids with only incomplete
 coverage remain unavailable; literal cell/caption strings are retrieval hints
