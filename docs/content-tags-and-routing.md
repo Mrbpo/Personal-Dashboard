@@ -19,9 +19,15 @@ Manual corrections block every overlapping range, including a broader batch;
 unrelated pages can still be classified. Overlapping automatic proposals remain
 independent unverified observations, not a silently merged semantic winner.
 
-An external classifier can execute the offered mini request. The existing admin
-CLI imports its raw response through Kernel, validates current source/catalog,
-offered IDs and unique exact original quotes, and records fragment-scoped model
+An external classifier can execute the offered mini request. Protocol v3 reuses
+the website's existing `documentQuoteUnits` partition, UTF16 ranges and source
+hashes. The model selects only labelId+quoteUnitId; it never transcribes quotes.
+Distinct fragments have distinct source IDs even when their words repeat; the
+entire selected fragment is the witness. Repeats inside one fragment are not
+claimed to be separate word-level occurrences. Nothing is relocated to the first
+text match. The existing admin CLI imports the raw response through Kernel,
+validates current source/catalog and offered IDs, restores original ranges/text,
+and records fragment-scoped model
 proposals in the same classification revisions used by retrieval. Unknown/no label
 is valid. Confidence0.5 is an uncalibrated proposal marker, not an accuracy claim;
 semantic/filter authority remains false. The audit reason retains exact request
