@@ -3,7 +3,9 @@ import {createHash} from 'node:crypto';
 import {normalizeDocumentRoutingScope,documentRoutingScopeSql,assertDocumentRoutingScope,type DocumentRoutingScope} from './document-routing-scope.ts';
 import {contentTagRoutingMode,routeDocumentContentTagCandidates,type ContentTagRoutingReceipt} from './content-tag-routing.ts';
 import {runClassificationShadow,type ClassificationRouteShadow} from './classification-route-shadow.ts';
-import {runGuardedClassification,type ClassificationGuardReceipt} from './classification-route-guard.ts';
+import {runGuardedClassification,type ClassificationGuardReceipt,type ClassificationQueryPreparation} from './classification-route-guard.ts';
+import type{RegisteredAliasExpansion}from'./content-taxonomy-registry.ts';
+import{recallClassificationWitnesses}from'./classification-witness-recall.ts';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
@@ -59,12 +61,34 @@ export function documentSearchText(value:string):string {
 export function documentSearchTerms(query:string):{normalized:string;words:string[]}{
   const normalized=documentSearchText(query).slice(0,4000);
   const formulaQuery=/[\\^_=∫∑√]/u.test(query);
+  return{normalized,words:documentSearchWords(normalized,formulaQuery).slice(0,40)};
+}
+function documentSearchWords(normalized:string,formulaQuery:boolean){
   const words=[...new Set(normalized.split(' ').filter(word=>word.length>=(formulaQuery?1:2)&&
-    (formulaQuery||!queryStopWords.has(word))))].slice(0,40);
+    (formulaQuery||!queryStopWords.has(word))))];
   // A query made entirely of short variables/numbers must still reach search.
   if(!words.length)words.push(...[...new Set(normalized.split(' ').filter(word=>
-    word.length===1&&!queryStopWords.has(word)))].slice(0,40));
-  return {normalized,words};
+    word.length===1&&!queryStopWords.has(word)))]);
+  return words;
+}
+/** Retrieval hints only. Preserve every original meaningful term; limits
+ * reject the expansion rather than silently slicing either language. */
+export function prepareClassificationQuery(query:string,aliases:RegisteredAliasExpansion|undefined):ClassificationQueryPreparation{
+ const original=documentSearchTerms(query),unchanged={query,broadQuery:documentBroadSearchQuery(original.words)};
+ if(!aliases)return unchanged;
+ const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),base={policy:'registered-alias-lexical-v1' as const,
+  taxonomyRevisionId:aliases.taxonomyRevisionId,aliasSetSha256:aliases.aliasSetSha256,originalQuerySha256:sha(query),
+  originalTermCount:original.words.length};
+ const stop=(status:'unavailable'|'unchanged',reason:string):ClassificationQueryPreparation=>({...unchanged,
+  expansion:{...base,status,reason,effectiveQuerySha256:sha(query),expandedTermCount:original.words.length,addedTerms:[]}});
+ if(aliases.status!=='ready')return stop('unavailable',aliases.reason);
+ if(original.words.some(w=>!/^[\p{L}\p{N}]+$/u.test(w)))return stop('unavailable','original-term-boundary');
+ const normalized=aliases.phrases.map(documentSearchText).join(' '),aliasWords=documentSearchWords(normalized,/[\\^_=∫∑√]/u.test(query));
+ if(normalized.length>4000||aliasWords.length>40)return stop('unavailable','alias-term-capacity');
+ const addedTerms=aliasWords.filter(w=>!original.words.includes(w));if(!addedTerms.length)return stop('unchanged','no-new-terms');
+ const words=[...original.words,...addedTerms];
+ return{query,terms:words,broadQuery:documentBroadSearchQuery(words),expansion:{...base,status:'expanded',reason:'registered-aliases',
+  effectiveQuerySha256:sha(words.join(' ')),expandedTermCount:words.length,addedTerms}};
 }
 
 export function splitDocumentText(text:string):string[] {
@@ -137,7 +161,7 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   refinement_mode?:'adjacent-pages'|'no-new-neighbors';refinement_candidate_count?:number;
   refined_from?:Array<{document_id:string;page_number:number;source_version_id:string;evidence_id:string}>;
   refinement_seeds?:Array<{document_id:string;page_number:number;source_version_id:string;evidence_id:string}>;
-  retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+  retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback'|'classification-witness';degraded_reason?:string};
 
 export type DocumentSearchOptions={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;sourceHint?:DocumentSourceHint;
  limit?:number;strict?:boolean;semantic?:boolean;aiRerank?:boolean;hybrid?:boolean;relatedDocuments?:boolean;
@@ -227,6 +251,9 @@ function rankingFailure(error:unknown):string{
 }
 
 const classificationShadowActive=Symbol('classification-shadow-active');
+// Internal prepared terms cannot be supplied through a JSON request. Keep the
+// original question/reference query intact while bounding lexical work to80.
+const classificationQueryWords=Symbol('classification-query-words');
 export const documentBroadSearchQuery=(words:readonly string[])=>words.map(word=>`"${word}"`).join(' OR ');
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
   const tagMode=contentTagRoutingMode();
@@ -237,12 +264,22 @@ export async function searchDocumentText(pool:Pool,owner:string,query:string,opt
    !options.strict&&!options.documentId&&!options.sourceHint&&options.semantic===false&&options.hybrid===false&&options.aiRerank===false&&
    (options.relatedDocuments===false||options.relatedDocuments===true)&&options.refineAdjacent===false){
     const limit=Math.max(1,Math.min(240,options.limit||30)),guarded=await runGuardedClassification<DocumentTextHit,DocumentSearchOptions>(pool,owner,query,options,
-     {broadQuery:documentBroadSearchQuery(documentSearchTerms(query).words),limit,...(options.relatedDocuments?{expand:async(db:Pool,base:DocumentTextHit[])=>{
+     {broadQuery:documentBroadSearchQuery(documentSearchTerms(query).words),limit,prepareQuery:plan=>prepareClassificationQuery(query,plan.aliasExpansion),
+      recall:async(db,plan,ordinary)=>{
+       const recalled=await recallClassificationWitnesses(db,owner,options,plan,ordinary,limit,options.evidenceBody==='full-page');
+       if(options.relatedDocuments&&recalled.receipt.witnessOnlyPages){
+        const expanded=await recallReferencedDocuments(db,owner,query,recalled.hits,limit,options.courseId,options.routingScope);
+        recalled.hits=options.evidenceBody==='full-page'?await readFullDocumentEvidence(db,owner,expanded):expanded;
+        recalled.receipt.referencesExpanded=true;
+       }
+       return recalled;
+      },
+      ...(options.relatedDocuments?{expand:async(db:Pool,base:DocumentTextHit[])=>{
       const expanded=await recallReferencedDocuments(db,owner,query,base,limit,options.courseId,options.routingScope);
       return options.evidenceBody==='full-page'?readFullDocumentEvidence(db,owner,expanded):expanded;
      }}:{})},
-     (db,scoped,phase)=>searchDocumentText(db,owner,query,{...scoped,...(phase==='branch'&&options.relatedDocuments?{relatedDocuments:false,evidenceBody:'snippet' as const}:{}),
-      [classificationShadowActive]:true} as DocumentSearchOptions));
+     (db,scoped,phase,prepared)=>searchDocumentText(db,owner,prepared.query,{...scoped,...(phase==='branch'&&options.relatedDocuments?{relatedDocuments:false,evidenceBody:'snippet' as const}:{}),
+      [classificationShadowActive]:true,...(prepared.terms?{[classificationQueryWords]:prepared.terms}:{})} as DocumentSearchOptions));
     await assertDocumentRoutingScope(pool,owner,guarded.map(h=>h.document_id),options);return guarded;
   }
   if(tagMode==='classification-shadow-v1'&&!(options as DocumentSearchOptions&{[classificationShadowActive]?:boolean})[classificationShadowActive]&&
@@ -286,7 +323,10 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       throw new DocumentSourceResolutionError('DOCUMENT_SOURCE_CHANGED','Returned evidence differs from the current selected source',current);
     return hits.map(hit=>({...hit,retrieval_scope:'selected-title-scoped' as const}));
   }
-  const {normalized,words}=documentSearchTerms(query);
+  const original=documentSearchTerms(query),normalized=original.normalized,
+    offered=(options as DocumentSearchOptions&{[classificationQueryWords]?:string[]})[classificationQueryWords],words=offered??original.words;
+  if(offered&&(!Array.isArray(offered)||offered.length>80||new Set(offered).size!==offered.length||
+    offered.some(w=>typeof w!=='string'||!/^[\p{L}\p{N}]+$/u.test(w))||original.words.some(w=>!offered.includes(w))))throw Error('Invalid prepared classification query');
   if(!words.length)return [];
   const limit=Math.max(1,Math.min(240,options.limit||30));
   const aiRerank=Boolean((options.aiRerank??(process.env.KERNEL_DOCUMENT_RERANK==='true'))&&!options.strict);

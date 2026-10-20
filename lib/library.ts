@@ -9,7 +9,7 @@ import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parse
 import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
 import {queueIngestionJob,doclingStageBlobHashes} from './kernel/jobs.ts';
 import {kernel} from './kernel/service.ts';
-import {documentSearchText,splitDocumentText} from './kernel/document-search.ts';
+import {documentSearchText,splitDocumentText,type DocumentTextHit} from './kernel/document-search.ts';
 import {DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
 import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
 export {EMBED_MODEL};
@@ -198,8 +198,8 @@ function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return A
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
 type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;hybrid?:boolean;onTiming?:(detail:SearchTiming)=>void};
-export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
-type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:DocumentTextHit['retrieval_mode'];degraded_reason?:string};
+type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;parser_version?:string;parser_warnings?:string[];retrieval_mode?:DocumentTextHit['retrieval_mode'];degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   let contentIdentifiers:string[]=[];
   if(!course){

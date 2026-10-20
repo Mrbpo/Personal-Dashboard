@@ -4,23 +4,26 @@ import {contentTagQueryPlan} from './content-tag-routing.ts';
 import {validateStoredContentClassification} from './content-classifications.ts';
 import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import {CONTENT_METADATA_CATALOG_VERSION,CONTENT_METADATA_CATALOG_SHA256,literalTaxonomyMention}from'./content-taxonomy.ts';
-import {readContentTaxonomy,contentTaxonomyQueryHints}from'./content-taxonomy-registry.ts';
+import {readContentTaxonomy,contentTaxonomyQueryHints,contentTaxonomyQueryAliases,type RegisteredAliasExpansion}from'./content-taxonomy-registry.ts';
 
 const normalize=(s:string)=>s.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu,' '),
  sha=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
 export const literalClassificationMention=literalTaxonomyMention;
 type Scope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
 type Plan={status:'candidate'|'broad';reason:string;documentIds:string[];classificationIds:string[];querySha256:string;
- catalogVersion:string;catalogSha256:string;taxonomyRevisionId:string|null};
+ catalogVersion:string;catalogSha256:string;taxonomyRevisionId:string|null;aliasExpansion?:RegisteredAliasExpansion};
 
 /** Read current classification metadata only, never original bodies/vectors.
  * Literal hints propose an experimental branch, not permission to exclude. */
 export async function planClassificationBranch(pool:Pool,owner:string,query:string,scope:Scope):Promise<Plan>{
  if(typeof query!=='string'||!query.trim()||query.length>16000||!owner?.trim())throw Error('Invalid classification routing query');
  let taxonomy:Awaited<ReturnType<typeof readContentTaxonomy>>=null;
+ let aliasExpansion:RegisteredAliasExpansion|undefined;
  const result=(status:Plan['status'],reason:string,documentIds:string[]=[],classificationIds:string[]=[]):Plan=>({status,reason,documentIds,classificationIds,querySha256:sha(query),
-   catalogVersion:CONTENT_METADATA_CATALOG_VERSION,catalogSha256:CONTENT_METADATA_CATALOG_SHA256,taxonomyRevisionId:taxonomy?.revisionId??null});
+   catalogVersion:CONTENT_METADATA_CATALOG_VERSION,catalogSha256:CONTENT_METADATA_CATALOG_SHA256,taxonomyRevisionId:taxonomy?.revisionId??null,
+   ...(aliasExpansion?{aliasExpansion}:{})});
  try{taxonomy=await readContentTaxonomy(pool,owner);}catch{return result('broad','invalid-taxonomy');}
+ if(taxonomy)aliasExpansion=contentTaxonomyQueryAliases(query,taxonomy);
  const hints=[...contentTagQueryPlan(query).hints,...(taxonomy?contentTaxonomyQueryHints(query,taxonomy):[])].map(({facet,key})=>({facet,key})),normalized=normalize(query),
   args:unknown[]=[owner,normalized,JSON.stringify(hints),scope.courseId||null,scope.documentId||null,taxonomy===null],where=documentRoutingScopeSql(scope.routingScope,args);
  const rows=(await pool.query<Record<string,unknown>>(`/* classifications:shadow-plan */ SELECT r.* FROM document_content_classification_heads h

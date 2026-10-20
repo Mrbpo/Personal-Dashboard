@@ -69,3 +69,17 @@ export function contentTaxonomyQueryHints(query:string,taxonomy:NonNullable<Awai
   return aliases.length?[{facet:e.facet,key:e.key,aliases,taxonomyRevisionId:taxonomy.revisionId}]:[];
  });
 }
+export type RegisteredAliasExpansion={taxonomyRevisionId:string;status:'ready'|'unavailable';reason:string;phrases:string[];aliasSetSha256:string;omittedAmbiguousAliases:number;
+ matches:Array<{facet:'topic'|'chapter';key:string}>};
+export function contentTaxonomyQueryAliases(query:string,taxonomy:NonNullable<Awaited<ReturnType<typeof readContentTaxonomy>>>):RegisteredAliasExpansion|undefined{
+ const matches=contentTaxonomyQueryHints(query,taxonomy);
+ if(!matches.length)return undefined;
+ const selected=new Set(matches.map(m=>canonical([m.facet,m.key]))),owners=new Map<string,Set<string>>();
+ for(const e of taxonomy.entries)for(const phrase of[e.key,...e.aliases]){const key=normalize(phrase),set=owners.get(key)??new Set<string>();set.add(canonical([e.facet,e.key]));owners.set(key,set);}
+ const offered=[...new Set(taxonomy.entries.filter(e=>selected.has(canonical([e.facet,e.key]))).flatMap(e=>[e.key,...e.aliases]))],
+  omitted=offered.filter(p=>!literalTaxonomyMention(query,p)&&[...owners.get(normalize(p))!].some(o=>!selected.has(o))),
+  phrases=offered.filter(p=>!omitted.includes(p)),aliasSetSha256=hash({taxonomyRevisionId:taxonomy.revisionId,phrases,omitted}),
+  bounded=phrases.length<=64&&Buffer.byteLength(JSON.stringify(phrases))<=4096;
+ return{taxonomyRevisionId:taxonomy.revisionId,status:bounded?'ready':'unavailable',reason:bounded?'registered-aliases':'alias-capacity',phrases:bounded?phrases:[],aliasSetSha256,
+  omittedAmbiguousAliases:omitted.length,matches:matches.map(({facet,key})=>({facet,key}))};
+}

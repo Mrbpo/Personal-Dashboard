@@ -388,3 +388,56 @@ Within each original eight-candidate rank window, matching candidates precede no
 This is a limited category/source priority step, not full semantic classification, a hard prefilter or proof of fewer files scored. Metadata lookup adds work; file/page scoring counts and model-input capacity are unchanged. Wrong tags can still affect ordering or final top-k relevance, and missing tags cannot help documents outside the original candidate pool. Same-corpus recall, answer/citation correctness and performance require real HTTP comparisons before adoption. No production toggle, library backfill or new content score is implied. Topic/chapter/assignment inference, correction administration and adaptive scoped routing remain open.
 
 Kernel captures the ranked reader's returned anchors after its normal source recheck. The two existing HTTP send paths persist this diagnostic as `answer.meta.study.contentTagRouting` when routed anchors exist. The observation identifies source/page/evidence bindings and the original candidate-pool receipts; `scope=ranked-reader-returned-anchors-only` explicitly distinguishes the returned anchor subset from the whole pool and corpus. Pool size is not the number of files scored, and `eligibleCorpusDocuments`/`scoredDocuments` remain null. Expansion sources and neighbors without a routing receipt are not retroactively assigned one. Nothing is added to generation inputs, citations or canonical facts. No routed anchors means the optional field is absent, retaining the old response shape.
+
+## Registered aliases and source-witness recall
+
+The opt-in `classification-guarded-lexical-v1` route now carries the current
+registered topic/chapter aliases into actual lexical retrieval, rather than only
+using them to propose a document branch. The original question is unchanged.
+The existing first 40 original search terms are retained, with at most 40 added
+alias terms (80 total). Alias sets exceeding 64 phrases, 4096 JSON bytes or the
+term capacity are rejected as a whole; diagnostics explain the fallback. A clear
+concept does not introduce an alternate acronym shared by an unmatched concept.
+An actually ambiguous query retains both registered meanings. Withdrawal of the
+current vocabulary removes its expansion without changing historical revisions.
+
+The independent index-membership gate, branch proof and ordinary lexical search
+use the same expanded terms within the existing repeatable-read transaction.
+Untagged matching documents outside a proposed branch force broad lexical
+retrieval. This gate proves index membership, not semantic relevance or completeness.
+
+Some original fragments contain abbreviations absent from the vocabulary. A
+second bounded lane can therefore locate original pages from current registered
+fragment classifications even when lexical recall is empty. It checks ownership,
+visibility, logical-source currency, version/hash, evidence ID, exact UTF-16
+fragment text and text/body digests. It returns unchanged original evidence,
+never labels or aliases as quotations. Classification reads can add body reads;
+the earlier no-body-read claim applies only to the lexical index gate.
+
+This lane checks at most 32 distinct pages (with a 33rd detecting overflow) and
+uses existing RRF60 fusion with ordinary lexical results. The ordinary and
+witness heads are retained when two slots are available; one slot retains the
+ordinary head. The existing final limit still truncates the remaining ranks.
+Selection is deterministic by source identity, not a new semantic ranking model.
+Overflow or invalid witnesses is partial coverage, not proof of exhaustive recall.
+Capacity fallback in the branch planner does not disable this bounded recall lane.
+Optional recall SQL errors roll back to a savepoint and retain ordinary results.
+Related-document expansion reuses the existing reader under the original scope.
+
+Witness-only hits carry `retrieval_mode=classification-witness`, lexical support
+zero, and `semanticVerified=false`. Wrong classifications can offer irrelevant
+original text and change the finite final context; they cannot certify relevance
+or justify an answer. Receipts distinguish the original lexical effect from
+`source-witness-augmented` and record candidate/witness-only pages, partial
+coverage, taxonomy/classification IDs and query-expansion identity. Receipts are
+still per-hit: an empty result can omit these diagnostics.
+
+The route remains default off and limited to explicitly lexical, non-strict
+requests with adjacent expansion disabled. Semantic/hybrid/AI and legacy
+`documentId`/resolved-source paths retain their prior behavior; modern explicit
+`routingScope.documentIds` is supported. No new model, embedding, backfill or
+production change is included. A read-only regression recovered one unchanged
+English excerpt for a Chinese query (0 to 1 hit), not a full-PDF, large-library,
+website-answer or final independent-group acceptance result. Large-corpus
+semantic recall, real HTTP answer/citation quality and actual cost/latency savings
+remain to be verified on frozen configurations.
