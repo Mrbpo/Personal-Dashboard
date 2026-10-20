@@ -441,3 +441,19 @@ English excerpt for a Chinese query (0 to 1 hit), not a full-PDF, large-library,
 website-answer or final independent-group acceptance result. Large-corpus
 semantic recall, real HTTP answer/citation quality and actual cost/latency savings
 remain to be verified on frozen configurations.
+
+## Indexed classification candidate lookup
+
+Literal registered `(facet, key)` hints use JSON containment against the existing
+`document_content_classification_tags` GIN index. Matching revision IDs are
+deduplicated before loading their full payloads through primary-key lookups.
+Current classification heads, source versions, ownership and explicit scope
+remain required, and every selected payload still passes its digest validator.
+The previous unregistered-topic substring proposal path remains available.
+
+This changes classification metadata lookup, not tag meaning, candidate limits,
+the independent FTS coverage guard, document scoring, source-witness recovery or
+answer generation. The optimizer chooses the actual plan; index availability
+alone is not proof of reduced work. An isolated 5,001-revision synthetic fixture
+and two real-source candidate comparisons are engineering evidence, not a large
+document-library answer test, website latency claim or production rollout.

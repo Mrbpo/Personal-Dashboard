@@ -26,15 +26,25 @@ export async function planClassificationBranch(pool:Pool,owner:string,query:stri
  if(taxonomy)aliasExpansion=contentTaxonomyQueryAliases(query,taxonomy);
  const hints=[...contentTagQueryPlan(query).hints,...(taxonomy?contentTaxonomyQueryHints(query,taxonomy):[])].map(({facet,key})=>({facet,key})),normalized=normalize(query),
   args:unknown[]=[owner,normalized,JSON.stringify(hints),scope.courseId||null,scope.documentId||null,taxonomy===null],where=documentRoutingScopeSql(scope.routingScope,args);
- const rows=(await pool.query<Record<string,unknown>>(`/* classifications:shadow-plan */ SELECT r.* FROM document_content_classification_heads h
-  JOIN document_content_classifications r ON r.id=h.classification_id AND r.owner_id=h.owner_id AND r.version_id=h.version_id AND r.classifier_id=h.classifier_id
+ // Indexable containment uses the existing assignments GIN index. Union IDs
+ // before reading full records: repeated aliases must not consume the limit.
+ // Unregistered topic literals keep their previous substring candidate path.
+ const rows=(await pool.query<Record<string,unknown>>(`/* classifications:shadow-plan */
+  WITH matched AS MATERIALIZED (
+   SELECT c.id FROM jsonb_to_recordset($3::jsonb) AS hint(facet text,key text)
+    JOIN document_content_classifications c ON c.owner_id=$1
+     AND c.assignments @> jsonb_build_array(jsonb_build_object('facet',hint.facet,'key',hint.key))
+   UNION
+   SELECT c.id FROM document_content_classifications c WHERE $6::boolean AND c.owner_id=$1
+    AND EXISTS(SELECT 1 FROM jsonb_array_elements(c.assignments) a WHERE
+     a->>'facet' IN ('topic','chapter') AND length(a->>'key')>0 AND strpos($2,a->>'key')>0))
+  SELECT r.* FROM matched m
+  JOIN LATERAL (SELECT r.* FROM document_content_classifications r WHERE r.id=m.id LIMIT 1) r ON true
+  JOIN document_content_classification_heads h ON r.id=h.classification_id AND r.owner_id=h.owner_id AND r.version_id=h.version_id AND r.classifier_id=h.classifier_id
   JOIN document_texts d ON d.id=r.document_id AND d.owner_id=r.owner_id AND d.current_version_id=r.version_id AND d.source_hash=r.source_hash
   WHERE d.owner_id=$1 AND NOT d.hidden AND ($4::text IS NULL OR d.course_id=$4) AND ($5::text IS NULL OR d.id=$5) ${where}
    AND NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key
     AND NOT newer.hidden AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
-   AND EXISTS(SELECT 1 FROM jsonb_array_elements(r.assignments) a WHERE
-    ($6::boolean AND a->>'facet' IN ('topic','chapter') AND length(a->>'key')>0 AND strpos($2,a->>'key')>0)
-    OR EXISTS(SELECT 1 FROM jsonb_to_recordset($3::jsonb) AS hint(facet text,key text) WHERE a->>'facet'=hint.facet AND a->>'key'=hint.key))
   ORDER BY r.id LIMIT 257`,args)).rows;
  if(rows.length>256)return result('broad','classification-capacity');
  const matched=[];

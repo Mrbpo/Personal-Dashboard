@@ -13,6 +13,31 @@ test('literal classification mentions normalize text, preserve word boundaries a
  assert.equal(literalClassificationMention('请解释贝叶斯推断的用途','贝叶斯推断'),true);
  assert.throws(()=>validateStoredContentClassification({}));
 });
+
+test('indexed registered hints deduplicate matching revisions and retain current, owner and explicit-source boundaries',{skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const uid=randomUUID(),owner='indexed:'+uid;
+ await kernel.recordContentTaxonomy(owner,{previousId:null,entries:[{facet:'topic',key:'probability',aliases:['Probability','概率']}]},'test-admin','Isolated indexed planner fixture');
+ const add=async(name:string,origin:string,sourceOwner=owner)=>{
+  const doc={id:hash(uid+name),ownerId:sourceOwner,courseId:'',name:name+'.txt',hash:hash('raw'+uid+name),mime:'text/plain',origin,originKey:uid+name};
+  await kernel.ingestParsedDocument(doc,[{pageNumber:1,locator:'p1',text:'Probability notes.'}],{parserVersion:'indexed-fixture'});
+  const row=(await kernelPool().query('SELECT d.current_version_id,v.source_version_id FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id WHERE d.id=$1',[doc.id])).rows[0];
+  return{doc,row};
+ };
+ const a=await add('Lecture','canvas'),b=await add('Discussion','piazza'),foreign=await add('Other','canvas','foreign:'+uid);
+ const put=async(source:typeof a,classifierId:string,previousId:string|null=null,keys=['probability'])=>kernel.recordDocumentClassification(source.doc.ownerId,
+  {documentId:source.doc.id,versionId:source.row.current_version_id,sourceVersionId:source.row.source_version_id,sourceHash:source.doc.hash,
+   classifierId,producerVersion:'v1',method:'manual',model:null,previousId,
+   tags:keys.map(key=>({facet:'topic',key,confidence:1,evidence:{kind:'human-judgment'}}))},'test-admin','Indexed planner fixture');
+ const old=await put(a,'indexed/withdrawn');await put(a,'indexed/withdrawn',old.id,[]);
+ const current=await Promise.all([put(a,'indexed/one'),put(a,'indexed/two'),put(b,'indexed/one'),put(foreign,'indexed/one')]);
+ const plan=await planClassificationBranch(kernelPool(),owner,'Probability 概率 lecture',{});
+ assert.equal(plan.status,'candidate');assert.deepEqual(plan.documentIds,[a.doc.id,b.doc.id].sort());
+ assert.deepEqual(plan.classificationIds,current.slice(0,3).map(r=>r.id).sort(),'Repeated aliases must not duplicate a revision or resurrect withdrawn heads');
+ const scoped=await planClassificationBranch(kernelPool(),owner,'概率',{routingScope:{origins:['canvas']}});
+ assert.deepEqual(scoped.documentIds,[a.doc.id]);assert.deepEqual(scoped.classificationIds,current.slice(0,2).map(r=>r.id).sort());
+ await kernelPool().query(`UPDATE document_content_classifications SET assignments=jsonb_set(assignments,'{0,confidence}','0.5') WHERE id=$1`,[current[0].id]);
+ assert.equal((await planClassificationBranch(kernelPool(),owner,'概率',{})).reason,'invalid-classification','Containment never replaces stored-payload validation');
+});
 test('shadow observes wrong/unclassified losses without changing returned evidence or escaping explicit scope',{skip:!process.env.KERNEL_DATABASE_URL},async()=>{
  await migrateKernel();const uid=randomUUID(),owner='shadow:'+uid,env=process.env.KERNEL_CONTENT_TAG_ROUTING,docs:Record<string,any>={};
  const put=async(name:string,origin:string,tag?:string,otherOwner=owner)=>{
