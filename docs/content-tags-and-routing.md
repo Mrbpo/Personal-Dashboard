@@ -91,7 +91,42 @@ Before automatically applying a code-derived scope, Kernel checks for a current 
 
 The successful reply/user metadata records the course decision and whether it was applied or broadened. Tags and history remain query context, not answer evidence. This slice has no model classification, bulk backfill, production toggle or new network service. Independent HTTP content/recall/performance acceptance is still required.
 
-## Opt-in soft metadata priority within the existing candidate pool
+## Classification preselection comparison, not an active final filter
+
+`KERNEL_CONTENT_TAG_ROUTING=classification-shadow-v1` proposes a document scope
+before lexical scoring using current classification revisions. It reuses the
+controlled source/type query aliases and literal topic/chapter keys. This does not
+provide general topic synonym resolution, exclusion interpretation or semantic
+classification. It reads bounded classification metadata and existing explicit
+scope predicates; it does not load every document body/vector to classify them.
+Stored revision/input/assignment digests and fragment scopes are validated before
+use. Old, hidden, superseded and foreign sources cannot propose current candidates.
+
+Only explicitly lexical (`semantic=false`, `hybrid=false`, `aiRerank=false`)
+non-strict requests without a resolved document/source hint enter the comparison.
+The existing baseline and the proposed branch both run, under the same owner,
+course/source/term restrictions. Recursive calls do not replan. Capacity overflow,
+invalid revisions or no literal labels retain broad search. Branch errors do not
+replace the successful baseline. Indexed fragments select candidate files for this
+experiment; their classifications remain fragment-scoped, unverified observations.
+
+**Only the baseline is returned. This mode saves no total request work and is not
+a production prefilter.** Wrong and absent tags can lose evidence even when the
+branch returns plausible results. Per-hit `classification_route_shadow` records
+the proposed source/revision IDs, reason, whether the branch ran, returned counts
+and the number of baseline evidence tuples absent from the branch. These are not
+Gold recall or numbers of files scored (`scoredDocuments=null`). If no branch ran,
+its counts/loss are null. Kernel forwards only optional diagnostics to the existing
+reply metadata as `study.classificationRouting`; tag labels never become answer
+evidence, canonical state, or source citations.
+
+Default off and the existing metadata-priority behavior are unchanged. Enabling
+this test mode needs migration016 in that isolated database; no existing server
+corpus or production migration is implied. Controlled topic vocabulary, automatic
+classification, recovery policy and final branch adoption remain open and need
+real corpus/HTTP recall, answer, citation and refusal validation.
+
+## Existing metadata candidate priority
 
 `KERNEL_CONTENT_TAG_ROUTING=metadata-priority-v1` consumes current `source-metadata-rules-v1` tag snapshots in shared Kernel retrieval. Default `off` preserves the old ordering and makes no tag query. Controlled English/Chinese aliases map literal mentions of document types and sources to existing taxonomy keys; they do not classify arbitrary topics or interpret source exclusions as permission to filter. Queries without aliases and strict lexical search retain their existing path.
 

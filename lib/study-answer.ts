@@ -212,6 +212,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     providerResponseId:result.providerResponseId,usage:result.usage,
     contextExpansion:result.contextExpansion,
     ...('contentTagRouting' in result&&result.contentTagRouting?{contentTagRouting:result.contentTagRouting}:{}),
+    ...('classificationRouting' in result&&result.classificationRouting?{classificationRouting:result.classificationRouting}:{}),
     ...('sourceIdentityContext' in result&&result.sourceIdentityContext?{sourceIdentityContext:result.sourceIdentityContext}:{}),
     ...('sourceNavigation' in result?{sourceNavigation:result.sourceNavigation}:{}),
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),

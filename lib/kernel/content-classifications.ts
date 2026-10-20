@@ -51,6 +51,34 @@ const currentSource=`NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.o
  AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
  AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))`;
 
+/** Check an immutable revision before allowing it to influence an index.
+ * Source identity is rechecked by its reader; a digest is not semantic proof. */
+export function validateStoredContentClassification(row:Record<string,unknown>){
+ if(!text(row.owner_id)||!text(row.actor,240)||!text(row.reason,2000)||row.taxonomy_version!==CONTENT_TAG_TAXONOMY||
+  row.filter_authorization!==false||row.semantic_verified!==false||row.coverage!=='explicit-scopes-only'||!Array.isArray(row.assignments))
+  throw Error('Invalid stored classification');
+ const tags=row.assignments.map((value:unknown)=>{
+  if(!exact(value,['facet','key','confidence','scope','witness','routingUse','semanticVerified']))throw Error('Invalid stored assignment');
+  const a=value as Record<string,unknown>,w=a.witness as Record<string,unknown>;
+  if(!w||a.routingUse!=='soft-only'||a.semanticVerified!==false)throw Error('Invalid assignment authority');
+  let evidence:unknown,scope:unknown;
+  if(w.kind==='page'){
+   if(!exact(w,['kind','pageNumber','evidenceId','startUtf16','endUtf16','text','bodySha256','textSha256'])||!hex(w.bodySha256)||
+    typeof w.text!=='string'||w.textSha256!==shaText(w.text))throw Error('Invalid stored page witness');
+   const {bodySha256,textSha256,...original}=w;evidence=original;
+   scope={kind:'fragment',pageNumber:w.pageNumber,startUtf16:w.startUtf16,endUtf16:w.endUtf16};
+  }else{evidence=w;scope={kind:'document'};}
+  if(canonical(scope)!==canonical(a.scope))throw Error('Classification scope was widened');
+  return {facet:a.facet,key:a.key,confidence:a.confidence,evidence};
+ });
+ const request=validateContentClassification({documentId:row.document_id,versionId:row.version_id,sourceVersionId:row.source_version_id,
+  sourceHash:row.source_hash,classifierId:row.classifier_id,producerVersion:row.producer_version,method:row.method,model:row.model,previousId:row.previous_id,tags});
+ const expected=sha({owner:row.owner_id,taxonomy:CONTENT_TAG_TAXONOMY,request,assignments:row.assignments,actor:row.actor,reason:row.reason});
+ if(row.id!==expected||row.payload_sha256!==expected||row.input_sha256!==sha(request)||
+  canonical(row.unknown_facets)!==canonical(CONTENT_TAG_FACETS.filter(f=>!request.tags.some(t=>t.facet===f))))throw Error('Classification digest differs');
+ return request;
+}
+
 /** The caller owns the short Kernel transaction. Fetch/AI/classification runs
  * outside it. Serialize with ingestion on the current document; never rebase. */
 export async function recordContentClassification(client:PoolClient,owner:string,input:unknown,actor:string,reason:string){

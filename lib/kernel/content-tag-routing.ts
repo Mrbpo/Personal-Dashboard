@@ -26,7 +26,7 @@ const sha=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('he
 
 export function contentTagRoutingMode(){
  const mode=process.env.KERNEL_CONTENT_TAG_ROUTING??'off';
- if(mode!=='off'&&mode!=='metadata-priority-v1')throw Error('Invalid KERNEL_CONTENT_TAG_ROUTING');
+ if(!['off','metadata-priority-v1','classification-shadow-v1'].includes(mode))throw Error('Invalid KERNEL_CONTENT_TAG_ROUTING');
  return mode;
 }
 
@@ -92,7 +92,7 @@ type CurrentRow=Candidate&{tag_sets:Snapshot[]};
  * source-head and page identity checks as retrieval. Does not read vectors/body,
  * filter the corpus, create classifications or call a provider. */
 export async function routeDocumentContentTagCandidates<T extends Candidate>(pool:Pool,owner:string,question:string,candidates:T[]):Promise<T[]>{
- if(contentTagRoutingMode()==='off'||!candidates.length)return candidates;
+ if(contentTagRoutingMode()!=='metadata-priority-v1'||!candidates.length)return candidates;
  const plan=contentTagQueryPlan(question);if(!plan.hints.length)return candidates;
  if(candidates.length>240||new Set(candidates.map(candidateKey)).size!==candidates.length)throw Error('Invalid content tag candidate pool');
  const rows=(await pool.query<CurrentRow>(`/* content-tags:candidate-priority */

@@ -2,6 +2,7 @@ import type { Pool } from 'pg';
 import {createHash} from 'node:crypto';
 import {normalizeDocumentRoutingScope,documentRoutingScopeSql,assertDocumentRoutingScope,type DocumentRoutingScope} from './document-routing-scope.ts';
 import {contentTagRoutingMode,routeDocumentContentTagCandidates,type ContentTagRoutingReceipt} from './content-tag-routing.ts';
+import {runClassificationShadow,type ClassificationRouteShadow} from './classification-route-shadow.ts';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
 import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
@@ -128,6 +129,7 @@ export type DocumentTextHit={id:string;document_id:string;course_id:string;name:
   retrieval_hint?:ReturnType<typeof documentOrigSearchMetadata>;
   retrieval_scope?:'selected-title-scoped';
   content_tag_routing?:ContentTagRoutingReceipt;
+  classification_route_shadow?:ClassificationRouteShadow;
   rerank_model?:'gpt-5-mini'|'gpt-6-astra';rerank_reasoning_effort?:'low'|'medium'|'high'|'xhigh'|'max';
   rerank_max_output_tokens?:number;
   refinement_mode?:'adjacent-pages'|'no-new-neighbors';refinement_candidate_count?:number;
@@ -222,9 +224,13 @@ function rankingFailure(error:unknown):string{
   return 'unavailable';
 }
 
+const classificationShadowActive=Symbol('classification-shadow-active');
 export async function searchDocumentText(pool:Pool,owner:string,query:string,options:DocumentSearchOptions={}):Promise<DocumentTextHit[]> {
-  contentTagRoutingMode();
+  const tagMode=contentTagRoutingMode();
   options={...options,routingScope:normalizeDocumentRoutingScope(options.routingScope)};
+  if(tagMode==='classification-shadow-v1'&&!(options as DocumentSearchOptions&{[classificationShadowActive]?:boolean})[classificationShadowActive]&&
+   !options.strict&&!options.documentId&&!options.sourceHint&&options.semantic===false&&options.hybrid===false&&options.aiRerank===false)
+    return runClassificationShadow(pool,owner,query,options,scoped=>searchDocumentText(pool,owner,query,{...scoped,[classificationShadowActive]:true} as DocumentSearchOptions));
   const {evidenceBody,...rankingOptions}=options;
   if(evidenceBody!==undefined&&evidenceBody!=='snippet'&&evidenceBody!=='full-page')
     throw new Error('Invalid document evidence body mode');
