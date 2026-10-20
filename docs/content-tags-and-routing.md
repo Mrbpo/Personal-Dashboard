@@ -126,7 +126,37 @@ corpus or production migration is implied. Controlled topic vocabulary, automati
 classification, recovery policy and final branch adoption remain open and need
 real corpus/HTTP recall, answer, citation and refusal validation.
 
-## Existing metadata candidate priority
+## Guarded lexical candidate route (isolated opt-in)
+
+`KERNEL_CONTENT_TAG_ROUTING=classification-guarded-lexical-v1` can use the proposed
+scope only after an independent full-text-index check finds no matching page
+outside it. It uses the exact shared lexical query expression and original
+owner/current-source/explicit restrictions. Wrong or unclassified matching sources
+therefore trigger original broad retrieval before a branch is used. Label
+confidence does not override this check.
+
+The complete matching page set must also fit within the requested result limit;
+otherwise the original query runs to retain its top-k ranking. The returned branch
+must match the entire bounded source/page/evidence/hash proof, or recover to the
+original query. Check and retrieval share one repeatable-read read-only transaction;
+savepoint rollback permits broad recovery after a branch SQL error.
+
+This gate applies only to explicitly lexical requests with related-document and
+adjacent expansion disabled by the caller. It does not disable those features:
+their requests, semantic/hybrid/AI, strict and named-source reads retain their
+existing paths. Default off. No migration/backfill/production adoption is implied.
+
+The proof covers indexed lexical candidates only, not semantic relevance, parsed
+fidelity or Gold recall. Scoped BM25 scores/order may differ, so narrowing is
+allowed only when all lexical pages fit, with the complete evidence set checked.
+`classification_route_guard` and optional existing reply diagnostics distinguish
+original broad recovery from narrowed retrieval, record reason/proof counts and
+explicitly leave semantic coverage unassessed and total scoring work unknown.
+There is no blanket speedup claim: common terms may correctly force broad search.
+Automatic classification, controlled topic synonyms, semantic/expanded routes and
+real corpus/HTTP answer/citation/refusal acceptance remain open.
+
+## Metadata priority behavior
 
 `KERNEL_CONTENT_TAG_ROUTING=metadata-priority-v1` consumes current `source-metadata-rules-v1` tag snapshots in shared Kernel retrieval. Default `off` preserves the old ordering and makes no tag query. Controlled English/Chinese aliases map literal mentions of document types and sources to existing taxonomy keys; they do not classify arbitrary topics or interpret source exclusions as permission to filter. Queries without aliases and strict lexical search retain their existing path.
 

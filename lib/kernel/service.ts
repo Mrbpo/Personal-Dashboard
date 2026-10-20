@@ -6,6 +6,7 @@ import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadata
 import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
+import {classificationGuardAnswerObservation} from './classification-route-guard.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
@@ -1343,12 +1344,12 @@ export class KernelService {
     const identityCourseCodes=policy.sourceIdentityContext?[...new Set(observeLiteralCourseCodes(question).map(observation=>observation.code))]:undefined;
     const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes);
     let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
-    let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>;
+    let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>|ReturnType<typeof classificationGuardAnswerObservation>;
     let sourceIdentityContext:DocumentAnswerContext['sourceIdentityContext'];
     const rankedRead=async()=>{
       const context=await originalRankedRead();
       contentTagRouting=contentTagAnswerObservation(context.anchors);
-      classificationRouting=classificationShadowAnswerObservation(context.anchors);
+      classificationRouting=classificationGuardAnswerObservation(context.anchors)??classificationShadowAnswerObservation(context.anchors);
       sourceIdentityContext='sourceIdentityContext' in context?context.sourceIdentityContext:undefined;
       return context;
     };

@@ -26,7 +26,7 @@ const sha=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('he
 
 export function contentTagRoutingMode(){
  const mode=process.env.KERNEL_CONTENT_TAG_ROUTING??'off';
- if(!['off','metadata-priority-v1','classification-shadow-v1'].includes(mode))throw Error('Invalid KERNEL_CONTENT_TAG_ROUTING');
+ if(!['off','metadata-priority-v1','classification-shadow-v1','classification-guarded-lexical-v1'].includes(mode))throw Error('Invalid KERNEL_CONTENT_TAG_ROUTING');
  return mode;
 }
 
