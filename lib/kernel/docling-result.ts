@@ -4,6 +4,8 @@ import {DOCLING_SOURCE_MATH_VERSION,doclingMathRaw,type DoclingMathNode,type Doc
 export const DOCLING_PARSER_VERSION = 'docling-v4-list-markers-search';
 export const DOCLING_TEXT_PARSER_VERSION = 'docling-v4-list-markers-text-search';
 export const DOCLING_NUL_PROJECTION_VERSION = 'nul-unknown-v1';
+// Apply the native-artifact bounds before allocating a search-text grid too.
+export const DOCLING_TABLE_GRID_LIMITS=Object.freeze({cells:10000,rows:1000,columns:200});
 export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
 }
@@ -220,17 +222,29 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   function tableText(node: Json, ancestors: Set<string>,reference:string): string {
     const data = object(node.data);
     if (!data) throw new Error('Docling table has no structured data');
-    const cells = list(data.table_cells).map(value => {
+    for(const [key,limit] of [['num_rows',DOCLING_TABLE_GRID_LIMITS.rows],['num_cols',DOCLING_TABLE_GRID_LIMITS.columns]] as const){
+      const declared=data[key];
+      if(declared!==undefined&&(!Number.isSafeInteger(declared)||(declared as number)<1||(declared as number)>limit))
+        throw new Error('Docling table has invalid or oversized declared grid');
+    }
+    const rawCells=list(data.table_cells),starts=new Set<string>();
+    if(rawCells.length>DOCLING_TABLE_GRID_LIMITS.cells)throw new Error('Docling table exceeds cell limit');
+    const cells = rawCells.map(value => {
       const cell = object(value);
-      if (!cell || !Number.isInteger(cell.start_row_offset_idx) || !Number.isInteger(cell.start_col_offset_idx) ||
-          (cell.start_row_offset_idx as number) < 0 || (cell.start_col_offset_idx as number) < 0) {
+      if (!cell || !Number.isSafeInteger(cell.start_row_offset_idx) || !Number.isSafeInteger(cell.start_col_offset_idx) ||
+          (cell.start_row_offset_idx as number) < 0 || (cell.start_col_offset_idx as number) < 0 ||
+          (cell.start_row_offset_idx as number)>=((data.num_rows as number|undefined)??DOCLING_TABLE_GRID_LIMITS.rows) ||
+          (cell.start_col_offset_idx as number)>=((data.num_cols as number|undefined)??DOCLING_TABLE_GRID_LIMITS.columns)) {
         throw new Error('Docling table has invalid cell coordinates');
       }
+      const key=`${cell.start_row_offset_idx}:${cell.start_col_offset_idx}`;
+      if(starts.has(key))throw new Error('Docling table has overlapping cell coordinates');
+      starts.add(key);
       return cell;
     }).sort((a, b) => (a.start_row_offset_idx as number) - (b.start_row_offset_idx as number) || (a.start_col_offset_idx as number) - (b.start_col_offset_idx as number));
     const rows = new Map<number, string[]>();
     const tablePages = new Set(provenance(node).map(location => location.page_no));
-    const cellIndices=new Map(list(data.table_cells).map((cell,index)=>[cell,index]));
+    const cellIndices=new Map(rawCells.map((cell,index)=>[cell,index]));
     const cellTexts:DoclingNativeTable['cellTexts']=[];
     for (const cell of cells) {
       const row = cell.start_row_offset_idx as number;
@@ -240,7 +254,6 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       const original=cellText(cell, ancestors, tablePages);
       cellTexts.push({cellIndex:cellIndices.get(cell)!,text:original});
       const content = original.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
-      if (values[column] && content) throw new Error('Docling table has overlapping cell coordinates');
       values[column] = content;
       rows.set(row, values);
     }

@@ -6,7 +6,7 @@ import {isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {validateAndSerialize} from './visible-table-grid-v1.mjs';
 import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
 import type {DoclingNativeTable} from './docling-result.ts';
-import {decodeDoclingResult} from './docling-result.ts';
+import {decodeDoclingResult,DOCLING_TABLE_GRID_LIMITS} from './docling-result.ts';
 import {prepareNativeCellDeclarations,type NativeCellDeclarations} from './document-native-cells.ts';
 import {readDocumentImages,readDocumentOutline,type DocumentContextSource,type DocumentImageEvidence} from './document-context.ts';
 import {documentSearchText,documentSearchTerms} from './document-search.ts';
@@ -16,7 +16,7 @@ import {DocumentEvidenceChangedError,type DocumentSelectedNodeHit} from './docum
 
 export const NATIVE_TABLE_PRODUCER='docling-native-table-v1';
 export const NATIVE_TABLE_NAMESPACE='table-derived-search-v1';
-export const NATIVE_TABLE_LIMITS=Object.freeze({tables:512,cells:10000,rows:1000,columns:200,bodyBytes:2*1024*1024,supplementalPages:2});
+export const NATIVE_TABLE_LIMITS=Object.freeze({tables:512,...DOCLING_TABLE_GRID_LIMITS,bodyBytes:2*1024*1024,supplementalPages:2});
 export const NATIVE_TABLE_OBSERVATION_LIMITS=Object.freeze({bytes:32*1024,perImage:2});
 const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
 const canonical=(value:unknown):string=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)

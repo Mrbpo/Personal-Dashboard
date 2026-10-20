@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import { decodeDoclingResult, DOCLING_NUL_PROJECTION_VERSION } from '../lib/kernel/docling-result.ts';
 
 const ref = (name: string) => ({$ref: `#/${name}`});
@@ -12,6 +13,70 @@ function result(pages = 1) {
     groups: [] as Record<string, unknown>[], tables: [] as Record<string, unknown>[], pictures: [] as Record<string, unknown>[],
   }}};
 }
+
+function tableResult(data:Record<string,unknown>){
+ const value=result(),doc=value.document.json_content;
+ doc.body.children=[ref('tables/0')];
+ doc.texts=[];
+ doc.tables=[{prov:[{page_no:1}],data}];
+ return value;
+}
+
+test('table projection rejects out-of-grid starts and duplicate starts even when text is empty',()=>{
+ const cell=(text:string,row=0,col=0)=>({text,start_row_offset_idx:row,start_col_offset_idx:col});
+ const cases=[
+  {num_rows:1,num_cols:2,table_cells:[cell('A'),cell('outside',0,3)]},
+  {num_rows:1,num_cols:1,table_cells:[cell('A'),cell('outside',2)]},
+  {num_rows:1,num_cols:1,table_cells:[cell('original'),cell('')]},
+  {num_rows:1,num_cols:1,table_cells:[cell(''),cell('replacement')]},
+ ];
+ for(const data of cases){
+  const value=tableResult(data),before=JSON.stringify(value);
+  assert.throws(()=>decodeDoclingResult(value,1),/invalid cell coordinates|overlapping cell coordinates/);
+  assert.equal(JSON.stringify(value),before,'Conflicting native input is retained, never repaired or overwritten');
+ }
+});
+
+test('valid table projection preserves sparse positions, explicit spans and unknown optional dimensions',()=>{
+ const table_cells=[
+  {text:'merged | heading',start_row_offset_idx:0,start_col_offset_idx:0,row_span:1,col_span:2,end_row_offset_idx:1,end_col_offset_idx:2},
+  {text:'line one\nline two',start_row_offset_idx:1,start_col_offset_idx:1},
+ ];
+ for(const dimensions of [{num_rows:2,num_cols:2},{}]){
+  const value=tableResult({...dimensions,table_cells}),before=JSON.stringify(value);
+  const decoded=decodeDoclingResult(value,1);
+  assert.equal(decoded.pages[0].text,'| merged \\| heading |  |\n|  | line one line two |');
+  assert.deepEqual(decoded.nativeTables[0].cellTexts,[{cellIndex:0,text:'merged | heading'},{cellIndex:1,text:'line one\nline two'}]);
+  assert.equal(JSON.stringify(value),before);
+  assert.deepEqual(decoded.nativeTables[0].raw.data,{...dimensions,table_cells});
+ }
+});
+
+test('oversized table coordinates, declared dimensions and cell counts fail before grid allocation',()=>{
+ // Isolate this regression: even a broken guard cannot exhaust the test runner.
+ const moduleUrl=new URL('../lib/kernel/docling-result.ts',import.meta.url).href;
+ const child=spawnSync(process.execPath,['--max-old-space-size=96','--experimental-strip-types','--input-type=module','-e',`
+  import assert from 'node:assert/strict';
+  import {decodeDoclingResult} from ${JSON.stringify(moduleUrl)};
+  const cell={text:'A',start_row_offset_idx:0,start_col_offset_idx:0};
+  const cases=[
+   {table_cells:[{...cell,start_col_offset_idx:1000000000}]},
+   {table_cells:[{...cell,start_row_offset_idx:1000000000}]},
+   {num_rows:1,num_cols:1000000000,table_cells:[cell]},
+   {num_rows:1000000000,num_cols:1,table_cells:[cell]},
+   {table_cells:Array.from({length:10001},()=>({...cell}))},
+   {num_rows:0,num_cols:1,table_cells:[cell]},
+  ];
+  for(const data of cases){
+   const value={status:'success',document:{json_content:{pages:{1:{page_no:1}},body:{children:[{$ref:'#/tables/0'}]},tables:[{prov:[{page_no:1}],data}]}}};
+   assert.throws(()=>decodeDoclingResult(value,1),/invalid cell coordinates|invalid or oversized declared grid|exceeds cell limit/);
+  }
+  console.log('six bounded failures');
+ `],{encoding:'utf8',timeout:3000,maxBuffer:8192});
+ assert.equal(child.error,undefined);
+ assert.equal(child.status,0,child.stderr);
+ assert.equal(child.stdout.trim(),'six bounded failures');
+});
 
 test('native bibliography marker remains bound to its own source text without changing raw provenance',()=>{
  // Public KALM saved result 6b23b249... /texts/5; local page 1 maps to original page 7.
