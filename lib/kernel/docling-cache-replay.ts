@@ -1,5 +1,8 @@
 import {PDFArray,PDFDocument,PDFName,PDFStream} from 'pdf-lib';
-import {digest,readBlob} from '../library.ts';
+import {digest,readBlob,saveBlob} from '../library.ts';
+import {isDeepStrictEqual} from 'node:util';
+import {nativeWhitespaceMode,nativeWhitespaceFingerprint,prepareNativeWhitespace,withNativeWhitespace,
+ NATIVE_WHITESPACE_VERSION,NATIVE_WHITESPACE_WARNING,type projectNativeWhitespace} from './native-whitespace.ts';
 import {kernelPool} from './db.ts';
 import {kernel} from './service.ts';
 import {validateDoclingProgress,decodeDerivedDoclingResult,type DoclingIdentity,type DoclingProgress} from './docling-batches.ts';
@@ -19,10 +22,13 @@ type Provenance={pageNumber:number;extractionMethod:string;parserVersion:string;
 export type CachedDoclingAudit={schema:1;owner:string;documentId:string;sourceHash:string;expectedCurrentVersion:string;
  decision:'eligible'|'unchanged';pageCount:number;changedPages:number[];warnings:string[];pages:Array<{pageNumber:number;locator:string;text:string}>;
  pageProvenance:Provenance[];document:Document;batchProvenance:DoclingProgress;visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[];
- sourceMath?:PreparedDoclingSourceMath;
+ sourceMath?:PreparedDoclingSourceMath;parserVersion:string;
  visualEvidence:{status:'missing'|'matching'|'layout-changed'|'render-incomplete';manifestSha256:string|null;contentSha256:string|null;layoutSha256:string;
  internalLinks?:'recorded'|'not-recorded'};visualOnly:boolean;reviewHash:string};
 const normalizedWarnings=(warnings:string[])=>[...new Set(warnings.map(w=>w.trim()).filter(Boolean))].sort();
+// Audit output remains serializable/read-only; only a fresh apply can publish
+// these bytes after re-auditing the original source and matching reviewHash.
+const whitespaceReceipts=new WeakMap<CachedDoclingAudit,string>();
 
 /** No remote fallback: missing/corrupt drafts must fail, never request parsing. */
 export async function decodeCachedDoclingReplay(original:Uint8Array,identity:DoclingIdentity,value:unknown,
@@ -108,6 +114,7 @@ export async function decodeCachedDoclingReplay(original:Uint8Array,identity:Doc
 }
 
 export async function auditCachedDoclingReplay(owner:string,documentId:string):Promise<CachedDoclingAudit>{
+ const whitespaceMode=nativeWhitespaceMode();
  if(!owner||!documentId)throw new Error('Cached replay owner and document are required');
  const pool=kernelPool();
  const document=(await pool.query<Document>(`SELECT d.id,d.owner_id,d.course_id,d.name,d.source_hash,d.origin,d.origin_key,d.created_at,v.parser_version,
@@ -129,14 +136,42 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
   throw new Error('Cached replay requires complete raw Docling pages; enhanced/native/manual pages are protected');
  const stored=document.raw_value.batchProvenance as DoclingProgress|undefined;
  if(!stored?.identity)throw new Error('Cached replay has no saved derived batch provenance');
+ const previousWhitespace=nativeWhitespaceFingerprint(stored);
+ if(previousWhitespace&&whitespaceMode==='off')throw Error('Cached replay cannot downgrade a native whitespace derivation while its policy is off');
  const identity={owner,documentId,sourceHash:document.source_hash,totalPages:document.page_count,optionsHash:stored.identity.optionsHash,
   ...(stored.identity.sourceEncodingReceiptHash!==undefined?{sourceEncodingReceiptHash:stored.identity.sourceEncodingReceiptHash}:{})};
- const decoded=await decodeCachedDoclingReplay(await readBlob(document.source_hash),identity,stored);
+ const original=await readBlob(document.source_hash),decoded=await decodeCachedDoclingReplay(original,identity,stored);
+ let previousReceipt:NonNullable<ReturnType<typeof projectNativeWhitespace>['receipt']>|undefined;
+ if(previousWhitespace&&typeof previousWhitespace.receiptHash==='string'){
+  const raw=await readBlob(previousWhitespace.receiptHash);
+  if(digest(raw)!==previousWhitespace.receiptHash)throw Error('Cached replay native whitespace receipt checksum differs');
+  previousReceipt=JSON.parse(raw.toString());
+  if(!previousReceipt||previousReceipt.policy!==NATIVE_WHITESPACE_VERSION||previousReceipt.sourceHash!==document.source_hash||
+   !Array.isArray(previousReceipt.pages)||previousReceipt.pages.length!==old.length||previousReceipt.pages.some((p,i)=>
+    p.pageNumber!==old[i].page_number||p.projectedBodySha256!==digest(old[i].body)))throw Error('Cached replay native whitespace receipt/current pages differ');
+  if(old.some((p,i)=>p.body.replace(/\s/gu,'')!==decoded.pages[i].text.replace(/\s/gu,'')))
+   throw Error('Cached replay raw characters differ from protected native whitespace pages');
+  // Reuse existing observations as the base. A partially unavailable new
+  // extractor must never drop prior repairs in other blocks of the same page.
+  decoded.pages=old.map(p=>({pageNumber:p.page_number,locator:p.locator,text:p.body}));
+ }
+ let whitespace=await prepareNativeWhitespace(document.source_hash,decoded.pages,original,whitespaceMode);
+ if(previousReceipt&&whitespace.metadata?.status==='unavailable')throw Error('Cached replay native whitespace observation unavailable; current derived pages protected');
+ if(previousReceipt&&previousWhitespace&&whitespace.receipt&&isDeepStrictEqual(previousReceipt.native,whitespace.receipt.native)&&
+  whitespace.pages.every((p,i)=>p.text===old[i].body)){
+  // The same native observation is already recorded: no synthetic new proof
+  // merely because replay starts from the previously projected page bodies.
+  whitespace={...whitespace,metadata:previousWhitespace,receiptJson:undefined,blobReference:undefined};
+ }
+ decoded.pages=whitespace.pages;
+ const batchProvenance=withNativeWhitespace(decoded.progress,whitespace),parserVersion=CACHED_DOCLING_REPLAY_VERSION+
+  (whitespace.metadata?`-${NATIVE_WHITESPACE_VERSION}`:'');
  const sourceMath=await prepareDoclingSourceMath({owner,documentId,sourceHash:document.source_hash,pages:decoded.pages,structures:decoded.sourceMath});
  const mathChanged=Boolean(sourceMath&&sourceMath.sha256!==document.raw_value.sourceMathSha256);
  const changedPages=old.filter((page,i)=>page.body!==decoded.pages[i].text).map(page=>page.page_number);
- const candidateWarnings=normalizedWarnings([...document.warnings,...decoded.warnings]);
- const qualityChanged=JSON.stringify(candidateWarnings)!==JSON.stringify(normalizedWarnings(document.warnings));
+ const candidateWarnings=normalizedWarnings([...document.warnings,...decoded.warnings,...(whitespace.metadata?[NATIVE_WHITESPACE_WARNING]:[])]);
+ const qualityChanged=JSON.stringify(candidateWarnings)!==JSON.stringify(normalizedWarnings(document.warnings))||
+  !isDeepStrictEqual(previousWhitespace,nativeWhitespaceFingerprint(batchProvenance));
  const visualRow=(await pool.query<{manifest_sha256:string;content_sha256:string;manifest:{content:{layout:DoclingVisualLayout;renderStatus:string;internalLinks?:PdfInternalLinks}}}>(
   'SELECT manifest_sha256,content_sha256,manifest FROM document_pdf_visual_manifests WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3',
   [document.current_version_id,document.source_version_id,document.source_hash])).rows[0];
@@ -155,16 +190,18 @@ export async function auditCachedDoclingReplay(owner:string,documentId:string):P
   '缓存 Docling 原始结果重读；公式、符号、上下标及 LaTeX 未完全核验，请保留原 PDF 为证据']):candidateWarnings;
  const pageProvenance=old.map(page=>({pageNumber:page.page_number,
   extractionMethod:changedPages.includes(page.page_number)?'cached-docling-redecode':page.extraction_method,
-  parserVersion:changedPages.includes(page.page_number)?CACHED_DOCLING_REPLAY_VERSION:page.parser_version,
+  parserVersion:changedPages.includes(page.page_number)?parserVersion:page.parser_version,
   ...(page.model?{model:page.model}:{}),basedOn:{versionId:document.current_version_id,
    sourceVersionId:document.source_version_id,evidenceId:page.evidence_id}}));
  const audit={schema:1 as const,owner,documentId,sourceHash:document.source_hash,expectedCurrentVersion:document.current_version_id,
   decision:decision as CachedDoclingAudit['decision'],pageCount:document.page_count,changedPages,warnings,
-  pages:decoded.pages,pageProvenance,document,batchProvenance:decoded.progress,visualLayout:decoded.visualLayout,nativeTables:decoded.nativeTables,...(sourceMath?{sourceMath}:{}),
+  pages:decoded.pages,pageProvenance,document,batchProvenance,parserVersion,visualLayout:decoded.visualLayout,nativeTables:decoded.nativeTables,...(sourceMath?{sourceMath}:{}),
   visualEvidence:{status:visualStatus,manifestSha256:visualRow?.manifest_sha256??null,contentSha256:visualRow?.content_sha256??null,layoutSha256,
    ...(linkPolicy==='goto-v1'?{internalLinks:hasLinks?'recorded' as const:'not-recorded' as const}:{})},
   visualOnly:!textChanged&&!mathChanged&&(visualStatus!=='matching'||linksNeeded)};
- return {...audit,reviewHash:digest(JSON.stringify(audit))};
+ const reviewed={...audit,reviewHash:digest(JSON.stringify(audit))};
+ if(whitespace.receiptJson)whitespaceReceipts.set(reviewed,whitespace.receiptJson);
+ return reviewed;
 }
 
 export async function applyCachedDoclingReplay(reviewed:CachedDoclingAudit,expectedCurrentVersion:string,
@@ -189,9 +226,15 @@ export async function applyCachedDoclingReplay(reviewed:CachedDoclingAudit,expec
   if(unchanged.length!==1)throw new Error('Cached replay current source changed while preparing unchanged visuals');
   return {action:'unchanged',currentVersion:expectedCurrentVersion,visualStatus:pdfVisuals.content.renderStatus};
  }
+ const whitespaceReceipt=whitespaceReceipts.get(current);
+ if(whitespaceReceipt){
+  const metadata=nativeWhitespaceFingerprint(current.batchProvenance);
+  if(!metadata||!('receiptHash'in metadata)||digest(whitespaceReceipt)!==metadata.receiptHash||
+   await saveBlob(Buffer.from(whitespaceReceipt))!==metadata.receiptHash)throw Error('Cached replay native whitespace publication receipt differs');
+ }
  await kernel.ingestParsedDocument({id:d.id,ownerId:d.owner_id,courseId:d.course_id||'',name:d.name,hash:d.source_hash,
   mime:'application/pdf',origin:d.origin,originKey:d.origin_key,createdAt:d.created_at.toISOString()},current.pages,
-  {parserVersion:current.visualOnly?d.parser_version:CACHED_DOCLING_REPLAY_VERSION,
+  {parserVersion:current.visualOnly?d.parser_version:current.parserVersion,
    extractionMethod:current.visualOnly?String(d.raw_value.extractionMethod||d.parser_version):'mixed-cached-docling-redecode',expectedPages:current.pageCount,
    expectedCurrentVersion,warnings:current.warnings,pageProvenance:current.pageProvenance,batchProvenance:current.batchProvenance,pdfVisuals,nativeTables,sourceMath:current.sourceMath});
  return {action:'published',currentVersion:(await kernelPool().query<{current_version_id:string}>(

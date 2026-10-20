@@ -11,8 +11,8 @@ import {rememberDoclingTask,doclingJobPayload,rememberDoclingProgress} from './j
 import {convertDoclingBatches,requestDoclingResult,storeDoclingResult,type DoclingProgress,type DecodedDocling} from './docling-batches.ts';
 import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
 import {enrichParsedPdfFormulae,transcribePdfVisualPages} from '../document-parser.ts';
-import {localPdfTextPages,localPdfReadingObservation} from '../local-ocr.ts';
-import{nativeWhitespaceMode,projectNativeWhitespace,NATIVE_WHITESPACE_VERSION}from'./native-whitespace.ts';
+import {localPdfTextPages} from '../local-ocr.ts';
+import{nativeWhitespaceMode,prepareNativeWhitespace,withNativeWhitespace,NATIVE_WHITESPACE_VERSION,NATIVE_WHITESPACE_WARNING}from'./native-whitespace.ts';
 import {prepareNativeTableCandidates} from './document-table-candidates.ts';
 import {bindDoclingSourceMath,prepareDoclingSourceMath} from './docling-source-math.ts';
 
@@ -525,19 +525,14 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   // Canonical Unicode composition only: raw parser responses and glyph evidence
   // remain unchanged; no formula, layout or whitespace inference is performed.
   if(sourceEncodingReceiptHash&&!visual)pages=pages.map(page=>({...page,text:page.text.normalize('NFC')}));
-  let nativeWhitespace:Record<string,unknown>|undefined,nativeWhitespaceBlob:{kind:string;sha256:string;byteLength:number}|undefined;
+  let whitespace:Awaited<ReturnType<typeof prepareNativeWhitespace>>|undefined;
   if(whitespaceMode==='source-v1'&&!visual&&!nativeComplete){
-    const observed=await localPdfReadingObservation(bytes),projected=projectNativeWhitespace(document.hash,pages,observed);
-    pages=projected.pages;
-    if(projected.receipt){
-      const raw=Buffer.from(JSON.stringify(projected.receipt)),receiptHash=await saveBlob(raw);
-      nativeWhitespaceBlob={kind:'native-whitespace-observation',sha256:receiptHash,byteLength:raw.length};
-      nativeWhitespace={policy:NATIVE_WHITESPACE_VERSION,status:projected.status,changedBlocks:projected.changedBlocks,receiptHash};
-    }else nativeWhitespace={policy:NATIVE_WHITESPACE_VERSION,status:projected.status,reason:projected.reason};
-    warnings=[...warnings,'原生文本空白观测：仅唯一且全部非空白字符相同的段落使用原 PDF 提取空白；字符、数学、结构及别名语义仍未验证'];
+    whitespace=await prepareNativeWhitespace(document.hash,pages,bytes,whitespaceMode);pages=whitespace.pages;
+    if(whitespace.receiptJson&&await saveBlob(Buffer.from(whitespace.receiptJson))!==whitespace.blobReference!.sha256)throw Error('Native whitespace receipt checksum differs');
+    warnings=[...warnings,NATIVE_WHITESPACE_WARNING];
   }
   const parserVersion=(formulaEnriched?DOCLING_PARSER_VERSION:DOCLING_TEXT_PARSER_VERSION)+
-    (nativeWhitespace?`-${NATIVE_WHITESPACE_VERSION}`:'')+
+    (whitespace?.metadata?`-${NATIVE_WHITESPACE_VERSION}`:'')+
     (warnings.some(warning=>warning.includes(`[${DOCLING_NUL_PROJECTION_VERSION}]`))?`-${DOCLING_NUL_PROJECTION_VERSION}`:'')+
     (sourceFontObservations?'-type1-unmapped-observations-v1':'')+(sourceEncodingReceiptHash&&!visual?
     encoding.proof?.referenceDictionarySha256?`-${encoding.proof.version}`:'-source-encoding-v1':'')+(decoded.sourceMath?.length?'-source-math-v1':'');
@@ -566,7 +561,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     hash:document.hash,mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
     {parserVersion,expectedPages:totalPages,warnings,nativeTables,pdfVisuals,sourceMath,expectedCurrentVersion,
       ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,
-      batchProvenance:nativeWhitespace?{...batchProvenance,nativeWhitespace,...(nativeWhitespaceBlob?{blobReferences:[nativeWhitespaceBlob]}:{})}:batchProvenance,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
+      batchProvenance:whitespace?withNativeWhitespace(batchProvenance??{},whitespace):batchProvenance,extractionMethod:visual?'ai-visual-page-transcription':nativeComplete?
       (formulaEnriched?'native-text-plus-ai-formula':'native-text'):formulaEnriched?`docling-plus-${formulaBackend}-formula`:'docling-text'});
   const chunks=pages.flatMap(page=>splitText(page.text).map(body=>({locator:page.locator,body})));
   // Search chunks are a rebuildable cache. The original blob and provenance remain available.

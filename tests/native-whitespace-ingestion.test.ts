@@ -53,6 +53,12 @@ test('real Poppler through normal Docling ingestion retains original/raw/history
   await convertDocumentWithDocling(owner,id);assert.equal((await versions()).rows.length,2,'same observations replay without a third version');
   assert.equal(digest(await readBlob(hash)),hash);assert.equal((await getDocument(owner,id)).hash,hash);
   assert.equal(calls,6,'three synthetic Docling submit/result pairs; zero model requests');
+  const {auditCachedDoclingReplay}=await import('../lib/kernel/docling-cache-replay.ts');
+  process.env.DOCLING_NATIVE_WHITESPACE='off';await assert.rejects(auditCachedDoclingReplay(owner,id),/cannot downgrade/);
+  process.env.DOCLING_NATIVE_WHITESPACE='source-v1';process.env.LOCAL_OCR='false';
+  await assert.rejects(auditCachedDoclingReplay(owner,id),/observation unavailable/);
+  process.env.LOCAL_OCR='true';const nativeReplay=await auditCachedDoclingReplay(owner,id);
+  assert.deepEqual(nativeReplay.changedPages,[]);assert.equal(nativeReplay.pages[0].text,text);
   // Protocol control: two exact serializations of the same real observation
   // are distinct CAS artifacts. A same-body new artifact must not be swallowed
   // by source-version idempotency; neither artifact asserts a new model result.

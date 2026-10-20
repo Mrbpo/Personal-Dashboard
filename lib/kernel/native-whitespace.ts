@@ -1,5 +1,6 @@
-import{createHash}from'node:crypto';import type{DoclingPage}from'./docling-result.ts';import type{NativePdfReadingObservation}from'../local-ocr.ts';
+import{createHash}from'node:crypto';import type{DoclingPage}from'./docling-result.ts';import{localPdfReadingObservation,type NativePdfReadingObservation}from'../local-ocr.ts';
 export const NATIVE_WHITESPACE_VERSION='source-observed-whitespace-v1';
+export const NATIVE_WHITESPACE_WARNING='原生文本空白观测：仅唯一且全部非空白字符相同的段落使用原 PDF 提取空白；字符、数学、结构及别名语义仍未验证';
 export function nativeWhitespaceMode(){const value=process.env.DOCLING_NATIVE_WHITESPACE??'off';
  if(value!=='off'&&value!=='source-v1')throw Error('Invalid DOCLING_NATIVE_WHITESPACE');return value;}
 /** Stable provenance participates in identity even when the body is identical.
@@ -18,6 +19,24 @@ export function nativeWhitespaceFingerprint(provenance:unknown){
  return{policy:NATIVE_WHITESPACE_VERSION,status:metadata.status,changedBlocks:metadata.changedBlocks,receiptHash:metadata.receiptHash};
 }
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),compact=(s:string)=>s.replace(/\s/gu,'');
+/** Shared preparation for ingestion and reviewed replay. No CAS/database write. */
+export async function prepareNativeWhitespace(sourceHash:string,pages:DoclingPage[],original:Uint8Array,mode:ReturnType<typeof nativeWhitespaceMode>){
+ if(mode==='off')return{pages,metadata:undefined,receipt:undefined,receiptJson:undefined,blobReference:undefined};
+ if(createHash('sha256').update(original).digest('hex')!==sourceHash)throw Error('Native whitespace original checksum differs');
+ const result=projectNativeWhitespace(sourceHash,pages,await localPdfReadingObservation(original));
+ const receiptJson=result.receipt?JSON.stringify(result.receipt):undefined,receiptHash=receiptJson?hash(receiptJson):undefined;
+ const metadata:Record<string,unknown>={policy:NATIVE_WHITESPACE_VERSION,status:result.status,...(receiptHash?
+  {changedBlocks:result.changedBlocks,receiptHash}:{reason:result.reason})};
+ return{pages:result.pages,metadata,receipt:result.receipt,receiptJson,blobReference:receiptHash&&receiptJson?
+  {kind:'native-whitespace-observation',sha256:receiptHash,byteLength:Buffer.byteLength(receiptJson)}:undefined};
+}
+export function withNativeWhitespace<T extends object>(previous:T,prepared:Awaited<ReturnType<typeof prepareNativeWhitespace>>){
+ if(!prepared.metadata)return previous;
+ const refs=(previous as {blobReferences?:Array<{kind:string;sha256:string;byteLength:number}>}).blobReferences??[];
+ if(!Array.isArray(refs))throw Error('Invalid existing parsing blob references');
+ const ref=prepared.blobReference;
+ return{...previous,nativeWhitespace:prepared.metadata,...(ref?{blobReferences:[...refs,...(refs.some(r=>r.sha256===ref.sha256)?[]:[ref])]}:{})};
+}
 type Edit={blockOrdinal:number;originalRangeUtf16:[number,number];projectedRangeUtf16:[number,number];nativeRangeUtf16:[number,number];
  originalSha256:string;projectedSha256:string;nonWhitespaceSha256:string;nonWhitespaceCharactersUnchanged:true};
 /** Two literal parser observations must agree on every non-whitespace UTF16
