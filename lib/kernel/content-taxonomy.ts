@@ -2,6 +2,16 @@ import{createHash}from'node:crypto';
 
 export const CONTENT_TAXONOMY_FACETS=['course','term','source','format','document_type','topic','chapter','assignment']as const;
 export const CONTENT_METADATA_CATALOG_VERSION='academic-metadata-catalog-v1';
+/** Literal normalized alias boundary only, never semantic identity. A shared
+ * alias may match several entries; callers must not choose the first one. */
+export function literalTaxonomyMention(query:string,key:string){
+ const normalize=(s:string)=>s.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu,' '),q=normalize(query),k=normalize(key);if(!k)return false;
+ for(let at=q.indexOf(k);at>=0;at=q.indexOf(k,at+1)){
+  const left=Array.from(q.slice(0,at)).at(-1)??'',right=Array.from(q.slice(at+k.length))[0]??'',first=Array.from(k)[0],last=Array.from(k).at(-1)!;
+  if((/\p{Script=Han}/u.test(first)||!/[\p{L}\p{N}_]/u.test(left))&&(/\p{Script=Han}/u.test(last)||!/[\p{L}\p{N}_]/u.test(right)))return true;
+ }
+ return false;
+}
 // Controlled metadata/navigation vocabulary only. Dynamic subjects, course IDs
 // and relationships still need source-bound revisions; these are not facts.
 const sources=[

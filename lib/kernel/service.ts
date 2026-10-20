@@ -6,6 +6,7 @@ import {contentTagIngestionMode,recordContentMetadataTags,readContentMetadataTag
 import {recordIngestedContentClassification} from './content-classification-ingestion.ts';
 import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
 import {prepareControlledTopics,importControlledTopics} from './content-topic-classification.ts';
+import {readContentTaxonomy,recordContentTaxonomy}from'./content-taxonomy-registry.ts';
 import {contentTopicJobMode,queueIngestedTopicJobs,runDocumentTopicJob} from './content-topic-jobs.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
@@ -1682,6 +1683,12 @@ export class KernelService {
 
   prepareDocumentTopics(owner:string,documentId:string,pages?:number[]){
     return prepareControlledTopics(kernelPool(),owner,documentId,pages);
+  }
+
+  contentTaxonomy(owner:string){return readContentTaxonomy(kernelPool(),owner);}
+
+  recordContentTaxonomy(owner:string,input:unknown,actor:string,reason:string){
+    return kernelTransaction(client=>recordContentTaxonomy(client,owner,input,actor,reason));
   }
 
   importDocumentTopics(owner:string,packet:unknown,rawResponse:string,actor:string,reason:string){

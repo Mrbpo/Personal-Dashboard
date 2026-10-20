@@ -1,5 +1,57 @@
 # Unified content tags and retrieval routing — Issue193
 
+## Owner-controlled topic/chapter registry (migration017)
+
+`KernelService.contentTaxonomy` and `recordContentTaxonomy` read/write an
+administrator-authored PostgreSQL configuration revision/head. A request contains
+`previousId` and at most256 `{facet,key,aliases}` entries; only topic/chapter
+facets are accepted. Keys normalize consistently with classification revisions;
+aliases retain their original strings, with at most16 per entry. Normalized
+duplicates within one entry reject; a shared alias across entries is allowed and
+proposes all matching keys rather than choosing the first meaning. Payloads are
+bounded to64KiB. Actor/reason, parent, payload digest and owner are retained;
+compare-and-set and an owner transaction lock serialize competing first writers.
+This configuration is neither source text nor a canonical academic fact.
+
+The existing named-administrator CLI has two additional commands:
+
+```text
+node --experimental-strip-types scripts/kernel-classify.ts taxonomy <owner>
+node --experimental-strip-types scripts/kernel-classify.ts record-taxonomy <owner> <input.json> "reason"
+```
+
+For example, a first request can contain
+`{"previousId":null,"entries":[{"facet":"topic","key":"calculus","aliases":["微积分"]}]}`.
+Subsequent edits must supply the current revision. An empty revision explicitly
+withdraws registered subject routing; it does not delete originals/classifications
+or silently reactivate old vocabulary. Exact historical replay never resets a
+newer head. This adds no public write API, page, service or whole-library backfill.
+
+With no registry, controlled-topic preparation/import retains the existing v3
+manual-document vocabulary and packet shape. With a registry it uses
+`registered-vocabulary-topic-proposal-v1`, binds its exact revision, and offers
+topic/chapter keys and aliases without a fake seed document. Existing source
+quote IDs/ranges, finite labels/packet bounds, correction guard and mini policy
+remain. More than64 offered labels returns unavailable; it never truncates them.
+Fresh import holds the same short vocabulary lock through source validation and
+classification commit; a concurrent edit cannot slip between them. Previously
+imported exact responses remain replayable, while stale fresh proposals reject.
+Source snippets remain unverified fragment-scoped classifications, not facts.
+
+The existing incremental worker can consume this packet using its durable
+prepared/attempted/received checkpoints and ordinary budget. Registry changes do
+not requeue completed/unavailable old jobs or reclassify old sources automatically;
+administrators can prepare/import a new bounded proposal through the existing
+commands. Unknown provider outcomes still require reconciliation, never retry.
+
+Current classification branch/shadow/guard diagnostics record the taxonomy
+revision and use its aliases before candidate scoring. Withdrawal leaves ordinary
+retrieval available. Invalid taxonomy revisions retain the broad route. Migration017
+is required before enabling these paths; no production migration is implied.
+An alias selecting candidate files does **not** translate a Chinese lexical query
+into English, certify relevance, or provide a tag-witness retrieval lane. That
+cross-language/dense integration and large-corpus real-API acceptance remain open.
+
 ## Shared metadata catalog and preserved legacy revisions
 
 `content-taxonomy.ts` now owns the existing facet/source/format/document-type

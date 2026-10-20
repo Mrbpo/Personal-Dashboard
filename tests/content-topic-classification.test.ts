@@ -22,6 +22,10 @@ test('controlled topic proposals persist source fragments, feed routing and pres
    seed=await add('Human Seed.txt','Reviewed seed document.');
   assert.equal((await kernel.prepareDocumentTopics(owner,target.id)).status,'unavailable','No invented vocabulary without a manual seed');
   const seedRevision=await classify(seed,'calculus'),prepared=await kernel.prepareDocumentTopics(owner,target.id,[1]);
+  assert.equal(prepared.status,'ready');if(prepared.status==='ready'){
+   assert.equal(prepared.packet.version,'manual-vocabulary-topic-proposal-v3');
+   assert.equal(Object.hasOwn(prepared.packet,'taxonomyRevisionId'),false,'No registry retains the original packet shape');
+  }
   assert.equal(prepared.status,'ready');if(prepared.status!=='ready')throw Error('Missing packet');const packet=prepared.packet;
   assert.deepEqual(packet.labels,[{id:'t0',key:'calculus'}]);assert.deepEqual(packet.vocabularyRevisionIds,[seedRevision.id]);
   const raw=(labels:unknown[],model='gpt-5.4-mini')=>JSON.stringify({status:'completed',model,usage:{input_tokens:100,output_tokens:50},output_text:JSON.stringify({labels})}),

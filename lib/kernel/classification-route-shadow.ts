@@ -3,32 +3,26 @@ import type {Pool} from 'pg';
 import {contentTagQueryPlan} from './content-tag-routing.ts';
 import {validateStoredContentClassification} from './content-classifications.ts';
 import {documentRoutingScopeSql,type DocumentRoutingScope} from './document-routing-scope.ts';
-import {CONTENT_METADATA_CATALOG_VERSION,CONTENT_METADATA_CATALOG_SHA256}from'./content-taxonomy.ts';
+import {CONTENT_METADATA_CATALOG_VERSION,CONTENT_METADATA_CATALOG_SHA256,literalTaxonomyMention}from'./content-taxonomy.ts';
+import {readContentTaxonomy,contentTaxonomyQueryHints}from'./content-taxonomy-registry.ts';
 
 const normalize=(s:string)=>s.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu,' '),
  sha=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
-export function literalClassificationMention(query:string,key:string){
- const q=normalize(query),k=normalize(key);if(!k)return false;
- for(let at=q.indexOf(k);at>=0;at=q.indexOf(k,at+1)){
-  const left=Array.from(q.slice(0,at)).at(-1)??'',right=Array.from(q.slice(at+k.length))[0]??'';
-  const first=Array.from(k)[0],last=Array.from(k).at(-1)!;
-  if((/\p{Script=Han}/u.test(first)||!/[\p{L}\p{N}_]/u.test(left))&&
-   (/\p{Script=Han}/u.test(last)||!/[\p{L}\p{N}_]/u.test(right)))return true;
- }
- return false;
-}
+export const literalClassificationMention=literalTaxonomyMention;
 type Scope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
 type Plan={status:'candidate'|'broad';reason:string;documentIds:string[];classificationIds:string[];querySha256:string;
- catalogVersion:string;catalogSha256:string};
+ catalogVersion:string;catalogSha256:string;taxonomyRevisionId:string|null};
 
 /** Read current classification metadata only, never original bodies/vectors.
  * Literal hints propose an experimental branch, not permission to exclude. */
 export async function planClassificationBranch(pool:Pool,owner:string,query:string,scope:Scope):Promise<Plan>{
  if(typeof query!=='string'||!query.trim()||query.length>16000||!owner?.trim())throw Error('Invalid classification routing query');
- const hints=contentTagQueryPlan(query).hints.map(({facet,key})=>({facet,key})),normalized=normalize(query),
-  args:unknown[]=[owner,normalized,JSON.stringify(hints),scope.courseId||null,scope.documentId||null],where=documentRoutingScopeSql(scope.routingScope,args),
-  result=(status:Plan['status'],reason:string,documentIds:string[]=[],classificationIds:string[]=[]):Plan=>({status,reason,documentIds,classificationIds,querySha256:sha(query),
-   catalogVersion:CONTENT_METADATA_CATALOG_VERSION,catalogSha256:CONTENT_METADATA_CATALOG_SHA256});
+ let taxonomy:Awaited<ReturnType<typeof readContentTaxonomy>>=null;
+ const result=(status:Plan['status'],reason:string,documentIds:string[]=[],classificationIds:string[]=[]):Plan=>({status,reason,documentIds,classificationIds,querySha256:sha(query),
+   catalogVersion:CONTENT_METADATA_CATALOG_VERSION,catalogSha256:CONTENT_METADATA_CATALOG_SHA256,taxonomyRevisionId:taxonomy?.revisionId??null});
+ try{taxonomy=await readContentTaxonomy(pool,owner);}catch{return result('broad','invalid-taxonomy');}
+ const hints=[...contentTagQueryPlan(query).hints,...(taxonomy?contentTaxonomyQueryHints(query,taxonomy):[])].map(({facet,key})=>({facet,key})),normalized=normalize(query),
+  args:unknown[]=[owner,normalized,JSON.stringify(hints),scope.courseId||null,scope.documentId||null,taxonomy===null],where=documentRoutingScopeSql(scope.routingScope,args);
  const rows=(await pool.query<Record<string,unknown>>(`/* classifications:shadow-plan */ SELECT r.* FROM document_content_classification_heads h
   JOIN document_content_classifications r ON r.id=h.classification_id AND r.owner_id=h.owner_id AND r.version_id=h.version_id AND r.classifier_id=h.classifier_id
   JOIN document_texts d ON d.id=r.document_id AND d.owner_id=r.owner_id AND d.current_version_id=r.version_id AND d.source_hash=r.source_hash
@@ -36,7 +30,7 @@ export async function planClassificationBranch(pool:Pool,owner:string,query:stri
    AND NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key
     AND NOT newer.hidden AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
    AND EXISTS(SELECT 1 FROM jsonb_array_elements(r.assignments) a WHERE
-    (a->>'facet' IN ('topic','chapter') AND length(a->>'key')>0 AND strpos($2,a->>'key')>0)
+    ($6::boolean AND a->>'facet' IN ('topic','chapter') AND length(a->>'key')>0 AND strpos($2,a->>'key')>0)
     OR EXISTS(SELECT 1 FROM jsonb_to_recordset($3::jsonb) AS hint(facet text,key text) WHERE a->>'facet'=hint.facet AND a->>'key'=hint.key))
   ORDER BY r.id LIMIT 257`,args)).rows;
  if(rows.length>256)return result('broad','classification-capacity');
@@ -44,7 +38,7 @@ export async function planClassificationBranch(pool:Pool,owner:string,query:stri
  for(const row of rows){
   let input;try{input=validateStoredContentClassification(row);}catch{return result('broad','invalid-classification');}
   if(input.tags.some(t=>hints.some(h=>h.facet===t.facet&&h.key===t.key)||
-   ['topic','chapter'].includes(t.facet)&&literalClassificationMention(query,t.key)))matched.push({documentId:input.documentId,id:String(row.id)});
+   !taxonomy&&['topic','chapter'].includes(t.facet)&&literalClassificationMention(query,t.key)))matched.push({documentId:input.documentId,id:String(row.id)});
  }
  const ids=[...new Set(matched.map(m=>m.documentId))].sort();
  if(!ids.length)return result('broad','no-literal-classification');
