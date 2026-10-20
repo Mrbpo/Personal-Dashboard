@@ -10,7 +10,8 @@ const directory=mkdtempSync(join(tmpdir(),'native-whitespace-ingestion-'));
 process.env.DATABASE_URL=':memory:';process.env.LIBRARY_DIR=directory;
 after(async()=>{if(process.env.KERNEL_DATABASE_URL){const {kernelPool}=await import('../lib/kernel/db.ts');await kernelPool().end();}rmSync(directory,{recursive:true,force:true});});
 test('real Poppler through normal Docling ingestion retains original/raw/history, search and proof GC roots',
- {skip:!process.env.KERNEL_DATABASE_URL||!poppler},async()=>{
+ {skip:!process.env.KERNEL_DATABASE_URL||(!poppler&&process.env.CI!=='true')},async()=>{
+ assert.ok(poppler,'CI must install real Poppler; native ingestion must not silently skip');
  const {kernelPool,migrateKernel}=await import('../lib/kernel/db.ts'),{kernel}=await import('../lib/kernel/service.ts');
  const {saveDocument,getDocument,readBlob,saveBlob,digest}=await import('../lib/library.ts');
  const {convertDocumentWithDocling}=await import('../lib/kernel/docling.ts');
