@@ -17,7 +17,7 @@ test('topic job mode is explicit and defaults off',()=>{
 });
 test('incremental topic jobs atomically queue pages and recover saved output without repeated paid transport',
  {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
- await migrateKernel();const uid=randomUUID(),owner='topic-job:'+uid,saved={mode:process.env.KERNEL_CONTENT_TOPICS,key:process.env.OPENAI_API_KEY,budget:process.env.AI_MONTHLY_BUDGET};
+ await migrateKernel();const uid=randomUUID(),owner='topic-job:'+uid,saved={mode:process.env.KERNEL_CONTENT_TOPICS,key:process.env.OPENAI_API_KEY,budget:process.env.AI_MONTHLY_BUDGET,bypass:process.env.AI_BUDGET_TEST_BYPASS};
  const add=async(name:string,texts=['Calculus describes integrals.'])=>{
   const doc={id:hash(uid+name),ownerId:owner,courseId:'',name:name+'.txt',hash:hash(texts.join('\n')),mime:'text/plain',origin:'fixture-topic-job',originKey:uid+name};
   await kernel.ingestParsedDocument(doc,texts.map((text,i)=>({pageNumber:i+1,locator:'page '+(i+1),text})),{parserVersion:'topic-job-plain-text-v1',extractionMethod:'plain-text'});return doc;
@@ -25,7 +25,7 @@ test('incremental topic jobs atomically queue pages and recover saved output wit
  const list=async(id:string)=>(await kernelPool().query('SELECT * FROM ingestion_jobs WHERE kind=$1 AND scope=$2 ORDER BY (payload->>\'pageNumber\')::int',[CONTENT_TOPIC_JOB_KIND,id])).rows;
  const claim=async(id:string)=>{const j=await claimIngestionJob(id);assert.ok(j);return j;};
  try{
-  delete process.env.KERNEL_CONTENT_TOPICS;process.env.OPENAI_API_KEY='synthetic-no-real-api';process.env.AI_MONTHLY_BUDGET='1';
+  delete process.env.KERNEL_CONTENT_TOPICS;process.env.OPENAI_API_KEY='synthetic-no-real-api';process.env.AI_MONTHLY_BUDGET='1';process.env.AI_BUDGET_TEST_BYPASS='false';
   const seed=await add('Vocabulary'),row=(await kernelPool().query('SELECT d.current_version_id,v.source_version_id FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id WHERE d.id=$1',[seed.id])).rows[0];
   assert.equal((await list(seed.id)).length,0);
   await kernel.recordDocumentClassification(owner,{documentId:seed.id,versionId:row.current_version_id,sourceVersionId:row.source_version_id,sourceHash:seed.hash,
@@ -78,5 +78,5 @@ test('incremental topic jobs atomically queue pages and recover saved output wit
   await kernelPool().query('CREATE TRIGGER topic_queue_test_reject BEFORE INSERT ON ingestion_jobs FOR EACH ROW EXECUTE FUNCTION topic_queue_test_reject()');
   try{await assert.rejects(add('Rollback'),/Synthetic queue interruption/);}finally{await kernelPool().query('DROP TRIGGER topic_queue_test_reject ON ingestion_jobs');await kernelPool().query('DROP FUNCTION topic_queue_test_reject()');}
   assert.equal((await kernelPool().query('SELECT id FROM document_texts WHERE id=$1',[hash(uid+'Rollback')])).rowCount,0,'Source and queue roll back together');
- }finally{for(const [key,value]of Object.entries({KERNEL_CONTENT_TOPICS:saved.mode,OPENAI_API_KEY:saved.key,AI_MONTHLY_BUDGET:saved.budget}))if(value===undefined)delete process.env[key];else process.env[key]=value;}
+ }finally{for(const [key,value]of Object.entries({KERNEL_CONTENT_TOPICS:saved.mode,OPENAI_API_KEY:saved.key,AI_MONTHLY_BUDGET:saved.budget,AI_BUDGET_TEST_BYPASS:saved.bypass}))if(value===undefined)delete process.env[key];else process.env[key]=value;}
 });
