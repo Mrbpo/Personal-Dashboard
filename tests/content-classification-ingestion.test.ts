@@ -23,6 +23,7 @@ test('ingestion publishes source-bound revisions to routing without duplicate le
  try{
   process.env.KERNEL_CONTENT_TAGS='metadata-classifications-v1';
   await kernel.upsertCourse({id:course,name:'Synthetic course',course_code:'SYN101',term:{id:term,name:'Synthetic term'}});
+  const storedTerm=(await kernelPool().query('SELECT term_id FROM courses WHERE id=$1',[course])).rows[0].term_id;
   await kernel.ingestParsedDocument(doc,pages,parser);const first=(await rows())[0];assert.ok(first);
   assert.equal(first.classifier_id,METADATA_CLASSIFIER_ID);assert.equal(first.method,'rule');assert.equal(first.filter_authorization,false);
   assert.equal(first.semantic_verified,false);assert.ok(first.unknown_facets.includes('topic'));
@@ -35,7 +36,7 @@ test('ingestion publishes source-bound revisions to routing without duplicate le
   const nextTerm='next-term:'+uid;await kernel.upsertCourse({id:course,name:'Synthetic course',course_code:'SYN101',term:{id:nextTerm,name:'Next synthetic term'}});
   await kernel.ingestParsedDocument(doc,pages,parser);const changed=(await rows())[0];assert.notEqual(changed.id,first.id);assert.equal(changed.previous_id,first.id);assert.equal(await count(),2);
   await assert.rejects(kernelTransaction(async client=>{
-   await client.query('UPDATE courses SET term_id=$2 WHERE id=$1',[course,term]);
+   await client.query('UPDATE courses SET term_id=$2 WHERE id=$1',[course,storedTerm]);
    const pending=await recordIngestedContentClassification(client,owner,id,changed.version_id);assert.equal(pending.status,'recorded');throw Error('Deliberate atomic rollback');
   }),/Deliberate atomic rollback/);assert.equal(await count(),2);assert.equal((await rows())[0].id,changed.id);
   const identity={documentId:id,versionId:changed.version_id,sourceVersionId:changed.source_version_id,sourceHash:doc.hash,producerVersion:'fixture-v1',model:null};
