@@ -6,6 +6,7 @@ import {contentTagIngestionMode,recordContentMetadataTags,readContentMetadataTag
 import {recordIngestedContentClassification} from './content-classification-ingestion.ts';
 import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
 import {prepareControlledTopics,importControlledTopics} from './content-topic-classification.ts';
+import {contentTopicJobMode,queueIngestedTopicJobs,runDocumentTopicJob} from './content-topic-jobs.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
 import {classificationGuardAnswerObservation} from './classification-route-guard.ts';
@@ -881,7 +882,7 @@ export class KernelService {
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
       nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence;sourceMath?:PreparedDoclingSourceMath}={}) {
-    const tagMetadata=contentTagIngestionMode();
+    const tagMetadata=contentTagIngestionMode(),topicJobs=contentTopicJobMode();
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -1044,6 +1045,7 @@ export class KernelService {
         await commitNativeTableCandidates(client,options.nativeTables,{documentId:document.id,currentVersionId:parsedVersion,
           sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''},pageEvidenceIds);
       }
+      if(topicJobs==='controlled-v1')await queueIngestedTopicJobs(client,owner,document.id,parsedVersion);
       if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
         await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
@@ -1682,6 +1684,8 @@ export class KernelService {
   importDocumentTopics(owner:string,packet:unknown,rawResponse:string,actor:string,reason:string){
     return kernelTransaction(client=>importControlledTopics(client,owner,packet,rawResponse,actor,reason));
   }
+
+  runDocumentTopicJob(job:IngestionJob){return runDocumentTopicJob(job);}
 
   documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){
     return documentRoutingScopeCounts(kernelPool(),owner,scope);

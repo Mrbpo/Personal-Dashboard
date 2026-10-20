@@ -130,7 +130,7 @@ export async function doclingStageBlobHashes():Promise<string[]>{
 export async function finishIngestionJob(id: string, token: string, error?: string): Promise<void> {
   await kernelTransaction(async client=>{
     const result=await client.query<{source:string;scope:string;kind:string}>(
-      `UPDATE ingestion_jobs SET state=CASE WHEN $3::text IS NULL THEN 'complete' WHEN attempts>=5 THEN 'failed' ELSE 'queued' END,
+      `UPDATE ingestion_jobs SET state=CASE WHEN $3::text IS NULL THEN 'complete' WHEN attempts>=5 OR kind='document_topics' THEN 'failed' ELSE 'queued' END,
        last_error=$3,stage=CASE WHEN $3::text IS NULL THEN 'complete' ELSE stage END,
        available_at=CASE WHEN $3::text IS NULL THEN now() ELSE now()+make_interval(secs=>LEAST(3600,30*power(2,attempts)::int)) END,
        lease_until=NULL,lease_token=NULL,updated_at=now()

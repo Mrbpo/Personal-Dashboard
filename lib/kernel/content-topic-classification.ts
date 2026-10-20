@@ -82,7 +82,8 @@ export async function prepareControlledTopics(db:DB,owner:string,documentId:stri
 
 /** Imported classifier output is an attributed proposal, not authenticated
  * provider transport. The caller owns the existing short Kernel transaction. */
-export async function importControlledTopics(client:PoolClient,owner:string,input:unknown,rawResponse:string,actor:string,reason:string){
+export async function importControlledTopics(client:PoolClient,owner:string,input:unknown,rawResponse:string,actor:string,reason:string,
+ transport:'administrator-imported-output'|'kernel-worker-output'='administrator-imported-output'){
  if(!input||typeof input!=='object'||Buffer.byteLength(JSON.stringify(input))>65536||typeof rawResponse!=='string'||Buffer.byteLength(rawResponse)>65536||
   typeof reason!=='string'||!reason.trim()||reason.length>160)throw Error('Invalid bounded topic import');
  const packet=structuredClone(input)as Packet,{bindingSha256,...base}=packet;
@@ -109,7 +110,7 @@ export async function importControlledTopics(client:PoolClient,owner:string,inpu
  });
  const modelRequest=validateContentClassification({documentId:packet.source.documentId,versionId:packet.source.currentVersionId,sourceVersionId:packet.source.sourceVersionId,
   sourceHash:packet.source.sourceHash,classifierId:packet.classifierId,producerVersion:CONTROLLED_TOPIC_VERSION+'/'+bindingSha256,
-  method:'model',model:payload.model,previousId:packet.previousId,tags}),audit=JSON.stringify({reason,transport:'administrator-imported-output',requestSha256:textHash(JSON.stringify(packet.request)),
+   method:'model',model:payload.model,previousId:packet.previousId,tags}),audit=JSON.stringify({reason,transport,requestSha256:textHash(JSON.stringify(packet.request)),
    rawResponseSha256:textHash(rawResponse),vocabularyRevisionIds:packet.vocabularyRevisionIds,pages:packet.pageNumbers});
  const existing=(await client.query(`SELECT r.*,h.classification_id current_head FROM document_content_classifications r
   LEFT JOIN document_content_classification_heads h ON h.owner_id=r.owner_id AND h.version_id=r.version_id AND h.classifier_id=r.classifier_id

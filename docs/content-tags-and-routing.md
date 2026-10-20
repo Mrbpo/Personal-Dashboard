@@ -1,5 +1,30 @@
 # Unified content tags and retrieval routing — Issue193
 
+## Incremental controlled-topic jobs (default off)
+
+`KERNEL_CONTENT_TOPICS=controlled-v1` opts newly ingested source versions into the
+existing PostgreSQL ingestion queue, one idempotent job per page. Queue insertion
+and source publication share a transaction. It does not backfill old documents;
+worker claim excludes these jobs when the flag is off. No new service or table.
+Current manually approved topic revisions remain the vocabulary; missing labels,
+capacity limits and manual corrections produce an explicit unavailable result.
+
+The worker prepares the existing product packet, persists it, and commits an
+`attempted` marker before calling the existing mini provider outside transactions.
+Exact response bytes are checkpointed before a short lease-checked import. A saved
+response resumes without another paid request; a crash/timeout after attempted but
+before saving the response requires administrator reconciliation. Topic failures
+are terminal rather than the generic five retries. Only a known budget exception
+raised before transport resets the marker for existing budget deferral. Ordinary
+monthly/daily accounting applies (20 topic requests/day); no budget bypass.
+
+Per-page proposals keep other pages and manual corrections. Source/vocabulary
+changes still invalidate stale imports. Worker output is attributed separately
+from administrator-imported responses; neither certifies semantic correctness.
+Unknown or oversized pages are not silently truncated, interpreted as globally
+unclassified, or retried with a larger model. Complete taxonomy/semantic routing,
+large-corpus performance and real answer acceptance remain separate requirements.
+
 ## Controlled content-topic proposal tool
 
 `KernelService.prepareDocumentTopics` reads at most four requested current pages
