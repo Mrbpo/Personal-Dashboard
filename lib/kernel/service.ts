@@ -13,6 +13,7 @@ import {classificationGuardAnswerObservation} from './classification-route-guard
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
+import {nativeWhitespaceFingerprint} from './native-whitespace.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
@@ -929,7 +930,9 @@ export class KernelService {
     // Quality changes are immutable source changes even when the body is the
     // same. Normalize stable metadata; acquisition times and remote task IDs
     // intentionally remain outside identity so a replay stays idempotent.
+    const nativeWhitespace=nativeWhitespaceFingerprint(batchProvenance);
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(nativeWhitespace?{nativeWhitespace}:{}),
       ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
       ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
