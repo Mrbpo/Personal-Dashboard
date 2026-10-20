@@ -196,13 +196,16 @@ export class DocumentCitationCheckError extends Error{
 }
 
 /** Application-only, once per original claim. No full-source model review,
- * citation swapping, partial-answer deletion, revision or retry. */
+ * source substitution, claim deletion, text revision or retry. Individually
+ * rejected references can be withheld after the original collective audit. */
 export async function checkApplicationDocumentCitations(question:string,readContext:()=>Promise<DocumentAnswerContext>,
  binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy){
  await documentAnswerSettings(policy);
  if(policy.scope!=='application'||policy.citationCheck?.mode!=='selected-once')throw new Error('Explicit application citation check policy required');
  const check=policy.citationCheck,deadline=Date.now()+55000,audits=[];
- const selections=structuredClone(binding.providerSelections);
+ const selections=structuredClone(binding.providerSelections),releaseSelections=structuredClone(selections);
+ const removed:Array<ReturnType<typeof prepareDocumentCitationAudit>['binding']['citations'][number]&{
+  judgment:'does-not-establish';reason:string;auditRequestIdentity:string;auditBindingSha256:string;rawResponseSha256:string}>=[];
  if(!Array.isArray(selections.claims)||selections.claims.length>30)throw new DocumentCitationCheckError('citation-check-incomplete');
  for(let claimIndex=0;claimIndex<selections.claims.length;claimIndex++){
   try{
@@ -212,12 +215,41 @@ export async function checkApplicationDocumentCitations(question:string,readCont
    if(Date.now()>deadline)throw new Error('Citation check deadline reached');
    audits.push(audit);
    if(audit.diagnostics.judgment!=='supported')throw new DocumentCitationCheckError('citation-support-not-established');
+   const citations=selections.claims[claimIndex].citations;
+   if(audit.binding.citations.length!==citations.length)throw new Error('Citation release binding count changed');
+   releaseSelections.claims[claimIndex].citations=citations.filter((citation,index)=>{
+    const ref=audit.binding.citations[index],finding=audit.diagnostics.citationFindings[`r${index}`];
+    if(ref.refId!==`r${index}`||ref.claimIndex!==claimIndex||ref.citationIndex!==index||ref.selectionId!==citation.id)
+     throw new Error('Citation release reference changed');
+    // Unclear evidence can complement other sources. A contradiction must fail
+    // the audit, not disappear through this filter. No new citation is added.
+    if(finding.judgment!=='does-not-establish')return true;
+    removed.push({...structuredClone(ref),judgment:'does-not-establish',reason:finding.reason,
+     auditRequestIdentity:audit.requestIdentity,auditBindingSha256:audit.bindingSha256,rawResponseSha256:audit.rawResponseSha256});
+    return false;
+   });
+   if(!releaseSelections.claims[claimIndex].citations.length)throw new DocumentCitationCheckError('citation-support-not-established');
   }catch(error){
    if(error instanceof DocumentCitationCheckError)throw error;
    throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});
   }
  }
- return {mode:'selected-once' as const,version:DOCUMENT_CITATION_AUDIT_VERSION,claimCount:selections.claims.length,
+ let release:undefined|{released:ReturnType<typeof resolveDocumentAnswerSelections>;citationRelease:{
+  version:'withhold-unestablished-citations-v1';originalSelectionsSha256:string;releasedSelectionsSha256:string;claimTextsSha256:string;
+  claimsUnchanged:true;semanticVerified:false;removed:typeof removed}};
+ if(removed.length)try{
+  const prepared=prepareDocumentAnswer(question,await readContext(),binding.unitPolicy);
+  if(prepared.fingerprint!==binding.inputFingerprint||prepared.quoteUnitManifestSha256!==binding.quoteUnitManifestSha256)
+   throw new Error('Citation release source changed');
+  const original=resolveDocumentAnswerSelections(selections,prepared.supports),released=resolveDocumentAnswerSelections(releaseSelections,prepared.supports),
+   originalSelectionsSha256=sha(JSON.stringify(original.providerSelections)),texts=original.answer.claims.map(c=>c.text);
+  if(audits.some(audit=>audit.binding.originalSelectionsSha256!==originalSelectionsSha256)||
+   JSON.stringify(released.answer.claims.map(c=>c.text))!==JSON.stringify(texts))throw new Error('Citation release changed original claims');
+  release={released,citationRelease:{version:'withhold-unestablished-citations-v1',originalSelectionsSha256,
+   releasedSelectionsSha256:sha(JSON.stringify(released.providerSelections)),claimTextsSha256:sha(JSON.stringify(texts)),
+   claimsUnchanged:true,semanticVerified:false,removed}};
+ }catch(error){throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});}
+ return {mode:'selected-once' as const,version:DOCUMENT_CITATION_AUDIT_VERSION,claimCount:selections.claims.length,...release,
   status:'all-supported' as const,independentlyVerified:false as const,audits};
 }
 

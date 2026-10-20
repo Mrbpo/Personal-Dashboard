@@ -138,3 +138,21 @@ reference/image/byte limits. It never fills grid gaps or changes unavailable,
 unknown, source identity or semantic-verification flags. Invalid declarations
 still reject. A typed-route or budget fallback remains explicit; retaining cells
 does not prove the requested comparison, role or isolated effect is answerable.
+
+## Individually unestablished citations
+
+The existing `selected-once` check still audits every original claim with all of
+its original evidence. If the collective judgment supports the claim, references
+explicitly marked `does-not-establish` are withheld from that claim's displayed
+citations. Unclear/complementary evidence remains; unsupported claims and
+contradictions fail as before. No new source, model call, claim deletion or text
+revision is introduced. If withholding leaves no citation, the answer is not
+released.
+
+The current source/context is checked again and retained IDs pass through the
+normal resolver. Public selected-unit indices match the released citations.
+Original provider selections, raw responses and full audit bindings remain
+unchanged. `citationCheck.citationRelease` records original/derived digests and
+every withheld reference with its audit identity. It is an attributed model
+finding, not an independent semantic truth certificate. Off/legacy paths retain
+their previous behavior; production deployment is a separate step.

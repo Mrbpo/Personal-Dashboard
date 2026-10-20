@@ -74,3 +74,46 @@ test('opt-in explicit quantity mismatch preserves generation evidence and refuse
   }finally{globalThis.fetch=saved;}
  }
 });
+
+test('release withholds only an individually rejected citation, keeping claims, unclear evidence and other claims citing that source',async()=>{
+ const kernel=new KernelService(),c=context();c.anchors.push({...c.anchors[0],id:'pg:v2:1',document_id:'doc2',evidence_id:'e2',
+  source_version_id:'sv2',source_hash:'hash2',body:'Additional potentially complementary context.'});
+ const p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch;
+ (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+ const selections={status:'answered',message:'',claims:[{text:'A combined result.',citations:p.quoteUnits.map(u=>({id:u.id}))},
+  {text:'Grounding improves by 36.4%.',citations:[{id:p.quoteUnits[1].id}]}]},original=JSON.stringify(selections);
+ let calls=0;globalThis.fetch=async()=>{calls++;if(calls===1)return response(selections);
+  const d=diagnostic('supported',calls===2?3:1);if(calls===2)d.citationFindings.r1.judgment='does-not-establish';return response(d);};
+ try{
+  const result=await kernel.answerStudyContent('owner',question,{}, {scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)});
+  assert.equal(calls,3,'One generation and the same two original-claim audits, without repair calls');
+  assert.equal(JSON.stringify(result.providerSelections),original,'The original provider selection history remains intact');
+  assert.deepEqual(result.answer.claims.map(c=>c.text),selections.claims.map(c=>c.text));
+  assert.deepEqual(result.selectedUnits.map(u=>[u.claimIndex,u.citationIndex,u.selectionId]),[
+   [0,0,p.quoteUnits[0].id],[0,1,p.quoteUnits[2].id],[1,0,p.quoteUnits[1].id]]);
+  const release=result.citationCheck?.citationRelease;assert.ok(release);assert.equal(release.claimsUnchanged,true);
+  assert.equal(release.semanticVerified,false);assert.equal(release.removed.length,1);
+  assert.equal(release.removed[0].selectionId,p.quoteUnits[1].id);assert.equal(release.removed[0].claimIndex,0);
+  assert.equal(release.removed[0].auditBindingSha256,result.citationCheck?.audits[0].bindingSha256);
+  assert.equal(result.citationCheck?.audits[0].binding.citations.length,3,'Original joint evidence is still audited and retained');
+  assert.equal('released'in result.citationCheck!,false,'Do not duplicate a derived answer in public audit metadata');
+ }finally{globalThis.fetch=saved;}
+});
+
+test('all-rejected and contradictory references cannot be rescued by citation withholding; release also rechecks current source',async()=>{
+ for(const mode of ['all-rejected','contradiction','drift']as const){
+  const c=context(),p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch;
+  const binding={inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,
+   providerSelections:{status:'answered' as const,message:'',claims:[{text:'A supported result.',citations:p.quoteUnits.map(u=>({id:u.id}))}]}};
+  let calls=0,reads=0;globalThis.fetch=async()=>{calls++;const d=diagnostic('supported',2);
+   d.citationFindings.r1.judgment='does-not-establish';
+   if(mode==='all-rejected')d.citationFindings.r0.judgment='does-not-establish';
+   if(mode==='contradiction')d.citationFindings.r0.judgment='contradicts';
+   return response(d);};
+  try{await assert.rejects(checkApplicationDocumentCitations(question,async()=>{reads++;if(mode==='drift'&&reads===4)c.anchors[0].body+=' changed';return c;},
+   binding,{scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)}),
+   (e:unknown)=>e instanceof DocumentCitationCheckError&&e.code===(mode==='all-rejected'?'citation-support-not-established':'citation-check-incomplete'));
+   assert.equal(calls,1);assert.equal(raw.length,1);
+  }finally{globalThis.fetch=saved;}
+ }
+});

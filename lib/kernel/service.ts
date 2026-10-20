@@ -1488,16 +1488,26 @@ export class KernelService {
         ...(blocked?{originalSelectedUnits:generated.selectedUnits}:{}),inputFingerprint:generated.inputFingerprint}}:generated;
     if('pdfPageRegionTransport'in result&&result.pdfPageRegionTransport)
       contextExpansion={...contextExpansion,pdfPageRegions:result.pdfPageRegionTransport};
-    let citationCheck:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>|undefined;
+    let citationCheck:Omit<Awaited<ReturnType<typeof checkApplicationDocumentCitations>>,'released'>|undefined,
+      releasedAnswer:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>['released'];
     const auditSelections='sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?result.sourceQuantityDerivation.normalizedSelections:
       'sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
     if(result.answer.claims.length&&policy.citationCheck&&auditSelections?.claims.length){
       policy.onStage?.('citation-validation');
-      citationCheck=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
+      const {released,...checked}=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
         quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
         ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
+      citationCheck=checked;
+      if(released){
+        if(JSON.stringify(result.answer.claims.map(c=>c.text))!==JSON.stringify(released.answer.claims.map(c=>c.text)))
+          throw new Error('Citation release changed answer text');
+        // Provider selections/raw responses remain the original generation;
+        // only the restored displayed citations and their unit indices change.
+        releasedAnswer=released;
+      }
     }
-    return {...result,contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
+    return {...result,...(releasedAnswer?{answer:releasedAnswer.answer,selectedUnits:releasedAnswer.selectedUnits}:{}),
+      contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
       ...(contentTagRouting?{contentTagRouting}:{}),...(classificationRouting?{classificationRouting}:{}),...(sourceIdentityContext?{sourceIdentityContext}:{})};
   }
 
