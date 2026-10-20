@@ -649,7 +649,7 @@ export function buildDocumentAnswerRuntimeRequest(prepared:ReturnType<typeof pre
 export const DOCUMENT_EVIDENCE_SELECTION_VERSION='select-original-evidence-v1';
 export const DOCUMENT_TABLE_RETENTION_POLICY='source-value-retain-bound-table-images-v1';
 export type SourceValueEvidenceSelection={retentionPolicy:typeof DOCUMENT_TABLE_RETENTION_POLICY;providerReferenceIds:string[];
- normalizedProviderReferenceIds:string[];systemRetainedReferenceIds:string[];referenceIds:string[]};
+ normalizedProviderReferenceIds:string[];systemRetainedReferenceIds:string[];referenceIds:string[];declaredCellRetainedReferenceIds?:string[]};
 export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_SELECTION_VERSION;coverage:'unassessed';referenceIds:string[];
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
  sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected'|'provided-with-system-retention';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;
@@ -839,14 +839,16 @@ export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,
 
 /** Explicit source-value lane only. Suggestions cannot delete already retrieved
  * bound table PNGs. This does not rank tables or certify their contents. */
-export function resolveSourceValueEvidenceSelection(value:unknown,prepared:PreparedAnswer):SourceValueEvidenceSelection{
+export function resolveSourceValueEvidenceSelection(value:unknown,prepared:PreparedAnswer,retainDeclaredCells=false):SourceValueEvidenceSelection{
+ if(typeof retainDeclaredCells!=='boolean')throw new Error('Invalid native declaration retention option');
  if(!exactKeys(value,['referenceIds']))throw new Error('Invalid original evidence selection');
  const ids=(value as {referenceIds:unknown}).referenceIds,allowed=new Set(selectorIds(prepared));
  if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id)))throw new Error('Invalid original evidence selection');
- const normalizedProviderReferenceIds=[...new Set(ids as string[])],retained:string[]=[];
+ const normalizedProviderReferenceIds=[...new Set(ids as string[])],retained:string[]=[],declaredCellRetainedReferenceIds:string[]=[];
  for(const support of prepared.supports){
   if(support.kind!=='image'||!support.image)continue;
-  const available=support.tableObservations?.filter(observation=>observation.status==='available')??[];
+  const available=support.tableObservations?.filter(observation=>observation.status==='available'||retainDeclaredCells&&
+   observation.version==='docling-native-observation-v1'&&observation.cellDeclarations?.status==='available')??[];
   if(!available.length)continue;
   for(const observation of available){
    if(observation.version==='docling-native-observation-v1'){
@@ -857,12 +859,16 @@ export function resolveSourceValueEvidenceSelection(value:unknown,prepared:Prepa
     assertAuthorImageTableObservation(observation,support.image);
    }
   }
-  if(!normalizedProviderReferenceIds.includes(support.id))retained.push(support.id);
+  if(!normalizedProviderReferenceIds.includes(support.id)){
+   retained.push(support.id);
+   if(available.some(o=>o.version==='docling-native-observation-v1'&&o.status==='unavailable'))declaredCellRetainedReferenceIds.push(support.id);
+  }
  }
  const referenceIds=[...normalizedProviderReferenceIds,...new Set(retained)];
  if(referenceIds.length>64)throw new Error('Retained original evidence exceeds the 64-reference limit');
  return {retentionPolicy:DOCUMENT_TABLE_RETENTION_POLICY,providerReferenceIds:[...ids] as string[],normalizedProviderReferenceIds,
-  systemRetainedReferenceIds:[...new Set(retained)],referenceIds};
+  systemRetainedReferenceIds:[...new Set(retained)],referenceIds,
+  ...(declaredCellRetainedReferenceIds.length?{declaredCellRetainedReferenceIds}:{})};
 }
 
 /** The generator sees only these selected original units/images. Full-context
@@ -1139,7 +1145,8 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   const request=buildDocumentEvidenceSelectionRequest(prepared,settings,policy),providerRequestSha256=sha(JSON.stringify(request));
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
-  const sourceValueSelection=sourceGenerationRoute!=='ordinary'?resolveSourceValueEvidenceSelection(decoded,prepared):undefined;
+  const sourceValueSelection=sourceGenerationRoute!=='ordinary'?resolveSourceValueEvidenceSelection(decoded,prepared,
+   sourceGenerationRoute==='source-values'&&policy.sourceValueContract==='cell-bindings-v2'):undefined;
   const textSelection=sourceValueSelection?undefined:retainSelectedNativeTablePages(retainDocumentSelectionContext(decoded,prepared),prepared);
   referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
   const identitySelection=retainSelectedSourceIdentity(referenceIds,sourceValueSelection?.normalizedProviderReferenceIds??textSelection!.providerReferenceIds,prepared);

@@ -2,7 +2,7 @@ import {test} from 'node:test';import assert from 'node:assert/strict';import {c
 import {prepareNativeTableArtifact,prepareNativeTableObservation,NATIVE_TABLE_NAMESPACE,NATIVE_TABLE_PRODUCER} from '../lib/kernel/document-table-candidates.ts';
 import {prepareSourceCellBindingCatalog,deriveSourceCellBindingAnswer,sourceCellBindingAnswerSchema} from '../lib/kernel/document-source-cell-bindings.ts';
 import type {DoclingNativeTable} from '../lib/kernel/docling-result.ts';
-import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,synthesizeDocumentAnswer,documentSourceGenerationRoute,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,synthesizeDocumentAnswer,documentSourceGenerationRoute,resolveSourceValueEvidenceSelection,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex'),canonical=(v:unknown)=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 globalThis.fetch=async()=>{throw Error('Cell binding component tests forbid provider calls');};
 async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknown=false){
@@ -37,6 +37,23 @@ async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknow
 const result=(...claims:unknown[])=>({status:'answered',message:'',claims}),decode=(value:unknown,catalog:Awaited<ReturnType<typeof fixture>>['catalog'],ids=['i0','q:a','q:b'])=>deriveSourceCellBindingAnswer(value,JSON.stringify(value),catalog,ids);
 const schemaValueIds=(schema:ReturnType<typeof sourceCellBindingAnswerSchema>)=>(schema.properties.claims as {
  items:{anyOf:Array<{properties:{valueRef:{enum:string[]}}}>}}).items.anyOf[0].properties.valueRef.enum;
+
+test('v2 retains omitted available native declarations without promoting an incomplete grid or changing legacy retention',async()=>{
+ const f=await fixture(),policy={scope:'application' as const,model:'gpt-5.4-mini' as const,evidenceSelection:'select-then-answer' as const,
+  sourceValueContract:'cell-bindings-v2' as const,citationCheck:{mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}}},
+  prepared=prepareDocumentAnswerForPolicy('Read the original table.',f.context,policy);
+ assert.equal(f.observation.status,'unavailable');assert.equal(f.observation.cellDeclarations?.status,'available');
+ assert.deepEqual(resolveSourceValueEvidenceSelection({referenceIds:[]},prepared).referenceIds,[]);
+ const retained=resolveSourceValueEvidenceSelection({referenceIds:[]},prepared,true);
+ assert.deepEqual(retained.referenceIds,['i0']);assert.deepEqual(retained.systemRetainedReferenceIds,['i0']);
+ const generated=prepareSelectedSourceValueGeneration(prepared,retained.referenceIds,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},policy);
+ assert.equal(generated.applied,true);assert.equal(generated.catalog.tables[0].gridStatus,'unavailable');
+ assert.ok(generated.catalog.tables[0].unknownPositions.length>0);assert.equal(generated.catalog.cells.length,f.catalog.cells.length);
+ assert.equal(generated.request.text.format.name,'grounded_document_cell_bindings_v2');
+ assert.doesNotMatch(JSON.stringify(generated.request),/cellDeclarationWitness/);
+ const changed=structuredClone(prepared),o=changed.supports.find(s=>s.kind==='image')!.tableObservations![0];
+ o.observationSha256='0'.repeat(64);assert.throws(()=>resolveSourceValueEvidenceSelection({referenceIds:[]},changed,true));
+});
 test('cell bindings quote complete labels/values, support both axes and preserve mixed-source statements',async()=>{
  const f=await fixture();assert.equal(f.observation.status,'unavailable');assert.equal(f.catalog.status,'available');
  const a=decode(result({kind:'table-value',valueRef:f.at(2,1)}),f.catalog),b=decode(result({kind:'table-value',valueRef:f.at(2,3)}),f.catalog);

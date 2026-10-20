@@ -71,3 +71,16 @@ The generation input has a bounded `sourceCellBindings` navigation index over th
 `table-value` returns only a cell reference; `table-difference` returns only two cell references. The program restores all original row/column headings and values and, for supported one-axis plain-decimal subtraction, uses the existing exact decimal helper. These operations cannot accept arbitrary model labels, values, units, results or text. Same-row model columns and same-column data rows are supported. The resulting source bindings and arithmetic verification are separate from semantic/relationship/visibility verification, which remain false. No canonical data is written or whole grid promoted to truth.
 
 Ordinary statements and multi-source synthesis remain available through selected references outside the indexed table images. They are explicitly marked `provider-statement`; they do not gain a cell-binding guarantee. Text quotes on a table-containing page can still be used for prose, so semantic correctness of such statements remains an independent acceptance requirement. A model that bypasses typed bindings must not be counted as a successful binding experiment. No new judge, rewrite/retry loop or pure-subtraction intent forcing is added. If the index/input budget is unavailable, original generation remains with a recorded `newContractApplied=false` reason; this is not a verified result.
+
+For this explicit v2 route, original images whose validated native
+`cellDeclarations.status` is `available` are retained even if the selector
+omits them and the full grid remains `incomplete-grid`. These images and private
+source witnesses were already read by Kernel; no extra page or model is fetched.
+`declaredCellRetainedReferenceIds` distinguishes these system additions. Default
+and legacy contracts keep their complete-grid retention behavior.
+
+This preserves only declared cells and original PNG evidence, with the existing
+reference/image/byte limits. It never fills grid gaps or changes unavailable,
+unknown, source identity or semantic-verification flags. Invalid declarations
+still reject. A typed-route or budget fallback remains explicit; retaining cells
+does not prove the requested comparison, role or isolated effect is answerable.
