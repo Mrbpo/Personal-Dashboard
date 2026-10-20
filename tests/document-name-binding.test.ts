@@ -14,7 +14,7 @@ test('question name spans cannot be rewritten, extended, split across Unicode ch
 });
 
 test('Kernel binds current source-name observations, local declared aliases and unresolved comparators without global merging',{skip:!process.env.KERNEL_DATABASE_URL},async()=>{
- await migrateKernel();const uid=randomUUID(),owner='name-owner:'+uid,id=sha(uid),body='Expectation Maximization (EM) is described here. A different later use of EM is not rebound. Baseline Local Search is a separate named method. EM+Prune is another written name.',
+ await migrateKernel();const uid=randomUUID(),owner='name-owner:'+uid,id=sha(uid),body='Expectation Maximization (EM) is described here. A different later use of EM is not rebound. Baseline Local Search is a separate named method. EM+Prune is another written name. A fused xExpectation Maximization (EM) is ambiguous.',
   doc={id,ownerId:owner,courseId:'',name:'Source.txt',hash:sha('raw'+uid),mime:'text/plain',origin:'upload',originKey:uid},parser={parserVersion:'name-fixture-plain-text-v1',extractionMethod:'plain-text'};
  await kernel.ingestParsedDocument(doc,[{locator:'page 1',pageNumber:1,text:body}],parser);
  const sourceRow=(await kernelPool().query('SELECT d.current_version_id,v.source_version_id,p.evidence_id FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id WHERE d.id=$1',[id])).rows[0],
@@ -40,6 +40,10 @@ test('Kernel binds current source-name observations, local declared aliases and 
  assert.equal(late.status,'unresolved','A definition is not permission to merge a later occurrence');
  const cooccurs=await bind(q,'Expectation Maximization','Baseline Local Search',{definition:{...definition,shortName:span(body,'Baseline Local Search')}});
  assert.equal(cooccurs.status,'unresolved');
+ const fusedLong=span(body,'Expectation Maximization',body.indexOf('xExpectation')),fusedShort=span(body,'EM',fusedLong.endUtf16);
+ const fused=await kernel.bindDocumentQuestionName(owner,source,q,{role:'comparator',questionName:span(q,'Expectation Maximization'),
+  candidate:{evidenceId,span:fusedShort},definition:{evidenceId,longName:fusedLong,shortName:fusedShort}});
+ assert.equal(fused.status,'unresolved','Do not manufacture a long-form boundary when extraction has fused adjoining text');
  const again=await bind(q,'Expectation Maximization','EM',{definition});assert.equal(again.observationSha256,alias.observationSha256);
  const request={role:'comparator',questionName:span(q,'Expectation Maximization'),candidate:{evidenceId,span:{...span(body,'EM'),text:'XY'}}};
  await assert.rejects(kernel.bindDocumentQuestionName(owner,source,q,request),DocumentNameBindingError);

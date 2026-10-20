@@ -107,6 +107,12 @@ caller selected every noun-phrase qualifier or all question requirements; that
 requires the later query-first contract. A matching span is not a complete
 semantic object description.
 
+Both defining spans must also have independent boundaries. Text extraction can
+fuse adjoining words (for example `inMethod Name`); cutting out `Method Name`
+does not establish a complete name, even if an adjacent short form exists.
+Keep such observations unresolved and retain the parser warnings. Do not repair
+the source or widen an identity claim to make the naming check pass.
+
 Observations keep `semanticIdentityVerified=false` and
 `globalEntityMergeAuthorized=false`. Unresolved does not prove whole-document
 unanswerability. This primitive does not yet change retrieval, answer release or

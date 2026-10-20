@@ -62,7 +62,8 @@ export async function bindDocumentQuestionName(pool:Pool,owner:string,expected:D
     /^\s*\)/u.test(node.body.slice(d.shortName.endUtf16)),
    sameOccurrence=d.evidenceId===r.candidate.evidenceId&&[d.longName,d.shortName].some(s=>s.startUtf16===r.candidate.span.startUtf16&&s.endUtf16===r.candidate.span.endUtf16&&s.text===r.candidate.span.text),
    wholeName=[d.longName.text,d.shortName.text].some(s=>name(s)===name(r.questionName.text));
-  if(tokens.length>=2&&tokens.length<=12&&/^[A-Z][A-Z0-9]{1,11}$/.test(short)&&initials===short&&adjacent&&sameOccurrence&&wholeName){
+  if(tokens.length>=2&&tokens.length<=12&&/^[A-Z][A-Z0-9]{1,11}$/.test(short)&&initials===short&&adjacent&&sameOccurrence&&wholeName&&
+   independentNameSpan(node.body,d.longName)&&independentNameSpan(node.body,d.shortName)){
    status='observed-initialism';reason='local-source-declared-initialism';
   }else reason='no-supported-local-name-declaration';
  }
