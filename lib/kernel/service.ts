@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
 import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
@@ -1652,6 +1653,14 @@ export class KernelService {
 
   documentMetadataTags(owner:string,documentId:string){
     return readContentMetadataTags(kernelPool(),owner,documentId);
+  }
+
+  recordDocumentClassification(owner:string,input:unknown,actor:string,reason:string){
+    return kernelTransaction(client=>recordContentClassification(client,owner,input,actor,reason));
+  }
+
+  documentClassifications(owner:string,documentId:string){
+    return readContentClassifications(kernelPool(),owner,documentId);
   }
 
   documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){

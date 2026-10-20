@@ -12,7 +12,57 @@ Migration015 adds immutable-by-writer `document_tag_sets` snapshots with source/
 
 Kernel reads original version metadata, not a changed library display title or caller-supplied label. Identical replay inserts nothing new. Changed source versions preserve old snapshots; a changed canonical term may produce another source-bound metadata revision. `documentMetadataTags` returns only owner-visible, current-version observations of the latest logical source (owner/origin/origin-key), and intentionally does not elect a winner among metadata revisions. Corrections/manual taxonomy management and exclusive route decisions are not implemented yet; archived snapshots are not a current-truth projection.
 
-## Following slices, not delivered yet
+## Source-bound classification revisions (Issue193, migration016)
+
+`KernelService.recordDocumentClassification` stores an explicit proposal/correction in
+one short PostgreSQL transaction. Existing ingestion and retrieval defaults are
+unchanged. It does not run AI, infer new tags, backfill the library, or authorize a
+filter. `documentClassifications` returns current heads of independent classifiers;
+it never silently chooses a winner between a model and a human.
+
+Each request contains `documentId`, `versionId`, `sourceVersionId`, `sourceHash`,
+`classifierId`, `producerVersion`, `method` (`manual`, `rule`, `model`), `model`
+(a name for model proposals, otherwise null), `previousId` (null initially), and
+`tags`. Tags contain `facet`, `key`, `confidence` and one `evidence` witness:
+
+- `page`: physical `pageNumber`, current `evidenceId`, `startUtf16`, `endUtf16`,
+  and exact `text`. Kernel verifies the source substring, Unicode boundaries and
+  stores UTF8 SHA256 of the original page body/fragment. This always produces a
+  fragment-scoped label; it is not expanded to the document.
+- `source-metadata`: an exact `field`/`value` observation of name, mime, origin,
+  originKey, courseId or termId. Kernel reads original source metadata rather than
+  trusting the request's value. Its scope is the document.
+- `human-judgment`: manual proposals only, attributed to the required actor and
+  correction reason. This does not fabricate a source excerpt or verified fact.
+
+Multiple facets/labels coexist. Ordinary keys share NFKC/lowercase/whitespace
+normalization; canonical course, term and task IDs retain case and must exist.
+Unknown facets remain explicit; confidence is not semantic verification. Every
+assignment is `soft-only`, with false semantic/filter authority. Controlled topic
+vocabulary/aliases and automatic extraction are still follow-up work; normalized
+free keys are not a complete semantic ontology.
+
+Records retain source/version/hash, producer and model version, actor/reason and
+parent revision. `previousId` is a compare-and-set token: a stale correction fails
+instead of overwriting another edit. An identical replay can return an older
+revision but never resets the active head. Empty tags explicitly withdraw that
+classifier's proposals. New document versions require fresh classification;
+history remains, but stale, hidden, superseded and foreign-owner records cannot
+serve as current labels. No canonical course/task/fact, original body or evidence
+is rewritten. No labels are yet consumed by preselection.
+
+Administrator CLI (same application module, no network service):
+
+```text
+node --experimental-strip-types scripts/kernel-classify.ts list <owner> <document-id>
+node --experimental-strip-types scripts/kernel-classify.ts record <owner> <input.json> "correction reason"
+```
+
+The write command requires a named administrator account. Source identities in the
+JSON must come from current Kernel metadata/readers; guessed IDs or stale versions
+are rejected. This endpoint is not exposed as a public unauthenticated API.
+
+## Remaining classification and routing work
 
 1. Add controlled term/alias administration and reasoned manual/model assignment revisions, with page/chunk-specific scope and evidence. Document-scope inheritance is explicit; a local topic cannot spread to other pages. Classification uses adapters/rules first, bounded AI only for ambiguity.
 2. Add automatic routing using explicit canonical choices and soft category/topic hints. A wrong/missing tag must not silently remove the sole correct evidence. Keep cross-source and cross-course synthesis and owner/version boundaries. The shared explicit-scope foundation below is implemented; automatic classification/routing is not yet implemented.
