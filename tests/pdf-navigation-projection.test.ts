@@ -159,3 +159,35 @@ test('ordinary and typed fallback actual synthesis transports navigation only to
   }
  }finally{globalThis.fetch=saved;}
 });
+
+test('stored-page navigation accepts actual normalized references for ordinary and typed fallback',async()=>{
+ const original=fixture(),c=answerContext(),longBody=body+'\n\n'+'Background material. '.repeat(90);
+ c.anchors[0].body=longBody;c.textQuotePolicy='stored-page-v1';
+ const {observationSha256:_,...page}=original.page;page.pageBodySha256=sha(longBody);
+ c.pdfNavigation={...original.context,pages:[signed(page)]};
+ const question='Which method?',prepared=prepareDocumentAnswer(question,c),
+  fine=prepared.quoteUnits.find(u=>u.selectable&&!u.pageContext&&u.startUtf16===0)!;
+ assert.ok(prepared.quoteUnits.some(u=>u.pageContext),'real long-page configuration must expose both catalog granularities');
+ const saved=globalThis.fetch,output=(value:unknown)=>new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',
+  usage:{input_tokens:100,output_tokens:20},output_text:JSON.stringify(value)}),{status:200});
+ try{
+  for(const typed of [false,true]){
+   let calls=0;
+   globalThis.fetch=async(_url,init)=>{
+    const req=JSON.parse(String(init?.body));calls++;
+    if(calls===1)return output({referenceIds:[fine.id]});
+    const packet=JSON.parse(req.input.at(-1).content[0].text),ids=new Set(packet.quoteUnits.map((u:any)=>u.id));
+    assert.ok(packet.sourceNavigationContainers.groups.length);
+    for(const group of packet.sourceNavigationContainers.groups)for(const container of group.containers)
+     for(const member of container.members)assert.ok(ids.has(member.id),'navigation may only mention units present in this final request');
+    const enumIds=req.text.format.schema.properties.claims.items.properties.citations.items.properties.id.enum;
+    if(typed)assert.ok(enumIds.includes(fine.id));
+    return output({status:'answered',message:'',claims:[{text:'The source compares a method.',citations:[{id:enumIds[0]}]}]});
+   };
+   const result=await synthesizeDocumentAnswer(question,async()=>c,{scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000,
+    evidenceSelection:'select-then-answer',citationCheck:{mode:'selected-once',beforeAttempt:async()=>{},recordResponse:async()=>{}},
+    ...(typed?{sourceValueContract:'cell-bindings-v2',recordSourceValueRawResponse:async()=>{},recordSourceValueDerivation:async()=>{}}:{})});
+   assert.equal(calls,2);assert.ok('sourceNavigation' in result);assert.equal(result.sourceNavigation?.applied,true);
+  }
+ }finally{globalThis.fetch=saved;}
+});

@@ -109,3 +109,9 @@ cross-page relation. The unchanged size caps can still omit observations; that
 is reported rather than treated as completeness. Enabling observations also
 changes their bound `sourceInputFingerprint`; it does not change source text,
 quote IDs, citation enums, model configuration or output schema.
+
+Stored-page context can coexist with valid fine quotation IDs in a typed
+fallback. Navigation validates final selections against the complete selectable
+catalog, rather than the ordinary generator's page-only view. This preserves
+existing selection and citation permissions; it does not convert fine IDs to
+page IDs or accept an ID absent from the prepared source catalog.
