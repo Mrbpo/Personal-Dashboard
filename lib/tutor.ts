@@ -171,14 +171,24 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
           }
         }
         if(courseRouting.status==='resolved'){
-          // A code observed in a question is not permission to discard uploads
-          // with missing/disabled/unmapped course metadata. Keep broad retrieval
-          // in that case; filename/topic guesses never authorize this filter.
+          // Keep missing/disabled/unmapped course sources. When they exist,
+          // exclude only other enabled canonical courses, rather than allowing
+          // one orphan upload to bring every known course back into the corpus.
+          // Filename/topic guesses never authorize this filter.
           const catalogIds=[...new Set(courses.map(course=>course.id))];
           if(catalogIds.length>256)courseRouting={...courseRouting,scopeApplied:false,fallbackReason:'course-catalog-capacity'};
           else{
-            if(await kernel.hasUnmappedCourseDocuments(owner,catalogIds))
-              courseRouting={...courseRouting,scopeApplied:false,fallbackReason:'unassigned-or-unmapped-source'};
+            if(await kernel.hasUnmappedCourseDocuments(owner,catalogIds)){
+              const excluded=catalogIds.filter(id=>!courseRouting!.courseIds.includes(id)).sort();
+              if(excluded.length){
+                const merged=[...new Set([...(routingScope?.excludedCourseIds??[]),...excluded])];
+                if(merged.length>256)courseRouting={...courseRouting,scopeApplied:false,retainedUnmappedSources:true,fallbackReason:'course-exclusion-capacity'};
+                else{
+                  answerScope=studyRoutingScope({...routingScope,excludedCourseIds:merged});
+                  courseRouting={...courseRouting,scopeApplied:true,retainedUnmappedSources:true,excludedCourseIds:excluded};
+                }
+              }else courseRouting={...courseRouting,scopeApplied:false,retainedUnmappedSources:true,fallbackReason:'unassigned-or-unmapped-source'};
+            }
             else{answerScope=studyRoutingScope({...routingScope,courseIds:courseRouting.courseIds});courseRouting={...courseRouting,scopeApplied:true};}
           }
         }

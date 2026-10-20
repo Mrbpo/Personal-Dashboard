@@ -1,5 +1,32 @@
 # Unified content tags and retrieval routing — Issue193
 
+## Course candidates with unknown sources retained
+
+The existing `STUDY_COURSE_ROUTING=explicit-codes-v1` route still requires a
+successful literal-code resolution against the enabled canonical course catalog.
+When all source associations are known, its positive course scope is unchanged.
+When any source is unassigned or outside that catalog, it now excludes only the
+other enabled canonical courses. Target courses and NULL/uncatalogued/disabled
+associations remain eligible before lexical/vector reads, title resolution and
+related-source expansion. No topic, filename or AI confidence licenses exclusion.
+
+The shared optional `routingScope.excludedCourseIds` is a parameterized negative
+course restriction: NULL is retained, values outside that exclusion are retained,
+and `[]` excludes nothing. Other dimensions and explicit positive scopes still
+intersect; positive empty sets match nothing. Existing explicit exclusions are
+unioned, never overwritten by automatic routing. The same predicate and final
+scope recheck serve keyword, dense, title, reference and fallback paths.
+If that union exceeds the existing 256-value bound, only the automatic addition
+is abandoned; the caller's original restrictions stay in force.
+
+`courseRouting.retainedUnmappedSources` and `excludedCourseIds` distinguish this
+route from a full-library fallback. If there are no other known courses to
+exclude, retrieval remains broad. Broader/ambiguous questions, term ambiguity,
+explicit course/document choices and default-off behavior remain unchanged.
+This is canonical-course candidate routing, not semantic topic classification,
+verified document relevance or proof of answer correctness. An incorrect
+canonical association remains a data-quality risk; tags cannot repair it.
+
 ## First slice: metadata observations, default off
 
 The existing `KernelService.ingestParsedDocument` is shared by indexed Canvas resources/announcements, Piazza text, imported mail bodies/attachments, PDFs and recording transcripts. Opt-in `KERNEL_CONTENT_TAGS=metadata-v1` classifies its stored source metadata in the same PostgreSQL transaction as evidence and the current document-version pointer. Default `off` preserves ingestion behavior; invalid modes fail before source writes. No model call, parse request, embedding or search change occurs.

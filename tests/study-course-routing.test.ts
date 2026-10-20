@@ -37,13 +37,19 @@ test('opt-in literal course routing reaches shared Kernel scope without persisti
   assert.equal(calls[4].options.routingScope,undefined);
   unmapped=true;
   await tutor.sendTutor('route-owner',id,'course-unmapped-000001','STAB22 assignments',[],false);
-  assert.equal(calls[5].options.routingScope,undefined,'unassigned content must retain broad retrieval');
+  assert.deepEqual(calls[5].options.routingScope,{excludedCourseIds:['chem-fall','chem-spring']},'retain unknown sources while excluding known unrelated courses');
   state=await tutor.tutorState('route-owner',id);
-  assert.equal(state.messages.at(-1)!.meta.study.courseRouting.fallbackReason,'unassigned-or-unmapped-source');
-  assert.equal(state.messages.at(-1)!.meta.study.courseRouting.scopeApplied,false);
+  assert.equal(state.messages.at(-1)!.meta.study.courseRouting.retainedUnmappedSources,true);
+  assert.equal(state.messages.at(-1)!.meta.study.courseRouting.scopeApplied,true);
+  await tutor.sendTutor('route-owner',id,'course-exclusion-union01','STAB22 assignments',[],false,'',{excludedCourseIds:['stats'],origins:['canvas']});
+  assert.deepEqual(calls[6].options.routingScope,{origins:['canvas'],excludedCourseIds:['chem-fall','chem-spring','stats']},'automatic routing must not overwrite an explicit exclusion or origin restriction');
+  const exclusions=Array.from({length:256},(_,i)=>'explicit-'+i);
+  await tutor.sendTutor('route-owner',id,'course-exclusion-cap001','STAB22 assignments',[],false,'',{excludedCourseIds:exclusions});
+  assert.deepEqual(calls[7].options.routingScope.excludedCourseIds,[...exclusions].sort(),'capacity recovery preserves the original explicit restriction');
+  state=await tutor.tutorState('route-owner',id);assert.equal(state.messages.at(-1)!.meta.study.courseRouting.fallbackReason,'course-exclusion-capacity');
   await assert.rejects(tutor.sendTutor('route-owner',id,'course-prefix-request1','CHMA100 assignment',[],false),(e:any)=>e.code==='course-scope-ambiguous');
   await assert.rejects(tutor.sendTutor('route-owner',id,'course-multi-request-01','A changed question',[],false),(e:any)=>e.code==='idempotency-scope-conflict');
-  assert.equal(calls.length,6);assert.equal(providerCalls,0);
+  assert.equal(calls.length,8);assert.equal(providerCalls,0);
  }finally{
   kernel.listCourses=saved.courses;kernel.documentRoutingCounts=saved.counts;kernel.hasUnmappedCourseDocuments=saved.unmapped;kernel.answerStudyContent=saved.answer;globalThis.fetch=saved.fetch;
   for(const name of names){if(env[name]===undefined)delete process.env[name];else process.env[name]=env[name];}

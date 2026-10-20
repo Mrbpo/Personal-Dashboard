@@ -6,7 +6,8 @@ type Observation={raw:string;code:string;startUtf16:number;endUtf16:number;cours
 export type QuestionCourseRoute={version:typeof QUESTION_COURSE_ROUTING_VERSION;catalogSha256:string;
  status:'resolved'|'unresolved'|'broad'|'none';reason:string;courseIds:string[];observations:Observation[];
  inputOrigin?:'successful-history';fromMessageId?:string;scopeApplied?:boolean;
- fallbackReason?:'unassigned-or-unmapped-source'|'course-catalog-capacity'};
+ retainedUnmappedSources?:true;excludedCourseIds?:string[];
+ fallbackReason?:'unassigned-or-unmapped-source'|'course-catalog-capacity'|'course-exclusion-capacity'};
 const tokens=(text:string)=>[...text.matchAll(/(?<![a-z0-9])([a-z]{2,8} ?\d{1,3}[-.]\d{2,4}|[a-z]{2,8}[ -]?\d{2,4}(?:[hyfs]\d)?)(?![a-z0-9]|[-.]\d)/gi)],
  key=(value:string)=>/\d[-.]\d/.test(value)?value.toUpperCase().replace(/ /g,''):value.toUpperCase().replace(/[ -]/g,''),
  base=(value:string)=>value.replace(/[HYFS]\d$/,'');

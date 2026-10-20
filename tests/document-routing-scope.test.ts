@@ -20,9 +20,50 @@ test('explicit scope is bounded, immutable, parameterized and keeps empty sets c
  assert.ok(!sql.includes('DROP'));assert.deepEqual(args,['owner',['A'],input.origins]);assert.match(sql,/d\.origin=ANY\(\$3::text\[\]\)/u);
  assert.equal(documentRoutingScopeSql({courseIds:[]},[]),'AND FALSE');
  assert.equal(documentRoutingScopeSql(undefined,[]),'');
+ const excludedArgs:unknown[]=[];
+ assert.match(documentRoutingScopeSql({excludedCourseIds:["B'bad"]},excludedArgs),/d\.course_id IS NULL OR NOT\(d\.course_id=ANY\(\$1::text\[\]\)\)/);
+ assert.deepEqual(excludedArgs,[["B'bad"]]);assert.notEqual(documentRoutingScopeSql({excludedCourseIds:[]},[]),'AND FALSE');
+ assert.equal(documentRoutingScopeSql({courseIds:[],excludedCourseIds:[]},[]),'AND FALSE');
  for(const bad of [null,[],{topic:['algebra']},{origins:'canvas'},{courseIds:['']},{documentIds:['bad\0id']},{termIds:Array(257).fill('x')}])
   assert.throws(()=>normalizeDocumentRoutingScope(bad));
  await assertDocumentRoutingScope({query:()=>{throw Error('Legacy must not add a query');}} as unknown as Pool,'owner',['doc'],{});
+});
+
+test('course exclusions reduce candidate reads while retaining unassigned and unmapped supplemental sources',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const pool=kernelPool(),uid=randomUUID(),owner='course-unknown:'+uid,a='chosen:'+uid,b='other:'+uid,c='uncatalogued:'+uid;
+ for(const id of[a,b,c])await kernel.upsertCourse({id,name:id,course_code:id});
+ const docs=[{id:'chosen-doc:'+uid,courseId:a,origin:'canvas',name:'Selected Guide.txt',text:'Nebula laboratory. See Unknown Discussion for clarification.'},
+  {id:'other-doc:'+uid,courseId:b,origin:'canvas',name:'Selected Guide.txt',text:'Nebula laboratory in another course.'},
+  {id:'unknown-doc:'+uid,courseId:'',origin:'piazza',name:'Unknown Discussion.txt',text:'Unassigned clarification from the instructor.'},
+  {id:'unmapped-doc:'+uid,courseId:c,origin:'gmail',name:'Uncatalogued Mail.txt',text:'Nebula laboratory in an uncatalogued source.'}];
+ const add=async(d:typeof docs[number],who=owner)=>kernel.ingestParsedDocument({id:d.id,ownerId:who,courseId:d.courseId,origin:d.origin,name:d.name,
+  originKey:d.id,hash:hash(d.text),mime:'text/plain'},[{locator:'body',text:d.text}],{parserVersion:'unknown-course-plain-text-v1',extractionMethod:'plain-text'});
+ for(const d of docs)await add(d);
+ await add({...docs[0],id:'foreign:'+uid},'foreign:'+uid);
+ await add({...docs[0],id:'hidden:'+uid});await pool.query('UPDATE document_texts SET hidden=true WHERE id=$1',['hidden:'+uid]);
+ const routingScope={excludedCourseIds:[b]},base={semantic:false,hybrid:false,aiRerank:false,refineAdjacent:false,limit:14};
+ assert.deepEqual(await kernel.documentRoutingCounts(owner,{routingScope}),{eligibleDocuments:4,routedDocuments:3,eligiblePages:4,routedPages:3});
+ const lexical=await kernel.searchDocumentText(owner,'nebula',{...base,routingScope});
+ assert.deepEqual(new Set(lexical.map(h=>h.document_id)),new Set([docs[0].id,docs[3].id]));
+ const linked=await kernel.searchDocumentText(owner,'nebula',{...base,relatedDocuments:true,routingScope,evidenceBody:'full-page'});
+ assert.ok(linked.some(h=>h.document_id===docs[2].id),'unknown Piazza supplement stays available under the original scope');
+ assert.ok(linked.every(h=>h.document_id!==docs[1].id&&h.evidence_body==='full-page'));
+ const selected=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:'Selected Guide.txt'},{routingScope});
+ assert.equal(selected.status,'resolved');if(selected.status==='resolved')assert.equal(selected.document.documentId,docs[0].id);
+ assert.equal((await findMentionedDocumentSources(pool,owner,'Explain Selected Guide.txt',{routingScope})).status,'resolved');
+ assert.deepEqual(await kernel.searchDocumentText(owner,'nebula',{...base,routingScope:{...routingScope,courseIds:[b]}}),[]);
+ assert.deepEqual((await kernel.searchDocumentText(owner,'nebula',{...base,routingScope:{...routingScope,origins:['canvas']}})).map(h=>h.document_id),[docs[0].id]);
+ const vector=Array.from({length:DOCUMENT_EMBEDDING_DIMENSIONS},(_,i)=>i===0?1:0),pages=(await pool.query(
+  'SELECT p.version_id,p.page_number,p.body FROM document_texts d JOIN document_text_pages p ON p.version_id=d.current_version_id WHERE d.owner_id=$1 AND NOT d.hidden',[owner])).rows;
+ for(const p of pages)await pool.query(`INSERT INTO document_page_embeddings(owner_id,version_id,page_number,model,input_hash,embedding)
+  VALUES($1,$2,$3,$4,$5,$6::double precision[])`,[owner,p.version_id,p.page_number,DOCUMENT_EMBEDDING_MODEL,documentVectorInput(p.body).inputHash,vector]);
+ const dense=await searchDocumentVectorText(pool,owner,vector,{routingScope});
+ assert.equal(dense.coverage.complete,true);assert.equal(dense.coverage.totalPages,3);
+ assert.deepEqual(new Set(dense.hits.map(h=>h.document_id)),new Set([docs[0].id,docs[2].id,docs[3].id]));
+ await assert.rejects(assertDocumentRoutingScope(pool,owner,[docs[1].id],{routingScope}),/left the explicit routing scope/);
+ await pool.query('UPDATE document_texts SET course_id=$1 WHERE id=$2',[b,docs[2].id]);
+ await assert.rejects(assertDocumentRoutingScope(pool,owner,[docs[2].id],{routingScope}),/left the explicit routing scope/);
 });
 
 test('keyword/dense/title/linked fallback share explicit intersections and candidate counts',

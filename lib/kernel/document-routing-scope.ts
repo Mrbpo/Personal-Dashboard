@@ -1,12 +1,13 @@
 import type {Pool} from 'pg';
 
-const dimensions=['courseIds','documentIds','origins','termIds'] as const;
+const dimensions=['courseIds','documentIds','origins','termIds','excludedCourseIds'] as const;
 export const DOCUMENT_ROUTING_SCOPE_VERSION='explicit-document-scope-v1';
 export type DocumentRoutingScope=Readonly<Partial<Record<typeof dimensions[number],readonly string[]>>>;
 type LegacyScope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
 
 /** Explicit caller scope only. Inferred topics/types cannot enter this contract.
- * Dimensions intersect; values within a dimension form a union; [] matches none. */
+ * Dimensions intersect; positive values form a union; [] matches none.
+ * Course exclusions retain NULL/unmapped sources; [] excludes nothing. */
 export function normalizeDocumentRoutingScope(value:unknown):DocumentRoutingScope|undefined{
  if(value===undefined)return undefined;
  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!dimensions.includes(key as typeof dimensions[number])))
@@ -26,10 +27,11 @@ export function normalizeDocumentRoutingScope(value:unknown):DocumentRoutingScop
  * Every caller still enforces owner/current-source guards. No tag inference. */
 export function documentRoutingScopeSql(value:DocumentRoutingScope|undefined,args:unknown[]):string{
  const scope=normalizeDocumentRoutingScope(value);if(!scope)return '';
- if(Object.values(scope).some(items=>items!.length===0))return 'AND FALSE';
+ if(Object.entries(scope).some(([key,items])=>key!=='excludedCourseIds'&&items!.length===0))return 'AND FALSE';
  return dimensions.filter(key=>scope[key]!==undefined).map(key=>{
   const parameter=args.push(scope[key]);
-  return key==='termIds'?`AND EXISTS(SELECT 1 FROM courses scope_course WHERE scope_course.id=d.course_id AND scope_course.term_id=ANY($${parameter}::text[]))`:
+  return key==='excludedCourseIds'?`AND (d.course_id IS NULL OR NOT(d.course_id=ANY($${parameter}::text[])))`:
+   key==='termIds'?`AND EXISTS(SELECT 1 FROM courses scope_course WHERE scope_course.id=d.course_id AND scope_course.term_id=ANY($${parameter}::text[]))`:
    `AND d.${{courseIds:'course_id',documentIds:'id',origins:'origin'}[key]}=ANY($${parameter}::text[])`;
  }).join(' ');
 }
