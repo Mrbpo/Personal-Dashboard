@@ -19,7 +19,7 @@ import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswe
 import {prepareSourceCellBindingCatalog,sourceCellBindingAnswerSchema,deriveSourceCellBindingAnswer,type SourceCellDerivation} from './document-source-cell-bindings.ts';
 import {prepareSourceQuantityCatalog,sourceQuantityAnswerSchema,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAggregations} from './document-source-quantities.ts';
 
-export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v8';
+export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v7';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
 export const DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION='source-quote-units-v1';
 export const DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16=8192;
@@ -612,10 +612,6 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    'Cover all question-relevant items in an explicit supplied list, rather than returning only one example. '+
    'For quantities, state the counted object, unit, scope, processing stage and configuration; preserve distinct supported interpretations and qualifications. '+
    'Preserve equations, qualifications and disagreement; do not invent facts from general knowledge. '+
-   'Preserve the logical form of each cited statement: retain material antecedents, exceptions, quantifiers and causal direction. '+
-   'If the source says that Q follows if P holds, do not assume P, drop P from Q, or turn the condition into a consequence. '+
-   'Complementary cited evidence may establish an antecedent; identify that evidence rather than assuming it or forbidding multi-source reasoning. '+
-   'A property illustrated by a named method or example does not establish that every method has that property; keep its stated applicability. '+
    'This is study-content synthesis. Current deadlines, exam dates, course relationships and task status require canonical Kernel facts; '+
    'do not establish those business states from document evidence and decline if the question requires them. '+
    `For insufficient evidence, return insufficient-evidence with no claims and message exactly: ${DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE} `+
