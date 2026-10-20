@@ -5,11 +5,12 @@ import type {DocumentTextHit} from './document-search.ts';
 import type {IngestionJob} from './jobs.ts';
 import {DOCUMENT_EMBEDDING_MODEL,DOCUMENT_EMBEDDING_DIMENSIONS,DOCUMENT_EMBEDDING_BATCH_SIZE,
   embedDocumentInputs} from './document-semantic.ts';
+import{documentEmbeddingInput,documentEmbeddingInputPolicy,documentEmbeddingSqlBody,type DocumentEmbeddingInputPolicy}from'./document-embedding-input.ts';
 
 export type DocumentVectorScope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
-export type DocumentVectorCoverage={totalPages:number;searchablePages:number;indexedPages:number;emptyPages:number;complete:boolean};
+export type DocumentVectorCoverage={totalPages:number;searchablePages:number;indexedPages:number;emptyPages:number;complete:boolean;inputPolicy?:'page-full-v1'};
 export type DocumentVectorResult={hits:DocumentTextHit[];coverage:DocumentVectorCoverage;degradedReason?:'incomplete-vector-index'};
-export type DocumentVectorPayload={owner:string;documentId:string;versionId:string;model:string;pageCursor:number};
+export type DocumentVectorPayload={owner:string;documentId:string;versionId:string;model:string;pageCursor:number;inputPolicy?:DocumentEmbeddingInputPolicy};
 type EmbeddingPage={version_id:string;page_number:number;input:string;input_hash:string;cached_embedding:number[]|null};
 type EmbedInputs=(inputs:string[],deadline:number)=>Promise<number[][]>;
 
@@ -19,12 +20,9 @@ const trimCharacters=String.fromCodePoint(9,10,11,12,13,32,160,5760,
   8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279);
 const inputHash=(input:string)=>createHash('sha256').update(input).digest('hex');
 
-export function documentVectorInput(body:string):{input:string;inputHash:string}{
-  const input=Array.from(body).slice(0,6000).join('').trim();
-  return {input,inputHash:inputHash(input)};
-}
+export const documentVectorInput=documentEmbeddingInput;
 
-function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
+function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string,policy=documentEmbeddingInputPolicy()){
   if(!owner?.trim())throw new Error('PDF vector owner is required');
   const args:unknown[]=[owner,DOCUMENT_EMBEDDING_MODEL,trimCharacters];
   const course=scope.courseId?`AND d.course_id=$${args.push(scope.courseId)}`:'';
@@ -43,27 +41,28 @@ function scopeSql(owner:string,scope:DocumentVectorScope={},versionId?:string){
     current_pages AS MATERIALIZED (
       SELECT d.id document_id,d.course_id,d.name,d.origin,d.origin_key,d.source_hash,
         d.version_id,d.source_version_id,d.parser_version,d.parser_warnings,p.page_number,p.body,p.evidence_id,p.locator,
-        btrim(left(p.body,6000),$3::text) input,
-        encode(sha256(convert_to(btrim(left(p.body,6000),$3::text),'UTF8')),'hex') input_hash
+        btrim(${documentEmbeddingSqlBody('p.body',policy)},$3::text) input,
+        encode(sha256(convert_to(btrim(${documentEmbeddingSqlBody('p.body',policy)},$3::text),'UTF8')),'hex') input_hash
       FROM current_documents d JOIN document_text_pages p ON p.version_id=d.version_id)`;
   return {sql,args};
 }
 
-function coverageRow(row:{total_pages:unknown;searchable_pages:unknown;indexed_pages:unknown}):DocumentVectorCoverage{
+function coverageRow(row:{total_pages:unknown;searchable_pages:unknown;indexed_pages:unknown},policy:DocumentEmbeddingInputPolicy):DocumentVectorCoverage{
   const totalPages=Number(row.total_pages),searchablePages=Number(row.searchable_pages),indexedPages=Number(row.indexed_pages);
-  return {totalPages,searchablePages,indexedPages,emptyPages:totalPages-searchablePages,complete:indexedPages===searchablePages};
+  return {totalPages,searchablePages,indexedPages,emptyPages:totalPages-searchablePages,complete:indexedPages===searchablePages,
+    ...(policy==='page-full-v1'?{inputPolicy:policy}:{})};
 }
 
 /** Coverage counts the whole requested current scope, never just keyword hits. */
 export async function documentVectorCoverage(pool:Pool,owner:string,scope:DocumentVectorScope={}):Promise<DocumentVectorCoverage>{
-  const {sql,args}=scopeSql(owner,scope);
+  const policy=documentEmbeddingInputPolicy(),{sql,args}=scopeSql(owner,scope,undefined,policy);
   const row=(await pool.query(`/* vector:coverage */ ${sql}
     SELECT count(*) total_pages,count(*) FILTER (WHERE p.input<>'') searchable_pages,
       count(*) FILTER (WHERE p.input<>'' AND public.vector_norm(e.embedding_vector)>0) indexed_pages
     FROM current_pages p LEFT JOIN document_page_embeddings e
       ON e.owner_id=$1 AND e.version_id=p.version_id AND e.page_number=p.page_number
         AND e.model=$2 AND e.input_hash=p.input_hash`,args)).rows[0];
-  return coverageRow(row);
+  return coverageRow(row,policy);
 }
 
 /** Exact independent dense recall. No page embeddings are generated on this path. */
@@ -73,7 +72,7 @@ export async function searchDocumentVectorText(pool:Pool,owner:string,queryVecto
     !queryVector.some(value=>Math.fround(value)!==0))throw new Error('Invalid PDF query vector');
   const limit=options.limit??80;
   if(!Number.isInteger(limit)||limit<1||limit>240)throw new Error('Invalid PDF dense candidate limit');
-  const {sql,args}=scopeSql(owner,options),vectorArg=args.push(JSON.stringify(queryVector)),limitArg=args.push(limit);
+  const policy=documentEmbeddingInputPolicy(),{sql,args}=scopeSql(owner,options,undefined,policy),vectorArg=args.push(JSON.stringify(queryVector)),limitArg=args.push(limit);
   // Coverage and candidates share one statement snapshot, preventing a concurrent
   // reparse from pairing a complete old count with incomplete new results.
   const row=(await pool.query<{coverage:{total_pages:number;searchable_pages:number;indexed_pages:number};hits:DocumentTextHit[]}>(`
@@ -90,7 +89,7 @@ export async function searchDocumentVectorText(pool:Pool,owner:string,queryVecto
       'searchable_pages',(SELECT count(*) FROM current_pages WHERE input<>''),
       'indexed_pages',(SELECT count(*) FROM indexed)) coverage,
       coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.score DESC,r.document_id,r.page_number) FROM ranked r),'[]'::jsonb) hits`,args)).rows[0];
-  const coverage=coverageRow(row.coverage);
+  const coverage=coverageRow(row.coverage,policy);
   return {coverage,hits:row.hits.map(hit=>({...hit,score:Number(hit.score),retrieval_mode:'semantic' as const})),
     ...(coverage.complete?{}:{degradedReason:'incomplete-vector-index' as const})};
 }
@@ -181,7 +180,7 @@ export async function buildHybridDocumentCandidates(pool:Pool,owner:string,lexic
 
 /** Only missing embeddings in complete, current document versions are queued. */
 export async function queueDocumentVectorJobs(pool:Pick<Pool,'query'>,owner:string,scope:DocumentVectorScope={}):Promise<string[]>{
-  const {sql,args}=scopeSql(owner,scope);
+  const policy=documentEmbeddingInputPolicy(),{sql,args}=scopeSql(owner,scope,undefined,policy);
   const versions=(await pool.query<{document_id:string;version_id:string}>(`/* vector:queue-candidates */ ${sql}
     SELECT DISTINCT p.document_id,p.version_id FROM current_pages p WHERE p.input<>'' AND NOT EXISTS (
       SELECT 1 FROM document_page_embeddings e WHERE e.owner_id=$1 AND e.version_id=p.version_id
@@ -191,8 +190,9 @@ export async function queueDocumentVectorJobs(pool:Pick<Pool,'query'>,owner:stri
   const ids:string[]=[];
   for(const version of versions){
     const payload:DocumentVectorPayload={owner,documentId:version.document_id,versionId:version.version_id,
-      model:DOCUMENT_EMBEDDING_MODEL,pageCursor:0};
-    const idempotencyKey=`document-vectors:${inputHash(JSON.stringify([owner,version.version_id,DOCUMENT_EMBEDDING_MODEL]))}`;
+      model:DOCUMENT_EMBEDDING_MODEL,pageCursor:0,...(policy==='page-full-v1'?{inputPolicy:policy}:{})};
+    const idempotencyKey=`document-vectors:${inputHash(JSON.stringify([owner,version.version_id,DOCUMENT_EMBEDDING_MODEL,
+      ...(policy==='page-full-v1'?[policy]:[])]))}`;
     const row=(await pool.query<{id:string}>(`INSERT INTO ingestion_jobs(id,kind,source,scope,payload,idempotency_key)
       VALUES ($1,'document_vectors','document',$2,$3::jsonb,$4) ON CONFLICT(idempotency_key) DO UPDATE SET
         state=CASE WHEN ingestion_jobs.state IN ('complete','failed') THEN 'queued' ELSE ingestion_jobs.state END,
@@ -210,6 +210,7 @@ function validatePayload(raw:unknown):DocumentVectorPayload{
   const value=raw as DocumentVectorPayload;
   if(!value.owner?.trim()||!value.documentId||!value.versionId||value.model!==DOCUMENT_EMBEDDING_MODEL||
     !Number.isInteger(value.pageCursor)||value.pageCursor<0)throw new Error('Invalid PDF vector job identity');
+  documentEmbeddingInputPolicy(value.inputPolicy??'page-prefix-v1');
   return value;
 }
 
@@ -227,9 +228,10 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
       [job.id,job.lease_token])).rows[0];
     if(!leased)throw new Error('PDF vector ingestion lease lost');
     const payload=validatePayload(leased.payload);
-    if(payload.owner!==initial.owner||payload.documentId!==initial.documentId||payload.versionId!==initial.versionId)
+    if(payload.owner!==initial.owner||payload.documentId!==initial.documentId||payload.versionId!==initial.versionId||
+      (payload.inputPolicy??'page-prefix-v1')!==(initial.inputPolicy??'page-prefix-v1'))
       throw new Error('PDF vector job identity changed');
-    const {sql,args}=scopeSql(payload.owner,{documentId:payload.documentId},payload.versionId);
+    const policy=payload.inputPolicy??'page-prefix-v1',{sql,args}=scopeSql(payload.owner,{documentId:payload.documentId},payload.versionId,policy);
     const cursor=args.push(payload.pageCursor),batchLimit=args.push(DOCUMENT_EMBEDDING_BATCH_SIZE);
     const current=(await pool.query<{current:boolean;pages:EmbeddingPage[]}>(`/* vector:missing-pages */ ${sql},missing AS (
       SELECT p.version_id,p.page_number,p.input,p.input_hash,cached.embedding cached_embedding FROM current_pages p
@@ -239,7 +241,7 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
         JOIN document_page_embeddings e ON e.version_id=old_page.version_id AND e.page_number=old_page.page_number
           AND e.owner_id=$1 AND e.model=$2 AND e.input_hash=p.input_hash
         WHERE old_version.document_id=p.document_id AND old_version.id<>p.version_id AND old_page.body=p.body
-          AND e.input_hash=encode(sha256(convert_to(btrim(left(old_page.body,6000),$3::text),'UTF8')),'hex')
+          AND e.input_hash=encode(sha256(convert_to(btrim(${documentEmbeddingSqlBody('old_page.body',policy)},$3::text),'UTF8')),'hex')
           AND public.vector_norm(e.embedding_vector)>0
         ORDER BY e.version_id,e.page_number LIMIT 1
       ) cached ON true
@@ -252,6 +254,11 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
     if(!current.current)return {indexedPages,reusedPages,obsolete:true};
     if(!current.pages.length)return {indexedPages,reusedPages,obsolete:false};
     const batch=current.pages;
+    // Validate the captured policy before any injected/provider embed callback.
+    if(policy==='page-full-v1')for(const page of batch){
+      const prepared=documentEmbeddingInput(page.input,policy);
+      if(prepared.input!==page.input||prepared.inputHash!==page.input_hash)throw Error('PDF full-page input binding differs');
+    }
     // Reuse only the same owner's same-document full original page body. An
     // identical truncated input alone cannot hide changes later in the page.
     // These are vector values, never historical evidence or version pointers.
@@ -283,7 +290,7 @@ export async function runDocumentVectorJob(pool:Pool,job:IngestionJob,options:{e
           ARRAY(SELECT jsonb_array_elements_text(r.embedding)::double precision)
         FROM jsonb_to_recordset($3::jsonb) AS r(version_id text,page_number integer,input_hash text,embedding jsonb)
           JOIN document_text_pages p ON p.version_id=r.version_id AND p.page_number=r.page_number
-        WHERE r.version_id=$4 AND r.input_hash=encode(sha256(convert_to(btrim(left(p.body,6000),$5::text),'UTF8')),'hex')
+        WHERE r.version_id=$4 AND r.input_hash=encode(sha256(convert_to(btrim(${documentEmbeddingSqlBody('p.body',policy)},$5::text),'UTF8')),'hex')
         ON CONFLICT(owner_id,version_id,page_number,model,input_hash) DO UPDATE
           SET embedding=excluded.embedding WHERE public.vector_norm(document_page_embeddings.embedding_vector)=0`,
         [payload.owner,DOCUMENT_EMBEDDING_MODEL,JSON.stringify(batch.map((page,index)=>({...page,embedding:embeddings[index]}))),
