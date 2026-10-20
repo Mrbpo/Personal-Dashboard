@@ -82,6 +82,38 @@ or increase a limit. Both the private context and actual wire are checked agains
 the rebuilt current artifact. This reuses the generation call, not an additional
 model stage; it is not full-page structure coverage or proof of answer accuracy.
 
+## Read-only question/source name observations
+
+`KernelService.bindDocumentQuestionName(owner, source, question, input)` keeps
+the question's role/name span separate from a proposed stored-source label.
+It reuses evidence-ID/current-version reads and rechecks the source before
+returning a hashed observation; it does not accept caller-supplied source bodies.
+Exact UTF-16 ranges, body hashes, source/version/evidence IDs, locator and parser
+warnings remain attached. Surrogate splits, forged spans and extra authority
+fields reject. Case and meaningful name modifiers are never discarded;
+normalization only trims/collapses whitespace.
+
+The initial observations are a literal requested/source span match or a strict local
+`Long Form (LF)` initialism declaration. The proposed candidate must be one of
+the defining occurrences; this does not license applying a definition to later
+ambiguous mentions or merging similarly named objects. Other synonyms,
+definitions, paraphrases and name variants remain unresolved, not proven
+different. This is a deliberately bounded naming-form verifier, not a general
+abbreviation extractor or semantic identity resolver.
+
+Connected identifier prefixes are unresolved (for example a short name cut out
+of a longer name joined by a plus sign). These checks do not establish that a
+caller selected every noun-phrase qualifier or all question requirements; that
+requires the later query-first contract. A matching span is not a complete
+semantic object description.
+
+Observations keep `semanticIdentityVerified=false` and
+`globalEntityMergeAuthorized=false`. Unresolved does not prove whole-document
+unanswerability. This primitive does not yet change retrieval, answer release or
+refusal policy; a query-first requirement contract and evidence relationship
+checks still need integration and independent validation. It does not add a
+table, model request, canonical fact, UI or new service.
+
 The generation input has a bounded `sourceCellBindings` navigation index over the actual selected native table images (maximum256cells/32KiB). Full raw witnesses stay private. An available index means observed cells are addressable; the original grid status and unknown positions stay unchanged. Local row/column label paths must be complete, unambiguous parser declarations. Unknown/missing paths, repeated blocks, foreign cells and incompatible axes/printed metric labels reject rather than infer missing structure.
 
 `table-value` returns only a cell reference; `table-difference` returns only two cell references. The program restores all original row/column headings and values and, for supported one-axis plain-decimal subtraction, uses the existing exact decimal helper. These operations cannot accept arbitrary model labels, values, units, results or text. Same-row model columns and same-column data rows are supported. The resulting source bindings and arithmetic verification are separate from semantic/relationship/visibility verification, which remain false. No canonical data is written or whole grid promoted to truth.

@@ -16,6 +16,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText,projectDocume
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
+import {bindDocumentQuestionName} from './document-name-binding.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
 import {checkDocumentQuantityConsistency} from './document-quantity-consistency.ts';
@@ -1161,6 +1162,10 @@ export class KernelService {
 
   readDocumentNodes(owner:string,expectedSource:DocumentContextSource,evidenceIds:string[]){
     return readDocumentNodes(kernelPool(),owner,expectedSource,evidenceIds);
+  }
+
+  bindDocumentQuestionName(owner:string,source:DocumentContextSource,question:string,input:unknown){
+    return bindDocumentQuestionName(kernelPool(),owner,source,question,input);
   }
 
   readCompleteDocumentSource(owner:string,expectedSource:DocumentContextSource){
