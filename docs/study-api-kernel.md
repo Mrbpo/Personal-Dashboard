@@ -66,6 +66,20 @@ The original256-cell bound and exact32 KiB whole-observation allowance apply; co
 
 `STUDY_SOURCE_VALUES=cell-bindings-v2` requires native declarations, the application selector and the existing selected-once citation check. `off` and `difference-v1` retain their implementations. The new variant reuses the same generation call and raw-response/derivation recorder. Existing supported prose mean/agreement/time quantity questions keep precedence when that quantity contract is also enabled.
 
+The cell-binding wire can additionally carry `declaredTableContexts` from the
+same revalidated native artifact: original caption records/references, table
+metadata/provenance and non-cell data metadata. They are parser declarations,
+with semantic/relationship/visibility verification false and coordinate mapping
+unverified; they do not create quotation IDs, canonical facts, repaired grids or
+verified caption-to-image relationships. Missing metadata is not invented.
+
+Optional context shares the existing 32KiB catalog limit. If it does not fit,
+the original cells, value paths and unknown positions remain available and the
+catalog's `contextTransport` records omission. The omission does not evict cells
+or increase a limit. Both the private context and actual wire are checked against
+the rebuilt current artifact. This reuses the generation call, not an additional
+model stage; it is not full-page structure coverage or proof of answer accuracy.
+
 The generation input has a bounded `sourceCellBindings` navigation index over the actual selected native table images (maximum256cells/32KiB). Full raw witnesses stay private. An available index means observed cells are addressable; the original grid status and unknown positions stay unchanged. Local row/column label paths must be complete, unambiguous parser declarations. Unknown/missing paths, repeated blocks, foreign cells and incompatible axes/printed metric labels reject rather than infer missing structure.
 
 `table-value` returns only a cell reference; `table-difference` returns only two cell references. The program restores all original row/column headings and values and, for supported one-axis plain-decimal subtraction, uses the existing exact decimal helper. These operations cannot accept arbitrary model labels, values, units, results or text. Same-row model columns and same-column data rows are supported. The resulting source bindings and arithmetic verification are separate from semantic/relationship/visibility verification, which remain false. No canonical data is written or whole grid promoted to truth.

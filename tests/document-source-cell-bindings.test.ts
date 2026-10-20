@@ -5,7 +5,7 @@ import type {DoclingNativeTable} from '../lib/kernel/docling-result.ts';
 import {prepareDocumentAnswerForPolicy,prepareSelectedSourceValueGeneration,synthesizeDocumentAnswer,documentSourceGenerationRoute,resolveSourceValueEvidenceSelection,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex'),canonical=(v:unknown)=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
 globalThis.fetch=async()=>{throw Error('Cell binding component tests forbid provider calls');};
-async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknown=false){
+async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknown=false,captionText?:string){
  const png=await readFile(new URL('./fixtures/native-table-mit-class5/source-page.png',import.meta.url)),
   cell=(r:number,c:number,text:string,role='none',span=1)=>({start_row_offset_idx:r,end_row_offset_idx:r+1,start_col_offset_idx:c,end_col_offset_idx:c+span,
    row_span:1,col_span:span,row_header:role==='row',column_header:role==='column',row_section:false,text}),
@@ -13,8 +13,10 @@ async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknow
    cell(2,0,'Zh','row'),cell(2,1,'8.92'),cell(2,2,'5.32'),cell(2,3,'9.53'),cell(2,4,'5.48'),
    cell(3,0,'Fr','row'),cell(3,1,'9.68'),cell(3,2,'1.95'),cell(3,3,'9.90'),cell(3,4,'2.03')].filter(c=>!omitRowLabel||c.start_row_offset_idx!==2||c.start_col_offset_idx!==0)
     .map((c,i)=>unknownHeader&&i===0?{...c,row_header:true}:allRowLabelsUnknown&&c.row_header?{...c,column_header:true}:c),
-  native:DoclingNativeTable={reference:'#/tables/0',pageNumbers:[1],raw:{data:{num_rows:4,num_cols:5,table_cells:raw}},
-   cellTexts:raw.map((c,cellIndex)=>({cellIndex,text:c.text})),captions:[],result:{resultBlobSha256:sha('synthetic-result'),derivedInputSha256:sha('synthetic-pdf'),optionsHash:sha('synthetic-options'),copyIndices:[0]}};
+  native:DoclingNativeTable={reference:'#/tables/0',pageNumbers:[1],raw:{...(captionText===undefined?{}:{self_ref:'#/tables/0',captions:[{$ref:'#/texts/0'}],
+   prov:[{page_no:1,bbox:{l:0,t:10,r:100,b:50,coord_origin:'TOPLEFT'}}]}),data:{num_rows:4,num_cols:5,table_cells:raw}},
+   cellTexts:raw.map((c,cellIndex)=>({cellIndex,text:c.text})),captions:captionText===undefined?[]:[{reference:'#/texts/0',raw:{self_ref:'#/texts/0',label:'caption',text:captionText}}],
+   result:{resultBlobSha256:sha('synthetic-result'),derivedInputSha256:sha('synthetic-pdf'),optionsHash:sha('synthetic-options'),copyIndices:[0]}};
  // Synthetic geometry/values on an unchanged fixture PNG: never a PDF fidelity score.
  const artifact=prepareNativeTableArtifact(native),source={documentId:'component-doc',currentVersionId:sha('v'),sourceVersionId:sha('s'),sourceHash:sha('synthetic-pdf')},
   image={kind:'pdf-page' as const,physicalPage:1,attachmentId:sha('attachment'),assetId:sha(png),anchorEvidenceId:'page-evidence',rawPdfSha256:source.sourceHash,
@@ -37,6 +39,41 @@ async function fixture(omitRowLabel=false,unknownHeader=false,allRowLabelsUnknow
 const result=(...claims:unknown[])=>({status:'answered',message:'',claims}),decode=(value:unknown,catalog:Awaited<ReturnType<typeof fixture>>['catalog'],ids=['i0','q:a','q:b'])=>deriveSourceCellBindingAnswer(value,JSON.stringify(value),catalog,ids);
 const schemaValueIds=(schema:ReturnType<typeof sourceCellBindingAnswerSchema>)=>(schema.properties.claims as {
  items:{anyOf:Array<{properties:{valueRef:{enum:string[]}}}>}}).items.anyOf[0].properties.valueRef.enum;
+
+test('declared table context reaches the generation wire verbatim without becoming verified relationships or new quotes',async()=>{
+ const caption='Table A: F₁ results; Model A and Model B are distinct configurations.',f=await fixture(false,false,false,caption),
+  legacy=await fixture(),packet=f.catalog.wire.declaredTableContexts!;
+ assert.equal(f.catalog.contextTransport.status,'available');assert.equal(packet.length,1);
+ assert.deepEqual(packet[0].captions,f.native.captions);assert.equal(packet[0].rawTableMetadata.self_ref,f.native.reference);
+ assert.deepEqual(packet[0].rawTableMetadata.prov,f.native.raw.prov);assert.equal(packet[0].nativeSha256,f.observation.nativeSha256);
+ assert.equal(packet[0].imageId,'i0');assert.equal(packet[0].tableId,'b0');assert.equal(packet[0].semanticVerified,false);
+ assert.equal(packet[0].relationshipVerified,false);assert.equal(packet[0].coordinateMapping,'unverified');
+ assert.deepEqual(f.catalog.cells,legacy.catalog.cells);assert.deepEqual(f.catalog.tables[0].unknownPositions,legacy.catalog.tables[0].unknownPositions);
+ assert.ok(!('table_cells'in packet[0].rawDataMetadata));assert.ok(!('grid'in packet[0].rawDataMetadata));
+ assert.equal(legacy.catalog.wire.declaredTableContexts,undefined,'Missing source captions/metadata are not invented');
+ const tampered=structuredClone(f.catalog);tampered.wire.declaredTableContexts![0].captions[0].raw.text='Invented qualification';
+ assert.throws(()=>sourceCellBindingAnswerSchema(tampered,['i0']),/source-cell-catalog-changed/);
+ const privateTampered=structuredClone(f.catalog);privateTampered.declaredTableContexts[0].relationshipVerified=true as false;
+ assert.throws(()=>sourceCellBindingAnswerSchema(privateTampered,['i0']),/source-cell-catalog-changed/);
+ const prepared=prepareDocumentAnswerForPolicy('Read the configurations.',f.context,{scope:'application',sourceValueContract:'cell-bindings-v2',evidenceSelection:'select-then-answer',
+  citationCheck:{mode:'selected-once',beforeAttempt:async()=>{},recordResponse:async()=>{}}});
+ const generation=prepareSelectedSourceValueGeneration(prepared,['i0'],{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},
+  {scope:'application',sourceValueContract:'cell-bindings-v2',evidenceSelection:'select-then-answer',citationCheck:{mode:'selected-once',beforeAttempt:async()=>{},recordResponse:async()=>{}}});
+ assert.ok(JSON.stringify(generation.request).includes(caption));
+});
+
+test('oversized optional table context keeps original cells within the existing catalog limit',async()=>{
+ const f=await fixture(false,false,false,'Synthetic caption '.repeat(850)),native={...f.native,reference:'#/tables/1',raw:{...f.native.raw,self_ref:'#/tables/1'}},
+  artifact=prepareNativeTableArtifact(native),identity={namespace:NATIVE_TABLE_NAMESPACE,producer:NATIVE_TABLE_PRODUCER,source:f.candidate.source,
+   artifactSha256:artifact.artifactSha256,manifestSha256:f.image.manifestSha256,assetSha256:f.image.sha256,anchor:f.image.anchorEvidenceId},
+  candidate={...f.candidate,id:sha(canonical(identity)),artifactSha256:artifact.artifactSha256},
+  observation=prepareNativeTableObservation(candidate,artifact,f.image,'declared-v1'),
+  catalog=prepareSourceCellBindingCatalog([{...f.support,tableObservations:[f.observation,observation]}]);
+ assert.equal(catalog.status,'available');assert.equal(catalog.tables.length,2);assert.equal(catalog.cells.length,f.catalog.cells.length*2);
+ assert.equal(catalog.contextTransport.reason,'context-byte-limit');assert.equal(catalog.contextTransport.omittedTables,2);
+ assert.equal(catalog.wire.declaredTableContexts,undefined);assert.ok(Buffer.byteLength(canonical(catalog.wire))<=32768);
+ assert.deepEqual(catalog.wire.tables[0].cells,f.catalog.wire.tables[0].cells);
+});
 
 test('v2 retains omitted available native declarations without promoting an incomplete grid or changing legacy retention',async()=>{
  const f=await fixture(),policy={scope:'application' as const,model:'gpt-5.4-mini' as const,evidenceSelection:'select-then-answer' as const,
