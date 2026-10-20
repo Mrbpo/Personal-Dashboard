@@ -116,6 +116,42 @@ export function fuseIndependentDocumentRanks(lexical:DocumentTextHit[],dense:Doc
     a.hit.page_number-b.hit.page_number).slice(0,limit).map(({hit,score})=>({...hit,score}));
 }
 
+const hybridPageKey=(hit:DocumentTextHit)=>JSON.stringify([hit.document_id,hit.page_number]);
+const sameHybridSource=(a:DocumentTextHit,b:DocumentTextHit)=>a.source_version_id===b.source_version_id&&
+  a.evidence_id===b.evidence_id&&a.source_hash===b.source_hash;
+
+function protectedHybridHeads(lexical:DocumentTextHit[],dense:DocumentTextHit[],limit:number):DocumentTextHit[]{
+  const selected=new Map<string,DocumentTextHit>(),quotas=[Math.ceil(limit/2),Math.floor(limit/2)],lanes=[lexical,dense].map((lane,index)=>{
+    const unique=new Map<string,DocumentTextHit>();
+    for(const hit of lane){const key=hybridPageKey(hit),old=unique.get(key);
+      if(old&&!sameHybridSource(old,hit))throw Error('PDF hybrid head versions conflict');
+      if(!old)unique.set(key,hit);}
+    return [...unique.values()].slice(0,quotas[index]);
+  });
+  for(let rank=0;rank<quotas[0];rank++)for(const lane of lanes){const hit=lane[rank];if(!hit)continue;
+    const key=hybridPageKey(hit),old=selected.get(key);if(old&&!sameHybridSource(old,hit))throw Error('PDF hybrid head versions conflict');
+    if(!old)selected.set(key,hit);
+  }
+  return [...selected.values()];
+}
+
+/** Reserve a bounded share for each independent retrieval lane, then fill in
+ * the existing routed RRF order. This protects evidence candidates, not truth.
+ * The ranked pool must still contain every protected current source identity. */
+export function selectHybridDocumentEvidence(lexical:DocumentTextHit[],dense:DocumentTextHit[],ranked:DocumentTextHit[],limit:number):DocumentTextHit[]{
+  if(!Number.isInteger(limit)||limit<1||limit>240)throw Error('Invalid PDF hybrid evidence limit');
+  const candidates=new Map(ranked.map(hit=>[hybridPageKey(hit),hit]));
+  if(candidates.size!==ranked.length)throw Error('Duplicate PDF hybrid evidence candidates');
+  const selected=new Set<string>();
+  for(const head of protectedHybridHeads(lexical,dense,limit)){
+    const key=hybridPageKey(head),current=candidates.get(key);
+    if(!current||!sameHybridSource(head,current))throw Error('PDF hybrid protected source missing or changed');
+    selected.add(key);
+  }
+  for(const hit of ranked)if(selected.size<limit)selected.add(hybridPageKey(hit));
+  return ranked.filter(hit=>selected.has(hybridPageKey(hit)));
+}
+
 /** Preserve each modality's head before the fused tail: an otherwise strong
  * lexical-only page must not be removed simply because many weaker pages occur
  * in both lists. Duplicate heads free slots for actual adjacent-page evidence.
@@ -131,7 +167,7 @@ export async function buildHybridDocumentCandidates(pool:Pool,owner:string,lexic
       throw new Error('PDF hybrid candidate versions conflict');
     if(!previous&&selected.size<40)selected.set(key(hit),{...hit,score:scores.get(key(hit))??hit.score});
   };
-  for(let index=0;index<20;index++)for(const hit of [lexical[index],dense[index]])if(hit)add(hit);
+  for(const hit of protectedHybridHeads(lexical,dense,40))add(hit);
   const heads=[...selected.values()];
   const byDocument=new Map<string,DocumentTextHit>();
   for(const hit of fused){if(!byDocument.has(hit.document_id))byDocument.set(hit.document_id,hit);if(byDocument.size===4)break;}

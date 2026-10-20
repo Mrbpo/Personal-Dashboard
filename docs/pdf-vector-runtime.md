@@ -14,6 +14,8 @@ Limits verified against the [official embeddings endpoint](https://developers.op
 
 ## Pinned extension and CPU behavior
 
+Non-AI hybrid output preserves `ceil(limit/2)` unique lexical and `floor(limit/2)` unique dense heads before filling from the existing routed RRF order. Overlap frees slots; no scores, original text or source identities are rewritten. The internal non-AI union may contain up to160 candidates from the existing80/80 lanes so a protected head is not silently lost before the final limit. Current owner/version validation covers that union; only the original requested number of pages reaches the answer context. The AI candidate builder reuses the same head selection at its existing20/20 budget. This is not semantic certification, exhaustive recall or proof of performance reduction. Existing hybrid enable/rollback flags remain unchanged.
+
 - `pgvector` source **v0.8.7**, archive SHA-256 `cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85`.
 - Both build and runtime use **postgres:18.6**, matching the existing server minor version and Debian ABI.
 - Compile with `OPTFLAGS=''`, avoiding machine-specific `-march=native`. This retains the compiler's portable optimization and pgvector's runtime CPU dispatch where supported; it does not promise AVX-512 on an unspecified virtual CPU.

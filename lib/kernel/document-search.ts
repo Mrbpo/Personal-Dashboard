@@ -8,7 +8,7 @@ import type{RegisteredAliasExpansion}from'./content-taxonomy-registry.ts';
 import{recallClassificationWitnesses}from'./classification-witness-recall.ts';
 import {rerankDocumentPages,documentQueryVector,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT} from './document-semantic.ts';
 import {rerankDocumentPagesWithAI,selectDocumentPagesWithAI,DOCUMENT_RERANK_CANDIDATE_LIMIT} from './document-rerank.ts';
-import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates} from './document-vector.ts';
+import {searchDocumentVectorText,documentVectorCoverage,fuseIndependentDocumentRanks,buildHybridDocumentCandidates,selectHybridDocumentEvidence} from './document-vector.ts';
 import {recallReferencedDocuments} from './document-references.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,DocumentSourceResolutionError,type DocumentSourceHint} from './document-source.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError} from './document-evidence.ts';
@@ -410,7 +410,8 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       const result=await dense;
       if(result.error)semanticFailure=`semantic:${rankingFailure(result.error)}`;
       else if(!result.value?.coverage.complete)semanticFailure='semantic:index-incomplete';
-      else try{independentDense=result.value.hits;reordered=fuseIndependentDocumentRanks(hits,independentDense,DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
+      else try{independentDense=result.value.hits;reordered=fuseIndependentDocumentRanks(hits,independentDense,
+        aiRerank?DOCUMENT_SEMANTIC_CANDIDATE_LIMIT:2*DOCUMENT_SEMANTIC_CANDIDATE_LIMIT);}
       catch(error){semanticFailure=`semantic:${rankingFailure(error)}`;}
     }else{
       try{
@@ -459,7 +460,8 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
           source_version_id:hit.source_version_id,evidence_id:hit.evidence_id})))]);
       if(Number(current.rows[0].n)!==reordered.length)return keywordFallback('semantic:stale-version');
     }
-    return (await route(reordered)).slice(0,limit).map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
+    const routed=await route(reordered),selected=hybrid?selectHybridDocumentEvidence(hits,independentDense,routed,limit):routed.slice(0,limit);
+    return selected.map(hit=>({...hit,score:hit.score*1000,retrieval_mode:'semantic' as const}));
   }
   return (await route(hits)).slice(0,limit);
 }

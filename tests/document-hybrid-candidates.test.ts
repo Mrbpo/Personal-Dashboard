@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type {Pool} from 'pg';
 import {documentSearchText,type DocumentTextHit} from '../lib/kernel/document-search.ts';
-import {buildHybridDocumentCandidates,fuseIndependentDocumentRanks} from '../lib/kernel/document-vector.ts';
+import {buildHybridDocumentCandidates,fuseIndependentDocumentRanks,selectHybridDocumentEvidence} from '../lib/kernel/document-vector.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {randomUUID} from 'node:crypto';
@@ -38,6 +38,23 @@ class AdjacentPool {
   return {rows,rowCount:rows.length};
  }
 }
+
+test('finite hybrid output retains both lane heads despite shared-page RRF votes, without changing text or scores',()=>{
+ const shared=Array.from({length:70},(_,i)=>hit('shared-'+i)),lexical=[hit('lexical-only'),...shared],dense=[hit('dense-only'),...shared],
+  ranked=fuseIndependentDocumentRanks(lexical,dense,160);
+ assert.ok(!ranked.slice(0,6).some(h=>h.document_id==='lexical-only'));
+ for(const limit of [1,3,6,10]){
+  const result=selectHybridDocumentEvidence(lexical,dense,ranked,limit),keys=new Set(result.map(h=>h.id));assert.equal(result.length,limit);
+  for(const head of lexical.slice(0,Math.ceil(limit/2)))assert.ok(keys.has(head.id));
+  for(const head of dense.slice(0,Math.floor(limit/2)))assert.ok(keys.has(head.id));
+  assert.deepEqual(result,ranked.filter(h=>keys.has(h.id)),'Only membership changes; current routed order, text and evidence remain');
+ }
+ const missing=ranked.filter(h=>h.document_id!=='lexical-only');assert.throws(()=>selectHybridDocumentEvidence(lexical,dense,missing,6),/missing or changed/);
+ assert.throws(()=>selectHybridDocumentEvidence(lexical,dense,ranked.map(h=>h.document_id==='lexical-only'?{...h,source_hash:'changed'}:h),6),/missing or changed/);
+ assert.throws(()=>selectHybridDocumentEvidence(lexical,dense,[...ranked,ranked[0]],6),/Duplicate/);
+ assert.throws(()=>selectHybridDocumentEvidence(lexical,dense,ranked,0),/limit/);
+ assert.deepEqual(selectHybridDocumentEvidence([],dense,ranked.filter(h=>h.document_id!=='lexical-only'),6).length,6);
+});
 
 test('hybrid candidates retain lexical-only and dense-only heads that plain RRF truncation drops',async()=>{
  const shared=Array.from({length:50},(_,index)=>hit('shared-'+index));

@@ -81,3 +81,33 @@ test('an incomplete dense index returns current keyword evidence without embeddi
   assert.equal(result[0].degraded_reason,'semantic:index-incomplete');
  }finally{globalThis.fetch=original;}
 });
+
+test('actual hybrid retrieval retains independent lexical and dense evidence when many shared pages would crowd both out',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ const{kernel}=await import('../lib/kernel/service.ts'),{kernelPool,migrateKernel}=await import('../lib/kernel/db.ts'),
+  {claimIngestionJob,finishIngestionJob}=await import('../lib/kernel/jobs.ts'),
+  {runDocumentVectorJob,searchDocumentVectorText,fuseIndependentDocumentRanks}=await import('../lib/kernel/document-vector.ts'),
+  {DOCUMENT_EMBEDDING_MODEL}=await import('../lib/kernel/document-semantic.ts');
+ await migrateKernel();const uid=randomUUID(),owner='head-retention:'+uid,lexicalId='z-lexical:'+uid,denseId='a-dense:'+uid,
+  sharedId='m-shared:'+uid,query='mercury orbital calibration',axis=(n:number)=>Array.from({length:768},(_,i)=>Number(i===n));
+ const ingest=async(id:string,texts:string[])=>kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:id+'.txt',hash:createHash('sha256').update(texts.join('\n')).digest('hex'),
+  mime:'text/plain',origin:'upload',originKey:id},texts.map((text,i)=>({pageNumber:i+1,locator:'page '+(i+1),text})),{parserVersion:'hybrid-head-fixture',expectedPages:texts.length});
+ await ingest(lexicalId,['Focused mercury orbital calibration requires measuring residuals before fitting.']);
+ await ingest(denseId,['A geometric residual explanation using an alternative vocabulary.']);
+ await ingest(sharedId,Array.from({length:50},(_,i)=>'Mercury orbital background. '+('A lengthy collection of general supporting examples. '.repeat(30))+i));
+ for(const jobId of await kernel.queueDocumentVectorJobs(owner)){const job=(await claimIngestionJob(jobId))!;
+  await runDocumentVectorJob(kernelPool(),job,{embed:async values=>values.map(v=>axis(v.startsWith('Focused')?1:0))});await finishIngestionJob(job.id,job.lease_token);}
+ await kernelPool().query('INSERT INTO document_query_embeddings(owner_id,query_hash,model,embedding) VALUES($1,$2,$3,$4::double precision[])',
+  [owner,createHash('sha256').update(query).digest('hex'),DOCUMENT_EMBEDDING_MODEL,axis(0)]);
+ const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('Head-retention integration uses cached fixtures only');};
+ try{
+  const opts={relatedDocuments:false,refineAdjacent:false,aiRerank:false},lexical=await kernel.searchDocumentText(owner,query,{...opts,limit:80,semantic:false,hybrid:false}),
+   dense=await searchDocumentVectorText(kernelPool(),owner,axis(0),{limit:80});
+  assert.equal(lexical[0].document_id,lexicalId);assert.equal(dense.hits[0].document_id,denseId);
+  const old=fuseIndependentDocumentRanks(lexical,dense.hits,6);assert.ok(!old.some(h=>h.document_id===lexicalId));assert.ok(!old.some(h=>h.document_id===denseId));
+  const result=await kernel.searchDocumentText(owner,query,{...opts,limit:6,semantic:true,hybrid:true});
+  assert.equal(result.length,6);assert.ok(result.some(h=>h.document_id===lexicalId));assert.ok(result.some(h=>h.document_id===denseId));
+  assert.equal(new Set(result.map(h=>h.evidence_id)).size,6);assert.equal(calls,0);
+  assert.deepEqual(await kernel.searchDocumentText('foreign:'+owner,query,{...opts,limit:6,hybrid:true}),[]);
+ }finally{globalThis.fetch=original;}
+});
