@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
-import {contentTagIngestionEnabled,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {contentTagIngestionMode,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {recordIngestedContentClassification} from './content-classification-ingestion.ts';
 import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
@@ -878,7 +879,7 @@ export class KernelService {
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
       nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence;sourceMath?:PreparedDoclingSourceMath}={}) {
-    const tagMetadata=contentTagIngestionEnabled();
+    const tagMetadata=contentTagIngestionMode();
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
@@ -1026,7 +1027,8 @@ export class KernelService {
         }
       }
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
-      if(tagMetadata)await recordContentMetadataTags(client,owner,document.id,parsedVersion);
+      if(tagMetadata==='metadata-v1')await recordContentMetadataTags(client,owner,document.id,parsedVersion);
+      if(tagMetadata==='metadata-classifications-v1')await recordIngestedContentClassification(client,owner,document.id,parsedVersion);
       if(options.pdfVisuals||options.sourceMath){
         const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
         if(options.pdfVisuals)await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);

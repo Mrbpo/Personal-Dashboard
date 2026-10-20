@@ -128,6 +128,28 @@ real corpus/HTTP recall, answer, citation and refusal validation.
 
 ## Guarded lexical candidate route (isolated opt-in)
 
+### Unified automatic metadata revisions
+
+`KERNEL_CONTENT_TAGS=metadata-classifications-v1` opts new ingestion into the same
+classification revisions and current-head store used by manual corrections and
+the classification route. It reuses existing metadata rules for source, format,
+course/term identifiers and filename-based document types. Topic, chapter and
+assignment inference remains unknown. Filename matches remain soft observations,
+not verified relevance or canonical facts. No classifier/model request is made.
+
+The short ingestion transaction records version/hash-bound metadata witnesses.
+An unchanged replay adds no revision; a changed course-term observation retains
+history. Independent manual classifiers are untouched, and an explicit external
+correction of this producer is not overwritten by later sync. Superseded, hidden
+or foreign sources cannot supply new current classifications. A failed ingestion
+rolls classification changes back with the source transaction.
+
+This mode writes no duplicate legacy `document_tag_sets` snapshot. The existing
+`metadata-v1` mode remains available for its legacy observation/priority behavior;
+default is still `off`. No corpus backfill, migration or production toggle is
+performed. Automatic metadata revisions enable route proposals, not permission to
+exclude documents: the independent lexical coverage gate remains required.
+
 `KERNEL_CONTENT_TAG_ROUTING=classification-guarded-lexical-v1` can use the proposed
 scope only after an independent full-text-index check finds no matching page
 outside it. It uses the exact shared lexical query expression and original

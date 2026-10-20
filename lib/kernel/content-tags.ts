@@ -13,11 +13,12 @@ const canonical=(value:unknown)=>JSON.stringify(value,(_key,item)=>item&&typeof 
  Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
 
-export function contentTagIngestionEnabled(){
+export function contentTagIngestionMode(){
  const mode=process.env.KERNEL_CONTENT_TAGS??'off';
- if(!['off','metadata-v1'].includes(mode))throw Error('Invalid KERNEL_CONTENT_TAGS');
- return mode==='metadata-v1';
+ if(mode!=='off'&&mode!=='metadata-v1'&&mode!=='metadata-classifications-v1')throw Error('Invalid KERNEL_CONTENT_TAGS');
+ return mode;
 }
+export function contentTagIngestionEnabled(){return contentTagIngestionMode()!=='off';}
 
 /** Tags describe stored metadata, never canonical truth or answer evidence.
  * Confidence 1 means an exact metadata observation, not verified relevance. */
