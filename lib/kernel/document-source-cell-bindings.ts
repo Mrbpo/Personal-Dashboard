@@ -20,7 +20,8 @@ type Table={id:string;imageId:string;observationIndex:number;source:DocumentCont
  rawCellReferenceBasis:'native.raw.data.table_cells[index]';unknownPositions:number[][];gridStatus:'available'|'unavailable';
  semanticVerified:false;relationshipVerified:false;visibilityVerified:false};
 export const SOURCE_CELL_VALUE_PATH_VERSION='parser-declared-cell-paths-v1';
-type DeclaredTableContext={tableId:string;imageId:string;nativeReference:string;nativeSha256:string;
+type DeclaredTableContext={tableId:string;imageId:string;nativeReference:string;nativeSha256:string;physicalPage:number;
+ provenancePageNumberBasis:'derived-input-one-based';resultReference:DoclingNativeTable['result']|null;
  authority:'parser-declared-untrusted';semanticVerified:false;relationshipVerified:false;visibilityVerified:false;coordinateMapping:'unverified';
  rawTableMetadata:Record<string,unknown>;rawDataMetadata:Record<string,unknown>;captions:DoclingNativeTable['captions']};
 type TableContextTransport={status:'available'|'unavailable';reason:string|null;tables:number;omittedTables:number;contextSha256:string};
@@ -87,7 +88,8 @@ export function prepareSourceCellBindingCatalog(sources:readonly SourceValueImag
    tables.push(table);
    const{data,...rawTableMetadata}=native.raw,{table_cells:_cells,grid:_grid,...rawDataMetadata}=data as Record<string,unknown>;
    if(native.captions.length||Object.keys(rawTableMetadata).length)declaredTableContexts.push({tableId:table.id,imageId:table.imageId,
-    nativeReference:native.reference,nativeSha256:observation.nativeSha256,authority:'parser-declared-untrusted',
+    nativeReference:native.reference,nativeSha256:observation.nativeSha256,physicalPage:table.physicalPage,
+    provenancePageNumberBasis:'derived-input-one-based',resultReference:structuredClone(native.result??null),authority:'parser-declared-untrusted',
     semanticVerified:false,relationshipVerified:false,visibilityVerified:false,coordinateMapping:'unverified',
     rawTableMetadata:structuredClone(rawTableMetadata),rawDataMetadata:structuredClone(rawDataMetadata),captions:structuredClone(native.captions)});
    raw.forEach((cell,index)=>{

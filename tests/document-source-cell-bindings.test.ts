@@ -46,6 +46,7 @@ test('declared table context reaches the generation wire verbatim without becomi
  assert.equal(f.catalog.contextTransport.status,'available');assert.equal(packet.length,1);
  assert.deepEqual(packet[0].captions,f.native.captions);assert.equal(packet[0].rawTableMetadata.self_ref,f.native.reference);
  assert.deepEqual(packet[0].rawTableMetadata.prov,f.native.raw.prov);assert.equal(packet[0].nativeSha256,f.observation.nativeSha256);
+ assert.equal(packet[0].physicalPage,1);assert.deepEqual(packet[0].resultReference,f.native.result);assert.equal(packet[0].provenancePageNumberBasis,'derived-input-one-based');
  assert.equal(packet[0].imageId,'i0');assert.equal(packet[0].tableId,'b0');assert.equal(packet[0].semanticVerified,false);
  assert.equal(packet[0].relationshipVerified,false);assert.equal(packet[0].coordinateMapping,'unverified');
  assert.deepEqual(f.catalog.cells,legacy.catalog.cells);assert.deepEqual(f.catalog.tables[0].unknownPositions,legacy.catalog.tables[0].unknownPositions);

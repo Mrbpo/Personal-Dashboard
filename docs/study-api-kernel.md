@@ -69,6 +69,8 @@ The original256-cell bound and exact32 KiB whole-observation allowance apply; co
 The cell-binding wire can additionally carry `declaredTableContexts` from the
 same revalidated native artifact: original caption records/references, table
 metadata/provenance and non-cell data metadata. They are parser declarations,
+with the original physical page and immutable result/copy-index mapping retained
+beside raw provenance's derived-input page numbers,
 with semantic/relationship/visibility verification false and coordinate mapping
 unverified; they do not create quotation IDs, canonical facts, repaired grids or
 verified caption-to-image relationships. Missing metadata is not invented.
