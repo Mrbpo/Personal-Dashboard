@@ -23,7 +23,12 @@ export async function runGuardedClassification<T extends Hit,O extends Scope>(po
  const client=await pool.connect(),db={query:client.query.bind(client)} as unknown as Pool;
  try{
   await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  // Optional taxonomy discovery may return an unavailable plan after catching
+  // a SQL error. Restore the snapshot before its ordinary-search fallback.
+  await client.query('SAVEPOINT classification_plan');
   const plan=await planClassificationBranch(db,owner,query,options);
+  if(plan.status==='broad'&&plan.reason==='invalid-taxonomy')await client.query('ROLLBACK TO SAVEPOINT classification_plan');
+  await client.query('RELEASE SAVEPOINT classification_plan');
   const prepared=spec.prepareQuery?.(plan)??{query,broadQuery:spec.broadQuery};
   let outsideMatch:boolean|null=null,indexedMatchPages:number|null=null,branchExecuted=false;
   let lastReceipt:ClassificationGuardReceipt|undefined;

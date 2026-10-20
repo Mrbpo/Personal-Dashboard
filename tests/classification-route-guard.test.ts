@@ -1,4 +1,5 @@
 import{test,after}from'node:test';import assert from'node:assert/strict';import{randomUUID,createHash}from'node:crypto';
+import type{Pool}from'pg';
 import{kernel}from'../lib/kernel/service.ts';import{kernelPool,migrateKernel}from'../lib/kernel/db.ts';
 import{searchDocumentText,documentSearchTerms,documentBroadSearchQuery,type DocumentTextHit,type DocumentSearchOptions}from'../lib/kernel/document-search.ts';
 import{runGuardedClassification,classificationGuardAnswerObservation}from'../lib/kernel/classification-route-guard.ts';
@@ -52,6 +53,30 @@ test('independent index coverage recovers wrong/unknown labels; narrow proof is 
    });
   assert.equal(failed,true);assert.deepEqual(strip(rollback),rareBaseline);
   assert.equal(rollback[0].classification_route_guard!.reason,'branch-search-failed');
+  let taxonomyErrors=0,baselineSearches=0;
+  const optionalFailurePool={connect:async()=>{
+   const client=await kernelPool().connect();
+   return {query:(sql:string,...args:unknown[])=>{
+    if(typeof sql==='string'&&sql.includes('FROM content_taxonomy_heads')){
+     taxonomyErrors++;return client.query('SELECT * FROM deliberately_missing_taxonomy_discovery_relation');
+    }
+    return client.query(sql,...args as [unknown[]]);
+   },release:()=>client.release()};
+  }} as unknown as Pool;
+  const taxonomyFallback=await runGuardedClassification<DocumentTextHit,DocumentSearchOptions>(optionalFailurePool,owner,'quasarone',opts,
+   {broadQuery:documentBroadSearchQuery(documentSearchTerms('quasarone').words),limit:14},async(db,o,phase)=>{
+    assert.equal(phase,'baseline');baselineSearches++;
+    const state=(await db.query("SELECT current_setting('transaction_read_only') ro,current_setting('transaction_isolation') isolation")).rows[0];
+    assert.equal(state.ro,'on');assert.equal(state.isolation,'repeatable read');
+    return searchDocumentText(db,owner,'quasarone',o);
+   });
+  assert.equal(taxonomyErrors,1);assert.equal(baselineSearches,1);assert.deepEqual(strip(taxonomyFallback),rareBaseline);
+  assert.equal(taxonomyFallback[0].classification_route_guard!.reason,'invalid-taxonomy');
+  assert.equal(taxonomyFallback[0].classification_route_guard!.effect,'broad-fallback');
+  assert.equal(taxonomyFallback[0].classification_route_guard!.plan.status,'broad');
+  await assert.rejects(runGuardedClassification<DocumentTextHit,DocumentSearchOptions>(optionalFailurePool,owner,'quasarone',opts,
+   {broadQuery:'quasarone',limit:14},async db=>{await db.query('SELECT * FROM deliberately_missing_core_search_relation');return[];}),
+   (error:unknown)=>(error as {code?:string}).code==='42P01','Core-search SQL errors must still fail instead of becoming empty evidence');
   assert.equal((await kernelPool().query('SELECT 1 n')).rows[0].n,1,'Pool connection is usable after guarded recovery');
  }finally{if(previous===undefined)delete process.env.KERNEL_CONTENT_TAG_ROUTING;else process.env.KERNEL_CONTENT_TAG_ROUTING=previous;}
 });
