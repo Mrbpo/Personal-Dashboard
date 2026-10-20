@@ -12,6 +12,12 @@ separate registry. Preparation returns unavailable rather than truncating an
 oversized catalog/source or inventing labels; source text is limited to12KiB.
 The packet binds the actual request, current source/version/evidence/body hashes,
 page scope, vocabulary revision IDs and producer correction head.
+Default coverage is the first page only; callers can explicitly choose up to
+four pages within the byte bound. Each page-range producer has its own revision
+head, so classifying another range does not replace earlier fragment labels.
+Manual corrections block every overlapping range, including a broader batch;
+unrelated pages can still be classified. Overlapping automatic proposals remain
+independent unverified observations, not a silently merged semantic winner.
 
 An external classifier can execute the offered mini request. The existing admin
 CLI imports its raw response through Kernel, validates current source/catalog,

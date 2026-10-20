@@ -1,6 +1,5 @@
 import{test,after}from'node:test';import assert from'node:assert/strict';import{createHash,randomUUID}from'node:crypto';
 import{kernel}from'../lib/kernel/service.ts';import{kernelPool,migrateKernel}from'../lib/kernel/db.ts';
-import{CONTROLLED_TOPIC_CLASSIFIER}from'../lib/kernel/content-topic-classification.ts';
 import{validateStoredContentClassification}from'../lib/kernel/content-classifications.ts';
 let calls=0;globalThis.fetch=async()=>{calls++;throw Error('Controlled topic tests forbid provider fetch');};
 after(async()=>{try{assert.equal(calls,0);}finally{if(process.env.KERNEL_DATABASE_URL)await kernelPool().end();}});
@@ -9,9 +8,9 @@ const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 test('controlled topic proposals persist source fragments, feed routing and preserve vocabulary/correction/replay boundaries',
  {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
  await migrateKernel();const uid=randomUUID(),owner='topic-owner:'+uid,saved=process.env.KERNEL_CONTENT_TAG_ROUTING;
- const add=async(name:string,text:string,who=owner)=>{
-  const doc={id:sha(uid+name+who),ownerId:who,courseId:'',name,hash:sha(text),origin:'upload',originKey:uid+name,mime:'text/plain'};
-  await kernel.ingestParsedDocument(doc,[{pageNumber:1,locator:'page 1',text}],{parserVersion:'topic-plain-text-fixture-v1',extractionMethod:'plain-text'});return doc;
+ const add=async(name:string,text:string,who=owner,more:string[]=[])=>{
+  const doc={id:sha(uid+name+who),ownerId:who,courseId:'',name,hash:sha([text,...more].join('\n')),origin:'upload',originKey:uid+name,mime:'text/plain'};
+  await kernel.ingestParsedDocument(doc,[text,...more].map((text,i)=>({pageNumber:i+1,locator:'page '+(i+1),text})),{parserVersion:'topic-plain-text-fixture-v1',extractionMethod:'plain-text'});return doc;
  };
  const classify=async(doc:Awaited<ReturnType<typeof add>>,key:string,previousId:string|null=null,classifierId='manual/topics')=>{
   const row=(await kernelPool().query('SELECT d.current_version_id,v.source_version_id FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id WHERE d.id=$1',[doc.id])).rows[0];
@@ -19,7 +18,7 @@ test('controlled topic proposals persist source fragments, feed routing and pres
    classifierId,producerVersion:'fixture-v1',method:'manual',model:null,previousId,tags:[{facet:'topic',key,confidence:1,evidence:{kind:'human-judgment'}}]},'fixture-admin','Explicit controlled topic seed');
  };
  try{
-  const target=await add('New Notes.txt','The integral of x is x squared divided by two. Quasartopic is discussed.'),
+  const target=await add('New Notes.txt','The integral of x is x squared divided by two. Quasartopic is discussed.',owner,['Second page about integrals.']),
    seed=await add('Human Seed.txt','Reviewed seed document.');
   assert.equal((await kernel.prepareDocumentTopics(owner,target.id)).status,'unavailable','No invented vocabulary without a manual seed');
   const seedRevision=await classify(seed,'calculus'),prepared=await kernel.prepareDocumentTopics(owner,target.id,[1]);
@@ -43,6 +42,12 @@ test('controlled topic proposals persist source fragments, feed routing and pres
   const replay=await kernel.importDocumentTopics(owner,packet,response,'fixture-admin','Apply proposal');assert.deepEqual(replay,{...imported,replayed:true});
   const next=await kernel.prepareDocumentTopics(owner,target.id);assert.equal(next.status,'ready');
   if(next.status==='ready')assert.deepEqual(next.packet.vocabularyRevisionIds,[seedRevision.id],'Model revisions must not seed vocabulary');
+  const page2=await kernel.prepareDocumentTopics(owner,target.id,[2]);assert.equal(page2.status,'ready');
+  if(page2.status==='ready'){
+   assert.notEqual(page2.packet.classifierId,packet.classifierId);
+   await kernel.importDocumentTopics(owner,page2.packet,raw([{labelId:'t0',unitId:'p0',quote:'Second page about integrals.'}]),'fixture-admin','Other page proposal');
+   assert.equal((await kernel.documentClassifications(owner,target.id)).length,2,'A second page must not replace earlier fragment labels');
+  }
   process.env.KERNEL_CONTENT_TAG_ROUTING='classification-guarded-lexical-v1';
   const options={semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,refineAdjacent:false,limit:14},
    route=await kernel.searchDocumentText(owner,'calculus quasartopic',options);
@@ -53,8 +58,10 @@ test('controlled topic proposals persist source fragments, feed routing and pres
   assert.equal(recovered[0].classification_route_guard!.effect,'broad-fallback');assert.ok(recovered.some(r=>r.document_id===unclassified.id));
   const changed=await classify(seed,'linear algebra',seedRevision.id);
   if(next.status==='ready')await assert.rejects(kernel.importDocumentTopics(owner,next.packet,response,'fixture-admin','New proposal'),/vocabulary or correction head changed/);
-  await classify(target,'analysis',imported.id,CONTROLLED_TOPIC_CLASSIFIER);
+  await classify(target,'analysis',imported.id,packet.classifierId);
   assert.equal((await kernel.prepareDocumentTopics(owner,target.id)).status,'unavailable','Manual producer correction blocks automatic overwriting');
+  assert.equal((await kernel.prepareDocumentTopics(owner,target.id,[1,2])).status,'unavailable','A broader overlapping batch must not bypass a manual correction');
+  assert.equal((await kernel.prepareDocumentTopics(owner,target.id,[2])).status,'ready','A non-overlapping page remains independently classifiable');
   const historicalReplay=await kernel.importDocumentTopics(owner,packet,response,'fixture-admin','Apply proposal');assert.equal(historicalReplay.replayed,true);assert.equal(historicalReplay.current,false);
   assert.notEqual((await kernel.documentClassifications(owner,target.id))[0].id,imported.id);
   for(let i=0;i<17;i++){const duplicate=await add('Repeated manual seed '+i,'Repeated manually reviewed topic seed.');await classify(duplicate,'calculus');}
