@@ -1,5 +1,13 @@
 # Unified content tags and retrieval routing — Issue193
 
+An explicit nonempty `routingScope.documentIds` uses the same bounded original
+table-page recovery as legacy `documentId`. Parser grids with only incomplete
+coverage remain unavailable; literal cell/caption strings are retrieval hints
+for the real current PNG, never textual answer evidence or repaired relations.
+Owner/current-version/origin and other explicit restrictions still intersect.
+Global unscoped searches do not gain this fallback; the shared two-page bound
+and original-PNG validation remain unchanged.
+
 ## Incremental controlled-topic jobs (default off)
 
 `KERNEL_CONTENT_TOPICS=controlled-v1` opts newly ingested source versions into the

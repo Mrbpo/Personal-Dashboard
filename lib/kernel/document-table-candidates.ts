@@ -331,10 +331,10 @@ export async function searchNativeTableCandidates(pool:Pool,owner:string,query:s
   AND t.search_vector @@ (${querySQL})), ranked AS (SELECT hits.*,ts_rank_cd(search_vector,(${querySQL})) match_rank,row_number() OVER
   (PARTITION BY version_id,page_number ORDER BY ts_rank_cd(search_vector,(${querySQL})) DESC,id) page_rank FROM hits)
   SELECT * FROM ranked WHERE page_rank=1 ORDER BY match_rank DESC,id LIMIT ${NATIVE_TABLE_LIMITS.supplementalPages}`,args)).rows;
- // A named source can have a readable original page but an incomplete parser
- // grid. Fill only unused supplemental slots. These literal strings are search
- // hints, never a repaired grid, original quotation or canonical fact.
- if(!scope.documentId||rows.length>=NATIVE_TABLE_LIMITS.supplementalPages)return rows.map(row=>candidate(row));
+ // An explicitly selected source set can have readable original pages but an
+ // incomplete parser grid. The API's documentIds and legacy documentId use the
+ // same SQL scope. Fill only unused slots; hints never become textual evidence.
+ if(!(scope.documentId||scope.routingScope?.documentIds?.length)||rows.length>=NATIVE_TABLE_LIMITS.supplementalPages)return rows.map(row=>candidate(row));
  const excluded=args.push(rows.map(row=>row.page_number)),literalText=`coalesce((SELECT string_agg(c->>'text',' ') FROM
   jsonb_array_elements(artifact::jsonb->'native'->'cellTexts') c),'')||' '||coalesce((SELECT string_agg(
   coalesce(nullif(btrim(c->'raw'->>'text'),''),c->'raw'->>'orig',''),' ') FROM jsonb_array_elements(artifact::jsonb->'native'->'captions') c),'')`,

@@ -194,8 +194,8 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),[]);
  await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits));
  // A controlled incomplete-grid result cannot enter ordinary/global search.
- // An explicit current document can recover the original page within the same
- // supplement bound, with the grid still unavailable to structured operators.
+ // Either explicit scope contract can recover the original page within the
+ // same supplement bound, with the grid unavailable to structured operators.
  const partialRaw=structuredClone(inputRaw);partialRaw.document.json_content.tables[0].data.table_cells.shift();
  const partialDecoded=decodeDerivedDoclingResult(partialRaw,{start:1,end:1,totalPages:1,copyIndices:[0]},
   {verifiedBlankPages:[],formulaEnriched:false});
@@ -206,6 +206,13 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  await kernel.ingestParsedDocument(doc,partialDecoded.pages,{parserVersion:'controlled-incomplete-grid',pdfVisuals:visuals,nativeTables:partialTables});
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),[]);
  const fallback=await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id});assert.equal(fallback.length,1);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id]}}),fallback,
+  'The real API documentIds scope must retain the same original-page fallback');
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id,'unowned-document']}}),fallback);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[]}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:['unowned-document']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id],origins:['gmail']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox',{routingScope:{documentIds:[id]}}),[]);
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id,routingScope:{origins:['public-fixture']}}),fallback);
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id,routingScope:{origins:['gmail']}}),[]);
  assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox',{documentId:id}),[]);
@@ -219,6 +226,7 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  await assert.rejects(kernel.readNativeTableCandidateEvidence('foreign-owner',fallback));
  await pool.query('UPDATE document_texts SET hidden=true WHERE id=$1',[id]);
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id]}}),[]);
  await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,fallback));
  assert.ok((await kernel.nativeTableBlobHashes()).includes(rawSha));
 });
