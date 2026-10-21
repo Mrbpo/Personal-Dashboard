@@ -1063,6 +1063,10 @@ export class KernelService {
     return resolveDocumentSource(kernelPool(),owner,hint,options);
   }
 
+  findMentionedDocumentSources(owner:string,question:string,options:{courseId?:string;routingScope?:DocumentRoutingScope}={}){
+    return findMentionedDocumentSources(kernelPool(),owner,question,options);
+  }
+
   mentionedOtherDocumentSources(owner:string,question:string,selectedDocumentId:string){
     return mentionedOtherDocumentSources(kernelPool(),owner,question,selectedDocumentId);
   }

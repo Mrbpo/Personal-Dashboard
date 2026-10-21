@@ -11,6 +11,7 @@ import {answerKernelStudy,studyAnswerBackend,studyRoutingScope,studyRoutingScope
 import type {DocumentRoutingScope} from './kernel/document-routing-scope.ts';
 import {routeQuestionCourseCodes,QUESTION_COURSE_ROUTING_VERSION,type QuestionCourseRoute} from './kernel/question-course-routing.ts';
 import {kernel} from './kernel/service.ts';
+import type {ResolvedDocumentSource} from './kernel/document-source.ts';
 
 export type Attachment = { name: string; mime: string; data: string; size: number; hash?: string };
 export type TutorThread = { id: string; course_id: string; title: string; updated_at: string };
@@ -156,11 +157,24 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     const recentQuestions = context.filter(m => m.role === 'user').slice(-2).map(m => m.body).join(' ');
     let activeCourse=thread.course_id;
     let answerScope=routingScope,courseRouting:QuestionCourseRoute|undefined;
+    let documentAttribution:{policy:'unique-mentioned-document-before-course-guard-v1';source:ResolvedDocumentSource;
+      courseOwnershipVerified:false;scopeApplied:false}|undefined;
     const explicitTarget=routingScope?.courseIds!==undefined||routingScope?.documentIds!==undefined;
     if(!activeCourse&&backend==='kernel'&&!explicitTarget){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
+      const literalCourseRoute=routeQuestionCourseCodes(question,courses);
+      const hasDocumentAttribution=async()=>{
+        // A literal course request still needs a valid course. A document name
+        // only removes a keyword false positive; it never becomes a filter.
+        if(literalCourseRoute.status!=='none')return false;
+        const named=await kernel.findMentionedDocumentSources(owner,question,{routingScope});
+        if(named.status!=='resolved')return false;
+        documentAttribution={policy:'unique-mentioned-document-before-course-guard-v1',source:named.matches[0],
+          courseOwnershipVerified:false,scopeApplied:false};
+        return true;
+      };
       if(courseRoutingMode){
-        courseRouting=routeQuestionCourseCodes(question,courses);
+        courseRouting=literalCourseRoute;
         if(courseRouting.status==='none'&&/这(?:两|门|几)|上述课程|它们|该课程|\b(?:their|those|these|same courses)\b/i.test(question)){
           const prior=context.filter(m=>m.role==='user').at(-1),previous=prior?JSON.parse(prior.meta_json).courseRouting:undefined;
           if(previous?.version===QUESTION_COURSE_ROUTING_VERSION&&previous.status==='resolved'&&Array.isArray(previous.observations)){
@@ -192,11 +206,11 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
             else{answerScope=studyRoutingScope({...routingScope,courseIds:courseRouting.courseIds});courseRouting={...courseRouting,scopeApplied:true};}
           }
         }
-        else if(courseRouting.status!=='broad'&&needsCourseScope(question))
+        else if(courseRouting.status!=='broad'&&needsCourseScope(question)&&!await hasDocumentAttribution())
           throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
       }else{
-        activeCourse=explicitCourseFromQuestion(question,courses);
-        if(!activeCourse&&needsCourseScope(question))throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
+        activeCourse=literalCourseRoute.status==='unresolved'?'':explicitCourseFromQuestion(question,courses);
+        if(!activeCourse&&needsCourseScope(question)&&!await hasDocumentAttribution())throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
         if(activeCourse){await db.prepare('UPDATE tutor_threads SET course_id=? WHERE id=? AND owner_id=? AND course_id=?').bind(activeCourse,threadId,owner,'').run();thread.course_id=activeCourse;}
       }
     }
@@ -213,7 +227,8 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     if(backend==='kernel'){
       if(previousFiles.length||attachments.length)throw new StudyAnswerError('parsing','attachment-not-indexed','内核问答请先将附件加入资料库并等待解析完成；本轮未调用模型');
       const result=await answerKernelStudy(owner,question,activeCourse,context,answerScope),now=new Date().toISOString();
-      const resultMeta=courseRouting?{...result.meta,study:{...result.meta.study,courseRouting}}:result.meta;
+      const resultMeta=courseRouting||documentAttribution?{...result.meta,study:{...result.meta.study,
+        ...(courseRouting?{courseRouting}:{}),...(documentAttribution?{documentAttribution}:{})}}:result.meta;
       if(!leaseValid)throw new Error('会话锁已失效，请刷新后重试');
       await owned(owner,threadId);
       await db.batch([
