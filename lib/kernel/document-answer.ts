@@ -8,6 +8,7 @@ import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudy
  type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead,type LiteralCourseIdentityContext} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,type FocusedDocumentText} from './document-focused-text.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
@@ -34,6 +35,7 @@ type Image=AuthorImage|(NativeTableObservedImage&{pageRegions?:StudyPdfPageRegio
 /** Structural subset of Kernel's verified context. The callback must use the
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
+ focusedText?:FocusedDocumentText;
  sourceIdentityContext?:LiteralCourseIdentityContext;
  /** Kernel configuration only; original page boundaries and bodies stay intact. */
  textQuotePolicy?:'stored-page-v1';
@@ -468,8 +470,26 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const mentionedSource=mentionedSourceIdentity(question,documentMetadata,supports);
+ const focusedText=context.focusedText;
+ if(focusedText){
+  const source=focusedText.source,query=mentionedSource&&focusedDocumentTextQuery(question,mentionedSource.title);
+  let bytes=0;
+  if(focusedText.policy!=='bounded-mentioned-source-relevance-v1'||focusedText.coverage!=='unassessed'||focusedText.structureRelationsVerified!==false||
+   !query||focusedText.querySha256!==focusedTextQueryHash(query)||!mentionedSource||source.documentId!==mentionedSource.documentId||
+   source.currentVersionId!==mentionedSource.documentVersionId||source.sourceVersionId!==mentionedSource.sourceVersionId||source.sourceHash!==mentionedSource.sourceHash||
+   !focusedText.pages.length||focusedText.pages.length>FOCUSED_TEXT_LIMITS.pages||
+   new Set(focusedText.pages.map(p=>p.evidenceId)).size!==focusedText.pages.length)throw Error('Invalid focused original text binding');
+  for(const page of focusedText.pages){
+   const matching=supports.filter(s=>s.kind==='text'&&s.documentId===source.documentId&&s.documentVersionId===source.currentVersionId&&
+    s.sourceVersionId===source.sourceVersionId&&s.sourceHash===source.sourceHash&&s.evidenceId===page.evidenceId&&s.sha256===page.bodySha256);
+   if(matching.length!==1)throw Error('Focused original text differs');
+   bytes+=Buffer.byteLength(matching[0].text??'');
+  }
+  if(bytes>FOCUSED_TEXT_LIMITS.bodyUtf8Bytes)throw Error('Focused original text exceeds budget');
+ }
  const input={question,evidence:metadata,quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,
   quoteUnits,quoteUnitManifestSha256,warnings,unavailableParents,parentMetadata,documentMetadata,
+  ...(focusedText?{focusedText}:{}),
   ...(mentionedSource?{mentionedSource}:{}),
   ...(context.imageSelection?{imageSelection:context.imageSelection}:{}),...(context.sourceCaptionProof?{sourceCaptionProof:context.sourceCaptionProof}:{}),
   ...(context.completeSourceProof?{completeSourceProof:context.completeSourceProof}:{}),...(unitPolicy?{unitPolicy}:{}),sourceContentIsUntrusted:true};
@@ -761,6 +781,8 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
  mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v2';documentId:string;sourceHash:string;
   status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
   inputScope:'available-original-quote-units';coverage:'unassessed';structureRelationsVerified:false};
+ focusedTextRetention?:{policy:'bounded-mentioned-source-relevance-v1';retainedEvidenceIds:string[];skippedEvidenceIds:string[];
+  textUtf8Bytes:number;addedReferenceIds:string[];coverage:'unassessed';structureRelationsVerified:false};
  coverage:'unassessed';structureRelationsVerified:false};
 
 /** Keep the existing text of selected storage nodes together. Storage adjacency
@@ -798,6 +820,24 @@ export function retainSelectedStoredNodeText(value:unknown,prepared:PreparedAnsw
 export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
  const retained=retainSelectedStoredNodeText(value,prepared);
  if(!retained.providerReferenceIds.length)return retained;
+ // A bounded focus is an already validated subset of offered current text.
+ // Keep whole pages in lexical relevance order, never evict another source or
+ // treat an empty selector response as sufficient evidence.
+ if(prepared.input.focusedText){
+  const ids=new Set(retained.referenceIds),units=generationQuoteUnits(prepared),focus=prepared.input.focusedText,
+   retainedEvidenceIds:string[]=[],skippedEvidenceIds:string[]=[],addedReferenceIds:string[]=[];
+  let textUtf8Bytes=0;
+  for(const page of focus.pages){
+   const support=prepared.supports.find(s=>s.kind==='text'&&s.documentId===focus.source.documentId&&s.evidenceId===page.evidenceId&&s.sha256===page.bodySha256)!,
+    pageUnits=units.filter(u=>u.supportId===support.id),additions=pageUnits.filter(u=>!ids.has(u.id)),size=pageUnits.reduce((n,u)=>n+Buffer.byteLength(u.text),0);
+   if(!pageUnits.length||textUtf8Bytes+size>FOCUSED_TEXT_LIMITS.bodyUtf8Bytes||ids.size+additions.length>64){skippedEvidenceIds.push(page.evidenceId);continue;}
+   textUtf8Bytes+=size;retainedEvidenceIds.push(page.evidenceId);
+   additions.forEach(u=>{ids.add(u.id);addedReferenceIds.push(u.id);});
+  }
+  return {...retained,referenceIds:[...ids],systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...addedReferenceIds],
+   expandedSupportIds:[...new Set([...retained.expandedSupportIds,...units.filter(u=>addedReferenceIds.includes(u.id)).map(u=>u.supportId)])],
+   focusedTextRetention:{policy:focus.policy,retainedEvidenceIds,skippedEvidenceIds,textUtf8Bytes,addedReferenceIds,coverage:'unassessed',structureRelationsVerified:false}};
+ }
  const mentioned=prepared.input.documentMetadata.filter(document=>documentTitleMention(prepared.input.question,document.name));
  if(mentioned.length!==1)return retained;
  const document=mentioned[0],supports=prepared.supports.filter(s=>s.documentId===document.documentId);

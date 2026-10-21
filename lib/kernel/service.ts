@@ -18,6 +18,7 @@ import {nativeWhitespaceFingerprint} from './native-whitespace.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
@@ -1377,27 +1378,63 @@ export class KernelService {
       const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
       if(mentioned.status==='resolved'){
         const selected=mentioned.matches[0];
+        const focusQuery=focusedDocumentTextQuery(question,selected.title),focusAllowed=focusQuery&&
+          (!routedOptions.documentId||routedOptions.documentId===selected.documentId)&&
+          (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===selected.title);
+        let focusReader:ReturnType<KernelService['studyAnswerContextReader']>|undefined;
         read=async()=>{
           const ranked=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
           if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
           const base=await this.authorImageTableContext(owner,retrievalQuestion??question,ranked,selected);
           const complete=await this.readCompleteDocumentSource(owner,selected);
+          const retainFocusedText=async():Promise<DocumentAnswerContext>=>{
+            if(!focusAllowed)return base;
+            // Search once; every subsequent answer-stage read still verifies
+            // current owner, source and page bodies through the Kernel reader.
+            focusReader??=this.studyAnswerContextReader(owner,focusQuery!,{...routedOptions,documentId:selected.documentId,
+              sourceHint:{selectedDocumentTitle:selected.title},limit:FOCUSED_TEXT_LIMITS.pages,strict:false,
+              includeParents:false,includeImages:false,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false},false);
+            const focused=await (await focusReader)(),settings=await documentAnswerSettings(policy);
+            let expanded=base,bytes=0,inputUpper:number|undefined;
+            const pages:FocusedDocumentText['pages']=[],omitted:Array<{evidenceId:string;reason:string}>=[];
+            for(const hit of focused.anchors){
+              if(hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||hit.source_version_id!==selected.sourceVersionId||
+                hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`)throw new DocumentEvidenceChangedError();
+              const size=Buffer.byteLength(hit.body),page={evidenceId:hit.evidence_id,bodySha256:createHash('sha256').update(hit.body).digest('hex')};
+              if(bytes+size>FOCUSED_TEXT_LIMITS.bodyUtf8Bytes){omitted.push({evidenceId:hit.evidence_id,reason:'focused-text-byte-limit'});continue;}
+              const merged=mergeStudyEvidence(expanded,{anchors:[hit],parents:[],images:[],sourceContentIsUntrusted:true});
+              if(!merged){omitted.push({evidenceId:hit.evidence_id,reason:'existing-image-budget'});continue;}
+              const candidate={...merged,focusedText:{policy:'bounded-mentioned-source-relevance-v1' as const,source:selected,
+                querySha256:focusedTextQueryHash(focusQuery!),pages:[...pages,page],coverage:'unassessed' as const,structureRelationsVerified:false as const}};
+              try{
+                const request=buildDocumentAnswerRuntimeRequest(prepareDocumentAnswerForPolicy(question,candidate,policy),
+                  {model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);
+                const upper=studyContextInputUpper(request,candidate);
+                if(upper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){omitted.push({evidenceId:hit.evidence_id,reason:'combined-request-budget'});continue;}
+                expanded=candidate;bytes+=size;pages.push(page);inputUpper=upper;
+              }catch(error){if(!(error instanceof DocumentAnswerRequestLimitError))throw error;omitted.push({evidenceId:hit.evidence_id,reason:error.code});}
+            }
+            contextExpansion={...contextExpansion,...(pages.length?{strategy:'ranked-plus-focused-mentioned-text'}:{}),
+              focusedText:{policy:'bounded-mentioned-source-relevance-v1',querySha256:focusedTextQueryHash(focusQuery!),
+                admitted:pages,omitted,bodyUtf8Bytes:bytes,inputTokenUpper:inputUpper,otherSourcesRetained:true,coverage:'unassessed',structureRelationsVerified:false}};
+            return expanded;
+          };
           const retainText=async(visualReason:string):Promise<DocumentAnswerContext>=>{
             const text=await this.readCompleteDocumentText(owner,selected);
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,
               expansionUnavailable:visualReason,...(text.status==='unavailable'?{textExpansionUnavailable:text.reason}:{})};
-            if(text.status==='unavailable')return base;
+            if(text.status==='unavailable')return retainFocusedText();
             const expanded=mergeStudyEvidence(base,text.context);
-            if(!expanded)return base;
+            if(!expanded)return retainFocusedText();
             const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),settings=await documentAnswerSettings(policy);
             let request;
             try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
               if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
-              contextExpansion={...contextExpansion,textExpansionUnavailable:error.code};return base;
+              contextExpansion={...contextExpansion,textExpansionUnavailable:error.code};return retainFocusedText();
             }
             const inputUpper=studyContextInputUpper(request,expanded);
             if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
-              contextExpansion={...contextExpansion,textExpansionUnavailable:'combined-request-budget'};return base;
+              contextExpansion={...contextExpansion,textExpansionUnavailable:'combined-request-budget'};return retainFocusedText();
             }
             contextExpansion={strategy:'ranked-plus-persisted-text-mentioned-source',coverage:'unassessed',selectedSource:selected,
               textScope:text.manifest.textCoverage,textNodes:text.manifest.returnedNodeCount,
@@ -1408,7 +1445,7 @@ export class KernelService {
           };
           if(complete.status==='unavailable'){
             if(complete.reason.startsWith('image-'))return retainText(complete.reason);
-            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:complete.reason};return base;
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:complete.reason};return retainFocusedText();
           }
           // Validate the existing complete-source proof before merging; it does
           // not certify completeness of a multi-source question or the answer.
@@ -1419,11 +1456,11 @@ export class KernelService {
           let request;
           try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
             if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
-            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:error.code};return base;
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:error.code};return retainText(error.code);
           }
           const inputUpper=studyContextInputUpper(request,expanded);
           if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
-            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-request-budget'};return base;
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-request-budget'};return retainText('combined-request-budget');
           }
           contextExpansion={strategy:'ranked-plus-complete-mentioned-source',coverage:'unassessed',selectedSource:selected,
             sourceManifestSha256:complete.manifest.manifestSha256,sourceNodes:complete.manifest.returnedNodeCount,
