@@ -99,3 +99,81 @@ route, historical transport and ranked short-chain checks were also run selectiv
 No real provider, PostgreSQL, new PDF parse, deployment or production switch was used.
 Structural/mock success does not establish complete-answer accuracy or three independent
 acceptance groups; the coordinator controls later real diagnostic pilots.
+
+### Explicit question-scope ID bindings (Issue181)
+
+`scopeWitnessPolicy: 'question-scope-v1'` opts the existing coverage/revision
+exchange into `complete-study-scope-id-bindings-v2` and
+`complete-study-scope-id-revision-v2`. It still requires explicit
+`completeSourceReview` and rejects `citationRevision`. No model, phase, output
+allowance, contract-v1 field or database table is added. Absent this policy,
+the previous default request bytes, identities and behavior remain unchanged.
+The independent `auditProfile` still controls only its existing execution settings.
+
+The request freezes a `scopeBindingRegistry` and its SHA from the actual question
+contract: each rN has an `rN.aspect`, plus IDs such as `rN.configuration` for its
+non-null scope fields. Their original strings are supplied by the program; the
+model does not retype question spans, source quotes, labels or qualifications.
+The full original question remains present. The contract and its aspect registry
+are fallible: a qualification absent from the contract remains part of the user's
+question, and this registry cannot prove question completeness.
+
+Each rN returns `findings` with only `aspectIds`, actual `sourceIds`, original
+`claimIds` and a fallible `supports`/`contradicts`/`unclear` judgment. Issues similarly
+select aspect IDs; the program preserves them and derives their parent rN IDs.
+Sources and aspects use shared schema enums; the final serialized coverage and
+revision schemas are checked before reservation against the existing 1000 enum,
+15000 per-enum string (when over 250 values) and 120000 total string limits.
+No source is truncated to satisfy capacity. Unknown IDs, wrong requirement/aspect
+bindings, duplicate IDs and stale registry identities fail, retaining the raw.
+Binding arrays are bounded at 30; source/aspect arrays require at least one ID.
+Each rN gets a uniform `floor(30 / requirementCount)` findings allowance in both
+schema and validator, keeping the whole response within the existing 30-finding
+limit. This is an output capacity bound, never a count of real entities. Cases
+that do not fit must remain incomplete rather than claim exhaustive coverage.
+
+After the existing fresh Kernel source/answer checks, the program restores each
+selected original paragraph or image with its actual caption members and source
+identity. A valid but irrelevant source ID stays that exact source: there is no
+quote search, neighboring-source substitution or automatic citation addition.
+`bindingsValid: true` certifies this mechanical restoration only;
+`semanticVerified: false`, `questionCoverage: 'unassessed'` and the separate original
+selected-reference findings remain. Fixed versus tuned, provenance versus use,
+entity inventories and exhaustive coverage still require independent assessment.
+Quote units are not counted as semantic entities.
+
+Program-assigned fN IDs identify those fallible findings for the one existing
+optional revision. It returns `{answer, discharges, unresolvedFindingIds}`. A
+discharge selects the same original aspect IDs, actual source IDs and new cN IDs.
+Old claim links are cleared. Each listed source must already be selected by a
+listed candidate claim, and each listed claim must select at least one listed
+source. `selected-source-claim-edges-v1` records the actual per-claim edges without
+adding references. A finding may address parallel answer claims; it is not a
+single semantic assertion or entity. These edges never pool semantic support:
+each claim still receives its own selected-only audit, and qualifications and
+whole-question completeness still require independent source-first assessment.
+Missing links, unresolved findings or `complete: false` retain the existing
+`incomplete-scope-witness` branch without spending new local-audit calls. Linked
+bindings are only `bindings-linked-awaiting-independent-review`; they are never
+"accounted entities" or a coverage PASS. Eligible candidates still receive the
+existing physically selected-only audits, without full-source rescue.
+
+Original generation and low-profile local raw are restored under their own actual
+wire identities. Historical v1 copied-witness scope responses are preserved but
+are rejected by the new v2 shape; they are not relabeled or silently repaired.
+Raw-before-parse, current-source rechecks, ordinary ledger, no retry, capacity
+failures and the six-claim limit remain unchanged. Synthetic focused checks cover
+ID restoration (including a legal wrong source), original PNG/caption members,
+unknown/stale bindings, default compatibility, historical local reuse, capacity
+and the one-revision selected-only boundary. They establish no semantic improvement
+and change no old answers, source bytes, raw logs or benchmark scores.
+### Qualification and inventory boundaries
+
+The explicit scope-witness route distinguishes evidence that an item was used,
+evidence that it satisfies the requested qualification, and evidence that a
+qualified inventory is exhaustive. A broader list, baseline label, table row or
+list position alone establishes neither qualification nor exhaustiveness.
+Unresolved qualifications retain supported use/role facts with a bounded
+explanation instead of an invented category boundary or a generic refusal.
+These are fallible semantic instructions in the existing review/revision; they
+add no model stage and do not turn ID validity or local support into acceptance.
