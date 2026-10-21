@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRuntimeRequest,buildDocumentEvidenceSelectionRequest,
- buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,retainSelectedSourceIdentity,synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
+ buildSelectedDocumentAnswerRequest,validateDocumentEvidenceSelection,normalizeDocumentEvidenceSelection,retainSelectedStoredNodeText,retainDocumentSelectionContext,retainSelectedSourceIdentity,synthesizeDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 
 process.env.DATABASE_URL=':memory:';
 process.env.SERVICE_VAULT_DIR=join(tmpdir(),'selection-test-'+randomUUID());
@@ -33,6 +33,46 @@ function identityContext():DocumentAnswerContext{
    observations:[{raw:'CS229',code:'CS229',startUtf16:0,endUtf16:5}]}]};
  return c;
 }
+
+test('selector set normalization preserves first order and rejects invalid or unoffered references before dedup',()=>{
+ const c=context();c.textQuotePolicy='stored-page-v1';c.anchors[0].body='Original intervening paragraph. '.repeat(75);
+ const p=prepareDocumentAnswer('What count is given?',c),
+  fine=p.quoteUnits.filter(u=>u.selectable&&!u.pageContext),a=fine[0].id,b=fine[1].id;
+ const raw={referenceIds:[b,a,b,a]},before=JSON.stringify(raw),r=normalizeDocumentEvidenceSelection(raw,p);
+ assert.deepEqual(r.referenceIds,[b,a]);assert.equal(JSON.stringify(raw),before);
+ assert.deepEqual(r.normalization,{policy:'identical-selector-reference-dedup-v1',providerReferenceIds:[b,a,b,a],
+  normalizedReferenceIds:[b,a],duplicateReferenceIds:[b,a]});
+ assert.deepEqual(normalizeDocumentEvidenceSelection({referenceIds:[]},p),{referenceIds:[],normalization:undefined});
+ assert.equal(normalizeDocumentEvidenceSelection({referenceIds:[a,b]},p).normalization,undefined);
+ assert.throws(()=>validateDocumentEvidenceSelection(raw,p),'downstream strict validator still rejects duplicates');
+ for(const value of [{referenceIds:[a,'invented',a]},{referenceIds:Array(65).fill(a)},
+  {referenceIds:[a,a],extra:true},{referenceIds:[a,5,a]},
+  {referenceIds:[p.quoteUnits.find(u=>u.pageContext)!.id]}])
+  assert.throws(()=>normalizeDocumentEvidenceSelection(value,p));
+});
+
+test('duplicate offered model selections reach generation in both lanes with an auditable receipt and no extra call',async()=>{
+ const c=context();c.images=[];c.anchors=c.anchors.slice(0,1);
+ const question='What count does Original a report?',p=prepareDocumentAnswer(question,c),id=p.quoteUnits[0].id,saved=globalThis.fetch;
+ try{
+  for(const typed of [false,true]){
+   let calls=0;globalThis.fetch=async(_url,init)=>{calls++;const req=JSON.parse(String(init?.body));
+    if(calls===1)return output({referenceIds:[id,id]});
+    const input=JSON.parse(req.input.at(-1).content[0].text);
+    assert.equal(input.quoteUnits.filter((u:any)=>u.id===id).length,1);
+    assert.doesNotMatch(JSON.stringify(input),/hidden-marker-947/);return output(claim(id));};
+   const result=await synthesizeDocumentAnswer(question,async()=>c,{...policy,
+    citationCheck:{mode:'selected-once',beforeAttempt:async()=>{},recordResponse:async()=>{}},
+    ...(typed?{sourceValueContract:'cell-bindings-v2' as const,recordSourceValueRawResponse:async()=>{},recordSourceValueDerivation:async()=>{}}:{})});
+   assert.equal(calls,2);assert.equal(result.answer.status,'answered');
+   assert.ok('evidenceSelection' in result);
+   assert.deepEqual(result.evidenceSelection!.referenceNormalization?.providerReferenceIds,[id,id]);
+   assert.deepEqual(result.evidenceSelection!.referenceNormalization?.normalizedReferenceIds,[id]);
+   assert.deepEqual(result.evidenceSelection!.referenceNormalization?.duplicateReferenceIds,[id]);
+   assert.equal(result.evidenceSelection!.coverage,'unassessed');
+  }
+ }finally{globalThis.fetch=saved;}
+});
 
 test('same-source identity survives ordinary and typed fallback selection in actual generation payloads',async()=>{
  const c=identityContext(),question='Compare CS229 textbooks.',p=prepareDocumentAnswer(question,c),

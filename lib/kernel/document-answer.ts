@@ -661,6 +661,7 @@ export type DocumentEvidenceSelectionReceipt={version:typeof DOCUMENT_EVIDENCE_S
  requestedModel:DocumentAnswerModel;model:string|null;providerRequestSha256:string;providerResponseId:string|null;usage:unknown;
  sourceInputFingerprint:string;outcome:'selected'|'no-evidence-selected'|'provided-with-system-retention';unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;
  pdfPageRegionTransport?:ReturnType<typeof pdfPageRegionTransport>;
+ referenceNormalization?:DocumentSelectionNormalization;
  sourceIdentityRetention?:Omit<SourceIdentitySelection,'referenceIds'>;
  textNodeRetention?:Omit<StoredNodeTextSelection,'referenceIds'>}&
  Partial<Omit<SourceValueEvidenceSelection,'referenceIds'>>;
@@ -708,6 +709,22 @@ export function validateDocumentEvidenceSelection(value:unknown,prepared:Prepare
  if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id))||new Set(ids).size!==ids.length)
   throw new Error('Invalid original evidence selection');
  return [...ids];
+}
+
+export type DocumentSelectionNormalization={policy:'identical-selector-reference-dedup-v1';
+ providerReferenceIds:string[];normalizedReferenceIds:string[];duplicateReferenceIds:string[]};
+/** The model selects a set. Repeating an offered ID adds no evidence; preserve
+ * the raw response in the receipt and keep all downstream validators strict. */
+export function normalizeDocumentEvidenceSelection(value:unknown,prepared:PreparedAnswer){
+ if(!exactKeys(value,['referenceIds']))throw new Error('Invalid original evidence selection');
+ const ids=(value as {referenceIds:unknown}).referenceIds,allowed=new Set(selectorIds(prepared));
+ if(!Array.isArray(ids)||ids.length>64||ids.some(id=>typeof id!=='string'||!allowed.has(id)))
+  throw new Error('Invalid original evidence selection');
+ const referenceIds=validateDocumentEvidenceSelection({referenceIds:[...new Set(ids as string[])]},prepared);
+ const normalization:DocumentSelectionNormalization|undefined=referenceIds.length===ids.length?undefined:{
+  policy:'identical-selector-reference-dedup-v1',providerReferenceIds:[...ids],normalizedReferenceIds:[...referenceIds],
+  duplicateReferenceIds:ids.filter((id,index)=>ids.indexOf(id)!==index)};
+ return {referenceIds,normalization};
 }
 
 /** A common bounded projection after either selector lane. Only already
@@ -1152,9 +1169,10 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
   const request=buildDocumentEvidenceSelectionRequest(prepared,settings,policy),providerRequestSha256=sha(JSON.stringify(request));
   await policy.beforeAttempt?.(sha(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256,fingerprint:prepared.fingerprint})));
   const {payload,actualModel,decoded}=await documentModelPayload(await paidOpenAI('responses',request,AbortSignal.timeout(timeout),{kind:'document-answer',dailyLimit}),model,policy);
+  const normalizedSelection=normalizeDocumentEvidenceSelection(decoded,prepared);
   const sourceValueSelection=sourceGenerationRoute!=='ordinary'?resolveSourceValueEvidenceSelection(decoded,prepared,
    sourceGenerationRoute==='source-values'&&policy.sourceValueContract==='cell-bindings-v2'):undefined;
-  const textSelection=sourceValueSelection?undefined:retainSelectedNativeTablePages(retainDocumentSelectionContext(decoded,prepared),prepared);
+  const textSelection=sourceValueSelection?undefined:retainSelectedNativeTablePages(retainDocumentSelectionContext({referenceIds:normalizedSelection.referenceIds},prepared),prepared);
   referenceIds=sourceValueSelection?.referenceIds??textSelection!.referenceIds;
   const identitySelection=retainSelectedSourceIdentity(referenceIds,sourceValueSelection?.normalizedProviderReferenceIds??textSelection!.providerReferenceIds,prepared);
   if(identitySelection)referenceIds=identitySelection.referenceIds;
@@ -1164,6 +1182,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    requestedModel:model,model:actualModel,providerRequestSha256,providerResponseId:payload.id??null,usage:payload.usage??null,
    sourceInputFingerprint:prepared.fingerprint,outcome:sourceValueSelection?.systemRetainedReferenceIds.length||textSelection?.systemRetainedReferenceIds.length||identitySelection?.addedReferenceIds.length?
     'provided-with-system-retention':referenceIds.length?'selected':'no-evidence-selected',
+   ...(normalizedSelection.normalization?{referenceNormalization:normalizedSelection.normalization}:{}),
    ...(sourceValueSelection?{...sourceValueSelection,referenceIds,systemRetainedReferenceIds:[...new Set([
     ...sourceValueSelection.systemRetainedReferenceIds,...(identitySelection?.addedReferenceIds??[])])]}:{}),
    ...(identitySelection?{sourceIdentityRetention:(({referenceIds:_,...identity})=>identity)(identitySelection)}:{}),
