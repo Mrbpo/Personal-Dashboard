@@ -38,13 +38,13 @@ async function runKernelJob(kernelJob:IngestionJob){
    db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now()).run(),
   ]).catch(()=>console.error('[worker] job renewal failed'));},30000);
   try{
-   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string};
+   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;nativeTextFastpath?:boolean};
    switch(kernelJob.kind){
     case 'document_vectors': await kernel.runDocumentVectorJob(kernelJob);break;
     case 'document_topics': await kernel.runDocumentTopicJob(kernelJob);break;
     case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id),{
      id:kernelJob.id,leaseToken:kernelJob.lease_token,taskId:payload.doclingTaskId,
-     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,
+     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,nativeTextFastpath:payload.nativeTextFastpath,
      progress:payload.doclingProgress,sourceHash:payload.sourceHash});break;
     case 'canvas': await archiveCanvas(payload.owner);break;
     case 'canvas-course': await archiveCanvasCourse(payload.owner,String(payload.course));break;

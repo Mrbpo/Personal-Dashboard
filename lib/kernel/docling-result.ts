@@ -9,6 +9,13 @@ export const DOCLING_TABLE_GRID_LIMITS=Object.freeze({cells:10000,rows:1000,colu
 export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
 }
+/** Text coverage cannot certify column order or retain producer structures.
+ * Native-only ingestion is an explicit optimization, never a quality proof. */
+export function configuredDoclingNativeTextFastpath(): boolean {
+  const value=process.env.DOCLING_NATIVE_TEXT_FASTPATH??'false';
+  if(value!=='true'&&value!=='false')throw new Error('Invalid DOCLING_NATIVE_TEXT_FASTPATH');
+  return value==='true';
+}
 export type DoclingPage = { locator: string; text: string; pageNumber: number };
 export type DoclingRegion={pictureRef:string;pageNumber:number;derivedPageNumber:number;
  pageSize:{width:number;height:number};bbox:{l:number;t:number;r:number;b:number;coord_origin:'BOTTOMLEFT'|'TOPLEFT'};

@@ -6,7 +6,7 @@ import type {PdfSourceEncodingProof,PdfFontReferenceDictionary} from '../pdf-sou
 import {SOURCE_POST_AGL_POLICY,validateSourcePostAgl,sourcePostAglCandidate,sourceCmapLexicalView,replaceSingleCmapDestination,type SourcePostFont} from '../pdf-source-agl.ts';
 import { digest, getDocument, readBlob, saveBlob, splitText } from '../library.ts';
 import { kernel } from './service.ts';
-import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION, DOCLING_NUL_PROJECTION_VERSION } from './docling-result.ts';
+import { decodeDoclingResult, DOCLING_PARSER_VERSION, DOCLING_TEXT_PARSER_VERSION, DOCLING_NUL_PROJECTION_VERSION, configuredDoclingNativeTextFastpath } from './docling-result.ts';
 import {rememberDoclingTask,doclingJobPayload,rememberDoclingProgress} from './jobs.ts';
 import {convertDoclingBatches,requestDoclingResult,storeDoclingResult,type DoclingProgress,type DecodedDocling} from './docling-batches.ts';
 import {preparePdfVisualEvidence} from './pdf-visual-evidence.ts';
@@ -408,7 +408,7 @@ export function nativePdfTextIsComplete(pages:string[]|null,expectedPages:number
     meaningful.filter(page=>page.length>=300).length>expectedPages*.5;
 }
 
-export async function convertDocumentWithDocling(owner: string, id: string, job?:{id:string;leaseToken:string;taskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;progress?:unknown;sourceHash?:string},savedResult?:Record<string,unknown>,savedTaskId?:string): Promise<void> {
+export async function convertDocumentWithDocling(owner: string, id: string, job?:{id:string;leaseToken:string;taskId?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;nativeTextFastpath?:boolean;progress?:unknown;sourceHash?:string},savedResult?:Record<string,unknown>,savedTaskId?:string): Promise<void> {
   const whitespaceMode=nativeWhitespaceMode();
   const base=process.env.DOCLING_URL;
   if(!base)throw new Error('DOCLING_URL is required for v1 PDF parsing');
@@ -423,6 +423,8 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
   if(job?.sourceHash&&job.sourceHash!==document.hash)throw new Error('PDF ingestion source identity mismatch');
   const progress=payload?.doclingProgress??job?.progress;
   const legacyTaskId=job?.taskId??(payload?.doclingTaskId as string|undefined)??savedTaskId;
+  const nativeTextFastpath=payload?.nativeTextFastpath??job?.nativeTextFastpath??configuredDoclingNativeTextFastpath();
+  if(typeof nativeTextFastpath!=='boolean')throw new Error('Invalid PDF native text fastpath setting');
   const originalPdf=await PDFDocument.load(bytes,{updateMetadata:false});
   const originalPages=originalPdf.getPageCount();
   if(originalPages>500)throw new Error('PDF 超过 500 页，请分册导入');
@@ -456,7 +458,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     throw Error('Font reference CAS identity mismatch');
   const sourceEncodingReceiptHash=encoding.proof?await storeDoclingResult({kind:encoding.proof.version,proof:encoding.proof}):undefined;
   const parserPdf=encoding.proof?await PDFDocument.load(encoding.bytes,{updateMetadata:false}):originalPdf;
-  const native=localFormula||process.env.DOCLING_NATIVE_TEXT_FASTPATH==='false'||savedResult||legacyTaskId||progress?null:await localPdfTextPages(encoding.bytes);
+  const native=localFormula||!nativeTextFastpath||savedResult||legacyTaskId||progress?null:await localPdfTextPages(encoding.bytes);
   // Keep the strict native gate: sparse/image-only bodies still need parsing.
   const nativeComplete=nativePdfTextIsComplete(native,originalPages,verifiedBlankPages);
   const scanBackend=payload?.scanBackend??job?.scanBackend??process.env.PDF_SCAN_TRANSCRIPTION_BACKEND??'docling';

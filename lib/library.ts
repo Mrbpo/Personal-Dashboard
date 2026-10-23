@@ -11,7 +11,7 @@ import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
 import {queueIngestionJob,doclingStageBlobHashes} from './kernel/jobs.ts';
 import {kernel} from './kernel/service.ts';
 import {documentSearchText,splitDocumentText,type DocumentTextHit} from './kernel/document-search.ts';
-import {DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
+import {DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,configuredDoclingParser,configuredDoclingNativeTextFastpath} from './kernel/docling-result.ts';
 import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
 export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
@@ -97,9 +97,9 @@ export const splitText=splitDocumentText;
 export async function indexDocument(owner:string,id:string,forcePdfFormulaReparse=false) {
   const d=await getDocument(owner,id);
   if(d.mime==='application/pdf' && process.env.DOCLING_URL){
-    const parser=configuredDoclingParser();
+    const parser=configuredDoclingParser(),nativeTextFastpath=configuredDoclingNativeTextFastpath();
     await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id,sourceHash:d.hash,formulaEnriched:parser===DOCLING_PARSER_VERSION,
-      formulaBackend:process.env.DOCLING_FORMULA_BACKEND||'ai',scanBackend:process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling'},`docling:${id}:${d.hash}:${parser}`,forcePdfFormulaReparse);
+      nativeTextFastpath,formulaBackend:process.env.DOCLING_FORMULA_BACKEND||'ai',scanBackend:process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling'},`docling:${id}:${d.hash}:${parser}`,forcePdfFormulaReparse);
     return;
   }
   if(d.mime==='application/pdf'&&d.status==='ready'&&!forcePdfFormulaReparse&&process.env.PDF_FORMULA_BACKFILL!=='true'){
