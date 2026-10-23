@@ -56,6 +56,40 @@ test('complementary actual citations can pass once; source drift stops after pre
  }
 });
 
+test('ordinary application checks retain discourse without requiring generated literal annotations or borrowing references',async()=>{
+ const c=context(),p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch;
+ const selections={status:'answered' as const,message:'',claims:[
+  {text:'The first result concerns accuracy.',citations:[{id:p.quoteUnits[0].id}]},
+  {text:'That is distinct from the grounding result.',citations:[{id:p.quoteUnits[1].id}]}]};
+ const binding={inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,providerSelections:selections};
+ let calls=0;globalThis.fetch=async(_url,init)=>{
+  const request=JSON.parse(String(init?.body)),packet=JSON.parse(request.input[1].content[0].text),index=calls++;
+  assert.equal(packet.answerTextContext.targetOriginalIndex,index);assert.equal(packet.answerTextContext.isSourceEvidence,false);
+  assert.deepEqual(packet.answerTextContext.claims,selections.claims.map((claim,originalIndex)=>({originalIndex,text:claim.text})));
+  assert.equal(packet.claim.text,selections.claims[index].text);assert.equal(packet.references.length,1);
+  assert.equal(packet.references[0].source.documentId,c.anchors[index].document_id);
+  assert.equal(packet.references[0].quote,c.anchors[index].body);
+  assert.equal(request.input[1].content.some((part:{type:string})=>part.type==='input_image'),false);
+  return response(diagnostic('supported',1));
+ };
+ try{
+  const result=await checkApplicationDocumentCitations(question,async()=>c,binding,
+   {scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)});
+  assert.equal(calls,2);assert.equal(result.claimCount,2);assert.equal(raw.length,2);
+  assert.ok(raw.every(r=>r.binding?.answerTextContextSha256));
+  assert.deepEqual(binding.providerSelections,selections);
+ }finally{globalThis.fetch=saved;}
+});
+
+test('application discourse rejects an invalid explicit mode before model work',async()=>{
+ const c=context(),p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[];
+ await assert.rejects(checkApplicationDocumentCitations(question,async()=>c,{inputFingerprint:p.fingerprint,
+  quoteUnitManifestSha256:p.quoteUnitManifestSha256,providerSelections:{status:'answered',message:'',claims:[]},
+  answerTextContext:'other' as 'bound-answer-v1'},
+  {scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)}),/Invalid application discourse/);
+ assert.deepEqual(attempts,[]);assert.deepEqual(raw,[]);
+});
+
 test('opt-in explicit quantity mismatch preserves generation evidence and refuses before citation calls; off keeps the existing path',async()=>{
  for(const enabled of [false,true]){
   const kernel=new KernelService(),q='How long did training take?',c=context();c.anchors[0].body='Each model was trained for 100 epochs.';

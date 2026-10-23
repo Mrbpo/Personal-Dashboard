@@ -215,7 +215,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
  binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy){
  await documentAnswerSettings(policy);
  if(policy.scope!=='application'||policy.citationCheck?.mode!=='selected-once')throw new Error('Explicit application citation check policy required');
- if(binding.answerTextContext&&policy.scopeAnnotations!=='literal-source-v1')throw new Error('Discourse context requires explicit literal scope policy');
+ if(binding.answerTextContext!==undefined&&binding.answerTextContext!=='bound-answer-v1')throw new Error('Invalid application discourse context policy');
  const check=policy.citationCheck,deadline=Date.now()+55000,audits=[];
  const selections=structuredClone(binding.providerSelections),releaseSelections=structuredClone(selections);
  const removed:Array<ReturnType<typeof prepareDocumentCitationAudit>['binding']['citations'][number]&{
@@ -225,7 +225,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
   try{
    const remaining=deadline-Date.now();if(remaining<1000)throw new Error('Citation check deadline reached');
    const audit=await executeCitationAudit(question,readContext,{...binding,providerSelections:selections,claimIndex,
-    ...(policy.scopeAnnotations==='literal-source-v1'?{answerTextContext:'bound-answer-v1' as const}:{})},
+    answerTextContext:'bound-answer-v1'},
     {dailyLimit:policy.dailyLimit,beforeAttempt:check.beforeAttempt,recordResponse:check.recordResponse},Math.min(30000,remaining));
    if(Date.now()>deadline)throw new Error('Citation check deadline reached');
    audits.push(audit);
