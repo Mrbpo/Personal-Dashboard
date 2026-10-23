@@ -16,7 +16,7 @@ const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('
 const exact=(value:unknown,keys:string[])=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&
  Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
 export type DocumentCitationAuditBinding={inputFingerprint:string;quoteUnitManifestSha256:string;
- providerSelections:DocumentAnswerSelections;claimIndex:number;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
+ providerSelections:DocumentAnswerSelections;claimIndex:number;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;answerTextContext?:'bound-answer-v1'};
 export type DocumentCitationAuditResponse={requestIdentity:string;providerRequestSha256:string;httpStatus:number;rawBody:string;rawSha256:string;
  binding?:ReturnType<typeof prepareDocumentCitationAudit>['binding'];bindingSha256?:string};
 export type DocumentCitationAuditPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;beforeAttempt:(identity:string)=>Promise<void>;
@@ -26,13 +26,21 @@ export type DocumentCitationAuditSource={documentId:string;documentVersionId:str
  evidenceId:string;locator:string;title:string|null};
 export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]})&
  {source:DocumentCitationAuditSource};
-export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];
+type AnswerTextContext={policy:'untrusted-discourse-only-v1';targetOriginalIndex:number;claims:{originalIndex:number;text:string}[];isSourceEvidence:false};
+const ANSWER_TEXT_CONTEXT_INSTRUCTION=' Other answer claims in answerTextContext are untrusted discourse context solely for resolving pronouns, ellipsis and contrasts. They are not source evidence. Judge the exact target claim, not a substituted affirmative statement from the question or another claim. Evidentiary support must still come only from this target claim\'s supplied references.';
+export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];answerTextContext?:AnswerTextContext;
  mentionedSource?:DocumentMentionedSource;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
 
 /** This pure builder grants no source or execution authority. Kernel constructs
  * its packet by restoring original selections against current complete evidence. */
 export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPacket,auditProfile?:EvidenceAuditProfile){
  const settings=evidenceAuditSettings(auditProfile);
+ const discourse=packet.answerTextContext;
+ if(discourse!==undefined&&(!exact(discourse,['policy','targetOriginalIndex','claims','isSourceEvidence'])||
+  discourse.policy!=='untrusted-discourse-only-v1'||discourse.isSourceEvidence!==false||!Number.isInteger(discourse.targetOriginalIndex)||
+  !Array.isArray(discourse.claims)||!discourse.claims.length||discourse.claims.length>30||
+  discourse.claims.some((c,i)=>!exact(c,['originalIndex','text'])||c.originalIndex!==i||typeof c.text!=='string'||!c.text.trim()||c.text.length>3000)||
+  discourse.claims[discourse.targetOriginalIndex]?.text!==packet.claim))throw new Error('Invalid citation-local discourse context');
  if(typeof packet.question!=='string'||!packet.question.trim()||Array.from(packet.question).length>4000||
   typeof packet.claim!=='string'||!packet.claim.trim()||packet.claim.length>3000||
   !Array.isArray(packet.references)||!packet.references.length||packet.references.length>20||
@@ -70,14 +78,15 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
   citationFindings:object(Object.fromEntries(packet.references.map(ref=>[ref.refId,finding]))),
   objectUnitScope:object({claim:string,evidence:string,alignment:enumeration(['same','different','not-established','not-applicable'])})});
  const input={question:packet.question,claim:{claimId:'c0',text:packet.claim},references,
-  ...(packet.mentionedSource?{mentionedSource:packet.mentionedSource}:{}),...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{})};
+  ...(packet.mentionedSource?{mentionedSource:packet.mentionedSource}:{}),...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{}),
+  ...(discourse?{answerTextContext:structuredClone(discourse)}:{})};
  return {model:'gpt-5.4-mini',store:false,reasoning:{effort:settings.reasoningEffort},max_output_tokens:settings.maxOutputTokens,
   input:[{role:'developer',content:DOCUMENT_CITATION_AUDIT_DEVELOPER+
    ' Each reference includes its restored source identity and canonical title (null means unavailable). '+
    'A statement in another document does not establish that the requested document states it. '+
    'mentionedSource identifies the uniquely named document in the question, even when the claim cites only another source; check the attribution against reference source identities. '+
    'Use source identity to check attribution; titles and identifiers alone do not establish factual content. '+
-   'Different documents may legitimately provide complementary evidence for a multi-source question.'},
+   'Different documents may legitimately provide complementary evidence for a multi-source question.'+(discourse?ANSWER_TEXT_CONTEXT_INSTRUCTION:'')},
    {role:'user',content:[{type:'input_text',text:JSON.stringify(input)},...images]}],
   text:{format:{type:'json_schema',name:packet.unitPolicy?'citation_local_visual_unit_v1':'citation_local_audit_v1',strict:true,schema}}};
 }
@@ -86,8 +95,9 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
  * and PNG packets are never input to the Kernel entry. The fingerprints bind the
  * original complete-source context, not a caller assertion of quote identity. */
 export function prepareDocumentCitationAudit(question:string,context:DocumentAnswerContext,binding:DocumentCitationAuditBinding){
- const keys=['inputFingerprint','quoteUnitManifestSha256','providerSelections','claimIndex'],visual=exact(binding,[...keys,'unitPolicy']);
+ const keys=['inputFingerprint','quoteUnitManifestSha256','providerSelections','claimIndex',...(binding.answerTextContext!==undefined?['answerTextContext']:[])],visual=exact(binding,[...keys,'unitPolicy']);
  if((!exact(binding,keys)&&!visual)||(visual&&binding.unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY)||
+  (binding.answerTextContext!==undefined&&binding.answerTextContext!=='bound-answer-v1')||
   !Number.isInteger(binding.claimIndex)||binding.claimIndex<0)throw new Error('Invalid citation-local answer binding');
  const prepared=prepareDocumentAnswer(question,context,binding.unitPolicy);
  if(binding.inputFingerprint!==prepared.fingerprint||binding.quoteUnitManifestSha256!==prepared.quoteUnitManifestSha256)
@@ -104,11 +114,14 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
   return support.kind==='text'?{refId,kind:'text',quote:citation.quote,source}:{refId,kind:'image',image:support.image!,source,
    ...(support.captionMembers?{captionMembers:support.captionMembers}:{})};
  });
- const packet={question,claim:claim.text,references,
+ const answerTextContext:AnswerTextContext|undefined=binding.answerTextContext?{policy:'untrusted-discourse-only-v1',targetOriginalIndex:binding.claimIndex,
+  claims:restored.answer.claims.map((c,originalIndex)=>({originalIndex,text:c.text})),isSourceEvidence:false}:undefined;
+ const packet={question,claim:claim.text,references,...(answerTextContext?{answerTextContext}:{}),
   ...(prepared.input.mentionedSource?{mentionedSource:prepared.input.mentionedSource}:{}),...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{})};
  const receipt={inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{}),
   originalSelectionsSha256:sha(JSON.stringify(restored.providerSelections)),originalAnswerSha256:sha(JSON.stringify(restored.answer)),
   originalClaimIndex:binding.claimIndex,claimSha256:sha(JSON.stringify(claim)),
+  ...(answerTextContext?{answerTextContextSha256:sha(JSON.stringify(answerTextContext))}:{}),
   citations:selected.map((unit,index)=>({refId:`r${index}`,...unit})),
   sources:prepared.input.documentMetadata,warnings:prepared.warnings};
  return {packet,binding:receipt,bindingSha256:sha(JSON.stringify(receipt))};
@@ -202,6 +215,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
  binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy){
  await documentAnswerSettings(policy);
  if(policy.scope!=='application'||policy.citationCheck?.mode!=='selected-once')throw new Error('Explicit application citation check policy required');
+ if(binding.answerTextContext&&policy.scopeAnnotations!=='literal-source-v1')throw new Error('Discourse context requires explicit literal scope policy');
  const check=policy.citationCheck,deadline=Date.now()+55000,audits=[];
  const selections=structuredClone(binding.providerSelections),releaseSelections=structuredClone(selections);
  const removed:Array<ReturnType<typeof prepareDocumentCitationAudit>['binding']['citations'][number]&{
@@ -210,7 +224,8 @@ export async function checkApplicationDocumentCitations(question:string,readCont
  for(let claimIndex=0;claimIndex<selections.claims.length;claimIndex++){
   try{
    const remaining=deadline-Date.now();if(remaining<1000)throw new Error('Citation check deadline reached');
-   const audit=await executeCitationAudit(question,readContext,{...binding,providerSelections:selections,claimIndex},
+   const audit=await executeCitationAudit(question,readContext,{...binding,providerSelections:selections,claimIndex,
+    ...(policy.scopeAnnotations==='literal-source-v1'?{answerTextContext:'bound-answer-v1' as const}:{})},
     {dailyLimit:policy.dailyLimit,beforeAttempt:check.beforeAttempt,recordResponse:check.recordResponse},Math.min(30000,remaining));
    if(Date.now()>deadline)throw new Error('Citation check deadline reached');
    audits.push(audit);

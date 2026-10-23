@@ -38,6 +38,36 @@ function binding(c=context()):DocumentCitationAuditBinding{
   providerSelections:{status:'answered',message:'',claims:[{text:'Two samples are compared.',
    citations:[{id:prepared.quoteUnits[0].id},{id:'i0'}]}]}};
 }
+test('opt-in discourse restores displayed answer text without adding another claims evidence or images',()=>{
+ const c=context(),b=binding(c),id=b.providerSelections.claims[0].citations[0].id;
+ b.providerSelections.claims=[{text:'First observation from a separate image.',citations:[{id:'i0'}]},
+  {text:'But that does not describe the text observation.',citations:[{id}]}];b.claimIndex=1;
+ const before=structuredClone(b),plain=prepareDocumentCitationAudit(question,c,b),enabled=prepareDocumentCitationAudit(question,c,{...b,answerTextContext:'bound-answer-v1'});
+ const request=buildDocumentCitationAuditRequest(enabled.packet),input=auditInput(request);
+ assert.deepEqual(b,before);assert.equal(input.answerTextContext.targetOriginalIndex,1);
+ assert.deepEqual(input.answerTextContext.claims,b.providerSelections.claims.map((claim,originalIndex)=>({originalIndex,text:claim.text})));
+ assert.equal(input.answerTextContext.isSourceEvidence,false);assert.deepEqual(enabled.packet.references,plain.packet.references);
+ assert.equal(input.references.length,1);assert.equal(input.references[0].kind,'text');
+ assert.equal(JSON.stringify(request).includes('data:image/png'),false,'other claims images are never added to target support');
+ assert.equal(enabled.binding.answerTextContextSha256,hash(JSON.stringify(input.answerTextContext)));
+ assert.notEqual(enabled.bindingSha256,plain.bindingSha256);
+ const original=buildDocumentCitationAuditRequest(plain.packet);
+ assert.equal(Object.hasOwn(auditInput(original),'answerTextContext'),false);
+ assert.equal(typeof original.input[0].content,'string');assert.equal(String(original.input[0].content).includes('Other answer claims in answerTextContext'),false);
+});
+test('discourse target/index/shape must match the restored target and changes bind the request identity',()=>{
+ const c=context(),b=binding(c);b.providerSelections.claims.push(structuredClone(b.providerSelections.claims[0]));b.claimIndex=1;
+ const prepared=prepareDocumentCitationAudit(question,c,{...b,answerTextContext:'bound-answer-v1'}),discourse=prepared.packet.answerTextContext!;
+ for(const bad of [{...discourse,targetOriginalIndex:-1},{...discourse,isSourceEvidence:true},
+  {...discourse,claims:[{originalIndex:0,text:'Changed context.'},{originalIndex:1,text:'A different target.'}]},
+  {...discourse,claims:[{originalIndex:1,text:discourse.claims[0].text},discourse.claims[1]]}])
+  assert.throws(()=>buildDocumentCitationAuditRequest({...prepared.packet,answerTextContext:bad as typeof discourse}),/Invalid citation-local discourse/);
+ const changed=structuredClone(b);changed.providerSelections.claims[0].text='A changed previous claim.';
+ const after=prepareDocumentCitationAudit(question,c,{...changed,answerTextContext:'bound-answer-v1'});
+ assert.equal(after.packet.claim,prepared.packet.claim);assert.deepEqual(after.packet.references,prepared.packet.references);
+ assert.notEqual(after.binding.answerTextContextSha256,prepared.binding.answerTextContextSha256);
+ assert.notEqual(after.bindingSha256,prepared.bindingSha256);
+});
 test('mentioned source attribution reaches the local audit when all actual citations are foreign',()=>{
  const c=context();c.images=[];c.anchors.push({...c.anchors[0],id:'pg:foreign-version:1',document_id:'foreign',
   name:'Different study',source_hash:'foreign-hash',source_version_id:'foreign-source-version',evidence_id:'foreign-evidence',body:'The different study tests six samples.'});
