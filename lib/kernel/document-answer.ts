@@ -348,29 +348,20 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
    start=end;
   }
  }
- // Fine units remain available for locating evidence. Separate bounded page
- // spans are offered before generation, never substituted for a cited fine ID.
+ // Fine units remain available for locating evidence. Separate page IDs are
+ // offered only before generation, never substituted for an answer's fine ID.
  for(const support of supports){
   const body=support.text??'';
-  if(support.kind!=='text'||support.textQuotePolicy!=='stored-page-v1'||body.length<=1200||!whitespace(body))continue;
+  if(support.kind!=='text'||support.textQuotePolicy!=='stored-page-v1'||body.length<=1200||
+   body.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16||!whitespace(body))continue;
   const sourceIdentity=[support.documentId,support.documentVersionId,support.sourceVersionId,
-   support.sourceHash,support.evidenceId,support.locator,support.sha256];
-  const fine=units.filter(u=>u.supportId===support.id),ranges:Array<{start:number;end:number}>=[];
-  for(const unit of fine){
-   const last=ranges.at(-1);
-   if(last&&unit.endUtf16-last.start<=DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16)last.end=unit.endUtf16;
-   else ranges.push({start:unit.startUtf16,end:unit.endUtf16});
-  }
-  const spans=ranges.map(({start,end})=>{const text=body.slice(start,end),quoteSha256=sha(text),
-   id='q:'+sha(JSON.stringify(['stored-page-context-v1',sourceIdentity,start,end,quoteSha256])).slice(0,24);
-   return {id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,
-    selectable:Boolean(whitespace(text))&&!paired.has(id),pageContext:{policy:'stored-page-context-v1' as const,semanticRelationsVerified:false as const}};
-  });
-  const eligible=[...units.filter(u=>u.selectable).map(u=>u.id),...supports.filter(s=>s.kind==='image').map(s=>s.id),...spans.map(u=>u.id)];
+   support.sourceHash,support.evidenceId,support.locator,support.sha256],
+   id='q:'+sha(JSON.stringify(['stored-page-context-v1',sourceIdentity,0,body.length,support.sha256])).slice(0,24),
+   eligible=[...units.filter(u=>u.selectable).map(u=>u.id),...supports.filter(s=>s.kind==='image').map(s=>s.id),id];
   if(eligible.length+3>1000||eligible.length>250&&eligible.reduce((n,v)=>n+v.length,0)>15000)continue;
-  for(const span of spans){
-   if(identities.has(span.id))throw new Error('Duplicate or colliding page quote unit ID');identities.add(span.id);units.push(span);
-  }
+  if(identities.has(id))throw new Error('Duplicate or colliding page quote unit ID');identities.add(id);
+  units.push({id,supportId:support.id,startUtf16:0,endUtf16:body.length,quoteSha256:support.sha256,text:body,
+   selectable:!paired.has(id),pageContext:{policy:'stored-page-context-v1',semanticRelationsVerified:false}});
  }
  // Additional windows are offered before selection. Every original partition
  // stays intact; no citation is expanded after the model has selected it.
@@ -802,8 +793,7 @@ export function retainSelectedStoredNodeText(value:unknown,prepared:PreparedAnsw
   allowed=new Set(selectorIds(prepared));
  if(providerReferenceIds.some(id=>!allowed.has(id)))throw new Error('Selector cited an unoffered page context');
  const units=generationQuoteUnits(prepared),pages=units.filter(u=>u.pageContext),
-  pageFor=(id:string)=>pages.find(page=>prepared.quoteUnits.some(u=>u.id===id&&u.supportId===page.supportId&&
-   u.startUtf16>=page.startUtf16&&u.endUtf16<=page.endUtf16)),
+  pageFor=(id:string)=>pages.find(page=>prepared.quoteUnits.some(u=>u.id===id&&u.supportId===page.supportId)),
   referenceIds=[...new Set(providerReferenceIds.map(id=>pageFor(id)?.id??id))],selected=new Set(referenceIds),
   supportIds=new Set(prepared.quoteUnits.filter(unit=>providerSet.has(unit.id)).map(unit=>unit.supportId)),
   systemRetainedReferenceIds=referenceIds.filter(id=>!providerSet.has(id)),expandedSupportIds:string[]=[],skippedSupportIds:string[]=[],

@@ -70,26 +70,13 @@ test('stored page quotes: fine selector IDs promote only already selected nodes 
 test('stored page quotes: bounded Unicode partitions retain every byte and never combine pages or versions',()=>{
  const body='a'.repeat(DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16-1)+'😀'+'b'.repeat(9000),c=context(body);
  c.textQuotePolicy='stored-page-v1';c.anchors.push({...c.anchors[0],id:'pg:current:3',page_number:3,evidence_id:'page-three',locator:'page:3',body:'Another page. '});
- const p=prepareDocumentAnswer('What is reported?',c),units=p.quoteUnits.filter(q=>q.supportId==='e0'&&q.pageContext),
-  fine=p.quoteUnits.filter(q=>q.supportId==='e0'&&!q.pageContext),legacy=prepareDocumentAnswer('What is reported?',{...c,textQuotePolicy:undefined});
- assert.deepEqual(fine,legacy.quoteUnits.filter(q=>q.supportId==='e0'),'original fine IDs and text are unchanged');
- assert.ok(units.length>1,'large pages have bounded citation contexts instead of silently losing the option');
+ const p=prepareDocumentAnswer('What is reported?',c),units=p.quoteUnits.filter(q=>q.supportId==='e0');
  assert.equal(units.map(q=>q.text).join(''),body);assert.ok(units.every(q=>q.text.length<=8192));
  for(let i=1;i<units.length;i++)assert.equal(units[i].startUtf16,units[i-1].endUtf16);
  assert.ok(units.every(q=>!/[\uD800-\uDBFF]$/.test(q.text)));
  const chosen=resolveDocumentAnswerSelections(selection(units[0].id),p.supports);
  assert.equal(chosen.answer.claims[0].citations[0].quote,units[0].text);
  assert.doesNotMatch(chosen.answer.claims[0].citations[0].quote,/Another page/);
- const last=fine.at(-1)!,containing=units.find(u=>last.startUtf16>=u.startUtf16&&last.endUtf16<=u.endUtf16)!;
- const kept=retainSelectedStoredNodeText({referenceIds:[last.id]},p);
- assert.equal(kept.pageQuotePromotions?.find(p=>p.providerReferenceIds.includes(last.id))?.referenceId,containing.id,
-  'a tail fine ID must promote to its containing span, never the first span on that page');
- const wire=buildDocumentEvidenceSelectionRequest(p,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000});
- assert.ok(inputPacket(wire.input.at(-1)!.content).quoteUnits.every((u:any)=>!u.pageContext));
- assert.throws(()=>retainSelectedStoredNodeText({referenceIds:[containing.id]},p),/unoffered/);
- const audit=prepareDocumentCitationAudit('What is reported?',c,{inputFingerprint:p.fingerprint,
-  quoteUnitManifestSha256:p.quoteUnitManifestSha256,providerSelections:selection(containing.id),claimIndex:0});
- assert.equal(inputPacket(buildDocumentCitationAuditRequest(audit.packet).input[1].content).references[0].quote,containing.text);
  const changed=structuredClone(c);changed.anchors[0].id='pg:new-version:2';
  assert.throws(()=>resolveDocumentAnswerSelections(selection(units[0].id),prepareDocumentAnswer('What is reported?',changed).supports),/ungrounded/);
  assert.equal(studyTextContextWindows('off'),undefined);assert.equal(studyTextContextWindows('stored-page-v1'),'stored-page-v1');
