@@ -18,10 +18,10 @@ test('literal scope output is opt-in, reaches the application policy and rejects
  try{
   Object.assign(process.env,values);
   kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;assert.equal(policy?.scopeAnnotations,'literal-source-v1');await documentAnswerSettings(policy);
-   return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},selectedUnits:[],sourceDocuments:[],warnings:[],textEvidenceCount:0,imageEvidenceCount:0,model:null} as any;};
+   return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},selectedUnits:[],sourceDocuments:[],warnings:[],textEvidenceCount:0,imageEvidenceCount:0,model:null} as unknown as Awaited<ReturnType<typeof saved>>;};
   await answerKernelStudy('owner','Synthetic scoped question','',[]);assert.equal(calls,1);
   process.env.STUDY_SOURCE_VALUES='difference-v1';
-  await assert.rejects(answerKernelStudy('owner','Synthetic scoped question','',[]),(e:any)=>e.code==='scope-annotations-require-ordinary-selection-check');assert.equal(calls,1);
+  await assert.rejects(answerKernelStudy('owner','Synthetic scoped question','',[]),(e:unknown)=>e instanceof StudyAnswerError&&e.code==='scope-annotations-require-ordinary-selection-check');assert.equal(calls,1);
  }finally{kernel.answerStudyContent=saved;for(const [k,v] of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
 });
 
