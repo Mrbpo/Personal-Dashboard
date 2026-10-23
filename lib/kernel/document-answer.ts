@@ -374,6 +374,9 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
  for(const support of supports){
   if(support.kind!=='text')continue;
   for(const hint of [support.textContextWindows,support.nativeRegionWindows]){if(!hint)continue;
+  if(hint.policy==='native-region-text-windows-v1')assertPreparedNativeRegionWindows(hint,{...hint.binding,
+   documentId:support.documentId,currentVersionId:support.documentVersionId,sourceVersionId:support.sourceVersionId,
+   sourceHash:support.sourceHash,evidenceId:support.evidenceId,bodySha256:sha(support.text??'')});
   const body=support.text??'',sourceIdentity=[support.documentId,support.documentVersionId,support.sourceVersionId,
    support.sourceHash,support.evidenceId,support.locator,support.sha256];
   for(const window of hint.windows){
@@ -412,7 +415,7 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
 export function resolveDocumentAnswerSelections(value:unknown,supports:readonly Support[]){
  const selections=answerShape(value,'units'),bySupport=new Map(supports.map(support=>[support.id,support])),
   byUnit=new Map(documentQuoteUnits(supports).map(unit=>[unit.id,unit]));
- const selectedUnits:DocumentUnitSelection[]=[];
+ const selectedUnits:DocumentUnitSelection[]=[],boundNativeSupports=new Set<string>();
  const claims=selections.claims.map((claim,claimIndex)=>{
   const seen=new Set<string>();
   return {text:claim.text,citations:claim.citations.map((citation,citationIndex)=>{
@@ -420,13 +423,18 @@ export function resolveDocumentAnswerSelections(value:unknown,supports:readonly 
    const unit=byUnit.get(citation.id),image=bySupport.get(citation.id);
    const support=unit?.selectable?bySupport.get(unit.supportId):image?.kind==='image'?image:undefined;
    if(!support)throw new Error('Invalid or ungrounded document answer');
+   if(unit?.contextWindow?.policy==='native-region-text-windows-v1'&&unit.text.length<=DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16)
+    boundNativeSupports.add(support.id);
    const quote=unit?unit.text:'';
    selectedUnits.push({claimIndex,citationIndex,selectionId:citation.id,kind:support.kind,evidence:supportMetadata(support),
     startUtf16:unit?.startUtf16??null,endUtf16:unit?.endUtf16??null,quoteSha256:sha(quote)});
    return {id:support.id,quote};
   })};
  });
- return {answer:validateGroundedDocumentAnswer({...selections,claims},supports),providerSelections:selections,selectedUnits};
+ // Only previously bound unit IDs receive the stored-page ceiling. Public
+ // literal validation and arbitrary quotations keep the original strict limit.
+ const validationSupports=supports.map(s=>boundNativeSupports.has(s.id)?{...s,textQuotePolicy:'stored-page-v1' as const}:s);
+ return {answer:validateGroundedDocumentAnswer({...selections,claims},validationSupports),providerSelections:selections,selectedUnits};
 }
 
 export function prepareDocumentAnswer(question:string,context:DocumentAnswerContext,unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY){
