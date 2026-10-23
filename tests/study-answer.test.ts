@@ -241,6 +241,9 @@ test('kernel tutor shares current-source references, preserves ownership and req
   const state=await tutor.tutorState('alice',id),message=state.messages[1];
   assert.match(message.body,/42.*\[S1\]/);assert.equal(message.meta.citations[0].title,'Original notes · p2');
   assert.equal(message.meta.citations[0].evidence.documentVersionId,'v1');assert.equal(message.meta.study.semanticVerified,false);
+  const citationQuery=new URL(message.meta.citations[0].url,'http://localhost').searchParams;
+  assert.equal(citationQuery.get('snapshot'),'1');assert.equal(citationQuery.get('version'),'v1');
+  assert.equal(citationQuery.get('sourceVersion'),'sv1');assert.equal(citationQuery.get('evidenceId'),'evidence');
   await assert.rejects(tutor.sendTutor('bob',id,'kernel-other-request01','Read it',[],false),/会话不存在/);
   await tutor.sendTutor('alice',id,'kernel-next-request001','And what does it mean?',[],false);
   assert.ok(actual.policy.conversation.some((m:any)=>m.role==='assistant'));

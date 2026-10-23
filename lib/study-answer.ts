@@ -195,7 +195,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
   const citations=[...refs].map(([key,ref])=>{
    const evidence=JSON.parse(key) as (typeof selected)[number]['evidence'];
    const name=result.sourceDocuments.find(document=>document.documentId===evidence.documentId)?.name??evidence.documentId;
-   const query=new URLSearchParams({evidence:'1',version:evidence.documentVersionId,sourceVersion:evidence.sourceVersionId,
+   const query=new URLSearchParams({evidence:'1',snapshot:'1',version:evidence.documentVersionId,sourceVersion:evidence.sourceVersionId,
     sourceHash:evidence.sourceHash,evidenceId:evidence.evidenceId});
    return {ref,title:`${name} · ${evidence.locator}`,url:`/api/library/${encodeURIComponent(evidence.documentId)}?${query}`,
     parser_warnings:result.warnings,evidence};

@@ -197,3 +197,24 @@ This path still scans visible original page bodies for numeric conditions.
 Its corpus latency must be reported separately from relevance improvements;
 a small SQL/unit test is not a throughput or final answer acceptance result.
 No provider request or parser is needed for this retrieval step.
+
+## Citation snapshots after reparsing
+
+New Kernel study citation URLs add `snapshot=1` to the existing evidence route.
+KernelService reads the exact document version/source version/original hash and
+evidence IDs from PostgreSQL. A single read checks current ownership and
+visibility, all version/evidence joins and the registered original-file hash.
+Missing, hidden, foreign or mixed identities fail; there is no latest-version
+fallback. Registered source name, parser warnings, page locator, full stored
+body and its SHA256 remain attached to that version. Reparse does not rewrite
+the snapshot. Status and current document version are observation metadata,
+not a new canonical fact store or proof of source interpretation.
+
+The response is `{snapshot, sourceContentIsUntrusted:true}`. Snapshot status is
+`historical` if the parse version changed or its document origin was superseded.
+Its distinct DTO declares `usableForCurrentGeneration:false`; current selection,
+generation and default evidence reads retain their current-version checks.
+Existing saved URLs without the new flag are not rewritten and retain their
+previous behavior. Explicit snapshot mode does not accept `nativeRegions=1`;
+native-region reading remains current-only. Snapshot text is stored parser
+output, not a guarantee of whole-PDF fidelity, table semantics or answer accuracy.

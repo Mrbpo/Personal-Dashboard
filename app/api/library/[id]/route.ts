@@ -7,6 +7,12 @@ export async function GET(r:Request,{params}:{params:Promise<{id:string}>}){try{
   const source={documentId:id,currentVersionId:query.get('version')||'',sourceVersionId:query.get('sourceVersion')||'',sourceHash:query.get('sourceHash')||''};
   const evidenceId=query.get('evidenceId')||'';
   if(!evidenceId||[...Object.values(source),evidenceId].some(value=>!value||value.length>1000))throw Error('Invalid evidence reference');
+  if(query.get('snapshot')==='1'){
+   if(query.get('nativeRegions')==='1')throw Error('Native regions require the current-source reader');
+   const snapshot=await kernel.readDocumentCitationSnapshot(owner,{documentId:id,documentVersionId:source.currentVersionId,
+    sourceVersionId:source.sourceVersionId,sourceHash:source.sourceHash},[evidenceId]);
+   return Response.json({snapshot,sourceContentIsUntrusted:true},{headers:{'Cache-Control':'no-store'}});
+  }
   // This current-source/owner check is required even for PostgreSQL-only sources
   // with no legacy SQLite library row. Never fall back to a different version.
   const nodes=await kernel.readDocumentNodes(owner,source,[evidenceId]);

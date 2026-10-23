@@ -21,7 +21,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText,projectDocume
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
-import {readDocumentNodes} from './document-nodes.ts';
+import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
 import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
@@ -1213,6 +1213,10 @@ export class KernelService {
 
   readDocumentNodes(owner:string,expectedSource:DocumentContextSource,evidenceIds:string[]){
     return readDocumentNodes(kernelPool(),owner,expectedSource,evidenceIds);
+  }
+
+  readDocumentCitationSnapshot(owner:string,source:DocumentCitationSource,evidenceIds:string[]){
+    return readDocumentCitationSnapshot(kernelPool(),owner,source,evidenceIds);
   }
 
   bindDocumentQuestionName(owner:string,source:DocumentContextSource,question:string,input:unknown){
