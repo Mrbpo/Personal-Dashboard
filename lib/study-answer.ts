@@ -67,6 +67,10 @@ export function studySourceScope(value=process.env.STUDY_SOURCE_SCOPE??'off'){
  if(value!=='off'&&value!=='question-scope')throw new StudyAnswerError('configuration','invalid-source-scope','问题来源范围配置无效');
  return value==='off'?undefined:value;
 }
+export function studyScopeAnnotations(value=process.env.STUDY_SCOPE_ANNOTATIONS??'off'){
+ if(value!=='off'&&value!=='literal-source-v1')throw new StudyAnswerError('configuration','invalid-scope-annotations','适用范围原文配置无效');
+ return value==='off'?undefined:value;
+}
 export function studyCourseRouting(value=process.env.STUDY_COURSE_ROUTING??'off'){
  if(value!=='off'&&value!=='explicit-codes-v1')throw new StudyAnswerError('configuration','invalid-course-routing','课程路由配置无效');
  return value==='off'?undefined:value;
@@ -133,6 +137,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  const dailyLimit=studyDevelopmentDailyLimit();
  const evidenceSelection=studyEvidenceSelection();
  const sourceScope=studySourceScope(),citationMode=studyCitationCheck();
+ const scopeAnnotations=studyScopeAnnotations();
+ if(scopeAnnotations&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'||studySourceValues()||studySourceQuantities()))
+  throw new StudyAnswerError('configuration','scope-annotations-require-ordinary-selection-check','适用范围原文需要普通内核证据选择和引用核对');
  const generationReasoningEffort=studyGenerationReasoning();
  const generationOutputTokens=studyGenerationOutputTokens();
  const generationVerbosity=studyGenerationVerbosity();
@@ -171,6 +178,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(scopeAnnotations?{scopeAnnotations}:{}),
     ...(quantityConsistency?{quantityConsistency}:{}),
     ...(sourceQuantityContract?{sourceQuantityContract,recordSourceQuantityRawResponse:recorder!.recordSourceQuantityRaw,recordSourceQuantityDerivation:recorder!.recordSourceQuantities}:{}),
     ...(textContextWindows?{textContextWindows}:{}),
@@ -207,6 +215,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
      ...(sourceIdentityContext?{sourceIdentityContext}:{}),
      ...(nativeCellObservations?{nativeCellObservations}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
+     ...(scopeAnnotations?{scopeAnnotations}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
     providerResponseId:result.providerResponseId,usage:result.usage,
@@ -215,6 +224,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...('classificationRouting' in result&&result.classificationRouting?{classificationRouting:result.classificationRouting}:{}),
     ...('sourceIdentityContext' in result&&result.sourceIdentityContext?{sourceIdentityContext:result.sourceIdentityContext}:{}),
     ...('sourceNavigation' in result?{sourceNavigation:result.sourceNavigation}:{}),
+    ...('scopeAnnotations' in result?{scopeAnnotations:result.scopeAnnotations}:{}),
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),

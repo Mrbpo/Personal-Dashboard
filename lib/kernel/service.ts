@@ -1591,7 +1591,8 @@ export class KernelService {
       contextExpansion={...contextExpansion,pdfPageRegions:result.pdfPageRegionTransport};
     let citationCheck:Omit<Awaited<ReturnType<typeof checkApplicationDocumentCitations>>,'released'>|undefined,
       releasedAnswer:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>['released'];
-    const auditSelections='sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?result.sourceQuantityDerivation.normalizedSelections:
+    const auditSelections='scopeAnnotatedSelections' in result&&result.scopeAnnotatedSelections?result.scopeAnnotatedSelections:
+      'sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?result.sourceQuantityDerivation.normalizedSelections:
       'sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
     if(result.answer.claims.length&&policy.citationCheck&&auditSelections?.claims.length){
       policy.onStage?.('citation-validation');

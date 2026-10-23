@@ -20,6 +20,7 @@ import {prepareSourceValueCatalog,sourceValueAnswerSchema,deriveSourceValueAnswe
  type SourceValueDerivation,type SourceValueQuestionContract,type SourceValueCatalog,type SourceValueTableContext} from './document-source-values.ts';
 import {prepareSourceCellBindingCatalog,sourceCellBindingAnswerSchema,deriveSourceCellBindingAnswer,type SourceCellDerivation} from './document-source-cell-bindings.ts';
 import {prepareSourceQuantityCatalog,sourceQuantityAnswerSchema,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAggregations} from './document-source-quantities.ts';
+import {withDocumentScopeOutput,bindDocumentScopeAnnotations} from './document-scope-annotations.ts';
 
 export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v7';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
@@ -109,6 +110,7 @@ export type DocumentSourceQuantityDerivation=ReturnType<typeof deriveSourceQuant
  sourceTables:SourceValueCatalog['tables'];tableProvenance:Array<Pick<SourceValueTableContext,'tableId'|'physicalPage'|'result'|'captionLinkStatus'>>};
 export type DocumentSourceQuantityRawResponse=Omit<DocumentSourceValueRawResponse,'method'|'questionContract'>&{method:'source-quantity-response-v1'};
 export type DocumentAnswerPolicy={scope?:'development'|'application';model?:DocumentAnswerModel;
+ scopeAnnotations?:'literal-source-v1';
  sourceIdentityContext?:'literal-course-frontpage-v1';
  quantityConsistency?:'explicit-unit-v1';
  sourceQuantityContract?:'bound-value-v1';
@@ -1156,6 +1158,9 @@ export function prepareSelectedSourceQuantityGeneration(prepared:PreparedAnswer,
 
 /** Reuse the existing trusted development guard before any source or model work. */
 export async function documentAnswerSettings(policy:DocumentAnswerPolicy={}){
+ if(policy.scopeAnnotations!==undefined&&(policy.scopeAnnotations!=='literal-source-v1'||policy.scope!=='application'||
+  policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||policy.sourceValueContract||policy.sourceQuantityContract))
+  throw new Error('Scope annotations require ordinary application selection/check without specialized contracts');
  if(policy.sourceQuantityContract!==undefined&&(policy.sourceQuantityContract!=='bound-value-v1'||policy.scope!=='application'||
   policy.evidenceSelection!=='select-then-answer'||policy.citationCheck?.mode!=='selected-once'||
   typeof policy.recordSourceQuantityRawResponse!=='function'||typeof policy.recordSourceQuantityDerivation!=='function'))
@@ -1301,7 +1306,9 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  // Typed fallback may legitimately retain fine units while stored-page
  // context also exists. Validate the final selected IDs against the complete
  // selectable catalog, not the ordinary generator's coarser page view.
- const navigationProjection=projectPdfNavigationRequest(baseRequest,prepared.pdfNavigation,prepared.supports,prepared.quoteUnits.filter(u=>u.selectable),referenceIds),request=navigationProjection.request;
+ const navigationProjection=projectPdfNavigationRequest(baseRequest,prepared.pdfNavigation,prepared.supports,prepared.quoteUnits.filter(u=>u.selectable),referenceIds);
+ const scopeUnits=prepared.quoteUnits.filter(u=>u.selectable&&referenceIds?.includes(u.id));
+ const request=policy.scopeAnnotations?withDocumentScopeOutput(navigationProjection.request,scopeUnits):navigationProjection.request;
  const providerRequestSha256=sha(JSON.stringify(request));
  const identity=sha(JSON.stringify({model,effort,maxOutput:request.max_output_tokens,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,providerRequestSha256,
   quoteUnitProtocolVersion:DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,fingerprint:prepared.fingerprint}));
@@ -1321,15 +1328,16 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
  }
  const {payload,actualModel,decoded,rawOutputText}=await documentModelPayload(response,model,policy);
  policy.onStage?.('citation-validation');
+ const scopeAnnotations=policy.scopeAnnotations?bindDocumentScopeAnnotations(decoded,scopeUnits,DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE):undefined;
  const sourceValueDerivation:SourceValueDerivation|SourceCellDerivation|undefined=sourceValueGeneration?.applied?
   sourceValueGeneration.kind==='cell-bindings-v2'?deriveSourceCellBindingAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!):
    deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!,sourceValueGeneration.questionContract):undefined;
  const sourceQuantityDerivation=sourceQuantityGeneration?.applied?deriveSourceQuantityAnswer(question,decoded,rawOutputText,
   sourceQuantityGeneration.catalog,sourceQuantityGeneration.table,sourceQuantityGeneration.units,referenceIds!):undefined;
- const citationNormalization=!sourceQuantityDerivation&&!sourceValueDerivation?normalizeDocumentAnswerSelections(decoded,
+ const citationNormalization=!sourceQuantityDerivation&&!sourceValueDerivation?normalizeDocumentAnswerSelections(scopeAnnotations?.selections??decoded,
   referenceIds??[...prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),...prepared.supports.filter(s=>s.kind==='image').map(s=>s.id)]):undefined;
  const {answer,providerSelections:normalizedSelections,selectedUnits}=resolveDocumentAnswerSelections(sourceQuantityDerivation?.normalizedSelections??sourceValueDerivation?.normalizedSelections??citationNormalization?.selections??decoded,prepared.supports);
- const providerSelections=sourceValueDerivation||sourceQuantityDerivation?null:normalizedSelections;
+ const providerSelections=sourceValueDerivation||sourceQuantityDerivation?null:scopeAnnotations?.originalSelections??normalizedSelections;
  if(referenceIds&&selectedUnits.some(unit=>!referenceIds.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
  policy.onStage?.('evidence-selection');
  if(prepareDocumentAnswerForPolicy(question,await readContext(),policy).fingerprint!==prepared.fingerprint)
@@ -1351,6 +1359,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    ({tableId,physicalPage,result,captionLinkStatus}))??[]:[])}:undefined;
  if(boundSourceQuantityDerivation)await policy.recordSourceQuantityDerivation?.(boundSourceQuantityDerivation);
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
+  ...(scopeAnnotations?{scopeAnnotations,scopeAnnotatedSelections:normalizedSelections}:{}),
   ...(citationNormalization?.normalization?{citationReferenceNormalization:citationNormalization.normalization}:{}),
   ...(navigationProjection.receipt?{sourceNavigation:navigationProjection.receipt}:{}),
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,

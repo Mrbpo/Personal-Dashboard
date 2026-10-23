@@ -7,6 +7,23 @@ const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceS
 const {documentAnswerSettings,DocumentModelResponseError}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
+test('literal scope output is opt-in, reaches the application policy and rejects specialized contracts',async()=>{
+ const {studyScopeAnnotations}=await import('../lib/study-answer.ts');
+ assert.equal(studyScopeAnnotations('off'),undefined);assert.equal(studyScopeAnnotations('literal-source-v1'),'literal-source-v1');
+ assert.throws(()=>studyScopeAnnotations('guess'),/适用范围原文配置无效/);
+ const values={STUDY_SCOPE_ANNOTATIONS:'literal-source-v1',STUDY_ANSWER_BACKEND:'kernel',STUDY_EVIDENCE_SELECTION:'select-then-answer',
+  STUDY_CITATION_CHECK:'selected-once',STUDY_SOURCE_VALUES:'off',STUDY_SOURCE_QUANTITIES:'off',OPENAI_MODEL:'gpt-5.4-mini',
+  STUDY_CITATION_TRACE_DIR:`${process.cwd()}/data/scope-fixture-never-written`};
+ const env=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;let calls=0;
+ try{
+  Object.assign(process.env,values);
+  kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;assert.equal(policy?.scopeAnnotations,'literal-source-v1');await documentAnswerSettings(policy);
+   return {answer:{status:'insufficient-evidence',message:'Fixture.',claims:[]},selectedUnits:[],sourceDocuments:[],warnings:[],textEvidenceCount:0,imageEvidenceCount:0,model:null} as any;};
+  await answerKernelStudy('owner','Synthetic scoped question','',[]);assert.equal(calls,1);
+  process.env.STUDY_SOURCE_VALUES='difference-v1';
+  await assert.rejects(answerKernelStudy('owner','Synthetic scoped question','',[]),(e:any)=>e.code==='scope-annotations-require-ordinary-selection-check');assert.equal(calls,1);
+ }finally{kernel.answerStudyContent=saved;for(const [k,v] of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
+});
 
 test('application accepts both source contracts together and preserves the shared bounded policy',async()=>{
  const values={STUDY_ANSWER_BACKEND:'kernel',STUDY_EVIDENCE_SELECTION:'select-then-answer',STUDY_CITATION_CHECK:'selected-once',
