@@ -375,15 +375,18 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
   if(options.strict&&numeric.unavailableReason)return [];
   const numericArg=numeric.patterns.length?`$${args.push(numeric.patterns)}::text[]`:undefined;
   const numericValuesArg=numericArg?`$${args.push(numeric.literals.map(literal=>literal.replace(/%$/u,'')))}::text[]`:undefined;
+  // Preserve exactly the same NFKC text while avoiding normalization of bodies
+  // already in that form (PostgreSQL's normalized predicate has a fast check).
+  const numericBody=(body:string)=>`(CASE WHEN ${body} IS NFKC NORMALIZED THEN ${body} ELSE normalize(${body},NFKC) END)`;
   // A literal substring is necessary for the escaped regex to match. CASE
   // keeps the expensive boundary regex off unrelated original page bodies.
   const numericCount=(body:string)=>`(SELECT count(*)::int FROM unnest(${numericArg},${numericValuesArg}) literal(pattern,value)
-    WHERE CASE WHEN strpos(normalize(${body},NFKC),literal.value)>0 THEN normalize(${body},NFKC) ~ literal.pattern ELSE false END)`;
+    WHERE CASE WHEN strpos(${numericBody(body)},literal.value)>0 THEN ${numericBody(body)} ~ literal.pattern ELSE false END)`;
   // Materialize the expensive normalization once per visible page, then only
   // retain version/page/count. PostgreSQL otherwise inlines the correlated
   // count repeatedly for filtering, scoring and the score window.
   const numericPages=numericArg?`, numeric_pages AS MATERIALIZED (
-    SELECT c.version_id,c.page_number,normalize(c.body,NFKC) numeric_body
+    SELECT c.version_id,c.page_number,${numericBody('c.body')} numeric_body
     FROM document_text_pages c JOIN visible_documents d ON d.current_version_id=c.version_id),
     numeric_observations AS MATERIALIZED (SELECT c.version_id,c.page_number,
       (SELECT count(*)::int FROM unnest(${numericArg},${numericValuesArg}) literal(pattern,value)

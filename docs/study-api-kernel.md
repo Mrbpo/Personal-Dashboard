@@ -188,6 +188,11 @@ stored search copy or index is rewritten. Queries without numeric conditions
 retain the existing scoring path. Original occurrence is a retrieval hint,
 not proof that a passage answers the question or supports a relationship.
 
+Already-NFKC bodies are reused after PostgreSQL's `IS NFKC NORMALIZED`
+check; other bodies still use the exact same normalization. This changes
+computation cost, not the comparison string or stored source. See the
+[PostgreSQL string functions](https://www.postgresql.org/docs/18/functions-string.html).
+
 This path still scans visible original page bodies for numeric conditions.
 Its corpus latency must be reported separately from relevance improvements;
 a small SQL/unit test is not a throughput or final answer acceptance result.

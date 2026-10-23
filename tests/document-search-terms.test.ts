@@ -34,6 +34,7 @@ test('numeric SQL binds escaped patterns after scope arguments and ranks origina
  assert.deepEqual(calls[0].args[7],['2.2','3.6']);
  assert.match(calls[0].sql,/unnest\(\$7::text\[\],\$8::text\[\]\)/);assert.match(calls[0].sql,/literal_counts\.matches=2/);
  assert.match(calls[0].sql,/numeric_pages AS MATERIALIZED/);assert.match(calls[0].sql,/numeric_observations AS MATERIALIZED/);
+ assert.match(calls[0].sql,/CASE WHEN c\.body IS NFKC NORMALIZED THEN c\.body ELSE normalize\(c\.body,NFKC\) END/);
  assert.match(calls[0].sql,/CASE WHEN strpos\(c\.numeric_body,literal\.value\)>0 THEN/);
  assert.match(calls[0].sql,/normalize\(chunk\.body,NFKC\)/);assert.ok(!calls[0].sql.includes('2.2%'));
  await searchDocumentText(pool,'owner',Array.from({length:9},(_,i)=>`${i}.25%`).join(' '),{strict:true});
