@@ -12,18 +12,40 @@ test('scope binding preserves original claims and binds unique literal with UTF-
  const before=structuredClone(base),r=bind(base);
  assert.deepEqual(base,before);assert.equal(r.originalSelections.claims[0].text,base.claims[0].text);
  assert.equal(r.selections.claims[0].text,'Source scope: pilot participants\nThe improvement was observed.');
- assert.deepEqual(r.bindings[0].binding,{referenceId:unit.id,quoteSha256:unit.quoteSha256,startUtf16:41,endUtf16:59,semanticScopeVerified:false});
+ assert.deepEqual(r.bindings[0].binding,{referenceId:unit.id,quoteSha256:unit.quoteSha256,
+  locationPolicy:'all-exact-occurrences-v1',locationStatus:'unique',startUtf16:41,endUtf16:59,
+  literalSpans:[{startUtf16:41,endUtf16:59}],semanticScopeVerified:false});
  assert.equal(r.semanticScopeVerified,false);
 });
-test('scope literal cannot be borrowed from an uncited unit or bind to guessed text, duplicate spans or altered bytes',()=>{
+test('scope literal cannot be borrowed from an uncited unit or bind to guessed text or altered bytes',()=>{
  for(const scope of [{kind:'source-limited',referenceId:'q:other',literal:'pilot participants'},
   {kind:'source-limited',referenceId:unit.id,literal:'all participants'},
   {kind:'not-applicable',referenceId:unit.id,literal:null}]){
   const v=structuredClone(base);Object.assign(v.claims[0].scope,scope);assert.throws(()=>bind(v),/Invalid literal/);
  }
- for(const other of [{...unit,selectable:false},{...unit,quoteSha256:'wrong'},
-  {...unit,text:'pilot participants; pilot participants',quoteSha256:createHash('sha256').update('pilot participants; pilot participants').digest('hex')}])
+ for(const other of [{...unit,selectable:false},{...unit,quoteSha256:'wrong'}])
   assert.throws(()=>bind(base,[other]),/Invalid literal/);
+});
+test('repeated experiment labels preserve all exact locations without selecting or semantically verifying one',()=>{
+ const text='😀 In Exp. 5.1, and 5.2 in Table 1, we see the results. Exp. 5.1 shows that decreasing decoder layers does not hurt performance.';
+ const source={...unit,text,quoteSha256:createHash('sha256').update(text).digest('hex')};
+ const v=structuredClone(base);v.claims[0].scope.literal='Exp. 5.1';
+ const r=bind(v,[source]),binding=r.bindings[0].binding!;
+ assert.equal(binding.locationStatus,'multiple-exact-occurrences');
+ assert.equal(binding.startUtf16,null);assert.equal(binding.endUtf16,null);
+ assert.deepEqual(binding.literalSpans,[{startUtf16:37,endUtf16:45},{startUtf16:87,endUtf16:95}]);
+ for(const span of binding.literalSpans)assert.equal(text.slice(span.startUtf16-source.startUtf16,span.endUtf16-source.startUtf16),'Exp. 5.1');
+ assert.equal(binding.semanticScopeVerified,false);assert.equal(r.semanticScopeVerified,false);
+ assert.equal(r.selections.claims[0].text,'Source scope: Exp. 5.1\nThe improvement was observed.');
+ assert.deepEqual(r.originalSelections.claims[0].citations,base.claims[0].citations);
+});
+test('all locations include overlaps and a bounded catalog rejects excessive literal matches',()=>{
+ const make=(text:string)=>({...unit,text,quoteSha256:createHash('sha256').update(text).digest('hex')});
+ const v=structuredClone(base);v.claims[0].scope.literal='aa';
+ assert.deepEqual(bind(v,[make('aaa')]).bindings[0].binding!.literalSpans,[{startUtf16:31,endUtf16:33},{startUtf16:32,endUtf16:34}]);
+ v.claims[0].scope.literal='a';
+ assert.equal(bind(v,[make('a'.repeat(64))]).bindings[0].binding!.literalSpans.length,64);
+ assert.throws(()=>bind(v,[make('a'.repeat(65))]),/Invalid literal/);
 });
 test('unknown necessary scope yields neutral insufficient evidence and retains original claim for diagnostics',()=>{
  const v=structuredClone(base);Object.assign(v.claims[0].scope,{kind:'not-established',referenceId:null,literal:null});

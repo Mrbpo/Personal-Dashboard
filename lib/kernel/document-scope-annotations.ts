@@ -49,10 +49,19 @@ export function bindDocumentScopeAnnotations(value:unknown,units:readonly Unit[]
   const unit=typeof s.referenceId==='string'?byId.get(s.referenceId):undefined;
   if(s.kind!=='source-limited'||!unit||typeof s.literal!=='string'||!s.literal.trim()||s.literal.length>240||
    !claim.citations.some(c=>c&&c.id===s.referenceId)||hash(unit.text)!==unit.quoteSha256)return invalid();
-  const offset=unit.text.indexOf(s.literal);
-  if(offset<0||unit.text.indexOf(s.literal,offset+1)!==-1)return invalid();
+  // A repeated label is still an observed literal. Preserve every exact
+  // location rather than guessing one span or rejecting valid source text.
+  const literalSpans:{startUtf16:number;endUtf16:number}[]=[];
+  for(let offset=unit.text.indexOf(s.literal);offset!==-1;offset=unit.text.indexOf(s.literal,offset+1)){
+   if(literalSpans.length===64)return invalid();
+   literalSpans.push({startUtf16:unit.startUtf16+offset,endUtf16:unit.startUtf16+offset+s.literal.length});
+  }
+  if(!literalSpans.length)return invalid();
+  const unique=literalSpans.length===1;
   return {claimIndex,scope:structuredClone(s),binding:{referenceId:unit.id,quoteSha256:unit.quoteSha256,
-   startUtf16:unit.startUtf16+offset,endUtf16:unit.startUtf16+offset+s.literal.length,semanticScopeVerified:false as const}};
+   locationPolicy:'all-exact-occurrences-v1' as const,locationStatus:unique?'unique' as const:'multiple-exact-occurrences' as const,
+   startUtf16:unique?literalSpans[0].startUtf16:null,endUtf16:unique?literalSpans[0].endUtf16:null,
+   literalSpans,semanticScopeVerified:false as const}};
  });
  const originalSelections:Selections={status:raw.status,message:raw.message,claims:raw.claims.map(c=>({text:c.text,citations:structuredClone(c.citations)}))};
  const selections:Selections=unknown?{status:'insufficient-evidence',message:insufficientMessage,claims:[]}:
