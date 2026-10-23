@@ -33,20 +33,54 @@ export function validateDocumentQueryScope(value:unknown):DocumentQueryScope{
  return {...v};
 }
 export type MentionedDocumentSources={status:'not-mentioned'|'resolved'|'ambiguous';matches:ResolvedDocumentSource[]};
+/** Literal accent spelling only. Never evaluate TeX, remove diacritics, expand
+ * unknown commands or alter stored names. Offsets map back to the NFKC input. */
+function literalTitleAccents(value:string){
+ const accents:Record<string,string>={"'":'\u0301','`':'\u0300','"':'\u0308','^':'\u0302','~':'\u0303','=':'\u0304','.':'\u0307'};
+ const matches=[...value.matchAll(/\{\\(['"`^~=.])\s*(?:\{([A-Za-z])\}|([A-Za-z]))\}|\\(['"`^~=.])\s*(?:\{([A-Za-z])\}|([A-Za-z]))/gu)];
+ if(!matches.length)return {text:value,starts:undefined,ends:undefined};
+ let text='',cursor=0;const starts:number[]=[],ends:number[]=[];
+ const literal=(start:number,end:number)=>{text+=value.slice(start,end);for(let i=start;i<end;i++){starts.push(i);ends.push(i+1);}};
+ for(const match of matches){
+  const start=match.index!;literal(cursor,start);
+  const symbol=match[1]??match[4],base=match[2]??match[3]??match[5]??match[6],glyph=(base+accents[symbol]).normalize('NFC');
+  text+=glyph;for(let i=0;i<glyph.length;i++){starts.push(start);ends.push(start+match[0].length);}
+  cursor=start+match[0].length;
+ }
+ literal(cursor,value.length);return {text,starts,ends};
+}
+/** Broaden metadata candidates only when literal accent equivalence is relevant.
+ * The JS full-title/boundary gate still decides matches; source bodies stay out. */
+function titleAccentCandidates(question:string,args:unknown[]){
+ const decoded=literalTitleAccents(question);
+ if(decoded.text===question&&!/\p{M}/u.test(question.normalize('NFD')))return '';
+ const parameter=args.push(decoded.text);
+ return ` OR strpos($${parameter},normalize(d.name,NFKC))>0
+   OR strpos($${parameter},regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0
+   OR strpos(d.name,chr(92))>0`;
+}
 /** A question mention is not a replacement for the canonical stored name. Only
- * the terminal PDF extension may be omitted; no case folding or fuzzy aliases. */
+ * the terminal PDF extension may be omitted. Literal TeX accents may match their
+ * Unicode spelling; no case folding, diacritic removal or fuzzy aliases. */
 export function documentTitleMention(question:string,canonicalName:string){
  const query=question.normalize('NFKC'),canonical=canonicalName.normalize('NFKC');
- const forms=[canonical,...(/\.pdf$/i.test(canonical)?[canonical.slice(0,-4)]:[])];
+ const questionAccents=literalTitleAccents(query),queryForms=[{text:query,starts:undefined as number[]|undefined,ends:undefined as number[]|undefined},
+  ...(questionAccents.text!==query?[questionAccents]:[])];
+ const names=[...new Set([canonical,literalTitleAccents(canonical).text])],forms=names.flatMap(name=>[name,...(/\.pdf$/i.test(name)?[name.slice(0,-4)]:[])]);
  for(const text of forms){
   if(!text)continue;
-  let start=query.indexOf(text);
+  for(const form of queryForms){
+  let start=form.text.indexOf(text);
   while(start>=0){
-   const before=query.slice(0,start),after=query.slice(start+text.length);
+   const before=form.text.slice(0,start),after=form.text.slice(start+text.length);
    if(!(/^[\p{L}\p{N}\p{M}_]/u.test(text)&&/[\p{L}\p{N}\p{M}_]$/u.test(before))&&
     !(/[\p{L}\p{N}\p{M}_]$/u.test(text)&&/^[\p{L}\p{N}\p{M}_]/u.test(after))&&
-    !/^\.[\p{L}\p{N}]/u.test(after))return {text,start,end:start+text.length};
-   start=query.indexOf(text,start+1);
+    !/^\.[\p{L}\p{N}]/u.test(after)){
+    const originalStart=form.starts?.[start]??start,originalEnd=form.ends?.[start+text.length-1]??start+text.length;
+    return {text:query.slice(originalStart,originalEnd),start:originalStart,end:originalEnd};
+   }
+   start=form.text.indexOf(text,start+1);
+  }
   }
  }
  return null;
@@ -96,7 +130,7 @@ export async function resolveDocumentSource(pool:Pool,owner:string,hint:Document
 }
 
 /** Conservative metadata-only discovery, not intent or evidence validation.
- * Match a full case-sensitive NFKC name or its terminal-PDF-extension-free form.
+ * Match a full case-sensitive NFKC name or its literal accent/PDF-stem form.
  * Automatic selection requires >=12 codepoints and two alphanumeric words, or
  * >=8 Han characters; short/single-word titles keep ordinary retrieval. Titles
  * embedded in a larger word do not count. Explicit sourceHint remains unchanged.
@@ -110,13 +144,13 @@ export async function findMentionedDocumentSources(pool:Pool,owner:string,questi
   throw new Error('Invalid current document title mention scope');
  if(!question.trim())return {status:'not-mentioned',matches:[]};
  const query=question.normalize('NFKC');
- const args:unknown[]=[owner,query,options.courseId||null],routing=documentRoutingScopeSql(options.routingScope,args);
+ const args:unknown[]=[owner,query,options.courseId||null],accentCandidates=titleAccentCandidates(query,args),routing=documentRoutingScopeSql(options.routingScope,args);
  const rows=(await pool.query<ResolvedDocumentSource>(`SELECT d.id "documentId",d.name title,
   v.id "currentVersionId",v.source_version_id "sourceVersionId",d.source_hash "sourceHash"
   FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   WHERE d.owner_id=$1 AND NOT d.hidden AND ($3::text IS NULL OR d.course_id=$3) ${routing}
    AND length(normalize(d.name,NFKC)) BETWEEN 8 AND 4000
-   AND (strpos($2,normalize(d.name,NFKC))>0 OR strpos($2,regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0)
+   AND (strpos($2,normalize(d.name,NFKC))>0 OR strpos($2,regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0 ${accentCandidates})
    AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
     AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
     AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
@@ -124,7 +158,7 @@ export async function findMentionedDocumentSources(pool:Pool,owner:string,questi
  const matches:ResolvedDocumentSource[]=[];
  for(const row of rows){
   const mention=documentTitleMention(question,row.title);if(!mention)continue;
-  const title=mention.text,words=title.match(/[\p{L}\p{N}]+/gu)??[];
+  const title=literalTitleAccents(mention.text).text,words=title.match(/[\p{L}\p{N}]+/gu)??[];
   if(!((Array.from(title).length>=12&&words.filter(word=>Array.from(word).length>=2).length>=2)||
    (title.match(/\p{Script=Han}/gu)?.length??0)>=8))continue;
   matches.push(row);
@@ -145,13 +179,14 @@ export function requireResolvedDocumentSource(resolution:DocumentSourceResolutio
  * of other current visible sources prevent an exclusive initial-source read.
  * Two examples suffice to establish a cross-source question; no bodies load. */
 export async function mentionedOtherDocumentSources(pool:Pool,owner:string,question:string,selectedDocumentId:string){
+ const query=question.normalize('NFKC'),args:unknown[]=[owner,selectedDocumentId,query],accentCandidates=titleAccentCandidates(query,args);
  const rows=(await pool.query<Pick<ResolvedDocumentSource,'documentId'|'title'>>(`SELECT d.id "documentId",d.name title
   FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   WHERE d.owner_id=$1 AND NOT d.hidden AND d.id<>$2 AND length(trim(d.name))>0
-   AND (strpos($3,normalize(d.name,NFKC))>0 OR strpos($3,regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0)
+   AND (strpos($3,normalize(d.name,NFKC))>0 OR strpos($3,regexp_replace(normalize(d.name,NFKC),'[.][pP][dD][fF]$',''))>0 ${accentCandidates})
    AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
     AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
     AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
-  ORDER BY d.id`,[owner,selectedDocumentId,question.normalize('NFKC')])).rows;
+  ORDER BY d.id`,args)).rows;
  return rows.filter(row=>documentTitleMention(question,row.title)).slice(0,2);
 }

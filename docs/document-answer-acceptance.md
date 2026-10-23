@@ -6,6 +6,8 @@
 
 统一入口为 `KernelService.answerStudyContent(owner, question, options, policy)`。它最多检索 14 个完整正文节点，保留调用者的语义、混合与重排选择；检索发生降级时不继续生成回答。可显式选择 `includeParents` 和 `includeImages`，默认仅用完整正文。图片模式须同时使用父上下文模式。当前标题选择及所有来源在生成前后重新验证；用户提交的 JSON、文件名、截图说明或旧搜索片段不能替代该读取。父章节最大 8192 个 Unicode codepoints，计数为原节点正文之和；超限内容明确标记不可用。
 
+完整来源名称的字面提及支持NFKC、可省略的终端PDF扩展名，以及闭集TeX重音符号（acute、grave、diaeresis、circumflex、tilde、macron、dot）的Unicode等价拼写。只转换单个Latin字母的已知重音，不执行或展开其它TeX命令、不去重音、不折叠大小写或模糊匹配。返回位置始终指向原NFKC问题片段，focus仅移除该片段。发现结果仍保留原始存储名称、ID及版本；多个文档等价时保持ambiguous，显式selectedDocumentTitle仍严格匹配存储名称。跨来源提及也使用同一规则。此为来源标签的排版等价，不证明PDF版本或作者标注材料相同，也不证明答案正确；候选查询只读受owner、可见性、课程及显式范围约束的元数据。
+
 回答只能返回以下状态：
 - `answered`：每个陈述都要引用本次实际输入的证据。
 - `insufficient-evidence`：没有陈述，说明资料不足。

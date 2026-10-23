@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import type {Pool} from 'pg';
 import {documentTitleMention,findMentionedDocumentSources,mentionedOtherDocumentSources,resolveDocumentSource,type ResolvedDocumentSource} from '../lib/kernel/document-source.ts';
+import {focusedDocumentTextQuery} from '../lib/kernel/document-focused-text.ts';
 
 const doc=(documentId:string,title:string):ResolvedDocumentSource=>({documentId,title,currentVersionId:`v-${documentId}`,
  sourceVersionId:`s-${documentId}`,sourceHash:`h-${documentId}`});
@@ -10,6 +11,38 @@ function metadata(rows:ResolvedDocumentSource[]){
  const calls:Array<{sql:string;args:unknown[]}>=[];
  return {calls,pool:{query:async(sql:string,args:unknown[])=>{calls.push({sql,args});return {rows};}} as unknown as Pool};
 }
+test('literal TeX accents match Unicode titles in either direction while preserving exact question spans',()=>{
+ const tex=String.raw`Generaci\'on autom\'atica de frases literarias en espa\~nol`;
+ const natural='Generación automática de frases literarias en español';
+ for(const [name,surface]of [[tex+'.pdf',natural],[natural+'.pdf',tex]]){
+  const question='😀 About “'+surface+'”, what metrics were measured?',match=documentTitleMention(question,name)!;
+  assert.ok(match);assert.equal(match.text,surface);assert.equal(match.start,question.indexOf(surface));assert.equal(match.end,question.indexOf(surface)+surface.length);
+  const focus=focusedDocumentTextQuery(question,name)!;
+  assert.ok(focus.startsWith('😀 About'));assert.ok(focus.endsWith('what metrics were measured?'));assert.ok(!focus.includes(surface));
+ }
+ for(const [name,surface]of [[String.raw`Caf\'e sampling methods.pdf`,'Café sampling methods'],
+  [String.raw`M{\"u}ller evaluation guide.pdf`,'Müller evaluation guide'],
+  [String.raw`Generaci\'{o}n de espa{\~n}ol.pdf`,'Generación de español']])
+  assert.equal(documentTitleMention('Use “'+surface+'”.',name)?.text,surface);
+});
+test('accent equivalence does not strip accents, expand unknown/malformed TeX or admit embedded titles',()=>{
+ for(const [name,question]of [[String.raw`Caf\'e sampling methods.pdf`,'Use Cafe sampling methods.'],
+  [String.raw`Caf\'e sampling methods.pdf`,'Use café sampling methods.'],
+  [String.raw`Caf\'e sampling methods.pdf`,'preCafé sampling methodsSuffix'],
+  [String.raw`Caf\'e sampling methods.pdf`,'Café sampling methods.pdf.txt'],
+  [String.raw`Caf\'{ee} sampling methods.pdf`,'Café sampling methods'],
+  [String.raw`Notes on \alpha methods.pdf`,'Notes on α methods']])assert.equal(documentTitleMention(question,name),null);
+ assert.equal(documentTitleMention(String.raw`Long source \~t`, 'Long source t.pdf'),null,'a combining mark still participates in the word boundary');
+});
+test('typographic discovery keeps canonical identity, ambiguity and multi-source guards without loading bodies',async()=>{
+ const tex=doc('tex',String.raw`Caf\'e sampling methods.pdf`),natural=doc('natural','Café sampling methods.pdf'),question='Compare Café sampling methods with the selected source.';
+ const db=metadata([tex]);assert.deepEqual(await findMentionedDocumentSources(db.pool,'alice',question,{courseId:'math',routingScope:{documentIds:['tex']}}),{status:'resolved',matches:[tex]});
+ assert.equal(db.calls[0].args[0],'alice');assert.equal(db.calls[0].args[2],'math');assert.equal(db.calls[0].args[3],question);assert.deepEqual(db.calls[0].args[4],['tex']);
+ assert.match(db.calls[0].sql,/d\.owner_id=\$1 AND NOT d\.hidden/);assert.match(db.calls[0].sql,/strpos\(d\.name,chr\(92\)\)/);
+ assert.doesNotMatch(db.calls[0].sql,/document_text_pages|\.body\b|embedding|\bLIMIT\b/i);
+ assert.deepEqual(await findMentionedDocumentSources(metadata([tex,natural]).pool,'alice',question),{status:'ambiguous',matches:[tex,natural]});
+ const other=metadata([tex]);assert.deepEqual(await mentionedOtherDocumentSources(other.pool,'alice',question,'selected'),[tex]);assert.equal(other.calls[0].args[3],question);
+});
 
 test('full NFKC title resolves only current owner/course metadata and preserves the source tuple',async()=>{
  const source=doc('one','Finite Ｆield Methods for Students'),db=metadata([source]);

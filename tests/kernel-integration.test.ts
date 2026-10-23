@@ -42,6 +42,11 @@ test('original upload source names bind immutable versions, survive replay/repai
  assert.equal(resolution.status,'resolved');assert.equal(resolution.matches[0].documentId,doc.id);
  assert.equal((await findMentionedDocumentSources(kernelPool(),'foreign',question)).status,'not-mentioned');
  assert.equal((await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:'different-course'})).status,'not-mentioned');
+ const naturalQuestion=question.replace("\\'a",'á'),natural=await findMentionedDocumentSources(kernelPool(),owner,naturalQuestion);
+ assert.equal(natural.status,'resolved');assert.equal(natural.matches[0].documentId,doc.id);assert.equal(natural.matches[0].title,original);
+ assert.equal(natural.matches[0].currentVersionId,second);assert.equal(natural.matches[0].sourceHash,hash);
+ assert.equal((await findMentionedDocumentSources(kernelPool(),'foreign',naturalQuestion)).status,'not-mentioned');
+ assert.equal((await findMentionedDocumentSources(kernelPool(),owner,naturalQuestion,{courseId:'different-course'})).status,'not-mentioned');
 });
 
 test('registered orig recall hints update only page search, survive rebuild and reject stale/raw failure atomically',async()=>{
