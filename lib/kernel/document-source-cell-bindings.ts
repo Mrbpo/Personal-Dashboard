@@ -27,13 +27,15 @@ type DeclaredTableContext={tableId:string;imageId:string;nativeReference:string;
 type TableContextTransport={status:'available'|'unavailable';reason:string|null;tables:number;omittedTables:number;contextSha256:string};
 type ValuePath={status:'parser-derived';rowLabels:string[];columnLabels:string[]}|{status:'not-value'}|
  {status:'unknown';reason:string;stage:SourceCellBindingError['stage']};
+type UnavailableTable={imageId:string;observationIndex:number;source:DocumentContextSource;evidenceId:string;physicalPage:number;
+ nativeReference:string;nativeSha256:string;artifactSha256:string;reason:'native-cell-declarations-unavailable';observationReason:string|null};
 export type SourceCellBindingCatalog={version:'source-cell-bindings-v2';status:'available'|'unavailable';reason:string|null;
  valuePathVersion:typeof SOURCE_CELL_VALUE_PATH_VERSION;
- tables:Table[];cells:Cell[];declaredTableContexts:DeclaredTableContext[];contextTransport:TableContextTransport;catalogSha256:string;wire:{version:'source-cell-bindings-v2';status:'available'|'unavailable';reason:string|null;
+ tables:Table[];cells:Cell[];declaredTableContexts:DeclaredTableContext[];unavailableTables?:UnavailableTable[];contextTransport:TableContextTransport;catalogSha256:string;wire:{version:'source-cell-bindings-v2';status:'available'|'unavailable';reason:string|null;
   authority:'parser-declared-untrusted';coverage:'observed-cells-only';gridRepaired:false;
   valuePathVersion:typeof SOURCE_CELL_VALUE_PATH_VERSION;valuePathAuthority:'parser-derived-unverified';
   tables:Array<Table&{cells:Array<Pick<Cell,'id'|'index'|'row'|'column'|'text'|'headerRole'>&{valuePath:ValuePath}>}>;catalogSha256:string;
-  declaredTableContexts?:DeclaredTableContext[]};
+  declaredTableContexts?:DeclaredTableContext[];unavailableTables?:UnavailableTable[]};
  /** Private reader witnesses; never put the whole catalog into model input. */
  sources:readonly SourceValueImage[]};
 type Binding={value:Cell;rowLabels:Cell[];columnLabels:Cell[];table:Table};
@@ -48,17 +50,17 @@ export type SourceCellDerivation={method:'source-cell-bindings-v2';rawProviderRe
 /** An index of observed cells beside original PNGs, not a usable/repaired grid.
  * Private witnesses are revalidated; only catalog.wire is provider metadata. */
 export function prepareSourceCellBindingCatalog(sources:readonly SourceValueImage[]):SourceCellBindingCatalog{
- const tables:Table[]=[],cells:Cell[]=[],declaredTableContexts:DeclaredTableContext[]=[];
+ const tables:Table[]=[],cells:Cell[]=[],declaredTableContexts:DeclaredTableContext[]=[],unavailableTables:UnavailableTable[]=[];
  const finish=(reason:string|null):SourceCellBindingCatalog=>{
   const status=reason?'unavailable' as const:'available' as const,value={version:'source-cell-bindings-v2' as const,status,reason,
    valuePathVersion:SOURCE_CELL_VALUE_PATH_VERSION as typeof SOURCE_CELL_VALUE_PATH_VERSION,tables:reason?[]:tables,cells:reason?[]:cells,
-   declaredTableContexts:reason?[]:declaredTableContexts},catalogSha256=sha(value),wire={version:value.version,status,reason,
+   declaredTableContexts:reason?[]:declaredTableContexts,...(unavailableTables.length?{unavailableTables}:{})},catalogSha256=sha(value),wire={version:value.version,status,reason,
    authority:'parser-declared-untrusted' as const,coverage:'observed-cells-only' as const,gridRepaired:false as const,
    valuePathVersion:SOURCE_CELL_VALUE_PATH_VERSION as typeof SOURCE_CELL_VALUE_PATH_VERSION,valuePathAuthority:'parser-derived-unverified' as const,
    tables:reason?[]:tables.map(table=>({...table,cells:cells.filter(c=>c.tableId===table.id).map(cell=>{
     const {id,index,row,column,text,headerRole}=cell;
     return {id,index,row,column,text,headerRole,valuePath:declaredValuePath(value,cell,table.imageId)};
-   })})),catalogSha256};
+   })})),catalogSha256,...(unavailableTables.length?{unavailableTables}:{})};
   // Optional source context must never evict cells or increase the old limit.
   // It remains parser metadata beside the original image, not new quote IDs.
   const contextualWire={...wire,declaredTableContexts:value.declaredTableContexts},fits=!reason&&value.declaredTableContexts.length>0&&
@@ -77,7 +79,14 @@ export function prepareSourceCellBindingCatalog(sources:readonly SourceValueImag
     support.sourceVersionId!==support.image.source.sourceVersionId||support.sourceHash!==support.image.source.sourceHash||
     support.evidenceId!==support.image.anchorEvidenceId||support.sha256!==support.image.sha256)throw new SourceCellBindingError('source-cell-image-binding-changed','evidence-selection');
    const native=observation.native??(observation.cellDeclarations?.status==='available'?observation.cellDeclarationWitness?.native:undefined);
-   if(!native)return finish('native-cell-declarations-unavailable');
+   if(!native){
+    // This is a verified unavailable observation, not a source/hash failure.
+    // Preserve its identity/reason while allowing independently bound tables.
+    unavailableTables.push({imageId:support.id,observationIndex,source:structuredClone(observation.candidate.source),
+     evidenceId:support.evidenceId,physicalPage:observation.candidate.pageNumber,nativeReference:observation.nativeReference,
+     nativeSha256:observation.nativeSha256,artifactSha256:observation.candidate.artifactSha256,
+     reason:'native-cell-declarations-unavailable',observationReason:observation.reason});continue;
+   }
    const raw=(native.raw.data as {table_cells:Record<string,unknown>[]}).table_cells;
    if(cells.length+raw.length>SOURCE_VALUE_LIMITS.cells)return finish('catalog-cell-limit');
    const table:Table={id:`b${tables.length}`,imageId:support.id,observationIndex,source:structuredClone(observation.candidate.source),
@@ -104,14 +113,14 @@ export function prepareSourceCellBindingCatalog(sources:readonly SourceValueImag
    });
   }
  }
- if(!cells.length)return finish('no-native-cell-declarations');
+ if(!cells.length)return finish(unavailableTables.length?'native-cell-declarations-unavailable':'no-native-cell-declarations');
  const result=finish(null);
  if(Buffer.byteLength(canonical(result.wire))>SOURCE_VALUE_LIMITS.bytes)return finish('catalog-byte-limit');
  return result.wire.tables.some(t=>t.cells.some(c=>c.valuePath.status==='parser-derived'))?result:finish('no-bindable-cell-values');
 }
 function assertCatalog(catalog:SourceCellBindingCatalog){
  const rebuilt=prepareSourceCellBindingCatalog(catalog.sources);
- if(canonical([catalog.declaredTableContexts,catalog.contextTransport])!==canonical([rebuilt.declaredTableContexts,rebuilt.contextTransport]))
+ if(canonical([catalog.declaredTableContexts,catalog.contextTransport,catalog.unavailableTables])!==canonical([rebuilt.declaredTableContexts,rebuilt.contextTransport,rebuilt.unavailableTables]))
   throw new SourceCellBindingError('source-cell-catalog-changed','structure-storage');
  if(catalog.status!=='available'||rebuilt.status!=='available'||catalog.valuePathVersion!==SOURCE_CELL_VALUE_PATH_VERSION||catalog.catalogSha256!==rebuilt.catalogSha256||
   canonical([catalog.tables,catalog.cells,catalog.wire])!==canonical([rebuilt.tables,rebuilt.cells,rebuilt.wire]))

@@ -138,3 +138,7 @@ operations verify a contract and fixed-point calculation, not that any model
 selected the right comparison or that an exposed question now passes.
 Local targeted checks mock all model transport and do not write PostgreSQL or
 claim fresh-current validation. No previous score or independent cohort changes.
+# Partial native-table availability
+
+The existing cell-binding catalog can retain bindable cells from one table when another source-verified table has no available cell declarations. `unavailableTables` preserves the unavailable observation's source/version, original-page/evidence identity, native/artifact hashes and reason in the catalog and model wire. Invalid source identities/checksums still fail; unknown header paths and incomplete grids remain unknown/unavailable. An available catalog means some parser-derived values can be referenced, never complete table coverage or verified semantics. It does not make fused metric tuples subtractable. The existing source-value route must still be explicitly selected and supplied with registered observations; this partial-availability fix does not activate it for ordinary answers or retrofit diagnostic exports into the live source registry.
+

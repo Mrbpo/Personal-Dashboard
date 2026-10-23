@@ -40,6 +40,31 @@ const result=(...claims:unknown[])=>({status:'answered',message:'',claims}),deco
 const schemaValueIds=(schema:ReturnType<typeof sourceCellBindingAnswerSchema>)=>(schema.properties.claims as {
  items:{anyOf:Array<{properties:{valueRef:{enum:string[]}}}>}}).items.anyOf[0].properties.valueRef.enum;
 
+test('an unavailable table remains explicit without poisoning another bound table or hiding invalid source identities',async()=>{
+ const f=await fixture(),native={...f.native,reference:'#/tables/1'},artifact=prepareNativeTableArtifact(native),
+  identity={namespace:NATIVE_TABLE_NAMESPACE,producer:NATIVE_TABLE_PRODUCER,source:f.image.source,artifactSha256:artifact.artifactSha256,
+   manifestSha256:f.image.manifestSha256,assetSha256:f.image.sha256,anchor:f.image.anchorEvidenceId},
+  candidate={...f.candidate,id:sha(canonical(identity)),artifactSha256:artifact.artifactSha256};
+ const saved=process.env.KERNEL_NATIVE_CELL_OBSERVATIONS;delete process.env.KERNEL_NATIVE_CELL_OBSERVATIONS;
+ let unavailable;try{unavailable=prepareNativeTableObservation(candidate,artifact,f.image);}finally{if(saved===undefined)delete process.env.KERNEL_NATIVE_CELL_OBSERVATIONS;else process.env.KERNEL_NATIVE_CELL_OBSERVATIONS=saved;}
+ assert.equal(unavailable.status,'unavailable');assert.equal(unavailable.cellDeclarations,undefined);
+ for(const order of [[unavailable,f.observation],[f.observation,unavailable]]){
+  const catalog=prepareSourceCellBindingCatalog([{...f.support,tableObservations:order}]);
+  assert.equal(catalog.status,'available');assert.equal(catalog.tables.length,1);assert.deepEqual(catalog.cells,f.catalog.cells);
+  assert.equal(catalog.unavailableTables?.length,1);assert.equal(catalog.wire.unavailableTables?.[0].nativeReference,'#/tables/1');
+  assert.equal(catalog.wire.unavailableTables?.[0].reason,'native-cell-declarations-unavailable');
+  assert.equal(catalog.tables[0].gridStatus,'unavailable');assert.equal(catalog.wire.coverage,'observed-cells-only');
+  assert.ok(schemaValueIds(sourceCellBindingAnswerSchema(catalog,['i0'])).includes(f.at(2,1)));
+  assert.match(decode(result({kind:'table-value',valueRef:f.at(2,1)}),catalog,['i0']).normalizedSelections.claims[0].text,/Zh.*Model A.*ppl.*8\.92/);
+  const changed=structuredClone(catalog);changed.unavailableTables![0].observationReason='silently repaired';assert.throws(()=>sourceCellBindingAnswerSchema(changed,['i0']),/changed/);
+ }
+ const all=prepareSourceCellBindingCatalog([{...f.support,tableObservations:[unavailable]}]);
+ assert.equal(all.status,'unavailable');assert.equal(all.reason,'native-cell-declarations-unavailable');assert.equal(all.unavailableTables?.length,1);
+ assert.throws(()=>prepareSourceCellBindingCatalog([{...f.support,documentVersionId:'foreign',tableObservations:[unavailable,f.observation]}]),/binding-changed/);
+ const invalid=structuredClone(unavailable);invalid.nativeSha256='0'.repeat(64);
+ assert.throws(()=>prepareSourceCellBindingCatalog([{...f.support,tableObservations:[invalid,f.observation]}]));
+});
+
 test('declared table context reaches the generation wire verbatim without becoming verified relationships or new quotes',async()=>{
  const caption='Table A: F₁ results; Model A and Model B are distinct configurations.',f=await fixture(false,false,false,caption),
   legacy=await fixture(),packet=f.catalog.wire.declaredTableContexts!;
