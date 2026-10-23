@@ -12,13 +12,14 @@ const hex=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)
 const compact=(s:string)=>s.replace(/\s/gu,'');
 type Rect=[number,number,number,number];
 export type NativeRegionBundle={policy:'native-pdf-region-observations-v1';source:{owner:string;documentId:string;sourceHash:string;pageCount:number};
- producer:{engine:'pdfplumber';packages:Record<string,string>;options:{layout:true;x_tolerance:2;y_tolerance:2};scriptSha256:string;
+ producer:{engine:'pdfplumber';packages:Record<string,string>;options:{layout:true;x_tolerance:2;y_tolerance:2;expand_ligatures?:false};scriptSha256:string;
  boundsExportSha256:string;boundsAuthority:'parser-declared-untrusted'};
  pages:Array<{physicalPage:number;width:number;height:number;chars:Array<{index:number;text:string;bbox:Rect;font:string}>;
- regions:Array<{id:string;bbox:Rect;text:string;charIndices:number[];boundsReference:string}>}>};
+ regions:Array<{id:string;bbox:Rect;text:string;charIndices:number[];boundsReference:string;tableBBox?:Rect;
+  captions?:Array<{reference:string;declaredBBox:Rect;bbox:Rect;charIndices:number[];producerText:string}>}>}>};
 type Source=NativeRegionBundle['source'];
 type PageProjection={physicalPage:number;previousBodySha256:string;bodySha256:string;windows:Array<{
- regionId:string;bbox:Rect;startUtf16:number;endUtf16:number;quoteSha256:string}>};
+ regionId:string;bbox:Rect;startUtf16:number;endUtf16:number;quoteSha256:string;captionReferences?:string[]}>};
 export type NativeRegionManifest={policy:typeof NATIVE_REGION_TEXT_VERSION;source:Source;observationSha256:string;pages:PageProjection[]};
 function invalid():never{throw Error('Native region source/characters/projection invalid');}
 const rect=(b:Rect,w:number,h:number)=>Array.isArray(b)&&b.length===4&&b.every(Number.isFinite)&&b[0]>=0&&b[1]>=0&&b[2]>b[0]&&b[3]>b[1]&&b[2]<=w&&b[3]<=h;
@@ -34,7 +35,7 @@ export function validateNativeRegionBundle(value:unknown,source:Source):NativeRe
   !Number.isSafeInteger(source.pageCount)||source.pageCount<1||source.pageCount>500||!v.producer||v.producer.engine!=='pdfplumber'||
   !hex(v.producer.scriptSha256)||!hex(v.producer.boundsExportSha256)||v.producer.boundsAuthority!=='parser-declared-untrusted'||
   !v.producer.packages?.pdfplumber||!v.producer.packages?.['pdfminer.six']||
-  !isDeepStrictEqual(v.producer.options,{layout:true,x_tolerance:2,y_tolerance:2})||!Array.isArray(v.pages)||!v.pages.length||v.pages.length>NATIVE_REGION_LIMITS.pages)invalid();
+  !(isDeepStrictEqual(v.producer.options,{layout:true,x_tolerance:2,y_tolerance:2})||isDeepStrictEqual(v.producer.options,{layout:true,x_tolerance:2,y_tolerance:2,expand_ligatures:false}))||!Array.isArray(v.pages)||!v.pages.length||v.pages.length>NATIVE_REGION_LIMITS.pages)invalid();
  let charCount=0,regionCount=0,textBytes=0;const pages=new Set<number>();
  for(const p of v.pages){
   if(!Number.isSafeInteger(p.physicalPage)||p.physicalPage<1||p.physicalPage>source.pageCount||pages.has(p.physicalPage)||
@@ -52,6 +53,18 @@ export function validateNativeRegionBundle(value:unknown,source:Source):NativeRe
    const observed=p.chars.filter(c=>compact(c.text)&&intersects(c.bbox,r.bbox));
    if(observed.some(c=>!inside(c.bbox,r.bbox))||!isDeepStrictEqual(observed.map(c=>c.index),r.charIndices)||
     compact(observed.map(c=>c.text).join(''))!==compact(r.text))invalid();
+   if(r.captions!==undefined){
+    if(!Array.isArray(r.captions)||r.captions.length>8||!r.tableBBox||!rect(r.tableBBox,p.width,p.height))invalid();
+    const refs=new Set<string>(),boxes=[r.tableBBox];
+    for(const c of r.captions){
+     if(!/^#\/texts\/\d+$/.test(c.reference)||refs.has(c.reference)||!rect(c.declaredBBox,p.width,p.height)||!rect(c.bbox,p.width,p.height)||typeof c.producerText!=='string')invalid();
+     refs.add(c.reference);const glyphs=p.chars.filter(g=>compact(g.text)&&(g.bbox[0]+g.bbox[2])/2>=c.declaredBBox[0]&&(g.bbox[0]+g.bbox[2])/2<=c.declaredBBox[2]&&
+      (g.bbox[1]+g.bbox[3])/2>=c.declaredBBox[1]&&(g.bbox[1]+g.bbox[3])/2<=c.declaredBBox[3]);
+     if(!glyphs.length||!isDeepStrictEqual(glyphs.map(g=>g.index),c.charIndices)||!isDeepStrictEqual(c.bbox,
+      [Math.min(...glyphs.map(g=>g.bbox[0])),Math.min(...glyphs.map(g=>g.bbox[1])),Math.max(...glyphs.map(g=>g.bbox[2])),Math.max(...glyphs.map(g=>g.bbox[3]))]))invalid();boxes.push(c.bbox);
+    }
+    if(!isDeepStrictEqual(r.bbox,[Math.min(...boxes.map(b=>b[0])),Math.min(...boxes.map(b=>b[1])),Math.max(...boxes.map(b=>b[2])),Math.max(...boxes.map(b=>b[3]))]))invalid();
+   }
   }
  }
  return v;
@@ -62,7 +75,8 @@ export function projectNativeRegionText(bundle:NativeRegionBundle,input:Array<{p
  for(const p of bundle.pages){
   const target=pages[p.physicalPage-1],previousBodySha256=nativeRegionHash(target.text),windows:PageProjection['windows']=[];
   for(const r of p.regions){target.text+='\n\n';const startUtf16=target.text.length;target.text+=r.text;
-   windows.push({regionId:r.id,bbox:r.bbox,startUtf16,endUtf16:target.text.length,quoteSha256:nativeRegionHash(r.text)});}
+   windows.push({regionId:r.id,bbox:r.bbox,startUtf16,endUtf16:target.text.length,quoteSha256:nativeRegionHash(r.text),
+    ...(r.captions?.length?{captionReferences:r.captions.map(c=>c.reference)}:{})});}
   projections.push({physicalPage:p.physicalPage,previousBodySha256,bodySha256:nativeRegionHash(target.text),windows});
  }
  const manifest:NativeRegionManifest={policy:NATIVE_REGION_TEXT_VERSION,source:bundle.source,observationSha256,pages:projections};
@@ -97,7 +111,7 @@ export async function readNativeRegionObservation(input:NativeRegionWindowInput)
  for(const [i,w] of projection.windows.entries()){
   const r=page.regions[i];if(w.regionId!==r.id||!isDeepStrictEqual(w.bbox,r.bbox)||!Number.isSafeInteger(w.startUtf16)||!Number.isSafeInteger(w.endUtf16)||
    w.startUtf16<2||w.endUtf16!==w.startUtf16+r.text.length||input.body.slice(w.startUtf16,w.endUtf16)!==r.text||w.quoteSha256!==nativeRegionHash(r.text)||
-   input.body.slice(w.startUtf16-2,w.startUtf16)!=='\n\n'||(end!==undefined&&w.startUtf16!==end+2))invalid();
+   input.body.slice(w.startUtf16-2,w.startUtf16)!=='\n\n'||(end!==undefined&&w.startUtf16!==end+2)||!isDeepStrictEqual(w.captionReferences,r.captions?.length?r.captions.map(c=>c.reference):undefined))invalid();
   if(i===0&&nativeRegionHash(input.body.slice(0,w.startUtf16-2))!==projection.previousBodySha256)invalid();end=w.endUtf16;
  }
  if(end!==input.body.length)invalid();
@@ -108,10 +122,23 @@ export async function prepareNativeRegionWindows(input:NativeRegionWindowInput){
  const observation=await readNativeRegionObservation(input);if(!observation)return null;
  const {body:_body,progress:_progress,...binding}=input;void _body;void _progress;
  const value:PreparedNativeRegionWindows={policy:NATIVE_REGION_WINDOWS_POLICY,binding,manifestSha256:observation.manifestSha256,
-  observationSha256:observation.observationSha256,windows:observation.projection.windows.map(w=>({...w,references:[{reference:'native-region:'+w.regionId}],semanticRelationsVerified:false})),hintSha256:''};
- value.hintSha256=nativeRegionHash(JSON.stringify(value));Object.freeze(value.binding);for(const w of value.windows){for(const ref of w.references)Object.freeze(ref);Object.freeze(w.references);Object.freeze(w.bbox);Object.freeze(w);}Object.freeze(value.windows);Object.freeze(value);
+  observationSha256:observation.observationSha256,windows:observation.projection.windows.map(w=>({...w,references:[{reference:'native-region:'+w.regionId},
+   ...(w.captionReferences??[]).map(reference=>({reference:'native-caption:'+reference}))],semanticRelationsVerified:false})),hintSha256:''};
+ value.hintSha256=nativeRegionHash(JSON.stringify(value));Object.freeze(value.binding);for(const w of value.windows){for(const ref of w.references)Object.freeze(ref);Object.freeze(w.references);Object.freeze(w.bbox);if(w.captionReferences)Object.freeze(w.captionReferences);Object.freeze(w);}Object.freeze(value.windows);Object.freeze(value);
  prepared.add(value);return value;
 }
 export function assertPreparedNativeRegionWindows(value:PreparedNativeRegionWindows,binding:DoclingTextContextWindowBinding){
  if(!prepared.has(value)||!isDeepStrictEqual(value.binding,binding))invalid();
+}
+
+/** Recover the unchanged native baseline when superseding only this adapter's
+ * observations. All old region glyphs must survive; no enhanced source repair. */
+export function nativeRegionBaseline(previous:NonNullable<Awaited<ReturnType<typeof readNativeRegionObservation>>>,replacement:NativeRegionBundle,body:string){
+ const page=replacement.pages.find(p=>p.physicalPage===previous.physicalPage);
+ if(!page||!isDeepStrictEqual(replacement.source,previous.source)||replacement.producer.boundsExportSha256!==previous.producer.boundsExportSha256||
+  !isDeepStrictEqual(page.chars,previous.page.chars)||nativeRegionHash(body)!==previous.projection.bodySha256)invalid();
+ for(const old of previous.page.regions){const r=page.regions.find(r=>r.id===old.id),indices=new Set(r?.charIndices);
+  if(!r||r.boundsReference!==old.boundsReference||!inside(old.bbox,r.bbox)||old.charIndices.some(i=>!indices.has(i)))invalid();}
+ const prefix=body.slice(0,previous.projection.windows[0].startUtf16-2);
+ if(nativeRegionHash(prefix)!==previous.projection.previousBodySha256)invalid();return prefix;
 }

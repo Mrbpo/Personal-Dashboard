@@ -4,7 +4,7 @@ import {mkdtemp,writeFile,readdir,unlink,rmdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {NATIVE_REGION_TEXT_VERSION,validateNativeRegionBundle,projectNativeRegionText,prepareNativeRegionWindows,
- readNativeRegionObservation,nativeRegionFingerprint,nativeRegionHash,type NativeRegionBundle} from '../lib/kernel/native-region-text.ts';
+ readNativeRegionObservation,nativeRegionFingerprint,nativeRegionHash,nativeRegionBaseline,type NativeRegionBundle} from '../lib/kernel/native-region-text.ts';
 import {prepareDocumentAnswer,resolveDocumentAnswerSelections,validateGroundedDocumentAnswer} from '../lib/kernel/document-answer.ts';
 
 const source={owner:'owner',documentId:'paper',sourceHash:'a'.repeat(64),pageCount:1},text='.650 / .647 / .654';
@@ -71,4 +71,34 @@ test('a whole source-bound region longer than the legacy quote limit resolves wi
  const resolved=resolveDocumentAnswerSelections({status:'answered',message:'',claims:[{text:'Transport fixture only.',citations:[{id:quote.id}]}]},prepared.supports);
  assert.equal(resolved.answer.claims[0].citations[0].quote,long);
  assert.throws(()=>validateGroundedDocumentAnswer({status:'answered',message:'',claims:[{text:'Literal fixture.',citations:[{id:'e0',quote:long}]}]},[{id:'e0',kind:'text',text:input.body}]),/ungrounded/);
+});
+
+function captionBundle(){
+ const b=bundle(),offset=b.pages[0].chars.length,caption='Table1:SLC';
+ b.pages[0].chars.push(...[...caption].map((text,i)=>({index:offset+i,text,bbox:[i+1,12,i+2,16] as [number,number,number,number],font:'F1'})));
+ return b;
+}
+function includeCaption(b:NativeRegionBundle){
+ const r=b.pages[0].regions[0],glyphs=b.pages[0].chars.filter(c=>c.bbox[1]===12);
+ r.tableBBox=[...r.bbox];r.bbox=[0,0,50,16];r.text+='\nTable1:SLC';r.charIndices.push(...glyphs.map(c=>c.index));
+ r.captions=[{reference:'#/texts/0',declaredBBox:[0,11,50,20],bbox:[1,12,11,16],charIndices:glyphs.map(c=>c.index),producerText:'Table 1: SLC'}];
+ b.producer.options.expand_ligatures=false;return b;
+}
+test('declared captions retain their original glyphs in one bound quotation without certifying semantic relations',async()=>{
+ const b=includeCaption(captionBundle());assert.equal(validateNativeRegionBundle(b,source),b);
+ const {input}=await staged(b),hint=(await prepareNativeRegionWindows(input))!,observation=(await readNativeRegionObservation(input))!;
+ assert.equal(hint.windows[0].references.length,2);assert.equal(hint.windows[0].references[1].reference,'native-caption:#/texts/0');
+ assert.equal(observation.page.regions[0].text,text+'\nTable1:SLC');assert.equal(observation.semanticRelationsVerified,false);
+ assert.throws(()=>hint.windows[0].captionReferences!.push('#/texts/other'));
+ const bad=structuredClone(b);bad.pages[0].regions[0].captions![0].charIndices.shift();assert.throws(()=>validateNativeRegionBundle(bad,source));
+});
+test('caption supersession recovers only the unchanged baseline and refuses loss of any previous source glyph',async()=>{
+ const old=captionBundle(),{input}=await staged(old),previous=(await readNativeRegionObservation(input))!,next=includeCaption(structuredClone(old)),
+  baseline=nativeRegionBaseline(previous,next,input.body);
+ assert.equal(baseline,'Previous native body.');
+ const projection=projectNativeRegionText(next,[{pageNumber:1,locator:'第 1 页',text:baseline}],'f'.repeat(64));
+ assert.equal(projection.pages[0].text,'Previous native body.\n\n'+text+'\nTable1:SLC');
+ const changed=structuredClone(next);changed.pages[0].chars[0].text='x';assert.throws(()=>nativeRegionBaseline(previous,changed,input.body));
+ const lost=structuredClone(next);lost.pages[0].regions[0].charIndices.shift();assert.throws(()=>nativeRegionBaseline(previous,lost,input.body));
+ assert.throws(()=>nativeRegionBaseline(previous,next,input.body+' changed'));
 });

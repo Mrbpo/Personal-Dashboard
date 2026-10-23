@@ -3,7 +3,7 @@ import {readBlob,saveBlob,digest} from '../library.ts';
 import {kernelPool} from './db.ts';
 import {kernel} from './service.ts';
 import {preparePdfVisualEvidence,readPdfVisualEvidence} from './pdf-visual-evidence.ts';
-import {NATIVE_REGION_TEXT_VERSION,NATIVE_REGION_LIMITS,validateNativeRegionBundle,projectNativeRegionText} from './native-region-text.ts';
+import {NATIVE_REGION_TEXT_VERSION,NATIVE_REGION_LIMITS,validateNativeRegionBundle,projectNativeRegionText,nativeRegionFingerprint,readNativeRegionObservation,nativeRegionBaseline} from './native-region-text.ts';
 
 export type NativeRegionIngestionInput={owner:string;documentId:string;sourceHash:string;expectedCurrentVersion:string;observationSha256:string};
 export type NativeRegionRenderer=Parameters<typeof preparePdfVisualEvidence>[1];
@@ -28,9 +28,10 @@ export async function ingestNativeRegionText(input:NativeRegionIngestionInput,re
  JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id AND e.source_item_id=s.source_item_id
  WHERE p.version_id=$1 AND v.document_id=$2 ORDER BY p.page_number`,[d.current_version_id,d.id])).rows;
  const prior=d.raw_value.batchProvenance;
- if(old.length!==d.page_count||old.some((p,i)=>p.page_number!==i+1||p.extraction_method!=='native-text')||prior?.sourceMath||prior?.sourceEncoding||prior?.nativeRegionText||
+ const previousNative=nativeRegionFingerprint(prior);
+ if(old.length!==d.page_count||old.some((p,i)=>p.page_number!==i+1||p.extraction_method!=='native-text'&&!(previousNative&&p.extraction_method==='native-region-observations'))||prior?.sourceMath||prior?.sourceEncoding||
   (prior?.identity as Record<string,unknown>|undefined)?.sourceEncodingReceiptHash)
-  throw Error('Native region import requires a complete unenhanced native baseline');
+  throw Error('Native region import requires an unchanged native baseline or its registered observations');
  const original=await readBlob(input.sourceHash),bytes=await readBlob(input.observationSha256);
  if(digest(original)!==input.sourceHash||bytes.length>NATIVE_REGION_LIMITS.bytes||digest(bytes)!==input.observationSha256)throw Error('Native region input checksum/size differs');
  const bundle=validateNativeRegionBundle(JSON.parse(Buffer.from(bytes).toString('utf8')),{owner:input.owner,documentId:d.id,sourceHash:d.source_hash,pageCount:d.page_count});
@@ -39,7 +40,21 @@ export async function ingestNativeRegionText(input:NativeRegionIngestionInput,re
   if(frame.getRotation().angle!==0||box.x!==0||box.y!==0||Math.abs(box.width-p.width)>.001||Math.abs(box.height-p.height)>.001)throw Error('Native region original page frame differs');}
  const bounds=await readBlob(bundle.producer.boundsExportSha256);
  if(bounds.length>NATIVE_REGION_LIMITS.bytes||digest(bounds)!==bundle.producer.boundsExportSha256)throw Error('Native region bounding observation differs');
- const projected=projectNativeRegionText(bundle,old.map(p=>({pageNumber:p.page_number,locator:p.locator,text:p.body})),input.observationSha256),
+ const baseline=old.map(p=>({pageNumber:p.page_number,locator:p.locator,text:p.body}));
+ if(previousNative)for(const p of old){
+  const observation=await readNativeRegionObservation({owner:input.owner,documentId:d.id,sourceHash:d.source_hash,pageCount:d.page_count,
+   physicalPage:p.page_number,currentVersionId:d.current_version_id,sourceVersionId:d.source_version_id,evidenceId:p.evidence_id,
+   parserVersion:NATIVE_REGION_TEXT_VERSION,body:p.body,bodySha256:digest(p.body),progress:prior});
+  if(observation)baseline[p.page_number-1].text=nativeRegionBaseline(observation,bundle,p.body);
+  else if(p.extraction_method!=='native-text')throw Error('Native region history is not registered');
+ }
+ if(previousNative?.observationSha256===input.observationSha256){
+  const head=(await db.query<{current_version_id:string}>('SELECT current_version_id FROM document_texts WHERE owner_id=$1 AND id=$2',[input.owner,d.id])).rows[0];
+  if(head?.current_version_id!==d.current_version_id)throw Error('Native region source changed during replay');
+  return {previousVersion:d.current_version_id,currentVersion:d.current_version_id,manifestSha256:previousNative.manifestSha256,
+   observationSha256:input.observationSha256,changedPages:[] as number[],regions:bundle.pages.reduce((n,p)=>n+p.regions.length,0),newParserCalls:0,unchanged:true};
+ }
+ const projected=projectNativeRegionText(bundle,baseline,input.observationSha256),
   manifestBytes=Buffer.from(JSON.stringify(projected.manifest)),manifestSha256=await saveBlob(manifestBytes),
   previousBytes=Buffer.from(JSON.stringify(prior??null)),previousSha256=await saveBlob(previousBytes),
   source={documentId:d.id,currentVersionId:d.current_version_id,sourceVersionId:d.source_version_id,sourceHash:d.source_hash,courseId:d.course_id??''},
