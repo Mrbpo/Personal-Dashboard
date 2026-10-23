@@ -12,6 +12,7 @@ import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,type F
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
+import {assertPreparedNativeRegionWindows,type PreparedNativeRegionWindows} from './native-region-text.ts';
 import {assertPdfNavigationContext,projectPdfNavigationRequest,type PdfNavigationContext} from './pdf-navigation-projection.ts';
 import {assertNativeTableObservation,assertAuthorImageTableObservation,NATIVE_TABLE_OBSERVATION_LIMITS,nativeTableObservationWire,
  type TableObservation,type NativeTableObservedImage} from './document-table-candidates.ts';
@@ -40,6 +41,7 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
  /** Kernel configuration only; original page boundaries and bodies stay intact. */
  textQuotePolicy?:'stored-page-v1';
  textContextWindows?:PreparedDoclingTextContextWindows[];
+ nativeRegionWindows?:PreparedNativeRegionWindows[];
  pdfNavigation?:PdfNavigationContext;
  pdfPageRegionReads?:StudyPdfPageRegionRead[];
  completeSourceProof?:CompleteStudySourceProof;
@@ -55,6 +57,9 @@ export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
 type Support={id:string;kind:'text'|'image';documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  textQuotePolicy?:'stored-page-v1';
  textContextWindows?:PreparedDoclingTextContextWindows;
+ nativeRegionWindows?:PreparedNativeRegionWindows;
+ nativeRegionObservation?:{policy:'native-region-text-windows-v1';manifestSha256:string;observationSha256:string;
+  physicalPage:number;bodySha256:string;regions:Array<{regionId:string;bbox:number[]}>;semanticRelationsVerified:false};
  textContextObservation?:{policy:'docling-text-context-windows-v1';hintSha256:string;resultBlobSha256:string;
   physicalPage:number;bodySha256:string;candidateWindows:number;semanticRelationsVerified:false};
  visual?:{kind:'pdf-page'|'pdf-region';physicalPage:number;rawPdfSha256:string;manifestSha256:string};
@@ -85,7 +90,7 @@ export type GroundedDocumentAnswer={status:'answered'|'insufficient-evidence'|'c
 export type DocumentAnswerSelections=Omit<GroundedDocumentAnswer,'claims'>&{claims:{text:string;citations:{id:string}[]}[]};
 export type DocumentQuoteUnit={id:string;supportId:string;startUtf16:number;endUtf16:number;quoteSha256:string;text:string;selectable:boolean;
  pageContext?:{policy:'stored-page-context-v1';semanticRelationsVerified:false};
- contextWindow?:{policy:'docling-text-context-windows-v1';hintSha256:string;references:string[];semanticRelationsVerified:false};
+ contextWindow?:{policy:'docling-text-context-windows-v1'|'native-region-text-windows-v1';hintSha256:string;references:string[];semanticRelationsVerified:false};
  contextWindowCoverage?:{windowId:string;relation:'literal-span-containment';semanticRelationsVerified:false}};
 export type DocumentUnitSelection={claimIndex:number;citationIndex:number;selectionId:string;kind:'text'|'image';
  evidence:Omit<Support,'text'|'image'>;startUtf16:number|null;endUtf16:number|null;quoteSha256:string};
@@ -313,8 +318,8 @@ export function resolveGroundedDocumentAnswerReferences(value:unknown,supports:r
  return {answer:validateGroundedDocumentAnswer(proposed,supports),citationRepairs};
 }
 
-const supportMetadata=({text,image,textContextWindows,...support}:Support)=>{
- void text;void image;void textContextWindows;
+const supportMetadata=({text,image,textContextWindows,nativeRegionWindows,...support}:Support)=>{
+ void text;void image;void textContextWindows;void nativeRegionWindows;
  return support.tableObservations?{...support,tableObservations:support.tableObservations.map(observation=>
   observation.version==='docling-native-observation-v1'?nativeTableObservationWire(observation):observation)}:support;
 };
@@ -367,7 +372,8 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
  // stays intact; no citation is expanded after the model has selected it.
  let extra=0;
  for(const support of supports){
-  const hint=support.textContextWindows;if(support.kind!=='text'||!hint)continue;
+  if(support.kind!=='text')continue;
+  for(const hint of [support.textContextWindows,support.nativeRegionWindows]){if(!hint)continue;
   const body=support.text??'',sourceIdentity=[support.documentId,support.documentVersionId,support.sourceVersionId,
    support.sourceHash,support.evidenceId,support.locator,support.sha256];
   for(const window of hint.windows){
@@ -383,6 +389,7 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
    units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:!paired.has(id),
     contextWindow:{policy:hint.policy,hintSha256:hint.hintSha256,references:window.references.map(ref=>ref.reference),semanticRelationsVerified:false}});
    extra++;
+  }
   }
  }
  // Prefer a declared window to its contained bare fragment before selection.
@@ -444,6 +451,16 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
   support.textContextWindows=hint;
   support.textContextObservation={policy:hint.policy,hintSha256:hint.hintSha256,resultBlobSha256:hint.result.resultBlobSha256,
    physicalPage:binding.physicalPage,bodySha256:binding.bodySha256,candidateWindows:hint.windows.length,semanticRelationsVerified:false};
+ }
+ for(const hint of context.nativeRegionWindows??[]){
+  const binding=hint.binding,support=supports.find(s=>s.kind==='text'&&s.documentId===binding.documentId&&
+   s.documentVersionId===binding.currentVersionId&&s.sourceVersionId===binding.sourceVersionId&&s.sourceHash===binding.sourceHash&&
+   s.evidenceId===binding.evidenceId&&s.sha256===binding.bodySha256),anchor=context.anchors.find(a=>a.document_id===binding.documentId&&a.evidence_id===binding.evidenceId);
+  if(!support||!anchor||support.nativeRegionWindows)throw Error('Missing or duplicate native region binding');
+  assertPreparedNativeRegionWindows(hint,{...binding,currentVersionId:support.documentVersionId,sourceVersionId:support.sourceVersionId,
+   sourceHash:support.sourceHash,evidenceId:support.evidenceId,physicalPage:anchor.page_number,parserVersion:anchor.parser_version,bodySha256:sha(support.text??'')});
+  support.nativeRegionWindows=hint;support.nativeRegionObservation={policy:hint.policy,manifestSha256:hint.manifestSha256,observationSha256:hint.observationSha256,
+   physicalPage:binding.physicalPage,bodySha256:binding.bodySha256,regions:hint.windows.map(w=>({regionId:w.regionId,bbox:[...w.bbox]})),semanticRelationsVerified:false};
  }
  if(unitPolicy){
   const units=documentQuoteUnits(supports),same=(a:Support,b:Support)=>a.documentId===b.documentId&&a.documentVersionId===b.documentVersionId&&

@@ -51,6 +51,8 @@ import {prepareDoclingOrigSearchHints,assertPreparedDoclingOrigSearchHints,docli
  prepareDoclingTextContextWindows,type PreparedDoclingTextContextWindows,type OrigSearchInput,type PreparedDoclingOrigSearchHints} from './docling-source-regions.ts';
 import {DoclingPageRegionError,type DoclingVisualLayout} from './docling-result.ts';
 import type {OriginalDoclingRangeInput,CachedOriginalDoclingRenderer} from './docling-original-range.ts';
+import type {NativeRegionIngestionInput,NativeRegionRenderer} from './native-region-ingestion.ts';
+import {NATIVE_REGION_TEXT_VERSION,nativeRegionFingerprint,prepareNativeRegionWindows,readNativeRegionObservation,type PreparedNativeRegionWindows} from './native-region-text.ts';
 
 type Json = Record<string, unknown>;
 type OrigSearchPage={document_id:string;current_version_id:string;source_version_id:string;source_hash:string;course_id:string;
@@ -884,6 +886,23 @@ export class KernelService {
     return ingestCachedOriginalDoclingRange(input,renderer);
   }
 
+  async ingestNativeRegionText(input:NativeRegionIngestionInput,renderer?:NativeRegionRenderer){
+    const {ingestNativeRegionText}=await import('./native-region-ingestion.ts');
+    return ingestNativeRegionText(input,renderer);
+  }
+
+  async readDocumentNativeRegions(owner:string,source:DocumentContextSource,physicalPage:number){
+    const rows=await origSearchPages(kernelPool(),owner,source.documentId,physicalPage),row=rows[0];
+    if(rows.length!==1||row.current_version_id!==source.currentVersionId||row.source_version_id!==source.sourceVersionId||row.source_hash!==source.sourceHash)
+      throw new DocumentEvidenceChangedError();
+    const result=await readNativeRegionObservation({...origSearchInput(owner,row),currentVersionId:row.current_version_id,
+      sourceVersionId:row.source_version_id,evidenceId:row.evidence_id,bodySha256:createHash('sha256').update(row.body).digest('hex')});
+    const after=(await origSearchPages(kernelPool(),owner,source.documentId,physicalPage))[0];
+    if(after.current_version_id!==row.current_version_id||after.source_version_id!==row.source_version_id||after.body!==row.body||
+      JSON.stringify(nativeRegionFingerprint(after.progress))!==JSON.stringify(nativeRegionFingerprint(row.progress)))throw new DocumentEvidenceChangedError();
+    return result;
+  }
+
   async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
@@ -939,8 +958,10 @@ export class KernelService {
     // same. Normalize stable metadata; acquisition times and remote task IDs
     // intentionally remain outside identity so a replay stays idempotent.
     const nativeWhitespace=nativeWhitespaceFingerprint(batchProvenance);
+    const nativeRegionText=nativeRegionFingerprint(batchProvenance);
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
       ...(nativeWhitespace?{nativeWhitespace}:{}),
+      ...(nativeRegionText?{nativeRegionText}:{}),
       ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
       ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
@@ -1513,6 +1534,25 @@ export class KernelService {
           const hint=await pending;if(hint?.windows.length)textContextWindows.push(hint);
         }
         return {...context,...(textContextWindows.length?{textContextWindows}:{})};
+      };
+    }
+    if(policy.textContextWindows==='producer-neighbors-v1'){
+      const readOriginal=read,cache=new Map<string,Promise<PreparedNativeRegionWindows|null>>();
+      read=async()=>{
+        const context=await readOriginal(),nativeRegionWindows:PreparedNativeRegionWindows[]=[],documents=new Map<string,OrigSearchPage[]>();
+        for(const anchor of context.anchors.slice(0,64)){
+          if(anchor.parser_version!==NATIVE_REGION_TEXT_VERSION)continue;
+          if(!documents.has(anchor.document_id))documents.set(anchor.document_id,await origSearchPages(kernelPool(),owner,anchor.document_id));
+          const row=documents.get(anchor.document_id)!.find(p=>p.page_number===anchor.page_number),version=/^pg:(.+):([0-9]+)$/.exec(anchor.id);
+          if(!row||!version||row.current_version_id!==version[1]||row.source_version_id!==anchor.source_version_id||row.source_hash!==anchor.source_hash||
+            row.evidence_id!==anchor.evidence_id||row.body!==anchor.body||row.parser_version!==anchor.parser_version)throw new DocumentEvidenceChangedError();
+          const key=createHash('sha256').update(JSON.stringify([row.current_version_id,row.evidence_id,row.body,nativeRegionFingerprint(row.progress)])).digest('hex');
+          let pending=cache.get(key);
+          if(!pending){pending=prepareNativeRegionWindows({...origSearchInput(owner,row),currentVersionId:row.current_version_id,
+            sourceVersionId:row.source_version_id,evidenceId:row.evidence_id,bodySha256:createHash('sha256').update(row.body).digest('hex')});cache.set(key,pending);}
+          const hint=await pending;if(hint)nativeRegionWindows.push(hint);
+        }
+        return {...context,...(nativeRegionWindows.length?{nativeRegionWindows}:{})};
       };
     }
     if(navigationEnabled&&policy.scope==='application'&&policy.evidenceSelection==='select-then-answer')

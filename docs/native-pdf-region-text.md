@@ -1,0 +1,15 @@
+# Native PDF region observations
+
+This is an administrator ingestion adapter, not a new truth source or an automatically enabled production parser. It supplements a complete native-text baseline through `KernelService.ingestNativeRegionText`, using the existing PostgreSQL source/version/evidence transaction and expected-current-version guard. Enhanced/mixed baselines are rejected.
+
+`scripts/observe-pdf-native-regions.py` reads a pinned original PDF and an immutable Docling export. It uses declared table regions only as untrusted bounding candidates. It records the full original page character inventory, character indices, bounding boxes, fonts, parser versions and options. A region that cuts a character, changes the non-whitespace character sequence or exceeds capacity is rejected. The producer does not repair cells, invent punctuation, infer row/column relationships, change Docling JSON or call a model. The companion Python environment needs the existing pdfplumber dependency; the application image gains no new dependency.
+
+The adapter preserves each previous page body and appends eligible literal region text. A separate immutable manifest binds the additions and their offsets to the original source and current projected body. Unchanged pages and all previous versions remain preserved. Original page images must be available. The projection manifest and observation digests participate in version identity, including geometry-only changes.
+
+Imports are trusted operator observations. A file hash proves identity, not that arbitrary caller-authored character JSON is authentic; there is no public upload endpoint for this adapter. Reading order, Unicode faithfulness and semantic relationships remain unverified, even after consistency checks pass. Uncertain cells are never promoted to canonical facts.
+
+With the existing `producer-neighbors-v1` application option, the website's ordinary answer path can offer each whole region as a current-source quotation before selection. These windows do not replace other documents, silently expand selected citations or certify answer completeness. Prepared windows require a current source/body binding; caller JSON is insufficient.
+
+The existing authenticated evidence GET accepts optional `nativeRegions=1` to return the registered observation for that physical page. The normal evidence/source/owner checks run first. Without that parameter the response is unchanged. No UI, page, database table or network service is added.
+
+Verification must distinguish character consistency and citation transport from table fidelity, evidence recall and final answer correctness. A successful import, valid schema or HTTP 200 is not a content acceptance result.

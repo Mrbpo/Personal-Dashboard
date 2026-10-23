@@ -10,7 +10,8 @@ export async function GET(r:Request,{params}:{params:Promise<{id:string}>}){try{
   // This current-source/owner check is required even for PostgreSQL-only sources
   // with no legacy SQLite library row. Never fall back to a different version.
   const nodes=await kernel.readDocumentNodes(owner,source,[evidenceId]);
-  return Response.json({source,nodes,sourceContentIsUntrusted:true},{headers:{'Cache-Control':'no-store'}});
+  const nativeRegions=query.get('nativeRegions')==='1'?await kernel.readDocumentNativeRegions(owner,source,nodes[0].page_number):undefined;
+  return Response.json({source,nodes,...(nativeRegions!==undefined?{nativeRegions}:{}),sourceContentIsUntrusted:true},{headers:{'Cache-Control':'no-store'}});
  }
  const d=await getDocument(owner,id),preview=query.get('preview')==='1',inline=preview&&(d.mime==='application/pdf'||['image/png','image/jpeg','image/webp','image/gif','image/avif'].includes(d.mime));return new Response(await readBlob(d.hash),{headers:{'Content-Type':d.mime,'Content-Disposition':`${inline?'inline':'attachment'}; filename*=UTF-8''${encodeURIComponent(d.name)}`,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 }catch(e){return apiError(e);}}
