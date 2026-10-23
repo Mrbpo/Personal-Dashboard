@@ -557,7 +557,7 @@ export async function convertDocumentWithDocling(owner: string, id: string, job?
     batchSize:currentProgress.batchSize,batches:currentProgress.batches,...(sourceFontObservations?{sourceFontObservations}:{})}:sourceEncodingReceiptHash&&!visual?
     {sourceEncoding:{receiptHash:sourceEncodingReceiptHash,parserInputHash:encoding.proof!.inputHash,version:encoding.proof!.version,textNormalization:'NFC'},
       ...(sourceFontObservations?{sourceFontObservations}:{})}:sourceFontObservations?{sourceFontObservations}:undefined;
-  await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,
+  await kernel.ingestParsedDocument({id:document.id,ownerId:owner,courseId:document.course_id,name:document.name,originalName:document.original_name,
     hash:document.hash,mime:document.mime,origin:document.origin,originKey:document.origin_key,createdAt:document.created_at},pages,
     {parserVersion,expectedPages:totalPages,warnings,nativeTables,pdfVisuals,sourceMath,expectedCurrentVersion,
       ingestionLease:job?{id:job.id,token:job.leaseToken}:undefined,

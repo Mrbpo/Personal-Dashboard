@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import {documentSourceName} from './document-source-name.ts';
 import { mkdir, readFile, writeFile, readdir, lstat, unlink, utimes } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { database as db, searchIndexAvailable } from './database.ts';
@@ -16,7 +17,7 @@ export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR || './data/library');
 export const digest=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
-export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;folder_path:string;name:string;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
+export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;folder_path:string;name:string;original_name?:string|null;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
 export function normalizeFolderPath(value:string){return value.replaceAll('\\','/').split('/').map(part=>part.trim()).filter(part=>part&&part!=='.'&&part!=='..').slice(0,20).map(part=>part.slice(0,100)).join('/');}
 function inferredFolder(document:Pick<DocumentRow,'origin'|'origin_key'|'folder_path'>){
   if(document.folder_path)return normalizeFolderPath(document.folder_path);
@@ -31,14 +32,15 @@ export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
   if(mime&&mime!=='application/octet-stream')return mime;
   return ({txt:'text/plain',md:'text/markdown',csv:'text/csv',tsv:'text/tab-separated-values',meg:'text/plain',fa:'text/plain',fas:'text/plain',fasta:'text/plain',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
 }
-export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='') {
+export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='',originalName?:string) {
   if(!bytes.length||bytes.length>MAX_LIBRARY_BYTES)throw new Error('资料须非空且单份不超过 50 MB');
+  const sourceName=documentSourceName(name,originalName);
   // Same filenames in different courses are distinct sources.
   key=JSON.stringify([course,key]);
   mime=canonicalDocumentMime(name,mime,bytes);
   const hash=await saveBlob(bytes),id=digest([owner,origin,key,hash].join('\0'));
   folderPath=normalizeFolderPath(folderPath||({canvas:'Canvas',piazza:'Piazza',mail:'邮件',gmail:'邮件',upload:'上传'} as Record<string,string>)[origin]||'其他来源');
-  await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,folderPath,name.slice(0,200),mime,hash,bytes.length,new Date().toISOString()).run();
+  await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,original_name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,folderPath,name.slice(0,200),sourceName?.originalName??null,mime,hash,bytes.length,new Date().toISOString()).run();
   await db.prepare('UPDATE library_documents SET folder_path=? WHERE id=? AND owner_id=?').bind(folderPath,id,owner).run();
   return id;
 }
@@ -137,7 +139,7 @@ export async function indexDocument(owner:string,id:string,forcePdfFormulaRepars
       const pdfVisuals=await preparePdfVisualEvidence({owner,documentId:d.id,sourceHash:d.hash,pdfBytes:bytes,
         layout:{status:'unavailable',regions:[],pageSizes:[],reason:'Native/legacy PDF parser has no Docling layout result'}});
       await kernel.ingestParsedDocument({id:d.id,ownerId:owner,createdAt:d.created_at,courseId:d.course_id,
-        name:d.name,hash:d.hash,mime:d.mime,origin:d.origin,originKey:d.origin_key},pages,
+        name:d.name,originalName:d.original_name,hash:d.hash,mime:d.mime,origin:d.origin,originKey:d.origin_key},pages,
         {parserVersion:PDF_PARSER_VERSION,expectedPages:pages.length,pdfVisuals,expectedCurrentVersion});
     }
     const warning=pages.some(p=>p.text.startsWith('[本页自动识别不完整')||p.text.startsWith('[自动识别不完整'))?'部分内容无法可靠识别；搜索结果会提示核对原文件。':pages.some(p=>p.text.startsWith('[本地 OCR'))?'本地 OCR 已完成；公式、表格与图形可能不完整，请核对 PDF 原页。':pages.some(p=>p.text.includes('[本页公式识别不完整')||p.text.includes('[部分公式无法可靠识别'))?'部分公式无法可靠识别，请核对 PDF 原页。':/word|officedocument/.test(d.mime)?'Word 文本已解析；内嵌图片和图表请另存 PDF 后导入。':null;

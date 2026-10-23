@@ -11,7 +11,38 @@ import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngesti
 import {writeFile} from 'node:fs/promises';
 import {preparePdfVisualEvidence} from '../lib/kernel/pdf-visual-evidence.ts';
 import {DocumentContextError} from '../lib/kernel/document-context.ts';
+import {safeAttachmentName} from '../lib/document-source-name.ts';
 import {sourcePageRegionsFixture,fixtureSha} from './fixtures/source-page-regions.ts';
+
+test('original upload source names bind immutable versions, survive replay/repair and retain source isolation',async()=>{
+ await migrateKernel();const uid=randomUUID(),owner='source-name:'+uid,original=`Original \\'accent scholarly title ${uid}.pdf`,storage=safeAttachmentName(original),
+  pdf=await PDFDocument.create();pdf.addPage([100,100]);const bytes=await pdf.save(),hash=fixtureSha(bytes),
+  doc={id:'source-name-doc:'+uid,ownerId:owner,courseId:'',name:storage,hash,mime:'application/pdf',origin:'upload',originKey:'source-name-key:'+uid},
+  pages=[{pageNumber:1,locator:'page 1',text:'Source identity fixture. No PDF content accuracy claim.'}],options={parserVersion:'source-name-contract-v1'};
+ await kernel.ingestParsedDocument(doc,pages,options);const first=await kernel.documentIngestionHead(owner,doc.id,hash);
+ await kernel.ingestParsedDocument({...doc,originalName:original},pages,{...options,expectedCurrentVersion:first});
+ const second=await kernel.documentIngestionHead(owner,doc.id,hash);assert.notEqual(second,first);
+ const records=async()=> (await kernelPool().query(`SELECT v.id,d.name,d.owner_id,s.raw_value FROM document_texts d
+  JOIN document_text_versions v ON v.document_id=d.id JOIN source_item_versions s ON s.id=v.source_version_id WHERE d.id=$1 ORDER BY v.id`,[doc.id])).rows;
+ let rows=await records();assert.equal(rows.length,2);assert.equal(rows[0].name,original);
+ const previous=rows.find(r=>r.id===first)!,current=rows.find(r=>r.id===second)!;
+ assert.equal(previous.raw_value.name,storage);assert.equal(previous.raw_value.sourceName,undefined);
+ assert.equal(current.raw_value.name,original);assert.equal(current.raw_value.sourceName.originalName,original);assert.equal(current.raw_value.sourceName.storageName,storage);
+ const frozen=JSON.stringify(rows);
+ await kernel.ingestParsedDocument({...doc,originalName:original},pages,options);
+ await kernel.ingestParsedDocument(doc,pages,options); // A later reader may only know the safe cache label.
+ await kernel.ingestParsedDocument({...doc,name:original},pages,options); // Kernel repair paths use the current canonical label.
+ assert.equal(await kernel.documentIngestionHead(owner,doc.id,hash),second);assert.equal(JSON.stringify(await records()),frozen);
+ await assert.rejects(()=>kernel.ingestParsedDocument({...doc,originalName:original},pages,{...options,expectedCurrentVersion:first}));
+ await assert.rejects(()=>kernel.ingestParsedDocument({...doc,ownerId:'foreign'},pages,options));
+ await assert.rejects(()=>kernel.ingestParsedDocument({...doc,originalName:'unrelated.pdf'},pages,options));
+ rows=await records();assert.equal(JSON.stringify(rows),frozen);
+ const {findMentionedDocumentSources}=await import('../lib/kernel/document-source.ts'),question='Regarding 《'+original.slice(0,-4)+'》, what does this paper report?',
+  resolution=await findMentionedDocumentSources(kernelPool(),owner,question);
+ assert.equal(resolution.status,'resolved');assert.equal(resolution.matches[0].documentId,doc.id);
+ assert.equal((await findMentionedDocumentSources(kernelPool(),'foreign',question)).status,'not-mentioned');
+ assert.equal((await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:'different-course'})).status,'not-mentioned');
+});
 
 test('registered orig recall hints update only page search, survive rebuild and reject stale/raw failure atomically',async()=>{
   await migrateKernel();

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {documentSourceName} from '../document-source-name.ts';
 import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
@@ -903,7 +904,7 @@ export class KernelService {
     return result;
   }
 
-  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
+  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;originalName?:string|null;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
     options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
@@ -925,11 +926,20 @@ export class KernelService {
       page.pageNumber!==index+1||!page.extractionMethod||!page.parserVersion||!page.basedOn?.versionId||!page.basedOn.sourceVersionId||!page.basedOn.evidenceId)))
       throw new Error('Document page repair provenance is incomplete');
     const parser=options.parserVersion||'docling-v1',owner=document.ownerId||'local-owner';
+    const previousName=document.originalName==null&&document.origin==='upload'?(await kernelPool().query<{current_version_id:string;source_name:unknown}>(
+      `SELECT d.current_version_id,s.raw_value->'sourceName' source_name FROM document_texts d
+       JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+       JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
+       WHERE d.owner_id=$1 AND d.id=$2 AND d.source_hash=$3 AND s.raw_sha256=$3 AND NOT d.hidden`,
+      [owner,document.id,document.hash])).rows[0]:undefined;
+    const sourceName=documentSourceName(document.name,document.originalName,previousName?.source_name),
+      canonicalName=sourceName?.originalName??document.name;
       if(options.pdfVisuals){
         if(document.mime!=='application/pdf')throw new Error('PDF visual evidence requires a PDF source');
         assertPreparedPdfVisualEvidence(options.pdfVisuals,owner,document.id,document.hash,expected);
       }
       const expectedCurrentVersion=options.expectedCurrentVersion!==undefined?options.expectedCurrentVersion:
+        previousName?.source_name?previousName.current_version_id:
         options.pdfVisuals?await this.documentIngestionHead(owner,document.id,document.hash):undefined;
     if(options.nativeTables)assertPreparedNativeTableCandidates(options.nativeTables,owner,document.id,document.hash);
     if(options.sourceMath){
@@ -960,6 +970,7 @@ export class KernelService {
     const nativeWhitespace=nativeWhitespaceFingerprint(batchProvenance);
     const nativeRegionText=nativeRegionFingerprint(batchProvenance);
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(sourceName?{sourceName}:{}),
       ...(nativeWhitespace?{nativeWhitespace}:{}),
       ...(nativeRegionText?{nativeRegionText}:{}),
       ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
@@ -1002,7 +1013,8 @@ export class KernelService {
       }else if(options.pageProvenance)throw new Error('Document page repair requires a current-version guard');
       const version=await sourceVersion(client,{id:sourceItemId,source:`document:${document.origin}`,scope:document.courseId||'unscoped',
         externalId:document.id,courseId:document.courseId||null,
-        contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
+        contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:canonicalName,mime:document.mime,
+          ...(sourceName?{sourceName}:{}),
           originKey:document.originKey,parser,extractionMethod,warnings,
           ...(batchProvenance?{batchProvenance}:{}),
           ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
@@ -1013,7 +1025,7 @@ export class KernelService {
         rawUri:document.rawUri||`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
       await client.query(`INSERT INTO document_texts(id,owner_id,course_id,source_item_id,origin,origin_key,name,source_hash,created_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name`,
-        [document.id,owner,document.courseId||null,sourceItemId,document.origin,document.originKey,document.name,document.hash,document.createdAt||acquiredAt]);
+        [document.id,owner,document.courseId||null,sourceItemId,document.origin,document.originKey,canonicalName,document.hash,document.createdAt||acquiredAt]);
       const existing=(await client.query<{owner_id:string;source_hash:string}>(
         'SELECT owner_id,source_hash FROM document_texts WHERE id=$1',[document.id])).rows[0];
       if(existing.owner_id!==owner||existing.source_hash!==document.hash)throw new Error('Document identity mismatch');

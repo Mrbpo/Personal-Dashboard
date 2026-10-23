@@ -156,3 +156,8 @@ unchanged. `citationCheck.citationRelease` records original/derived digests and
 every withheld reference with its audit identity. It is an attributed model
 finding, not an independent semantic truth certificate. Off/legacy paths retain
 their previous behavior; production deployment is a separate step.
+## Original upload source names
+
+Upload source storage can retain `original_name` separately from the existing safe attachment name. This field is raw source input, not an independent canonical truth store. Normal index and Docling tasks read it durably by owner/document identity. Kernel validates the exact filename transformation, records the source-name observation in PostgreSQL raw provenance and immutable version identity, and projects the original spelling as the document name. Later uploads/repairs cannot guess an original title from underscores; registered observations are inherited under the current-head guard.
+
+Safe download names, blob paths, ownership/course checks and literal title matching are retained. Existing records without the original metadata remain unchanged; this does not automatically repair legacy documents or rewrite old parsed versions. A legacy backfill needs the original source name and matching file hash, and must retain historical evidence. No fuzzy aliases or UI changes are introduced.

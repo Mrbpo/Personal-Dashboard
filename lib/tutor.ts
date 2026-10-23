@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import {safeAttachmentName} from './document-source-name.ts';
 import { database as db } from './database.ts';
 import { searchCourseContent, listCourseSettings } from './repository.ts';
 import { aiResponse, hasAI } from './ai-response.ts';
@@ -43,7 +44,7 @@ export function validateAttachment(name: string, bytes: Uint8Array, maxBytes=8*1
   const signature = b.subarray(0, 16).toString('hex');
   const valid = ext === 'pdf' ? b.subarray(0, 5).toString() === '%PDF-' : ext === 'docx' ? signature.startsWith('504b0304') : ext === 'doc' ? signature.startsWith('d0cf11e0a1b11ae1') : ext === 'png' ? signature.startsWith('89504e470d0a1a0a') : ext === 'jpg' || ext === 'jpeg' ? signature.startsWith('ffd8ff') : ext === 'webp' ? b.subarray(0, 4).toString() === 'RIFF' && b.subarray(8, 12).toString() === 'WEBP' : !b.includes(0);
   if (!valid) throw new Error('文件内容与扩展名不符，或文件已损坏');
-  return { name: name.replace(/[\\/\x00-\x1f]/g, '_').slice(-160), mime, data: b.toString('base64'), size: bytes.length };
+  return { name: safeAttachmentName(name), mime, data: b.toString('base64'), size: bytes.length };
 }
 
 async function owned(owner: string, id: string) {
