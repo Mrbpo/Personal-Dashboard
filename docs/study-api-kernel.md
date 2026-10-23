@@ -167,3 +167,28 @@ Safe download names, blob paths, ownership/course checks and literal title match
 ## Focus retention after complete expansion
 
 Successful complete-source and persisted-text expansion carry the existing bounded, query-relevant source-page observation into selection retention too. A complete selector input alone does not ensure the model selected every necessary passage. Focused pages remain limited to four pages / 32 KiB and the existing 64-reference and request-capacity guards. Existing selected references, other sources, images and full expansion metadata are retained; an empty selector response is still insufficient. Focus is neither an answer nor a completeness or semantic verification claim. No new model review, source rewrite or production switch is introduced.
+
+## Literal decimal conditions in shared retrieval
+
+The shared document search preserves up to eight explicit decimal/percentage
+literals (at most 40 characters each) alongside the unchanged lexical query.
+Parameterized original-text matching preserves signs, precision and percent
+symbols, with NFKC compatibility normalization. It does not infer numerical
+equivalence, units, rounding, table roles or canonical facts. Unsupported
+composite formats retain lexical fallback; strict over-capacity/composite
+conditions return no results rather than silently checking only some literals.
+
+Broad retrieval retains lexical fallback and adds original-text numeric matches.
+Literal match counts rank pages before the existing lexical score; snippet
+selection uses the same conditions. Strict retrieval also requires the existing
+lexical match and all accepted literals. Owner, course, document, current-version
+and routing predicates remain in scope. Numeric observations are materialized
+once per visible page inside the read statement; no original body, evidence,
+stored search copy or index is rewritten. Queries without numeric conditions
+retain the existing scoring path. Original occurrence is a retrieval hint,
+not proof that a passage answers the question or supports a relationship.
+
+This path still scans visible original page bodies for numeric conditions.
+Its corpus latency must be reported separately from relevance improvements;
+a small SQL/unit test is not a throughput or final answer acceptance result.
+No provider request or parser is needed for this retrieval step.

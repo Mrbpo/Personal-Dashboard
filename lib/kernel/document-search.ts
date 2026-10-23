@@ -63,6 +63,28 @@ export function documentSearchTerms(query:string):{normalized:string;words:strin
   const formulaQuery=/[\\^_=∫∑√]/u.test(query);
   return{normalized,words:documentSearchWords(normalized,formulaQuery).slice(0,40)};
 }
+/** Exact retrieval observations, not parsed quantities or inferred units.
+ * Keep the indexed normalization unchanged; decimal precision/signs survive in
+ * a bounded original-text lane. Unsupported composite formats stay lexical. */
+export function documentNumericQueryLiterals(query:string):{literals:string[];patterns:string[];unavailableReason?:string}{
+ const text=query.normalize('NFKC').slice(0,4000),literals=new Set<string>();
+ const unavailable=(reason:string)=>({literals:[],patterns:[],unavailableReason:reason});
+ for(const match of text.matchAll(/[+\-−]?\d+(?:\.\d+)?(?:\s*%)?/gu)){
+  const literal=match[0].replace(/\s+/gu,''),percent=literal.endsWith('%'),end=match.index!+match[0].length;
+  if(!percent&&!literal.includes('.'))continue;
+  if(/[A-Za-z0-9_.+,−-]/u.test(text[match.index!-1]??''))continue;
+  if(!percent&&/^(?:[0-9]|\.[0-9]|[eE][+−-]?[0-9])/u.test(text.slice(end)))continue;
+  if(literal.length>40)return unavailable('literal-length-limit');
+  literals.add(literal);if(literals.size>8)return unavailable('literal-count-limit');
+ }
+ if(literals.size&&/(?:\d|%),[+−-]?\d|\d(?:\.\d+)?[eE][+−-]?\d/u.test(text))return unavailable('unsupported-composite-number-format');
+ const patterns=[...literals].map(literal=>{
+  const percent=literal.endsWith('%'),value=percent?literal.slice(0,-1):literal;
+  const escaped=value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  return '(^|[^A-Za-z0-9_.+,−-])'+escaped+(percent?'[[:space:]]*%':'(?![0-9]|[.][0-9]|[eE][+−-]?[0-9])');
+ });
+ return {literals:[...literals],patterns};
+}
 function documentSearchWords(normalized:string,formulaQuery:boolean){
   const words=[...new Set(normalized.split(' ').filter(word=>word.length>=(formulaQuery?1:2)&&
     (formulaQuery||!queryStopWords.has(word))))];
@@ -349,7 +371,30 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
   const course=options.courseId?`AND d.course_id=$${args.push(options.courseId)}`:'';
   const document=options.documentId?`AND d.id=$${args.push(options.documentId)}`:'';
   const routing=documentRoutingScopeSql(options.routingScope,args);
-  const match=options.strict?'c.search_vector @@ q.exact':'c.search_vector @@ q.broad';
+  const numeric=documentNumericQueryLiterals(query);
+  if(options.strict&&numeric.unavailableReason)return [];
+  const numericArg=numeric.patterns.length?`$${args.push(numeric.patterns)}::text[]`:undefined;
+  const numericValuesArg=numericArg?`$${args.push(numeric.literals.map(literal=>literal.replace(/%$/u,'')))}::text[]`:undefined;
+  // A literal substring is necessary for the escaped regex to match. CASE
+  // keeps the expensive boundary regex off unrelated original page bodies.
+  const numericCount=(body:string)=>`(SELECT count(*)::int FROM unnest(${numericArg},${numericValuesArg}) literal(pattern,value)
+    WHERE CASE WHEN strpos(normalize(${body},NFKC),literal.value)>0 THEN normalize(${body},NFKC) ~ literal.pattern ELSE false END)`;
+  // Materialize the expensive normalization once per visible page, then only
+  // retain version/page/count. PostgreSQL otherwise inlines the correlated
+  // count repeatedly for filtering, scoring and the score window.
+  const numericPages=numericArg?`, numeric_pages AS MATERIALIZED (
+    SELECT c.version_id,c.page_number,normalize(c.body,NFKC) numeric_body
+    FROM document_text_pages c JOIN visible_documents d ON d.current_version_id=c.version_id),
+    numeric_observations AS MATERIALIZED (SELECT c.version_id,c.page_number,
+      (SELECT count(*)::int FROM unnest(${numericArg},${numericValuesArg}) literal(pattern,value)
+        WHERE CASE WHEN strpos(c.numeric_body,literal.value)>0 THEN c.numeric_body ~ literal.pattern ELSE false END) matches
+      FROM numeric_pages c)` :'';
+  const numericJoin=numericArg?`JOIN numeric_observations literal_counts ON literal_counts.version_id=c.version_id AND literal_counts.page_number=c.page_number`:'';
+  const baseMatch=options.strict?'c.search_vector @@ q.exact':'c.search_vector @@ q.broad';
+  const match=numericArg?(options.strict?`(${baseMatch} AND literal_counts.matches=${numeric.patterns.length})`:
+    `(${baseMatch} OR literal_counts.matches>0)`):baseMatch;
+  const scoredName=numericArg?'scored_numeric_base':'scored';
+  const numericScores=numericArg?`, scored AS (SELECT *,base_score+literal_matches*(max(base_score) OVER()+1) score FROM scored_numeric_base)`:'';
   const rows=await pool.query<DocumentTextHit&{orig_provenance?:DocumentOrigSearchProvenance|null;orig_version_id:string;orig_page_count:number;orig_body_sha256:string;orig_search_sha256:string}>(`
     WITH q AS (SELECT
       plainto_tsquery('english',$2) || plainto_tsquery('simple',$2) AS exact,
@@ -358,7 +403,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       WHERE d.owner_id=$1 AND d.hidden=false ${course} ${document} ${routing}
       AND NOT EXISTS (SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id
         AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND newer.hidden=false
-        AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))),
+        AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id))))${numericPages},
     terms AS (SELECT term,plainto_tsquery('english',term)||plainto_tsquery('simple',term) query FROM unnest($5::text[]) term),
     collection AS MATERIALIZED (SELECT count(*) n,greatest(1,avg(length(c.search_vector))) avg_length
       FROM document_text_pages c JOIN visible_documents d ON d.current_version_id=c.version_id),
@@ -366,15 +411,17 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       JOIN visible_documents d ON d.current_version_id=s.version_id WHERE s.search_vector @@ t.query) df FROM terms t),
     term_weights AS MATERIALIZED (SELECT f.*,ln(1+(collection.n-f.df+.5)/(f.df+.5)) idf
       FROM frequencies f CROSS JOIN collection WHERE f.df>0),
-    scored AS (SELECT c.version_id,c.page_number,c.version_id||':'||c.page_number id,0 position,d.id document_id,
+    ${scoredName} AS (SELECT c.version_id,c.page_number,c.version_id||':'||c.page_number id,0 position,d.id document_id,
+      ${numericArg?'literal_counts.matches literal_matches,':''}
       coalesce((SELECT sum(
         f.idf*
         (tf.value*2.2)/(tf.value+1.2*(.25+.75*length(c.search_vector)/collection.avg_length)))
       FROM term_weights f CROSS JOIN LATERAL (SELECT ts_rank_cd(c.search_vector,f.query,0)*10 value) tf
-      WHERE c.search_vector @@ f.query AND tf.value>0),0) score,
+      WHERE c.search_vector @@ f.query AND tf.value>0),0) ${numericArg?'base_score':'score'},
       coalesce((SELECT sum(f.idf) FROM term_weights f WHERE c.search_vector @@ f.query)/
         nullif((SELECT sum(idf) FROM term_weights),0),0) lexical_support
-      FROM document_text_pages c JOIN visible_documents d ON d.current_version_id=c.version_id CROSS JOIN q CROSS JOIN collection WHERE ${match}),
+      FROM document_text_pages c JOIN visible_documents d ON d.current_version_id=c.version_id ${numericJoin} CROSS JOIN q CROSS JOIN collection WHERE ${match})
+    ${numericScores},
     diverse AS (SELECT *,row_number() OVER (PARTITION BY document_id,page_number ORDER BY score DESC,position) page_rank FROM scored),
     selected AS MATERIALIZED (SELECT * FROM diverse WHERE page_rank=1
       ORDER BY score DESC,document_id,position LIMIT $4)
@@ -389,7 +436,7 @@ async function searchDocumentSnippets(pool:Pool,owner:string,query:string,option
       JOIN document_text_pages p ON p.version_id=c.version_id AND p.page_number=c.page_number
       LEFT JOIN LATERAL (SELECT chunk.id,chunk.body FROM document_text_chunks chunk
         WHERE chunk.version_id=c.version_id AND chunk.page_number=c.page_number
-        ORDER BY ts_rank_cd(chunk.search_vector,q.broad,0) DESC,chunk.position LIMIT 1) snippet ON true
+        ORDER BY ${numericArg?numericCount('chunk.body')+' DESC,':''}ts_rank_cd(chunk.search_vector,q.broad,0) DESC,chunk.position LIMIT 1) snippet ON true
     ORDER BY score DESC,d.id,c.position LIMIT $4`,args);
   let hits:DocumentTextHit[]=rows.rows.map(({orig_provenance,orig_version_id,orig_page_count,orig_body_sha256,orig_search_sha256,...row})=>({...row,
     ...(orig_provenance?{retrieval_hint:documentOrigSearchMetadata(orig_provenance,{owner,documentId:row.document_id,sourceHash:row.source_hash,

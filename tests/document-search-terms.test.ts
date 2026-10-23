@@ -1,7 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type {Pool} from 'pg';
-import {documentSearchTerms,documentSearchText,searchDocumentText} from '../lib/kernel/document-search.ts';
+import {documentSearchTerms,documentSearchText,documentNumericQueryLiterals,searchDocumentText} from '../lib/kernel/document-search.ts';
+
+test('decimal observations retain sign, precision and percent without altering indexed search text',()=>{
+ const query='target domain 2.2% 3.6%';
+ assert.deepEqual(documentNumericQueryLiterals(query).literals,['2.2%','3.6%']);
+ assert.deepEqual(documentNumericQueryLiterals('gain -2.2 +3.60 and −4.5 %').literals,['-2.2','+3.60','−4.5%']);
+ assert.deepEqual(documentNumericQueryLiterals('提高２．２％与３．６％').literals,['2.2%','3.6%']);
+ assert.deepEqual(documentNumericQueryLiterals('same 2.2% and 2.2 %').literals,['2.2%']);
+ assert.deepEqual(documentNumericQueryLiterals('decimal 0.5.').literals,['0.5']);
+ assert.deepEqual(documentNumericQueryLiterals('v2.2 _2.2 1.2.3 42').literals,[]);
+ const hostile=documentNumericQueryLiterals('gain 2.2%(a+)+');
+ assert.equal(hostile.patterns.length,1);assert.ok(!hostile.patterns[0].includes('(a+)+'));
+ assert.match(hostile.patterns[0],/2\\\.2/);
+ assert.equal(documentSearchText(query),'target domain 2 2 3 6');
+ assert.deepEqual(documentSearchTerms(query).words,['target','domain'],'old index/query normalization is not rewritten');
+});
+
+test('decimal observations have all-or-nothing bounds and reject unsupported composites without inventing conversions',()=>{
+ for(const query of [Array.from({length:9},(_,i)=>`${i}.25%`).join(' '),'1'.repeat(41)+'.2%',
+  '2.2% and 1,234.5%','2.2% and 1.2e-3']){
+  const result=documentNumericQueryLiterals(query);assert.deepEqual(result.patterns,[]);assert.ok(result.unavailableReason);
+ }
+ assert.notDeepEqual(documentNumericQueryLiterals('2.2%').patterns,documentNumericQueryLiterals('2.20%').patterns);
+ assert.notDeepEqual(documentNumericQueryLiterals('2.2%').patterns,documentNumericQueryLiterals('-2.2%').patterns);
+});
+
+test('numeric SQL binds escaped patterns after scope arguments and ranks original page and snippet observations',async()=>{
+ const calls:{sql:string;args:unknown[]}[]=[],pool={query:async(sql:string,args:unknown[])=>{calls.push({sql,args});return {rows:[]};}} as unknown as Pool;
+ await searchDocumentText(pool,'owner','target domain 2.2% 3.6%',{strict:true,courseId:'course-1',semantic:false,hybrid:false,aiRerank:false});
+ assert.equal(calls.length,1);assert.equal(calls[0].args[5],'course-1');assert.deepEqual(calls[0].args[6],documentNumericQueryLiterals('2.2% 3.6%').patterns);
+ assert.deepEqual(calls[0].args[7],['2.2','3.6']);
+ assert.match(calls[0].sql,/unnest\(\$7::text\[\],\$8::text\[\]\)/);assert.match(calls[0].sql,/literal_counts\.matches=2/);
+ assert.match(calls[0].sql,/numeric_pages AS MATERIALIZED/);assert.match(calls[0].sql,/numeric_observations AS MATERIALIZED/);
+ assert.match(calls[0].sql,/CASE WHEN strpos\(c\.numeric_body,literal\.value\)>0 THEN/);
+ assert.match(calls[0].sql,/normalize\(chunk\.body,NFKC\)/);assert.ok(!calls[0].sql.includes('2.2%'));
+ await searchDocumentText(pool,'owner',Array.from({length:9},(_,i)=>`${i}.25%`).join(' '),{strict:true});
+ assert.equal(calls.length,1,'strict over-capacity numeric conditions cannot silently become a partial numeric query');
+});
 
 test('an otherwise empty query retains short variables and numbers without changing indexed normalization',()=>{
  const query='4T(n/4) 5n';
