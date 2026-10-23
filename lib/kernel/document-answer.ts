@@ -330,6 +330,9 @@ const supportMetadata=({text,image,textContextWindows,nativeRegionWindows,...sup
 export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUnit[]{
  const units:DocumentQuoteUnit[]=[],identities=new Set<string>();
  const paired=new Set(supports.flatMap(s=>s.captionMembers?.map(u=>u.id)??[]));
+ const pairedNativeSupports=new Set(supports.filter(s=>s.nativeRegionObservation&&s.captionMembers)
+  .flatMap(s=>s.captionMembers!.map(u=>u.supportId)));
+ const isPaired=(id:string,supportId:string)=>paired.has(id)||pairedNativeSupports.has(supportId);
  const lastEnd=(text:string,pattern:RegExp)=>Array.from(text.matchAll(pattern)).at(-1);
  for(const support of supports){
   if(support.kind!=='text')continue;
@@ -349,7 +352,7 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
    const text=body.slice(start,end),quoteSha256=sha(text);
    const id='q:'+sha(JSON.stringify([DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION,sourceIdentity,start,end,quoteSha256])).slice(0,24);
    if(identities.has(id))throw new Error('Duplicate or colliding source quote unit ID');identities.add(id);
-   units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:Boolean(whitespace(text))&&!paired.has(id)});
+   units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:Boolean(whitespace(text))&&!isPaired(id,support.id)});
    start=end;
   }
  }
@@ -366,7 +369,7 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
   if(eligible.length+3>1000||eligible.length>250&&eligible.reduce((n,v)=>n+v.length,0)>15000)continue;
   if(identities.has(id))throw new Error('Duplicate or colliding page quote unit ID');identities.add(id);
   units.push({id,supportId:support.id,startUtf16:0,endUtf16:body.length,quoteSha256:support.sha256,text:body,
-   selectable:!paired.has(id),pageContext:{policy:'stored-page-context-v1',semanticRelationsVerified:false}});
+   selectable:!isPaired(id,support.id),pageContext:{policy:'stored-page-context-v1',semanticRelationsVerified:false}});
  }
  // Additional windows are offered before selection. Every original partition
  // stays intact; no citation is expanded after the model has selected it.
@@ -389,7 +392,7 @@ export function documentQuoteUnits(supports:readonly Support[]):DocumentQuoteUni
    const eligible=[...units.map(u=>u.id),...supports.filter(s=>s.kind==='image').map(s=>s.id),id];
    if(eligible.length+3>1000||eligible.length>250&&eligible.reduce((n,v)=>n+v.length,0)>15000)break;
    if(identities.has(id))throw new Error('Duplicate or colliding context quote unit ID');identities.add(id);
-   units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:!paired.has(id),
+   units.push({id,supportId:support.id,startUtf16:start,endUtf16:end,quoteSha256,text,selectable:!isPaired(id,support.id),
     contextWindow:{policy:hint.policy,hintSha256:hint.hintSha256,references:window.references.map(ref=>ref.reference),semanticRelationsVerified:false}});
    extra++;
   }
@@ -498,6 +501,18 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
    if(!caption||siblings.length!==1)continue; // Missing/ambiguous pairs stay separate; never import an outside caption.
    const members=units.filter(u=>u.supportId===caption.id);
    if(members.some(u=>u.selectable))image.captionMembers=members.map(u=>({...u,selectable:false}));
+  }
+  // Registered complex native PDF regions remain observations, not certified
+  // tables. Keep their literal text and one already available full original
+  // page together through selection, generation and the existing local audit.
+  // Never infer a pairing from a title, crop overlap or another page/version.
+  for(const caption of supports.filter(s=>s.kind==='text'&&s.nativeRegionWindows)){
+   const candidates=supports.filter(s=>s.kind==='image'&&s.image&&s.visual?.kind==='pdf-page'&&same(s,caption)&&
+    s.visual.physicalPage===caption.nativeRegionWindows!.binding.physicalPage);
+   if(candidates.length!==1)continue;
+   const members=units.filter(u=>u.supportId===caption.id);if(!members.some(u=>u.selectable))continue;
+   const image=candidates[0];image.captionMembers=members.map(u=>({...u,selectable:false}));
+   image.nativeRegionObservation=structuredClone(caption.nativeRegionObservation);
   }
  }
  const metadata=supports.map(support=>({...supportMetadata(support),

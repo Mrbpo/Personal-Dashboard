@@ -5,7 +5,9 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {NATIVE_REGION_TEXT_VERSION,validateNativeRegionBundle,projectNativeRegionText,prepareNativeRegionWindows,
  readNativeRegionObservation,nativeRegionFingerprint,nativeRegionHash,nativeRegionBaseline,type NativeRegionBundle} from '../lib/kernel/native-region-text.ts';
-import {prepareDocumentAnswer,resolveDocumentAnswerSelections,validateGroundedDocumentAnswer} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentAnswer,resolveDocumentAnswerSelections,validateGroundedDocumentAnswer,buildSelectedDocumentAnswerRequest,
+ DOCUMENT_ANSWER_VISUAL_UNIT_POLICY} from '../lib/kernel/document-answer.ts';
+import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest} from '../lib/kernel/document-citation-audit.ts';
 
 const source={owner:'owner',documentId:'paper',sourceHash:'a'.repeat(64),pageCount:1},text='.650 / .647 / .654';
 const bundle=():NativeRegionBundle=>({policy:'native-pdf-region-observations-v1',source:{...source},producer:{engine:'pdfplumber',packages:{pdfplumber:'0.11.9','pdfminer.six':'20251230'},
@@ -101,4 +103,52 @@ test('caption supersession recovers only the unchanged baseline and refuses loss
  const changed=structuredClone(next);changed.pages[0].chars[0].text='x';assert.throws(()=>nativeRegionBaseline(previous,changed,input.body));
  const lost=structuredClone(next);lost.pages[0].regions[0].charIndices.shift();assert.throws(()=>nativeRegionBaseline(previous,lost,input.body));
  assert.throws(()=>nativeRegionBaseline(previous,next,input.body+' changed'));
+});
+
+async function nativeVisualContext(){
+ const {input}=await staged(),hint=(await prepareNativeRegionWindows(input))!,
+  png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64'),hash=nativeRegionHash(png),
+  anchor={id:'pg:current:1',document_id:source.documentId,course_id:'',name:'Study',origin:'fixture',origin_key:'x',source_hash:source.sourceHash,
+   source_version_id:'source-version',body:input.body,locator:'第 1 页',page_number:1,evidence_id:'evidence',parser_version:NATIVE_REGION_TEXT_VERSION,score:1,evidence_body:'full-page' as const},
+  image={kind:'pdf-page' as 'pdf-page'|'pdf-region',attachmentId:'original-page',anchorEvidenceId:'evidence',assetId:hash,sha256:hash,byteLength:png.length,width:1,height:1,
+   mime:'image/png' as const,bytes:png,physicalPage:1,rawPdfSha256:source.sourceHash,manifestSha256:'f'.repeat(64),
+   provenance:{rawPdfSha256:source.sourceHash,pageRenderSha256:hash,pageSizePoints:{width:100,height:100},rotation:0,
+    rendererPolicy:'component-fixture-only',sourcePageCropBox:{x:0,y:0,width:100,height:100}},
+   source:{documentId:source.documentId,currentVersionId:'current',sourceVersionId:'source-version',sourceHash:source.sourceHash}};
+ return {context:{anchors:[anchor,{...anchor,id:'pg:other:1',document_id:'other',evidence_id:'outside',body:'Other source retained.'}],images:[image],parents:[],
+  sourceContentIsUntrusted:true as const,textQuotePolicy:'stored-page-v1' as const,nativeRegionWindows:[hint]},png};
+}
+
+test('native complex PDF quotation and its original page remain one source through generation and local citation checking',async()=>{
+ const {context,png}=await nativeVisualContext(),question='Compare the scores',legacy=prepareDocumentAnswer(question,context),
+  p=prepareDocumentAnswer(question,context,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY),image=p.supports.find(s=>s.id==='i0')!,members=p.quoteUnits.filter(q=>q.supportId==='e0'),
+  original=legacy.quoteUnits.find(q=>q.contextWindow?.policy==='native-region-text-windows-v1')!;
+ assert.ok(image.captionMembers?.some(u=>u.text===text));assert.ok(members.every(q=>!q.selectable));
+ assert.ok(p.quoteUnits.some(q=>q.supportId==='e1'&&q.selectable));assert.equal(image.nativeRegionObservation?.semanticRelationsVerified,false);
+ assert.notEqual(p.fingerprint,legacy.fingerprint);assert.ok(resolveDocumentAnswerSelections({status:'answered',message:'',claims:[{text:'Fixture.',citations:[{id:original.id}]}]},legacy.supports));
+ assert.throws(()=>resolveDocumentAnswerSelections({status:'answered',message:'',claims:[{text:'Fixture.',citations:[{id:original.id}]}]},p.supports),/ungrounded/);
+ const generation=buildSelectedDocumentAnswerRequest(p,['i0'],{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:4000}),wire=JSON.stringify(generation);
+ assert.ok(wire.includes(png.toString('base64')));assert.ok(wire.includes(text));assert.ok(!wire.includes('Other source retained.'));
+ const selections={status:'answered' as const,message:'',claims:[{text:'Transport fixture only.',citations:[{id:'i0'}]}]},
+  audit=prepareDocumentCitationAudit(question,context,{inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,
+   providerSelections:selections,claimIndex:0,unitPolicy:DOCUMENT_ANSWER_VISUAL_UNIT_POLICY}),request=buildDocumentCitationAuditRequest(audit.packet);
+ assert.equal(audit.packet.references[0].kind,'image');assert.ok(JSON.stringify(request).includes(png.toString('base64')));assert.ok(JSON.stringify(request).includes(text));
+});
+
+test('native PDF pairing never imports a cropped, wrong-page, ambiguous, missing or unrelated original',async()=>{
+ const {context}=await nativeVisualContext();
+ for(const change of ['crop','page','duplicate','missing','no-native'] as const){
+  const next={...context,images:context.images.map(i=>({...i}))};
+  if(change==='crop')next.images[0].kind='pdf-region';
+  if(change==='page')next.images[0].physicalPage=2;
+  if(change==='duplicate')next.images.push({...next.images[0],attachmentId:'ambiguous'});
+  if(change==='missing')next.images=[];
+  if(change==='no-native')next.nativeRegionWindows=[];
+  const p=prepareDocumentAnswer('Compare scores',next,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY);
+  assert.ok(!p.supports.some(s=>s.captionMembers?.length),change);assert.ok(p.quoteUnits.some(u=>u.supportId==='e0'&&u.selectable),change);
+ }
+ for(const field of ['documentId','currentVersionId','sourceVersionId','sourceHash'] as const){
+  const next={...context,images:context.images.map(i=>({...i,source:{...i.source,[field]:i.source[field]+'-other'}}))};
+  assert.throws(()=>prepareDocumentAnswer('Compare scores',next,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY));
+ }
 });
