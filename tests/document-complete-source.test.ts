@@ -95,7 +95,8 @@ test('application retains a missed current paragraph and its selected original P
   question=`Using ${item.title}, explain the baseline observations.`,stop=new Error('Stop before any paid reservation'),
   originalReader=(kernel as any).studyAnswerContextReader,originalText=kernel.readCompleteDocumentText;
  let observed:Awaited<ReturnType<typeof originalText>>|undefined,attempts=0;
- (kernel as any).studyAnswerContextReader=async()=>async()=>base;
+ (kernel as any).studyAnswerContextReader=async(_owner:unknown,_query:unknown,options:{documentId?:string})=>
+  async()=>options.documentId?{...base,anchors:[],parents:[],images:[]}:base;
  kernel.readCompleteDocumentText=async(...args)=>{observed=await originalText.apply(kernel,args);return observed;};
  const policy:DocumentAnswerPolicy={scope:'application',model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000,
   evidenceSelection:'select-then-answer',beforeAttempt:async identity=>{
@@ -112,6 +113,44 @@ test('application retains a missed current paragraph and its selected original P
  try{await assert.rejects(kernel.answerStudyContent(item.owner,question,{includeParents:true,includeImages:true},policy),e=>e===stop);
   assert.equal(attempts,1);assert.equal(unexpectedCalls,0);
  }finally{(kernel as any).studyAnswerContextReader=originalReader;kernel.readCompleteDocumentText=originalText;}
+});
+
+test('successful complete and persisted-text expansion retain relevant source text after a wrong-role selection',pg,async()=>{
+ const savedFetch=globalThis.fetch,savedComplete=kernel.readCompleteDocumentSource;
+ try{for(const completeAvailable of [true,false]){
+  const witness='The dataset contains five questions per image, with 15000 images and 75000 questions.',
+   distractor='The decoder produces five outputs for each step.',
+   item=await fixture({separateParents:true,captions:1,bodies:Array.from({length:20},(_,i)=>
+    i===0?distractor:i===19?witness:'Unrelated controls and training background. '.repeat(65))}),
+   question=`In ${item.title}, how many questions per image are in the dataset?`,stop=new Error('Generation captured; no external request');
+  assert.ok(item.pages.reduce((n,p)=>n+Buffer.byteLength(p.text),0)>32768,'exercise the selection retention limit');
+  assert.equal((await savedComplete.call(kernel,item.owner,item.source)).status,'available');
+  kernel.readCompleteDocumentSource=completeAvailable?savedComplete:async(...args)=>{
+   const result=await savedComplete.apply(kernel,args);if(result.status!=='available')return result;
+   return {status:'unavailable',reason:'image-input-limit',manifest:{...result.manifest,complete:false,reason:'image-input-limit'}};
+  };
+  let calls=0,selectedId='';
+  globalThis.fetch=async(_url,init)=>{
+   calls++;const request=JSON.parse(String(init?.body)),packet=JSON.parse(request.input.at(-1).content[0].text);
+   if(calls===1){
+    assert.equal(request.text.format.name,'document_evidence_selection');
+    assert.ok(packet.focusedText.pages.some((p:{evidenceId:string})=>p.evidenceId===item.nodes[19].evidenceId));
+    assert.ok(packet.quoteUnits.some((q:{text:string})=>q.text.includes('Unrelated controls')),'keep expanded original context');
+    assert.ok(packet.evidence.some((e:{kind:string})=>e.kind==='image'),'keep the already retrieved original image');
+    selectedId=packet.quoteUnits.find((q:{text:string})=>q.text===distractor).id;
+    return new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:1,output_tokens:1},
+     output_text:JSON.stringify({referenceIds:[selectedId]})}),{status:200});
+   }
+   assert.equal(calls,2);assert.equal(request.text.format.name,'grounded_document_answer_units');
+   assert.ok(packet.quoteUnits.some((q:{text:string})=>q.text===witness),'the source count survives without inventing an answer');
+   assert.ok(packet.quoteUnits.some((q:{text:string})=>q.text===distractor),'do not erase the model selection');
+   throw stop;
+  };
+  await assert.rejects(kernel.answerStudyContent(item.owner,question,{includeParents:true,includeImages:true,
+   semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false},{scope:'application',model:'gpt-5.4-mini',reasoningEffort:'low',
+   maxOutputTokens:3000,evidenceSelection:'select-then-answer'}),e=>e===stop);
+  assert.equal(calls,2);
+ }}finally{globalThis.fetch=savedFetch;kernel.readCompleteDocumentSource=savedComplete;}
 });
 
 test('selected complete initial route carries a real PG paragraph missed by ranked14 into actual generation input and binds current original images',pg,async()=>{

@@ -1426,15 +1426,15 @@ export class KernelService {
           if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
           const base=await this.authorImageTableContext(owner,retrievalQuestion??question,ranked,selected);
           const complete=await this.readCompleteDocumentSource(owner,selected);
-          const retainFocusedText=async():Promise<DocumentAnswerContext>=>{
-            if(!focusAllowed)return base;
+          const retainFocusedText=async(seed:DocumentAnswerContext=base):Promise<DocumentAnswerContext>=>{
+            if(!focusAllowed)return seed;
             // Search once; every subsequent answer-stage read still verifies
             // current owner, source and page bodies through the Kernel reader.
             focusReader??=this.studyAnswerContextReader(owner,focusQuery!,{...routedOptions,documentId:selected.documentId,
               sourceHint:{selectedDocumentTitle:selected.title},limit:FOCUSED_TEXT_LIMITS.pages,strict:false,
               includeParents:false,includeImages:false,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false},false);
             const focused=await (await focusReader)(),settings=await documentAnswerSettings(policy);
-            let expanded=base,bytes=0,inputUpper:number|undefined;
+            let expanded=seed,bytes=0,inputUpper:number|undefined;
             const pages:FocusedDocumentText['pages']=[],omitted:Array<{evidenceId:string;reason:string}>=[];
             for(const hit of focused.anchors){
               if(hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||hit.source_version_id!==selected.sourceVersionId||
@@ -1453,7 +1453,7 @@ export class KernelService {
                 expanded=candidate;bytes+=size;pages.push(page);inputUpper=upper;
               }catch(error){if(!(error instanceof DocumentAnswerRequestLimitError))throw error;omitted.push({evidenceId:hit.evidence_id,reason:error.code});}
             }
-            contextExpansion={...contextExpansion,...(pages.length?{strategy:'ranked-plus-focused-mentioned-text'}:{}),
+            contextExpansion={...contextExpansion,...(pages.length&&seed===base?{strategy:'ranked-plus-focused-mentioned-text'}:{}),
               focusedText:{policy:'bounded-mentioned-source-relevance-v1',querySha256:focusedTextQueryHash(focusQuery!),
                 admitted:pages,omitted,bodyUtf8Bytes:bytes,inputTokenUpper:inputUpper,otherSourcesRetained:true,coverage:'unassessed',structureRelationsVerified:false}};
             return expanded;
@@ -1480,7 +1480,7 @@ export class KernelService {
               textSourceManifestSha256:text.manifest.manifestSha256,orderedTextSha256:text.manifest.orderedTextSha256,
               visualScope:'ranked-selected-only',exhaustiveVisualUnavailable:visualReason,
               originalFileCompletenessVerified:false,otherSourcesRetained:true,inputTokenUpper:inputUpper};
-            return expanded;
+            return retainFocusedText(expanded);
           };
           if(complete.status==='unavailable'){
             if(complete.reason.startsWith('image-'))return retainText(complete.reason);
@@ -1504,7 +1504,9 @@ export class KernelService {
           contextExpansion={strategy:'ranked-plus-complete-mentioned-source',coverage:'unassessed',selectedSource:selected,
             sourceManifestSha256:complete.manifest.manifestSha256,sourceNodes:complete.manifest.returnedNodeCount,
             sourceImages:complete.manifest.images.length,otherSourcesRetained:true,inputTokenUpper:inputUpper};
-          return expanded;
+          // Complete input can still exceed selection's bounded text retention.
+          // Carry the same validated focus through successful expansion too.
+          return retainFocusedText(expanded);
         };
       }
     }
