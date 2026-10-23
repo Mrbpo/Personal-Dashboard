@@ -437,6 +437,26 @@ export function resolveDocumentAnswerSelections(value:unknown,supports:readonly 
  return {answer:validateGroundedDocumentAnswer({...selections,claims},validationSupports),providerSelections:selections,selectedUnits};
 }
 
+/** Model-response boundary only. Identical offered citations within one claim
+ * are a set, not a new evidence edge. Strict downstream resolvers stay strict;
+ * different claims, different IDs, raw output and claim text are not rewritten. */
+export function normalizeDocumentAnswerSelections(value:unknown,offeredIds:readonly string[]){
+ const original=answerShape(value,'units'),offered=new Set(offeredIds),duplicates:Array<{claimIndex:number;citationIndex:number;firstCitationIndex:number;id:string}>=[];
+ for(const claim of original.claims)for(const citation of claim.citations)
+  if(!offered.has(citation.id))throw Error('Answer cites evidence outside the selected input');
+ const selections:DocumentAnswerSelections={...original,claims:original.claims.map((claim,claimIndex)=>{
+  const first=new Map<string,number>();return {...claim,citations:claim.citations.filter((citation,citationIndex)=>{
+   const previous=first.get(citation.id);if(previous===undefined){first.set(citation.id,citationIndex);return true;}
+   duplicates.push({claimIndex,citationIndex,firstCitationIndex:previous,id:citation.id});return false;
+  })};
+ })};
+ const normalization=duplicates.length?{policy:'identical-offered-citation-dedup-v1' as const,
+  providerSelectionsSha256:sha(JSON.stringify(original)),normalizedSelectionsSha256:sha(JSON.stringify(selections)),
+  providerCitationIds:original.claims.map(c=>c.citations.map(x=>x.id)),normalizedCitationIds:selections.claims.map(c=>c.citations.map(x=>x.id)),
+  claimsUnchanged:true as const,duplicates}:undefined;
+ return {selections,normalization};
+}
+
 export function prepareDocumentAnswer(question:string,context:DocumentAnswerContext,unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY){
  if(typeof question!=='string'||!question.trim()||Array.from(question).length>4000)throw new Error('Invalid document question');
  if(unitPolicy!==undefined&&unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY)throw new Error('Invalid document citation unit policy');
@@ -1291,7 +1311,9 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    deriveSourceValueAnswer(decoded,rawOutputText,sourceValueGeneration.catalog,referenceIds!,sourceValueGeneration.questionContract):undefined;
  const sourceQuantityDerivation=sourceQuantityGeneration?.applied?deriveSourceQuantityAnswer(question,decoded,rawOutputText,
   sourceQuantityGeneration.catalog,sourceQuantityGeneration.table,sourceQuantityGeneration.units,referenceIds!):undefined;
- const {answer,providerSelections:normalizedSelections,selectedUnits}=resolveDocumentAnswerSelections(sourceQuantityDerivation?.normalizedSelections??sourceValueDerivation?.normalizedSelections??decoded,prepared.supports);
+ const citationNormalization=!sourceQuantityDerivation&&!sourceValueDerivation?normalizeDocumentAnswerSelections(decoded,
+  referenceIds??[...prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.id),...prepared.supports.filter(s=>s.kind==='image').map(s=>s.id)]):undefined;
+ const {answer,providerSelections:normalizedSelections,selectedUnits}=resolveDocumentAnswerSelections(sourceQuantityDerivation?.normalizedSelections??sourceValueDerivation?.normalizedSelections??citationNormalization?.selections??decoded,prepared.supports);
  const providerSelections=sourceValueDerivation||sourceQuantityDerivation?null:normalizedSelections;
  if(referenceIds&&selectedUnits.some(unit=>!referenceIds.includes(unit.selectionId)))throw new Error('Answer cites evidence outside the selected input');
  policy.onStage?.('evidence-selection');
@@ -1314,6 +1336,7 @@ export async function synthesizeDocumentAnswer(question:string,readContext:()=>P
    ({tableId,physicalPage,result,captionLinkStatus}))??[]:[])}:undefined;
  if(boundSourceQuantityDerivation)await policy.recordSourceQuantityDerivation?.(boundSourceQuantityDerivation);
  return {answer,providerSelections,selectedUnits,providerRequestSha256,citationRepairs:[] as DocumentCitationRepair[],
+  ...(citationNormalization?.normalization?{citationReferenceNormalization:citationNormalization.normalization}:{}),
   ...(navigationProjection.receipt?{sourceNavigation:navigationProjection.receipt}:{}),
   model:actualModel,requestedModel:model,providerResponseId:typeof payload.id==='string'?payload.id:null,usage:payload.usage??null,
   sourceDocuments:prepared.input.documentMetadata,promptVersion:DOCUMENT_ANSWER_PROMPT_VERSION,requestIdentity:identity,...receipt,

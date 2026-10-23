@@ -229,6 +229,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
       (result.sourceValueDerivation!.method==='source-cell-bindings-v2'?'program-rendered-source-cell':'program-rendered-difference'):'provider-statement')}:{}),
     promptVersion:result.promptVersion,referencePolicyVersion:result.referencePolicyVersion,
     selectedUnits:result.selectedUnits,evidence:result.evidence,warnings:result.warnings,
+    ...('citationReferenceNormalization' in result&&result.citationReferenceNormalization?{citationReferenceNormalization:result.citationReferenceNormalization}:{}),
     semanticVerified:false,wholeAnswerVerified:false}}};
  }catch(error){
   if(error instanceof StudyAnswerError)throw error;
