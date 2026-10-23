@@ -17,7 +17,19 @@ export type DoclingRegion={pictureRef:string;pageNumber:number;derivedPageNumber
 export type DoclingVisualLayout={status:'available'|'unavailable';regions:DoclingRegion[];
  pageSizes:Array<{pageNumber:number;width:number;height:number}>;reason?:string;
  unavailablePictures?:Array<{pictureRef:string;provenance:unknown[]}>;
- resultReferences?:Array<{resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[]}>};
+ resultReferences?:Array<{resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[];resultPageRange?:[number,number]}>};
+
+/** A partial result for an unmodified full original input is distinct from a
+ * copied/renumbered batch. Never infer this mapping from observed page numbers. */
+export function validateOriginalDoclingPageRange(value:unknown,binding:{sourceHash:string;inputHash:string;pageCount:number;copyIndices:number[]}):[number,number]|undefined{
+ if(value===undefined)return;
+ if(!Array.isArray(value)||value.length!==2||!value.every(Number.isInteger)||!Number.isInteger(binding.pageCount)||
+  binding.pageCount<1||binding.pageCount>500||value[0]<1||value[1]<value[0]||value[1]>binding.pageCount||
+  !/^[a-f0-9]{64}$/.test(binding.sourceHash)||binding.inputHash!==binding.sourceHash||
+  binding.copyIndices.length!==binding.pageCount||binding.copyIndices.some((n,i)=>n!==i))
+  throw new Error('Original Docling page range/input mapping differs');
+ return [value[0],value[1]];
+}
 /** Native parser output only. Raw fields and strings remain unchanged; this is
  * not original quotation evidence or a canonical fact. */
 export type DoclingNativeTable = {reference:string;pageNumbers:number[];raw:Record<string,unknown>;
@@ -366,7 +378,7 @@ export type DoclingPageRegionNode={reference:string;ordinal:number;path:Array<{r
  textScope:'single-page'|'multi-page'|'unknown'};
 /** Index producer declarations only. No page-body serialization, PDF parsing,
  * semantic roles, visual reading order, clipping or visibility inference. */
-export function indexDoclingPageRegions(result:unknown,derivedPage:number,expectedPages:number){
+export function indexDoclingPageRegions(result:unknown,derivedPage:number,expectedPages:number,resultPageRange?:readonly [number,number]){
   const fail=(code:DoclingPageRegionError['code'],message:string):never=>{throw new DoclingPageRegionError(code,message);};
   if(!Number.isInteger(expectedPages)||expectedPages<1||expectedPages>DOCLING_PAGE_REGION_LIMITS.pages||
     !Number.isInteger(derivedPage)||derivedPage<1||derivedPage>expectedPages)fail('invalid','Invalid explicit Docling page');
@@ -376,7 +388,9 @@ export function indexDoclingPageRegions(result:unknown,derivedPage:number,expect
     fail('invalid','Saved Docling document is incomplete');
   const numbers=Object.entries(manifest!).map(([key,value])=>{const page=object(value),n=Number(key);
     if(!Number.isInteger(n)||page?.page_no!==n)fail('invalid','Invalid Docling page manifest');return n;}).sort((a,b)=>a-b);
-  if(numbers.length!==expectedPages||numbers.some((n,i)=>n!==i+1))fail('invalid','Saved Docling page coverage differs');
+  const [first,last]=resultPageRange??[1,expectedPages];
+  if(!Number.isInteger(first)||!Number.isInteger(last)||first<1||last<first||last>expectedPages||derivedPage<first||derivedPage>last||
+    numbers.length!==last-first+1||numbers.some((n,i)=>n!==i+first))fail('invalid','Saved Docling page coverage differs');
   const size=object(object(manifest![String(derivedPage)])?.size),pageSize=size&&
     [size.width,size.height].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)?{width:size.width as number,height:size.height as number}:null;
   const indexed=new Map<string,DoclingPageRegionNode>(),selected=new Set<string>();let edges=0;

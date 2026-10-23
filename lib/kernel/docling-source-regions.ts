@@ -2,12 +2,12 @@ import {createHash} from 'node:crypto';
 import {open} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
-import {indexDoclingPageRegions,DoclingPageRegionError,DOCLING_PAGE_REGION_LIMITS,type DoclingVisualLayout} from './docling-result.ts';
+import {indexDoclingPageRegions,validateOriginalDoclingPageRange,DoclingPageRegionError,DOCLING_PAGE_REGION_LIMITS,type DoclingVisualLayout} from './docling-result.ts';
 import type {PdfVisualAsset} from './pdf-visual-evidence.ts';
 
 export const DOCLING_SOURCE_REGIONS_VERSION='docling-source-page-regions-v1' as const;
 export type DoclingRegionSource={owner:string;documentId:string;sourceHash:string;pageCount:number;physicalPage:number};
-export type DoclingRegionResultReference={resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[];optionsHash:string|null};
+export type DoclingRegionResultReference={resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[];optionsHash:string|null;resultPageRange?:[number,number]};
 const sha=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex');
 const object=(value:unknown):Record<string,unknown>|undefined=>value!==null&&typeof value==='object'&&!Array.isArray(value)?value as Record<string,unknown>:undefined;
 const isSha=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
@@ -39,11 +39,14 @@ export function doclingPageResultReferences(source:DoclingRegionSource,progress:
   if(!value||!isSha(value.resultBlobSha256)||!isSha(value.derivedInputSha256)||!Array.isArray(indices)||!indices.length||
    indices.length>source.pageCount||indices.some((n,i)=>!Number.isInteger(n)||n<0||n>=source.pageCount||(i>0&&n!==indices[i-1]+1)))
    invalid('Saved Docling result reference mapping differs');
-  if(!indices.includes(source.physicalPage-1))return;
+  let resultPageRange:[number,number]|undefined;
+  try{resultPageRange=validateOriginalDoclingPageRange(value.resultPageRange,{sourceHash:source.sourceHash,inputHash:value.derivedInputSha256 as string,
+   pageCount:source.pageCount,copyIndices:indices as number[]});}catch{invalid('Saved original Docling range differs');}
+  if(!indices.includes(source.physicalPage-1)||(resultPageRange&&(source.physicalPage<resultPageRange[0]||source.physicalPage>resultPageRange[1])))return;
   const ref:DoclingRegionResultReference={resultBlobSha256:value.resultBlobSha256 as string,derivedInputSha256:value.derivedInputSha256 as string,
-   copyIndices:[...indices] as number[],optionsHash};
+   copyIndices:[...indices] as number[],optionsHash,...(resultPageRange?{resultPageRange}:{})};
   const old=selected.get(ref.resultBlobSha256);
-  if(old&&(old.derivedInputSha256!==ref.derivedInputSha256||!isDeepStrictEqual(old.copyIndices,ref.copyIndices)||
+  if(old&&(old.derivedInputSha256!==ref.derivedInputSha256||!isDeepStrictEqual(old.copyIndices,ref.copyIndices)||!isDeepStrictEqual(old.resultPageRange,ref.resultPageRange)||
    (old.optionsHash!==null&&ref.optionsHash!==null&&old.optionsHash!==ref.optionsHash)))invalid('Conflicting current Docling result references');
   selected.set(ref.resultBlobSha256,{...ref,optionsHash:old?.optionsHash??ref.optionsHash});
  };
@@ -99,12 +102,12 @@ export async function readDoclingPageRegions(source:DoclingRegionSource,referenc
  if(!identity||identity.owner!==source.owner||identity.documentId!==source.documentId||identity.sourceHash!==source.sourceHash||
   identity.totalPages!==source.pageCount||identity.inputHash!==reference.derivedInputSha256||!isDeepStrictEqual(identity.copyIndices,indices)||
   (identity.optionsHash!==undefined&&!isSha(identity.optionsHash))||
-  (reference.optionsHash!==null&&identity.optionsHash!==reference.optionsHash))invalid('Saved Docling raw owner/source/input/options mapping differs');
+  (reference.optionsHash!==null&&identity.optionsHash!==reference.optionsHash)||!isDeepStrictEqual(identity.resultPageRange,reference.resultPageRange))invalid('Saved Docling raw owner/source/input/options mapping differs');
  if((identity.start!==undefined||identity.end!==undefined)&&(identity.start!==indices[0]+1||identity.end!==indices.at(-1)!+1))
   invalid('Saved Docling raw range differs');
  const derivedPage=indices.indexOf(source.physicalPage-1)+1;
  if(!derivedPage)invalid('Requested original page is outside saved result');
- const index=indexDoclingPageRegions(saved!.result,derivedPage,indices.length);
+ const index=indexDoclingPageRegions(saved!.result,derivedPage,indices.length,reference.resultPageRange);
  const output={policy:DOCLING_SOURCE_REGIONS_VERSION,physicalPage:source.physicalPage,...index,
   nodes:index.nodes.map(node=>({...node,physicalPageNumbers:node.declaredPageNumbers.map(page=>indices[page-1]+1)})),
   result:{...reference,optionsHash:isSha(identity.optionsHash)?identity.optionsHash:null},

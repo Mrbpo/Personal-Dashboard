@@ -6,7 +6,7 @@ import {PDFDocument} from 'pdf-lib';
 import sharp from 'sharp';
 import type {Pool,PoolClient} from 'pg';
 import {localPdfPageImage} from '../local-ocr.ts';
-import type {DoclingVisualLayout} from './docling-result.ts';
+import {validateOriginalDoclingPageRange,indexDoclingPageRegions,type DoclingVisualLayout} from './docling-result.ts';
 import type {DocumentContextSource} from './document-context.ts';
 import {DOCUMENT_IMAGE_LIMITS,type DocumentImageBudget} from './document-image-budget.ts';
 import {observePdfInternalLinks,type PdfInternalLinks} from './pdf-internal-links.ts';
@@ -62,6 +62,11 @@ export async function preparePdfVisualEvidence(input:{owner:string;documentId:st
   if(sha(bytes)!==reference.resultBlobSha256||saved.identity?.owner!==input.owner||saved.identity?.documentId!==input.documentId||
    saved.identity?.sourceHash!==input.sourceHash||saved.identity?.totalPages!==count||saved.identity?.inputHash!==reference.derivedInputSha256||
    pdfVisualCanonical(saved.identity?.copyIndices)!==pdfVisualCanonical(reference.copyIndices))throw new PdfVisualEvidenceError('invalid','Saved Docling layout source mapping differs');
+  if(pdfVisualCanonical(saved.identity?.resultPageRange??null)!==pdfVisualCanonical(reference.resultPageRange??null))
+   throw new PdfVisualEvidenceError('invalid','Saved Docling result page range differs');
+  const range=validateOriginalDoclingPageRange(reference.resultPageRange,{sourceHash:input.sourceHash,inputHash:reference.derivedInputSha256,
+   pageCount:count,copyIndices:reference.copyIndices});
+  if(range)indexDoclingPageRegions(saved.result,range[0],count,range);
   savedResults.set(reference.resultBlobSha256,saved);
  }
  for(const region of input.layout.regions){

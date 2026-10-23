@@ -50,6 +50,7 @@ import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type Prepared
 import {prepareDoclingOrigSearchHints,assertPreparedDoclingOrigSearchHints,doclingOrigSearchHash,
  prepareDoclingTextContextWindows,type PreparedDoclingTextContextWindows,type OrigSearchInput,type PreparedDoclingOrigSearchHints} from './docling-source-regions.ts';
 import {DoclingPageRegionError,type DoclingVisualLayout} from './docling-result.ts';
+import type {OriginalDoclingRangeInput,CachedOriginalDoclingRenderer} from './docling-original-range.ts';
 
 type Json = Record<string, unknown>;
 type OrigSearchPage={document_id:string;current_version_id:string;source_version_id:string;source_hash:string;course_id:string;
@@ -876,6 +877,11 @@ export class KernelService {
     const prepared=prepareRecordingTranscript(input);
     await this.ingestParsedDocument(prepared.document,prepared.pages,prepared.options);
     return {documentId:prepared.document.id,cues:prepared.pages.length};
+  }
+
+  async ingestCachedOriginalDoclingRange(input:OriginalDoclingRangeInput,renderer?:CachedOriginalDoclingRenderer){
+    const {ingestCachedOriginalDoclingRange}=await import('./docling-original-range.ts');
+    return ingestCachedOriginalDoclingRange(input,renderer);
   }
 
   async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
