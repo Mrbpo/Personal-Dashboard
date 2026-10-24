@@ -1,0 +1,137 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "complete": {
+      "type": "boolean",
+      "description": "True only if all visible tables, their text, and their grid/header/span relationships have been faithfully recorded within the schema and output limits."
+    },
+    "uncertain": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "maxLength": 1024
+      },
+      "description": "Describe each unresolved reading or structural relation by observed position. Do not invent a repair."
+    },
+    "tables": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/table"
+      }
+    }
+  },
+  "required": [
+    "complete",
+    "uncertain",
+    "tables"
+  ],
+  "$defs": {
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "row": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99,
+          "description": "Zero-based starting row, observed from the image."
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63,
+          "description": "Zero-based starting column, observed from the image."
+        },
+        "rowSpan": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Number of rows actually occupied by this cell; never guessed."
+        },
+        "columnSpan": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Number of columns actually occupied by this cell, including a visible group header."
+        },
+        "headerRole": {
+          "type": "string",
+          "enum": [
+            "none",
+            "row",
+            "column",
+            "section"
+          ],
+          "description": "Observed cell role, independent of bold style."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Original visible UTF-8 cell text. Empty string only for an explicitly observed blank cell. Inline LaTeX may preserve visible mathematics; no whole-table LaTeX."
+        },
+        "bold": {
+          "type": "string",
+          "enum": [
+            "all",
+            "none",
+            "mixed",
+            "uncertain"
+          ],
+          "description": "Observed bold extent in this cell; mixed does not identify which characters are bold."
+        }
+      },
+      "required": [
+        "row",
+        "column",
+        "rowSpan",
+        "columnSpan",
+        "headerRole",
+        "text",
+        "bold"
+      ]
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048,
+          "description": "Only the visible original caption, verbatim; null if no caption is visible."
+        },
+        "rowCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Actual number of logical rows you observe, including header rows. Limits are generic resource bounds, not source dimensions."
+        },
+        "columnCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Actual number of logical columns you observe, including row-label columns."
+        },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2048,
+          "items": {
+            "$ref": "#/$defs/cell"
+          }
+        }
+      },
+      "required": [
+        "caption",
+        "rowCount",
+        "columnCount",
+        "cells"
+      ]
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import {database as db} from '../lib/database.ts';
 import {claimJob,enqueue,finishJob,nightKey,acquireLease,releaseLease} from '../lib/jobs.ts';
+import{contentTopicJobMode,CONTENT_TOPIC_JOB_KIND}from'../lib/kernel/content-topic-jobs.ts';
 import {indexDocument,embedMissing,saveDocument,collectUnusedBlobs} from '../lib/library.ts';
 import {PDF_PARSER_VERSION} from '../lib/document-parser.ts';
 import {syncPiazza} from '../lib/piazza-sync.ts';
@@ -37,12 +38,13 @@ async function runKernelJob(kernelJob:IngestionJob){
    db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now()).run(),
   ]).catch(()=>console.error('[worker] job renewal failed'));},30000);
   try{
-   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string};
+   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;nativeTextFastpath?:boolean};
    switch(kernelJob.kind){
     case 'document_vectors': await kernel.runDocumentVectorJob(kernelJob);break;
+    case 'document_topics': await kernel.runDocumentTopicJob(kernelJob);break;
     case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id),{
      id:kernelJob.id,leaseToken:kernelJob.lease_token,taskId:payload.doclingTaskId,
-     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,
+     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,nativeTextFastpath:payload.nativeTextFastpath,
      progress:payload.doclingProgress,sourceHash:payload.sourceHash});break;
     case 'canvas': await archiveCanvas(payload.owner);break;
     case 'canvas-course': await archiveCanvasCourse(payload.owner,String(payload.course));break;
@@ -106,7 +108,7 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  if(stopping||!primary)return;
  const handled=await dispatchWorkerTurn(doclingSlot,{
   canClaim:()=>primary&&!stopping,runOneOutbox,hasActiveDocling:()=>hasRunningIngestionJob('docling_document'),
-  claim:excluded=>claimIngestionJob(undefined,excluded),run:runKernelJob,
+  claim:excluded=>claimIngestionJob(undefined,[...excluded,...(contentTopicJobMode()==='off'?[CONTENT_TOPIC_JOB_KIND]:[])]),run:runKernelJob,
   onUnexpectedError:()=>console.warn('[worker] Docling slot execution failed; persisted lease retained'),
  });
  if(handled)return;

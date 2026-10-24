@@ -4,12 +4,13 @@ import {createHash,randomUUID} from 'node:crypto';
 import {readFile,writeFile,rename} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import type {Pool} from 'pg';
-import {kernel} from '../lib/kernel/service.ts';
+import {kernel,mergeStudyEvidence} from '../lib/kernel/service.ts';
 import {kernelPool,migrateKernel} from '../lib/kernel/db.ts';
 import {DocumentContextError,readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS} from '../lib/kernel/document-context.ts';
 import {DocumentNodeSelectionError} from '../lib/kernel/document-nodes.ts';
 import {DocumentEvidenceChangedError} from '../lib/kernel/document-evidence.ts';
-import {buildDocumentAnswerRequest,prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
+import {buildDocumentAnswerRequest,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentEvidenceSelectionRequest,
+ DOCUMENT_EVIDENCE_SELECTION_VERSION,type DocumentAnswerPolicy} from '../lib/kernel/document-answer.ts';
 import {freezeStudyQuestionContract,prepareContractStudyPlan,buildContractStudyPlanRequest,bindContractStudyPlan} from '../lib/kernel/document-study-contract.ts';
 import {preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport} from '../lib/kernel/document-planned-answer.ts';
 const hash=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('hex');
@@ -71,6 +72,87 @@ test('whole source covers every original node and real caption image beyond14; r
  assert.equal(COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens,300000);
 });
 
+test('all persisted text remains readable without claiming unavailable originals or layout are complete',pg,async()=>{
+ const item=await fixture({images:false,separateParents:true}),visual=await kernel.readCompleteDocumentSource(item.owner,item.source);
+ assert.equal(visual.status,'unavailable');if(visual.status==='unavailable')assert.equal(visual.reason,'image-unavailable');
+ const text=await kernel.readCompleteDocumentText(item.owner,item.source);assert.equal(text.status,'available');
+ if(text.status!=='available')throw Error('Expected bounded text');
+ assert.deepEqual(text.context.anchors.map(h=>h.body),item.pages.map(p=>p.text));assert.equal(text.context.images.length,0);
+ assert.equal(text.manifest.textCoverage,'all-current-persisted-nodes');assert.equal(text.manifest.returnedNodeCount,22);
+ assert.equal(text.manifest.orderedTextSha256,hash(JSON.stringify(item.pages.map(p=>p.text))));
+ assert.equal(text.manifest.originalFileCompletenessVerified,false);assert.equal(text.manifest.visualCompletenessVerified,false);
+ assert.deepEqual(text.manifest.parserWarnings,['Original formula fidelity unverified.']);
+ await assert.rejects(kernel.readCompleteDocumentText('other-owner',item.source),changed);
+ await kernel.ingestParsedDocument(item.document,item.pages.map((p,i)=>i?p:{...p,text:p.text+' Updated version.'}),{parserVersion:'changed-text-v2'});
+ await assert.rejects(kernel.readCompleteDocumentText(item.owner,item.source),changed);
+});
+
+test('application retains a missed current paragraph and its selected original PNG after visual expansion fails',pg,async()=>{
+ const item=await fixture({images:false,separateParents:true}),caption=item.nodes[20];
+ await kernel.registerDocumentImage(item.owner,item.source,{captionEvidenceId:caption.evidenceId,originalReference:'retained.png',
+  provenance:{sourceUrl:'https://example.edu/retained.png',revision:'fixture-v1'},bytes:png});
+ const base=await kernel.readDocumentParents(item.owner,await kernel.readDocumentNodes(item.owner,item.source,[item.nodes[0].evidenceId,caption.evidenceId]),{includeImages:true}),
+  question=`Using ${item.title}, explain the baseline observations.`,stop=new Error('Stop before any paid reservation'),
+  originalReader=(kernel as any).studyAnswerContextReader,originalText=kernel.readCompleteDocumentText;
+ let observed:Awaited<ReturnType<typeof originalText>>|undefined,attempts=0;
+ (kernel as any).studyAnswerContextReader=async(_owner:unknown,_query:unknown,options:{documentId?:string})=>
+  async()=>options.documentId?{...base,anchors:[],parents:[],images:[]}:base;
+ kernel.readCompleteDocumentText=async(...args)=>{observed=await originalText.apply(kernel,args);return observed;};
+ const policy:DocumentAnswerPolicy={scope:'application',model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000,
+  evidenceSelection:'select-then-answer',beforeAttempt:async identity=>{
+   attempts++;assert.ok(observed&&observed.status==='available');
+   const expanded=mergeStudyEvidence(base,observed.context);assert.ok(expanded);
+   const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),request=buildDocumentEvidenceSelectionRequest(prepared,
+    {model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},policy),input=JSON.parse((request.input[1].content as any[])[0].text);
+   assert.equal(identity,hash(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256:hash(JSON.stringify(request)),fingerprint:prepared.fingerprint})));
+   assert.ok(input.quoteUnits.some((q:{text:string})=>q.text===item.pages[19].text));
+   assert.equal(expanded.images.length,1);assert.equal(hash(expanded.images[0].bytes),hash(png));
+   assert.equal('completeSourceProof' in input,false);assert.equal(observed.manifest.visualCompletenessVerified,false);
+   throw stop;
+  }};
+ try{await assert.rejects(kernel.answerStudyContent(item.owner,question,{includeParents:true,includeImages:true},policy),e=>e===stop);
+  assert.equal(attempts,1);assert.equal(unexpectedCalls,0);
+ }finally{(kernel as any).studyAnswerContextReader=originalReader;kernel.readCompleteDocumentText=originalText;}
+});
+
+test('successful complete and persisted-text expansion retain relevant source text after a wrong-role selection',pg,async()=>{
+ const savedFetch=globalThis.fetch,savedComplete=kernel.readCompleteDocumentSource;
+ try{for(const completeAvailable of [true,false]){
+  const witness='The dataset contains five questions per image, with 15000 images and 75000 questions.',
+   distractor='The decoder produces five outputs for each step.',
+   item=await fixture({separateParents:true,captions:1,bodies:Array.from({length:20},(_,i)=>
+    i===0?distractor:i===19?witness:'Unrelated controls and training background. '.repeat(65))}),
+   question=`In ${item.title}, how many questions per image are in the dataset?`,stop=new Error('Generation captured; no external request');
+  assert.ok(item.pages.reduce((n,p)=>n+Buffer.byteLength(p.text),0)>32768,'exercise the selection retention limit');
+  assert.equal((await savedComplete.call(kernel,item.owner,item.source)).status,'available');
+  kernel.readCompleteDocumentSource=completeAvailable?savedComplete:async(...args)=>{
+   const result=await savedComplete.apply(kernel,args);if(result.status!=='available')return result;
+   return {status:'unavailable',reason:'image-input-limit',manifest:{...result.manifest,complete:false,reason:'image-input-limit'}};
+  };
+  let calls=0,selectedId='';
+  globalThis.fetch=async(_url,init)=>{
+   calls++;const request=JSON.parse(String(init?.body)),packet=JSON.parse(request.input.at(-1).content[0].text);
+   if(calls===1){
+    assert.equal(request.text.format.name,'document_evidence_selection');
+    assert.ok(packet.focusedText.pages.some((p:{evidenceId:string})=>p.evidenceId===item.nodes[19].evidenceId));
+    assert.ok(packet.quoteUnits.some((q:{text:string})=>q.text.includes('Unrelated controls')),'keep expanded original context');
+    assert.ok(packet.evidence.some((e:{kind:string})=>e.kind==='image'),'keep the already retrieved original image');
+    selectedId=packet.quoteUnits.find((q:{text:string})=>q.text===distractor).id;
+    return new Response(JSON.stringify({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:1,output_tokens:1},
+     output_text:JSON.stringify({referenceIds:[selectedId]})}),{status:200});
+   }
+   assert.equal(calls,2);assert.equal(request.text.format.name,'grounded_document_answer_units');
+   assert.ok(packet.quoteUnits.some((q:{text:string})=>q.text===witness),'the source count survives without inventing an answer');
+   assert.ok(packet.quoteUnits.some((q:{text:string})=>q.text===distractor),'do not erase the model selection');
+   throw stop;
+  };
+  await assert.rejects(kernel.answerStudyContent(item.owner,question,{includeParents:true,includeImages:true,
+   semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false},{scope:'application',model:'gpt-5.4-mini',reasoningEffort:'low',
+   maxOutputTokens:3000,evidenceSelection:'select-then-answer'}),e=>e===stop);
+  assert.equal(calls,2);
+ }}finally{globalThis.fetch=savedFetch;kernel.readCompleteDocumentSource=savedComplete;}
+});
+
 test('selected complete initial route carries a real PG paragraph missed by ranked14 into actual generation input and binds current original images',pg,async()=>{
  const item=await fixture({separateParents:true,bodies:Array.from({length:20},(_,i)=>`Shared study terms. Original method observation ${i}.`)}),
   question=`In "${item.title}", describe the shared study method.`,ranked=await kernel.searchDocumentText(item.owner,'shared study terms',
@@ -111,6 +193,9 @@ test('complete source refuses overflow, missing or ambiguous originals without r
  const over=await kernel.readCompleteDocumentSource(tooMany.owner,tooMany.source);
  assert.equal(over.status,'unavailable');if(over.status!=='unavailable')throw new Error('Expected node bound');
  assert.equal(over.reason,'source-size-limit');assert.equal(over.manifest.returnedNodeCount,0);assert.equal('context' in over,false);
+ const textOver=await kernel.readCompleteDocumentText(tooMany.owner,tooMany.source);
+ assert.equal(textOver.status,'unavailable');assert.equal(textOver.manifest.returnedNodeCount,0);
+ assert.equal(textOver.manifest.textCoverage,'unavailable');assert.equal('context' in textOver,false);
  const manyImages=await fixture({bodies:['Original.'],captions:COMPLETE_DOCUMENT_SOURCE_LIMITS.images+1,images:false});
  const count=await kernel.readCompleteDocumentSource(manyImages.owner,manyImages.source);
  assert.equal(count.status,'unavailable');if(count.status==='unavailable')assert.equal(count.reason,'image-count-limit');

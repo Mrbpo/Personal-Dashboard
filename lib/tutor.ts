@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import {safeAttachmentName} from './document-source-name.ts';
 import { database as db } from './database.ts';
 import { searchCourseContent, listCourseSettings } from './repository.ts';
 import { aiResponse, hasAI } from './ai-response.ts';
@@ -7,6 +8,11 @@ import { saveBlob, readBlob, searchLibrary } from './library.ts';
 import { tutorWeb } from './tutor-web.ts';
 import { acquireLease,releaseLease,enqueue } from './jobs.ts';
 import {rollingMemory,relevantMemory} from './tutor-memory.ts';
+import {answerKernelStudy,studyAnswerBackend,studyRoutingScope,studyRoutingScopeWitness,studyCourseRouting,StudyAnswerError} from './study-answer.ts';
+import type {DocumentRoutingScope} from './kernel/document-routing-scope.ts';
+import {routeQuestionCourseCodes,QUESTION_COURSE_ROUTING_VERSION,type QuestionCourseRoute} from './kernel/question-course-routing.ts';
+import {kernel} from './kernel/service.ts';
+import type {ResolvedDocumentSource} from './kernel/document-source.ts';
 
 export type Attachment = { name: string; mime: string; data: string; size: number; hash?: string };
 export type TutorThread = { id: string; course_id: string; title: string; updated_at: string };
@@ -38,7 +44,7 @@ export function validateAttachment(name: string, bytes: Uint8Array, maxBytes=8*1
   const signature = b.subarray(0, 16).toString('hex');
   const valid = ext === 'pdf' ? b.subarray(0, 5).toString() === '%PDF-' : ext === 'docx' ? signature.startsWith('504b0304') : ext === 'doc' ? signature.startsWith('d0cf11e0a1b11ae1') : ext === 'png' ? signature.startsWith('89504e470d0a1a0a') : ext === 'jpg' || ext === 'jpeg' ? signature.startsWith('ffd8ff') : ext === 'webp' ? b.subarray(0, 4).toString() === 'RIFF' && b.subarray(8, 12).toString() === 'WEBP' : !b.includes(0);
   if (!valid) throw new Error('文件内容与扩展名不符，或文件已损坏');
-  return { name: name.replace(/[\\/\x00-\x1f]/g, '_').slice(-160), mime, data: b.toString('base64'), size: bytes.length };
+  return { name: safeAttachmentName(name), mime, data: b.toString('base64'), size: bytes.length };
 }
 
 async function owned(owner: string, id: string) {
@@ -121,8 +127,9 @@ export function dominantCourse(evidence:string[]){
  return ranked[0][1]>=2&&ranked[0][1]-(ranked[1]?.[1]||0)>=2?ranked[0][0]:'';
 }
 function needsCourseScope(question:string){return /(?:本课|课程|作业|实验|截止|提交|老师|教授)|\b(?:lecture|lab|assignment|quiz|exam|syllabus|due|piazza|canvas)\b/i.test(question);}
-export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='') {
+export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='',requestedScope?:DocumentRoutingScope) {
   const thread = await owned(owner, threadId);
+  const routingScope=studyRoutingScope(requestedScope),routingWitness=studyRoutingScopeWitness(routingScope);
   if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestId)) throw new Error('请求标识无效');
   if (question.length > 6000 || (!question.trim() && !attachments.length)) throw new Error('请输入问题（最多 6000 字）或上传附件');
   if (attachments.length > 3 || attachments.reduce((s,a) => s+a.size,0) > 12*1024*1024) throw new Error('每次最多 3 份附件，总计不超过 12 MB');
@@ -133,15 +140,82 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     if(!await acquireLease(lease,token))throw new Error('当前会话仍在回答，请稍后再试');
     renewal=setInterval(()=>{void acquireLease(lease,token).then(ok=>{if(!ok)leaseValid=false;}).catch(()=>{leaseValid=false;});},30000);
     const history = await rows(threadId);
-    if (history.some(m => m.id === `${threadId}:${requestId}`)) return;
+    const existing=history.find(m=>m.id===`${threadId}:${requestId}`);
+    if(existing){
+      const metadata=JSON.parse(existing.meta_json),prior=metadata.requestRouting;
+      if((routingWitness||prior||metadata.courseRouting)&&(existing.body!==question||prior?.fingerprint!==routingWitness?.fingerprint))
+        throw new StudyAnswerError('configuration','idempotency-scope-conflict','请求标识已用于其它问题或范围，请使用新的请求标识');
+      return;
+    }
     if (!hasAI()) throw new Error('请先在设置中配置 AI 接入');
     // All attachments in the conversation remain available; cap prevents silently dropping old files.
     const previousFiles = history.flatMap(m => JSON.parse(m.attachments_json) as Attachment[]);
     if (previousFiles.reduce((s,a) => s+a.size,0) + attachments.reduce((s,a) => s+a.size,0) > 20*1024*1024) throw new Error('本会话附件已超过 20 MB，请新建会话');
     const context = history.slice(-24);
+    const backend=studyAnswerBackend();
+    const courseRoutingMode=studyCourseRouting();
+    if(courseRoutingMode&&backend!=='kernel')throw new StudyAnswerError('configuration','course-routing-requires-kernel','课程路由需要启用内核问答');
     const recentQuestions = context.filter(m => m.role === 'user').slice(-2).map(m => m.body).join(' ');
     let activeCourse=thread.course_id;
-    if(!activeCourse){
+    let answerScope=routingScope,courseRouting:QuestionCourseRoute|undefined;
+    let documentAttribution:{policy:'unique-mentioned-document-before-course-guard-v1';source:ResolvedDocumentSource;
+      courseOwnershipVerified:false;scopeApplied:false}|undefined;
+    const explicitTarget=routingScope?.courseIds!==undefined||routingScope?.documentIds!==undefined;
+    if(!activeCourse&&backend==='kernel'&&!explicitTarget){
+      const courses=(await listCourseSettings()).filter(course=>course.enabled);
+      const literalCourseRoute=routeQuestionCourseCodes(question,courses);
+      const hasDocumentAttribution=async()=>{
+        // A literal course request still needs a valid course. A document name
+        // only removes a keyword false positive; it never becomes a filter.
+        if(literalCourseRoute.status!=='none')return false;
+        const named=await kernel.findMentionedDocumentSources(owner,question,{routingScope});
+        if(named.status!=='resolved')return false;
+        documentAttribution={policy:'unique-mentioned-document-before-course-guard-v1',source:named.matches[0],
+          courseOwnershipVerified:false,scopeApplied:false};
+        return true;
+      };
+      if(courseRoutingMode){
+        courseRouting=literalCourseRoute;
+        if(courseRouting.status==='none'&&/这(?:两|门|几)|上述课程|它们|该课程|\b(?:their|those|these|same courses)\b/i.test(question)){
+          const prior=context.filter(m=>m.role==='user').at(-1),previous=prior?JSON.parse(prior.meta_json).courseRouting:undefined;
+          if(previous?.version===QUESTION_COURSE_ROUTING_VERSION&&previous.status==='resolved'&&Array.isArray(previous.observations)){
+            // Re-resolve successful query context against today's catalog; old
+            // course IDs and assistant text are never source evidence.
+            const inherited=routeQuestionCourseCodes(previous.observations.map((o:{code:string})=>o.code).join(' '),courses);
+            if(inherited.status==='resolved')courseRouting={...inherited,inputOrigin:'successful-history',fromMessageId:prior!.id};
+          }
+        }
+        if(courseRouting.status==='resolved'){
+          // Keep missing/disabled/unmapped course sources. When they exist,
+          // exclude only other enabled canonical courses, rather than allowing
+          // one orphan upload to bring every known course back into the corpus.
+          // Filename/topic guesses never authorize this filter.
+          const catalogIds=[...new Set(courses.map(course=>course.id))];
+          if(catalogIds.length>256)courseRouting={...courseRouting,scopeApplied:false,fallbackReason:'course-catalog-capacity'};
+          else{
+            if(await kernel.hasUnmappedCourseDocuments(owner,catalogIds)){
+              const excluded=catalogIds.filter(id=>!courseRouting!.courseIds.includes(id)).sort();
+              if(excluded.length){
+                const merged=[...new Set([...(routingScope?.excludedCourseIds??[]),...excluded])];
+                if(merged.length>256)courseRouting={...courseRouting,scopeApplied:false,retainedUnmappedSources:true,fallbackReason:'course-exclusion-capacity'};
+                else{
+                  answerScope=studyRoutingScope({...routingScope,excludedCourseIds:merged});
+                  courseRouting={...courseRouting,scopeApplied:true,retainedUnmappedSources:true,excludedCourseIds:excluded};
+                }
+              }else courseRouting={...courseRouting,scopeApplied:false,retainedUnmappedSources:true,fallbackReason:'unassigned-or-unmapped-source'};
+            }
+            else{answerScope=studyRoutingScope({...routingScope,courseIds:courseRouting.courseIds});courseRouting={...courseRouting,scopeApplied:true};}
+          }
+        }
+        else if(courseRouting.status!=='broad'&&needsCourseScope(question)&&!await hasDocumentAttribution())
+          throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
+      }else{
+        activeCourse=literalCourseRoute.status==='unresolved'?'':explicitCourseFromQuestion(question,courses);
+        if(!activeCourse&&needsCourseScope(question)&&!await hasDocumentAttribution())throw new StudyAnswerError('evidence-selection','course-scope-ambiguous','请明确课程代码，避免引用其他课程资料');
+        if(activeCourse){await db.prepare('UPDATE tutor_threads SET course_id=? WHERE id=? AND owner_id=? AND course_id=?').bind(activeCourse,threadId,owner,'').run();thread.course_id=activeCourse;}
+      }
+    }
+    if(!activeCourse&&backend==='legacy'){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
       activeCourse=explicitCourseFromQuestion(question,courses);
       if(!activeCourse&&question.trim()){
@@ -150,6 +224,20 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
       }
       if(!activeCourse&&needsCourseScope(question))throw new Error(`为避免串课，请在问题中写一次课程代码（例如 ${courses.slice(0,3).map(c=>c.code).join('、')||'课程代码'}）；后续追问会自动沿用。`);
       if(activeCourse){await db.prepare('UPDATE tutor_threads SET course_id=? WHERE id=? AND owner_id=? AND course_id=?').bind(activeCourse,threadId,owner,'').run();thread.course_id=activeCourse;}
+    }
+    if(backend==='kernel'){
+      if(previousFiles.length||attachments.length)throw new StudyAnswerError('parsing','attachment-not-indexed','内核问答请先将附件加入资料库并等待解析完成；本轮未调用模型');
+      const result=await answerKernelStudy(owner,question,activeCourse,context,answerScope),now=new Date().toISOString();
+      const resultMeta=courseRouting||documentAttribution?{...result.meta,study:{...result.meta.study,
+        ...(courseRouting?{courseRouting}:{}),...(documentAttribution?{documentAttribution}:{})}}:result.meta;
+      if(!leaseValid)throw new Error('会话锁已失效，请刷新后重试');
+      await owned(owner,threadId);
+      await db.batch([
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}`,threadId,'user',question,'[]',JSON.stringify({...(routingWitness?{requestRouting:routingWitness}:{}),...(courseRouting?{courseRouting}:{})}),0,now),
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}:answer`,threadId,'assistant',result.answer,'[]',JSON.stringify(resultMeta),0,now),
+        db.prepare('UPDATE tutor_threads SET title=?, updated_at=? WHERE id=? AND owner_id=?').bind(history.length?thread.title:question.slice(0,60),now,threadId,owner),
+      ]);
+      return;
     }
     // An unscoped conceptual question uses general knowledge and attachments only.
     // Course sources are never pooled across subjects into one answer.

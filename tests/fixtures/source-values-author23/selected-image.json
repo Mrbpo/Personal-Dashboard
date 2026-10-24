@@ -1,0 +1,548 @@
+{
+  "id": "i2",
+  "kind": "image",
+  "documentId": "heldout68:c:qasper:1808.00265",
+  "documentVersionId": "08f204f33f5cafede15e894e47d93c69096e01714d387f480e376bc50da1fe0d",
+  "sourceVersionId": "c590171aef778b900eca945326884686be6028b46882b5accb26cbd0e78c6364",
+  "sourceHash": "46f35515ec624d358e585f7dea41a8ffc11ffdc4f21fd4115423c896d89595fb",
+  "evidenceId": "17cb13fcb68bd9c25b871cd4932a8f70d0a8bd8f9547e229a61e8e28e45579b2",
+  "locator": "attachment:4542e33847db70817d88dfdd0e60ee584094177e29c0ab3945f61bcc5a82bdf7",
+  "sha256": "9243be79a99c714d0c4476e9d30d4aeec1aa7fd9dfe430a61e7121d59e52d18d",
+  "tableObservations": [
+    {
+      "version": "author-image-table-observation-v1",
+      "sourceKind": "author-caption-image",
+      "producer": "visible-table-grid-v1",
+      "authority": "ai-derived-untrusted",
+      "semanticVerified": false,
+      "relationshipVerified": false,
+      "visibilityVerified": false,
+      "status": "available",
+      "reason": null,
+      "candidate": {
+        "kind": "derived-author-image-table",
+        "id": "cb4edbcf69503266a98c88ef75307a5d57bd68ea11d686a808d0e30d5a05f2dc",
+        "source": {
+          "courseId": "stage1-http-public",
+          "documentId": "heldout68:c:qasper:1808.00265",
+          "sourceHash": "46f35515ec624d358e585f7dea41a8ffc11ffdc4f21fd4115423c896d89595fb",
+          "sourceVersionId": "c590171aef778b900eca945326884686be6028b46882b5accb26cbd0e78c6364",
+          "currentVersionId": "08f204f33f5cafede15e894e47d93c69096e01714d387f480e376bc50da1fe0d"
+        },
+        "anchorEvidenceId": "17cb13fcb68bd9c25b871cd4932a8f70d0a8bd8f9547e229a61e8e28e45579b2",
+        "attachmentId": "4542e33847db70817d88dfdd0e60ee584094177e29c0ab3945f61bcc5a82bdf7",
+        "structureManifestSha256": "d0e1c9bb2e82240abdab026280be2f9bf61685bd5d8232dd841be240ba8f272c",
+        "assetSha256": "9243be79a99c714d0c4476e9d30d4aeec1aa7fd9dfe430a61e7121d59e52d18d",
+        "artifactSha256": "c27941118ca87956e9624134c99c8c5d066ca75286d2c74f9747342f77a3d654"
+      },
+      "physicalPage": null,
+      "bbox": null,
+      "sectionHierarchy": "unassessed",
+      "artifactByteLength": 7895,
+      "artifact": {
+        "bbox": null,
+        "grid": {
+          "tables": [
+            {
+              "cells": [
+                {
+                  "row": 0,
+                  "bold": "none",
+                  "text": "",
+                  "column": 0,
+                  "rowSpan": 2,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 0,
+                  "bold": "none",
+                  "text": "Rank Correlation",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 2,
+                  "headerRole": "section"
+                },
+                {
+                  "row": 0,
+                  "bold": "none",
+                  "text": "Accuracy/%",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "section"
+                },
+                {
+                  "row": 1,
+                  "bold": "none",
+                  "text": "VQA-HAT",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "column"
+                },
+                {
+                  "row": 1,
+                  "bold": "none",
+                  "text": "VQA-X",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "column"
+                },
+                {
+                  "row": 1,
+                  "bold": "none",
+                  "text": "VQA-2.0",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "column"
+                },
+                {
+                  "row": 2,
+                  "bold": "none",
+                  "text": "Human [5]",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 2,
+                  "bold": "none",
+                  "text": "0.623",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 2,
+                  "bold": "none",
+                  "text": "-",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 2,
+                  "bold": "none",
+                  "text": "80.62",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 3,
+                  "bold": "none",
+                  "text": "PJ-X [17]",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 3,
+                  "bold": "none",
+                  "text": "0.396",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 3,
+                  "bold": "none",
+                  "text": "0.342",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 3,
+                  "bold": "none",
+                  "text": "-",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 4,
+                  "bold": "none",
+                  "text": "MCB [6]",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 4,
+                  "bold": "none",
+                  "text": "0.276",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 4,
+                  "bold": "none",
+                  "text": "0.261",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 4,
+                  "bold": "none",
+                  "text": "62.27",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 5,
+                  "bold": "none",
+                  "text": "Attn-MCB, α=1 (ours)",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 5,
+                  "bold": "all",
+                  "text": "0.580",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 5,
+                  "bold": "all",
+                  "text": "0.396",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 5,
+                  "bold": "none",
+                  "text": "60.51",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 6,
+                  "bold": "none",
+                  "text": "Attn-MCB (ours)",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 6,
+                  "bold": "none",
+                  "text": "0.517",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 6,
+                  "bold": "none",
+                  "text": "0.375",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 6,
+                  "bold": "none",
+                  "text": "62.24",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 7,
+                  "bold": "none",
+                  "text": "MFB [25]",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 7,
+                  "bold": "none",
+                  "text": "0.276",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 7,
+                  "bold": "none",
+                  "text": "0.299",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 7,
+                  "bold": "none",
+                  "text": "65.22",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 8,
+                  "bold": "none",
+                  "text": "Attn-MFB (ours)",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 8,
+                  "bold": "none",
+                  "text": "0.416",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 8,
+                  "bold": "none",
+                  "text": "0.335",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 8,
+                  "bold": "none",
+                  "text": "65.36",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 9,
+                  "bold": "none",
+                  "text": "MFH [26]",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 9,
+                  "bold": "none",
+                  "text": "0.354",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 9,
+                  "bold": "none",
+                  "text": "0.350",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 9,
+                  "bold": "none",
+                  "text": "66.17",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 10,
+                  "bold": "none",
+                  "text": "Attn-MFH (ours)",
+                  "column": 0,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "row"
+                },
+                {
+                  "row": 10,
+                  "bold": "none",
+                  "text": "0.483",
+                  "column": 1,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 10,
+                  "bold": "none",
+                  "text": "0.376",
+                  "column": 2,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                },
+                {
+                  "row": 10,
+                  "bold": "all",
+                  "text": "66.31",
+                  "column": 3,
+                  "rowSpan": 1,
+                  "columnSpan": 1,
+                  "headerRole": "none"
+                }
+              ],
+              "caption": "Table 1. Evaluation of different VQA models on visual grounding and answer prediction. All the listed models are trained on VQA-",
+              "rowCount": 11,
+              "columnCount": 4
+            }
+          ],
+          "complete": true,
+          "uncertain": []
+        },
+        "width": 686,
+        "height": 392,
+        "source": {
+          "courseId": "stage1-http-public",
+          "documentId": "heldout68:c:qasper:1808.00265",
+          "sourceHash": "46f35515ec624d358e585f7dea41a8ffc11ffdc4f21fd4115423c896d89595fb",
+          "sourceVersionId": "c590171aef778b900eca945326884686be6028b46882b5accb26cbd0e78c6364",
+          "currentVersionId": "08f204f33f5cafede15e894e47d93c69096e01714d387f480e376bc50da1fe0d"
+        },
+        "ledgerId": "7441ab76-5d88-4c38-8b1e-5fa6649aed13",
+        "producer": "visible-table-grid-v1",
+        "protocol": "visible_table_grid_v1",
+        "namespace": "author-image-table-derived-search-v1",
+        "tsvSha256": "92fba3555d9838a86295fd17eb90fdacf0732d5cfcb89aae734a35fb49dae8e2",
+        "sourceKind": "author-caption-image",
+        "actualModel": "gpt-5.4-mini-2026-03-17",
+        "assetSha256": "9243be79a99c714d0c4476e9d30d4aeec1aa7fd9dfe430a61e7121d59e52d18d",
+        "attachmentId": "4542e33847db70817d88dfdd0e60ee584094177e29c0ab3945f61bcc5a82bdf7",
+        "helperSha256": "1988b58e305fe632b78df879ddb8e2691f936e65874992b73a93176b984e7950",
+        "physicalPage": null,
+        "requestSha256": "7492f547a8807701733548e5f88123394471ca2a34c231f1500e8c6176285224",
+        "artifactSha256": "c27941118ca87956e9624134c99c8c5d066ca75286d2c74f9747342f77a3d654",
+        "blobReferences": [
+          {
+            "kind": "request",
+            "sha256": "7492f547a8807701733548e5f88123394471ca2a34c231f1500e8c6176285224",
+            "byteLength": 62155
+          },
+          {
+            "kind": "rawResponse",
+            "sha256": "f6498d099b2fac118dd0e8c993b7790f9ac8322e0ab3a1520fad664a00df65a2",
+            "byteLength": 27560
+          },
+          {
+            "kind": "candidate",
+            "sha256": "522319eabea6a5f5834167cc95c89ed91d92ec4a59004687a6cac35ca38db036",
+            "byteLength": 8723
+          },
+          {
+            "kind": "tsv",
+            "sha256": "92fba3555d9838a86295fd17eb90fdacf0732d5cfcb89aae734a35fb49dae8e2",
+            "byteLength": 3863
+          },
+          {
+            "kind": "schema",
+            "sha256": "36fd39acec61d8d733ee901a9135446d6c644b603c3cb1bc9f9c08c8f516fcb4",
+            "byteLength": 3914
+          },
+          {
+            "kind": "attempt",
+            "sha256": "17eaaec8433e9fe91d63bbaf9dc9f47a77139cb0abf32636059a76d4bc0a6e5a",
+            "byteLength": 417
+          },
+          {
+            "kind": "http",
+            "sha256": "2b432e6941317ee02aea03ec4afd0da262e755d34c47f43d6a5940a5824222c3",
+            "byteLength": 103
+          },
+          {
+            "kind": "requestIdentity",
+            "sha256": "26174646cc9a7c0388c474a5a7594c69d95e4766d1dca1f2b42ee62fc7daf5c6",
+            "byteLength": 1909
+          },
+          {
+            "kind": "terminal",
+            "sha256": "6ec2f8142fe53c61fb4bd89e7173d68ad45c7087f5e131546db76172a4c2f1c5",
+            "byteLength": 2451
+          },
+          {
+            "kind": "completeSourceManifest",
+            "sha256": "195e137ea42072cd34d4d8e1bc56e824914f3aa10f136f10cbde3beac09856cf",
+            "byteLength": 28203
+          }
+        ],
+        "requestedModel": "gpt-5.4-mini",
+        "candidateSha256": "522319eabea6a5f5834167cc95c89ed91d92ec4a59004687a6cac35ca38db036",
+        "maxOutputTokens": 9000,
+        "rawSchemaSha256": "36fd39acec61d8d733ee901a9135446d6c644b603c3cb1bc9f9c08c8f516fcb4",
+        "reasoningEffort": "low",
+        "sectionHierarchy": "unassessed",
+        "captionEvidenceId": "17cb13fcb68bd9c25b871cd4932a8f70d0a8bd8f9547e229a61e8e28e45579b2",
+        "coordinateMapping": "unknown",
+        "rawResponseSha256": "f6498d099b2fac118dd0e8c993b7790f9ac8322e0ab3a1520fad664a00df65a2",
+        "historicalRunSource": {
+          "courseId": "",
+          "documentId": "heldout68:c:qasper:1808.00265",
+          "sourceHash": "46f35515ec624d358e585f7dea41a8ffc11ffdc4f21fd4115423c896d89595fb",
+          "sourceVersionId": "c590171aef778b900eca945326884686be6028b46882b5accb26cbd0e78c6364",
+          "currentVersionId": "08f204f33f5cafede15e894e47d93c69096e01714d387f480e376bc50da1fe0d"
+        },
+        "canonicalSchemaSha256": "fd011827457cc74b5346113edf4b6101a0ca12f2e3e8cf9d57c472278837a1c5",
+        "structureManifestSha256": "d0e1c9bb2e82240abdab026280be2f9bf61685bd5d8232dd841be240ba8f272c",
+        "historicalSourceManifestSha256": "b18b1edd5c2838fc288ecd0bf88c1f6af6db8af802704a53c58925075f0fae59",
+        "historicalSourceManifestBlobSha256": "195e137ea42072cd34d4d8e1bc56e824914f3aa10f136f10cbde3beac09856cf"
+      },
+      "observationSha256": "553d008cb6c0b8ed7819a830732783cd8a6e8fc4c04a9b7abca76141afd4e710"
+    }
+  ],
+  "captionMembers": [
+    {
+      "id": "q:1b6a32516724b37fd4b48a7a",
+      "supportId": "e42",
+      "startUtf16": 0,
+      "endUtf16": 329,
+      "quoteSha256": "7e3378a123d4a43fe1e71f18ac2bc2ba7fa1ffd83c8125e60425cf2876117e1a",
+      "text": "Table 1. Evaluation of different VQA models on visual grounding and answer prediction. All the listed models are trained on VQA2.0 and Visual Genome. The reported accuracies are evaluated using the VQA-2.0 test-standard set. Note that the results of MCB, MFB and MFH are taken directly from the author’s public best single model.",
+      "selectable": false
+    }
+  ],
+  "attachmentId": "4542e33847db70817d88dfdd0e60ee584094177e29c0ab3945f61bcc5a82bdf7",
+  "width": 686,
+  "height": 392,
+  "byteLength": 38801
+}

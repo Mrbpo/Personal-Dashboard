@@ -36,6 +36,8 @@ jobs:
         run: |
           bash deploy/prepare-vector-ci.sh "$POSTGRES_CONTAINER"
       - run: npm ci
+      - name: Install native PDF text tools for ingestion checks
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: python3 -m unittest discover -s scripts/course-video -p 'test_*.py'
       - run: npm test
       - run: npm run kernel:test

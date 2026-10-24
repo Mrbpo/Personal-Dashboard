@@ -168,6 +168,9 @@ async function ready() {
     const taskColumns = await getClient().execute("PRAGMA table_info(tasks)");
     const settingsColumns = await getClient().execute("PRAGMA table_info(settings)");
     const libraryColumns = await getClient().execute("PRAGMA table_info(library_documents)");
+    if (!libraryColumns.rows.some((row) => row.name === "original_name")) {
+      await getClient().execute("ALTER TABLE library_documents ADD COLUMN original_name TEXT");
+    }
     const courseColumns = await getClient().execute("PRAGMA table_info(courses)");
     const mailColumns = await getClient().execute("PRAGMA table_info(mail_messages)");
     const mailSyncColumns = await getClient().execute("PRAGMA table_info(mail_sync)");

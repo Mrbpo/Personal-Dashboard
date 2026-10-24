@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {PDFDocument,PDFName,PDFDict,PDFArray,PDFRawStream,decodePDFRawStream} from 'pdf-lib';
+import {PDFDocument,PDFName,PDFDict,PDFArray,PDFRawStream,PDFRef,PDFNull,decodePDFRawStream} from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import type {PdfFontReferenceDictionary} from '../lib/pdf-source-fidelity.ts';
 
@@ -35,6 +35,128 @@ async function cmap(bytes:Uint8Array,key:string){
  const stream=font.lookup(name('ToUnicode'));assert.ok(stream instanceof PDFRawStream);
  return Buffer.from(decodePDFRawStream(stream).decode()).toString();
 }
+
+test('missing optional Type1 ToUnicode retains original bytes and records unknown mappings without a repair proof',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ const pdf=await PDFDocument.load(await fixture()),font=pdf.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict);
+ font.delete(name('ToUnicode'));
+ const input=await pdf.save(),snapshot=Buffer.from(input),unchangedOtherMap=await cmap(input,'Z');
+ const result=await prepareSourceFontInput(input);
+ assert.equal(result.bytes,input);assert.deepEqual(Buffer.from(input),snapshot);assert.equal(result.proof,undefined);
+ assert.equal(result.observations?.length,1);
+ assert.deepEqual(result.observations?.[0],{pageNumber:1,resourceKey:'/P',
+  fontFileHash:result.observations![0].fontFileHash,reason:'missing-type1-tounicode',
+  declaredTargets:[{code:42,glyphName:'prime'},{code:54,glyphName:'negationslash'}],characterMapping:'unknown',glyphUsage:'unknown'});
+ assert.match(result.observations![0].fontFileHash,/^[a-f0-9]{64}$/);
+ const selected=await prepareSourceFontInput(input,[0]),copy=await PDFDocument.load(selected.bytes);
+ assert.equal(copy.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict).has(name('ToUnicode')),false);
+ assert.equal(await cmap(selected.bytes,'Z'),unchangedOtherMap);
+ assert.deepEqual(selected.observations,result.observations);assert.equal(selected.proof,undefined);
+});
+
+test('present malformed ToUnicode is still rejected rather than treated as absent',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ for(const mode of ['oversized','not-stream','dangling','null']){
+  const pdf=await PDFDocument.load(await fixture()),font=pdf.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict);
+  font.set(name('ToUnicode'),mode==='oversized'?pdf.context.register(pdf.context.flateStream(Buffer.alloc(65537,32))):
+   mode==='dangling'?PDFRef.of(900000):mode==='null'?PDFNull:name('InvalidCMap'));
+  const input=await pdf.save(),snapshot=Buffer.from(input);
+  await assert.rejects(prepareSourceFontInput(input),/needs review/,mode);assert.deepEqual(Buffer.from(input),snapshot);
+ }
+});
+
+async function singletonRangeFixture(mode='valid',glyph='prime',differenceMode?:string,sourceValue='FFFD'){
+ const pdf=await PDFDocument.create(),page=pdf.addPage(),context=pdf.context,code=42;
+ const program=Buffer.from(`%!PS-AdobeFont-1.0\n/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\ndup ${code} /${glyph} put\nreadonly def\ncurrentfile eexec\n`),
+  file=context.register(context.flateStream(program,{Length1:program.length})),descriptor=context.register(context.obj({FontFile:file}));
+ const rows=Array.from({length:32},(_,i)=>{const hex=(32+i).toString(16);return `<${hex}> <${hex}> <FFFD>`;});
+  rows[code-32]=`<2a> <2a> <${sourceValue}>`;
+  if(mode==='scalar-inverse')rows[code-31]=`<2b> <2b> <${sourceValue}>`;
+ if(mode==='missing')rows.splice(code-32,1);
+ if(mode==='overlap')rows.push('<2a> <2b> <FFFD>');
+ if(mode==='duplicate')rows.push('<2a> <2a> <FFFD>');
+ if(mode==='nonsingleton')rows.splice(code-32,2,'<2a> <2b> <FFFD>');
+ if(mode==='array')rows[code-32]='<2a> <2a> [<FFFD>]';
+ if(mode==='outside')rows.push('<40> <40> <FFFD>');
+ if(mode==='wide')rows[code-32]='<002a> <002a> <FFFD>';
+ if(mode==='bfchar-target')rows.splice(code-32,1);
+ const body=`begincmap\n1 begincodespacerange\n<20> <3f>\nendcodespacerange\n${rows.length+(mode==='count'?1:0)} beginbfrange\n${rows.join('\n')}${mode==='junk'?'\nunsupported-token':''}\nendbfrange\n${mode==='bfchar-target'?'1 beginbfchar\n<2a> <FFFD>\nendbfchar\n':''}${mode==='commented-bfchar'?'% 2 beginbfchar\n% <2a> <0030>\n% endbfchar\n':''}${mode==='extra-codespace'?'1 begincodespacerange\n<20> <3f>\nendcodespacerange\n':''}${mode==='usecmap'?'/Unknown usecmap\n':''}endcmap`;
+ const source=context.obj({Type:'Font',Subtype:'Type1',BaseFont:'ArbitraryFixtureName',FontDescriptor:descriptor,
+  ToUnicode:context.register(context.flateStream(Buffer.from(body)))});
+ if(mode==='override')source.set(name('Encoding'),name('StandardEncoding'));
+ if(differenceMode){
+  const values:Record<string,Array<number|boolean|PDFName>>={match:[42,name(glyph)],implicit:[40,name('other'),name('neighbor'),name(glyph)],
+   missing:[41,name('other')],different:[42,name('zero')],duplicate:[42,name(glyph),42,name(glyph)],
+   outside:[256,name(glyph)],negative:[-1,name(glyph)],fractional:[42.5,name(glyph)],overrun:[255,name('other'),name(glyph)],
+   unknown:[42,true],startName:[name(glyph)],trailing:[42,name(glyph),45],empty:[],
+   oversized:Array.from({length:513},()=>42)};
+  const value=context.obj({Type:'Encoding',Differences:values[differenceMode]??values.match});
+  if(differenceMode==='extra')value.set(name('BaseEncoding'),name('StandardEncoding'));
+  if(differenceMode==='no-type')value.delete(name('Type'));
+  if(differenceMode==='no-differences')value.delete(name('Differences'));
+  source.set(name('Encoding'),differenceMode==='name'?name('StandardEncoding'):value);
+ }
+ page.node.set(name('Resources'),context.obj({Font:{P:context.register(source)}}));
+ page.node.set(name('Contents'),context.register(context.flateStream(Buffer.from('BT /P 12 Tf (*)Tj ET'))));
+ return pdf.save();
+}
+
+test('bounded singleton placeholder ranges repair only embedded declared glyph destinations and reject unsupported maps',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ for(const [glyph,expected]of [['prime','2032'],['negationslash','0338']]){
+  const input=await singletonRangeFixture('valid',glyph),snapshot=Buffer.from(input),before=await cmap(input,'P'),result=await prepareSourceFontInput(input);
+  assert.deepEqual(Buffer.from(input),snapshot);assert.equal(result.proof?.patches.length,1);
+  assert.deepEqual(result.proof!.patches.map(p=>[p.code,p.glyphName]),[[42,glyph]]);
+  assert.equal(await cmap(result.bytes,'P'),before.replace('<2a> <2a> <FFFD>',`<2a> <2a> <${expected}>`));
+  assert.deepEqual(result.proof!.preserved[0].contentHashes.length,1);
+ }
+ for(const mode of ['missing','overlap','duplicate','nonsingleton','array','outside','wide','bfchar-target','count','junk','extra-codespace','usecmap','override']){
+  const input=await singletonRangeFixture(mode),snapshot=Buffer.from(input);
+  await assert.rejects(prepareSourceFontInput(input),/needs review/,mode);assert.deepEqual(Buffer.from(input),snapshot);
+ }
+});
+
+test('unique scalar singleton destinations repair only literal embedded glyphs without Encoding overrides',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ for(const [glyph,sourceValue,expected]of [['prime','0027','2032'],['negationslash','0036','0338']]){
+  const input=await singletonRangeFixture('valid',glyph,undefined,sourceValue),snapshot=Buffer.from(input),
+   before=await cmap(input,'P'),result=await prepareSourceFontInput(input);
+  assert.deepEqual(Buffer.from(input),snapshot);assert.equal(result.proof?.patches.length,1);
+  assert.deepEqual(result.proof!.patches.map(p=>[p.code,p.glyphName]),[[42,glyph]]);
+  assert.equal(await cmap(result.bytes,'P'),before.replace(`<2a> <2a> <${sourceValue}>`,`<2a> <2a> <${expected}>`));
+  assert.equal(result.proof!.preserved[0].contentHashes.length,1);
+ }
+ for(const [mode,differences,value]of [['scalar-inverse',undefined,'0027'],['valid',undefined,'00610062'],
+  ['valid','match','0027'],['override',undefined,'0027']] as const){
+  const input=await singletonRangeFixture(mode,'prime',differences,value),snapshot=Buffer.from(input);
+  await assert.rejects(prepareSourceFontInput(input),/needs review/,`${mode}/${differences}/${value}`);
+  assert.deepEqual(Buffer.from(input),snapshot);
+ }
+});
+
+test('singleton placeholder accepts only complete explicit matching Differences and ignores commented bfchar examples',async()=>{
+ const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
+ const encodingText=async(bytes:Uint8Array)=>{
+  const pdf=await PDFDocument.load(bytes),font=pdf.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict);
+  return font.lookup(name('Encoding'),PDFDict).toString();
+ };
+ for(const [mode,differences]of [['valid','match'],['valid','implicit'],['commented-bfchar','match']]){
+  const input=await singletonRangeFixture(mode,'prime',differences),before=Buffer.from(input),oldEncoding=await encodingText(input),
+   oldCmap=await cmap(input,'P'),result=await prepareSourceFontInput(input);
+  assert.deepEqual(Buffer.from(input),before);assert.equal(result.proof?.patches.length,1);
+  assert.equal(await encodingText(result.bytes),oldEncoding,'Differences dictionary is not changed');
+  assert.equal(await cmap(result.bytes,'P'),oldCmap.replace('<2a> <2a> <FFFD>','<2a> <2a> <2032>'));
+ }
+ for(const mode of ['missing','different','duplicate','outside','negative','fractional','overrun','unknown','startName','trailing',
+  'empty','oversized','extra','no-type','no-differences','name']){
+  const input=await singletonRangeFixture('valid','prime',mode),before=Buffer.from(input);
+  await assert.rejects(prepareSourceFontInput(input),/needs review/,mode);assert.deepEqual(Buffer.from(input),before);
+ }
+ // Matching Differences does not relax the pre-existing bfchar override gate.
+ const legacy=await PDFDocument.load(await fixture()),font=legacy.getPage(0).node.Resources()!.lookup(name('Font'),PDFDict).lookup(name('P'),PDFDict);
+ font.set(name('Encoding'),legacy.context.obj({Type:'Encoding',Differences:[42,name('prime'),54,name('negationslash')]}));
+ await assert.rejects(prepareSourceFontInput(await legacy.save()),/overridden or unsupported Encoding/);
+});
 
 test('actual embedded glyph names repair arbitrary codes/names; thirteen source zeros and content stay unchanged',async()=>{
  const {prepareSourceFontInput}=await import('../lib/kernel/docling.ts');
