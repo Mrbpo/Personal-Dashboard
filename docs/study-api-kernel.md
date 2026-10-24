@@ -292,3 +292,11 @@ source versions, page evidence and full body hash must match. The v2 retention
 receipt marks `focused-nonquotable-page`; the text's original eligibility and
 all unverified structural relationships stay unchanged. Missing focus, mismatched
 identity or a foreign-only/empty selection cannot activate this fallback.
+
+For the isolated Sol candidate, a text-only request whose conservative UTF-8
+estimate exceeds the existing reservation limit now uses the same fresh sealed
+input-count protocol as image requests (Issue #216). The complete text and
+USD0.40 ceiling remain unchanged; unsupported projection fields, failed counts
+or a truly over-limit count still stop before generation. Small text requests
+continue using their byte bound without a counter. See the official
+[token counting guide](https://developers.openai.com/api/docs/guides/token-counting).

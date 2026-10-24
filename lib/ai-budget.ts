@@ -34,10 +34,13 @@ function validateSolGeneration(body:any,allowImages=false):boolean{
         c?.type!=='input_text'||typeof c.text!=='string'||c.prompt_cache_breakpoint!==undefined))))
     throw new Error('Sol candidate requires bounded Standard text-only or counted original-image generation with explicit 30m caching');
   const hasImages=body.input.some((m:any)=>Array.isArray(m.content)&&m.content.some((c:any)=>c.type==='input_image'));
-  if(hasImages&&(Object.keys(body).some(k=>!['model','store','reasoning','max_output_tokens','input','text','service_tier','prompt_cache_options'].includes(k))||
-    body.store!==false||body.input.some((m:any)=>Object.keys(m).some(k=>!['role','content'].includes(k)))))
-    throw new Error('Sol image counting does not support unmeasured request fields');
+  if(hasImages)assertSolCountProjection(body);
   return hasImages;
+}
+function assertSolCountProjection(body:any):void{
+  if(Object.keys(body).some(k=>!['model','store','reasoning','max_output_tokens','input','text','service_tier','prompt_cache_options'].includes(k))||
+    body.store!==false||body.input.some((m:any)=>Object.keys(m).some(k=>!['role','content'].includes(k))))
+    throw new Error('Sol input counting does not support unmeasured request fields');
 }
 function solReservationForInput(inputUpper:number,maxOutput:number):number{
   const reserved=(inputUpper*5+maxOutput*10)/1e6;
@@ -50,7 +53,12 @@ export function solGenerationReservation(body:any):number{
   return solReservationForInput(Buffer.byteLength(JSON.stringify(body))+4096,body.max_output_tokens);
 }
 async function countedSolReservation(body:any,wire:string,key:string,signal?:AbortSignal|null):Promise<number>{
-  if(!validateSolGeneration(body,true))return solGenerationReservation(body);
+  const hasImages=validateSolGeneration(body,true),byteUpper=Buffer.byteLength(wire)+4096;
+  // A byte estimate may overstate a legitimate text input. Count that same
+  // sealed request rather than dropping evidence or raising the cost ceiling.
+  if(!hasImages&&byteUpper<=272000&&(byteUpper*5+body.max_output_tokens*10)/1e6<=.40)
+    return solGenerationReservation(body);
+  assertSolCountProjection(body);
   // A private projection of the sealed body includes every token-bearing field.
   // No client count, saved measurement, remote image or conversation is accepted.
   const countWire=JSON.stringify({model:body.model,input:body.input,reasoning:body.reasoning,text:body.text});
@@ -59,7 +67,7 @@ async function countedSolReservation(body:any,wire:string,key:string,signal?:Abo
     signal:signal||AbortSignal.timeout(120000)});
   const count=await response.json().catch(()=>null);
   if(!response.ok||count?.object!=='response.input_tokens'||!Number.isSafeInteger(count.input_tokens)||count.input_tokens<1)
-    throw new Error('Sol image input count failed; generation was not sent');
+    throw new Error('Sol input count failed; generation was not sent');
   const reserved=solReservationForInput(count.input_tokens+4096,body.max_output_tokens);
   // Log only count and hashes, never source text, image bytes or credentials.
   console.info('Sol counted generation budget',JSON.stringify({inputTokens:count.input_tokens,reserved,

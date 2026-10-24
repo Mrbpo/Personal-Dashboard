@@ -128,3 +128,40 @@ test('original-image generation uses a fresh exact count and sealed wire; count 
   assert.equal(calls.length,n,'unmeasured fields or mutable remote images are blocked before count');
  }finally{globalThis.fetch=originalFetch;if(saved===undefined)delete process.env.KERNEL_ADMIN_DEVELOPMENT_RUN;else process.env.KERNEL_ADMIN_DEVELOPMENT_RUN=saved;}
 });
+
+test('an oversized text byte estimate uses exact sealed input counting without lifting its cost ceiling',async()=>{
+ await database.prepare('SELECT count(*) n FROM ai_ledger').first();
+ const saved=process.env.KERNEL_ADMIN_DEVELOPMENT_RUN,originalFetch=globalThis.fetch;
+ const makeBody=()=>({model:'gpt-6.1-sol',store:false,service_tier:'default',prompt_cache_options:{mode:'implicit',ttl:'30m'},
+  max_output_tokens:6000,reasoning:{effort:'medium'},text:{format:{type:'json_schema',name:'fixture',schema:{type:'object'}}},
+  input:[{role:'user',content:[{type:'input_text',text:'Original multilingual evidence. '.repeat(2400)}]}]});
+ let body=makeBody(),mode='valid';const calls:string[]=[],sent:string[]=[];
+ const countRows=async()=>Number((await database.prepare('SELECT count(*) n FROM ai_ledger').first<{n:number}>())!.n);
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';assert.throws(()=>solGenerationReservation(body),/cost ceiling/);
+  const before=await countRows(),frozen=JSON.stringify(body);
+  globalThis.fetch=async(url,init)=>{
+   calls.push(String(url));const wire=String(init?.body),request=JSON.parse(wire);
+   if(String(url).endsWith('/input_tokens')){
+    assert.deepEqual(request.input,makeBody().input);assert.equal(request.model,'gpt-6.1-sol');
+    body.input[0].content[0].text='caller mutation after sealing';
+    return mode==='http'?Response.json({error:'unavailable'},{status:503}):
+     Response.json({object:'response.input_tokens',input_tokens:mode==='overflow'?100000:mode==='invalid'?null:19000});
+   }
+   sent.push(wire);return Response.json({model:'gpt-6.1-sol',service_tier:'default',usage:{input_tokens:19000,output_tokens:20,
+    input_tokens_details:{cached_tokens:0,cache_write_tokens:0}}});
+  };
+  await paidOpenAI('responses',body,null,{kind:'document-answer',dailyLimit:200});
+  assert.equal(sent[0],frozen);assert.equal(calls.length,2);assert.equal(await countRows(),before+1);
+  const row=await database.prepare('SELECT reserved,charged,status FROM ai_ledger ORDER BY rowid DESC LIMIT 1').first<{reserved:number;charged:number;status:string}>();
+  assert.equal(row!.reserved,((19000+4096)*5+6000*10)/1e6);assert.equal(row!.status,'settled');
+  for(mode of ['http','invalid','overflow']){
+   body=makeBody();const n=calls.length;
+   await assert.rejects(paidOpenAI('responses',body,null,{kind:'document-answer',dailyLimit:200}),/count failed|cost ceiling/);
+   assert.equal(calls.length,n+1);assert.equal(await countRows(),before+1,'failed count has no generation reservation');
+  }
+  body=makeBody();const n=calls.length;
+  await assert.rejects(paidOpenAI('responses',{...body,instructions:'outside counted projection'},null,{kind:'document-answer',dailyLimit:200}),/unmeasured/);
+  assert.equal(calls.length,n,'unmeasured text request fields cannot pass counting');
+ }finally{globalThis.fetch=originalFetch;if(saved===undefined)delete process.env.KERNEL_ADMIN_DEVELOPMENT_RUN;else process.env.KERNEL_ADMIN_DEVELOPMENT_RUN=saved;}
+});
