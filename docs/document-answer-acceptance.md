@@ -12,6 +12,31 @@
 
 不删除或替换不匹配样本，不改原始题目、Gold 或旧分数。应保留原件及获取版本，补充正确版本时使用新的来源/解析记录和新的冻结配置；历史结果继续按原资料解释。标题提示缺失也可能源于 TeX 或排版，不能自动判为错误文件。
 
+### 作者随基准发布 PDF 的来源适配（Issue #221）
+
+`node scripts/study-source-preflight.mjs --publisher-bundle <bundle.json> --bundle-root <local-release-directory> --output <new-report.json> --final`
+
+这是同一来源门禁的离线输入适配；原 arXiv 模式不变，两种输入不能混用。清单示意如下，blob与commit值必须来自预先冻结的独立作者发布目录，不能用本地任意文件反填：
+
+```json
+{
+  "protocol": "publisher-git-pdf-bundle-v1",
+  "repository": "https://github.com/publisher/benchmark",
+  "commit": "<40 hex commit>",
+  "annotations": {"path": "data/samples.json", "gitBlobSha1": "<published annotation blob>"},
+  "documents": [{
+    "documentId": "paper.pdf",
+    "path": "data/documents/paper.pdf",
+    "gitBlobSha1": "<published PDF blob>",
+    "bytes": 12345
+  }]
+}
+```
+
+适配器读取原始发布字节并核对 Git blob SHA1（含 Git blob framing），另记录实际 PDF/标注文件 SHA256；拒绝指针、非PDF替代、大小/哈希不符、重复ID、文件名别名及根目录外路径。标注必须是非空JSON数组，使用其中原始 `doc_id` 与PDF文件名精确关联；不推断标题或历史版本。仅检查关联字段，不向报告或日志输出问题、答案，也不修改标注。自动程序仍需读取标注原始字节；这不代表盲测问题可以提前展示给开发者。
+
+结果仅覆盖清单中列出的文档ID，`fullPublisherDatasetValidated=false`；后续执行器必须确认每一道所选题的 `doc_id` 都在 `validatedDocumentIds`，且使用同一固定标注SHA和原件SHA。发布者来源目录本身仍须独立核实，工具不能从自填repository/commit证明作者身份。该检查既不证明原始Gold正确，也不证明解析或问答正确。来源检查不匹配/未知时 `--final` 仍退出2，历史arXiv未知状态不能借新模式改为通过。报告拒绝覆盖，工具不下载文件、不连接数据库、不调用模型、不改变生产。
+
 关联 Issue #68。`lib/kernel/document-answer.ts` 提供应用内、只读的内容回答模块，不新增页面、UI、服务或事实写入。
 
 ## 输入与输出

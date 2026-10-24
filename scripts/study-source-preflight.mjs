@@ -1,6 +1,6 @@
-import {readFile,writeFile} from 'node:fs/promises';
+import {readFile,writeFile,realpath} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
-import {resolve} from 'node:path';
+import {resolve,relative,isAbsolute,posix} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 export const STUDY_SOURCE_PREFLIGHT_VERSION='study-source-alignment-preflight-v1';
@@ -72,18 +72,98 @@ export function requireFinalStudySources(report){
   throw Error('Final study acceptance requires aligned sources; retain unresolved cases and resolve their material binding first');
 }
 
+const gitHash=value=>typeof value==='string'&&/^[a-f0-9]{40}$/.test(value);
+const artifactPath=value=>typeof value==='string'&&value.length>0&&value.length<=4000&&
+ !/[\\:\u0000-\u001f]/u.test(value)&&!value.split('/').some(part=>!part||part==='.'||part==='..');
+const gitBlob=bytes=>createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+
+/** Offline adapter for a publisher's commit-pinned PDF + array/doc_id release.
+ * Expected blobs must come from an independently captured publisher inventory.
+ * Only doc_id is inspected; question/answer content is never emitted or graded.
+ * A title, inferred revision or locally invented annotation cannot bind a PDF. */
+export async function publishedStudySourcePreflight(bundle,readArtifact){
+ if(bundle?.protocol!=='publisher-git-pdf-bundle-v1'||
+  typeof bundle.repository!=='string'||!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(bundle.repository)||
+  !gitHash(bundle.commit)||typeof readArtifact!=='function'||
+  !artifactPath(bundle.annotations?.path)||!gitHash(bundle.annotations?.gitBlobSha1)||
+  !Array.isArray(bundle.documents)||!bundle.documents.length)
+  throw Error('Invalid publisher PDF bundle');
+ const ids=new Set(),paths=new Set();
+ for(const row of bundle.documents){
+  if(!row||typeof row.documentId!=='string'||!artifactPath(row.documentId)||row.documentId.includes('/')||
+   !artifactPath(row.path)||posix.basename(row.path)!==row.documentId||!row.path.endsWith('.pdf')||
+   row.path===bundle.annotations.path||!gitHash(row.gitBlobSha1)||
+   !Number.isSafeInteger(row.bytes)||row.bytes<=0||ids.has(row.documentId)||paths.has(row.path))
+   throw Error('Invalid or duplicate publisher document identity');
+  ids.add(row.documentId);paths.add(row.path);
+ }
+ const annotations=await readArtifact(bundle.annotations.path);
+ if(!Buffer.isBuffer(annotations))throw Error('Publisher artifacts must be raw bytes');
+ const actualAnnotationBlob=gitBlob(annotations),annotationVerified=actualAnnotationBlob===bundle.annotations.gitBlobSha1;
+ const referenced=new Set();
+ if(annotationVerified){
+  let rows;try{rows=JSON.parse(annotations.toString('utf8'));}catch{throw Error('Invalid publisher annotation JSON');}
+  if(!Array.isArray(rows)||!rows.length||rows.some(row=>!row||typeof row.doc_id!=='string'||!row.doc_id))
+   throw Error('Publisher annotations must be a nonempty array with document IDs');
+  for(const row of rows)referenced.add(row.doc_id);
+ }
+ const records=[];
+ for(const row of bundle.documents){
+  const bytes=await readArtifact(row.path);
+  if(!Buffer.isBuffer(bytes))throw Error('Publisher artifacts must be raw bytes');
+  const actualBlob=gitBlob(bytes),issues=[];
+  if(!annotationVerified)issues.push('publisher-annotation-blob-mismatch');
+  if(bytes.length!==row.bytes||actualBlob!==row.gitBlobSha1)issues.push('publisher-pdf-blob-mismatch');
+  if(!bytes.subarray(0,5).equals(Buffer.from('%PDF-')))issues.push('publisher-artifact-not-raw-pdf');
+  if(annotationVerified&&!referenced.has(row.documentId))issues.push('publisher-document-id-not-referenced');
+  const mismatch=issues.some(issue=>issue!=='publisher-document-id-not-referenced');
+  records.push({documentId:row.documentId,rawPdfSha256:hash(bytes),bytes:bytes.length,
+   publisherPdfPath:row.path,publisherPdfBlobSha1:row.gitBlobSha1,actualPdfBlobSha1:actualBlob,
+   authorSourceAlignment:mismatch?'mismatched':issues.length?'unknown':'aligned',
+   alignmentBasis:'publisher-pinned-annotation-doc-id-and-pdf-blob',issues,
+   contentFidelity:'unassessed',answerCorrectness:'unassessed'});
+ }
+ const counts={sources:records.length,aligned:0,unknown:0,mismatched:0,titleNotObserved:0};
+ for(const row of records)counts[row.authorSourceAlignment]++;
+ return {version:STUDY_SOURCE_PREFLIGHT_VERSION,sourceBindingProtocol:bundle.protocol,
+  publisher:{repository:bundle.repository,commit:bundle.commit,annotationPath:bundle.annotations.path,
+   expectedAnnotationBlobSha1:bundle.annotations.gitBlobSha1,actualAnnotationBlobSha1:actualAnnotationBlob,
+   annotationSha256:hash(annotations)},scope:'listed-document-ids-only',
+  validatedDocumentIds:records.filter(row=>row.authorSourceAlignment==='aligned').map(row=>row.documentId),
+  fullPublisherDatasetValidated:false,counts,finalSourceReady:counts.aligned===counts.sources,records,
+  meaning:'Publisher artifact association only; not proof of parsing, retrieval, answer, citation or refusal accuracy.'};
+}
+
+export async function readPublishedStudyArtifact(root,path){
+ if(!artifactPath(path))throw Error('Invalid publisher artifact path');
+ const base=await realpath(root),target=await realpath(resolve(base,...path.split('/'))),inside=relative(base,target);
+ if(!inside||inside==='..'||inside.startsWith('..\\')||inside.startsWith('../')||isAbsolute(inside))
+  throw Error('Publisher artifact is outside its local bundle root');
+ return readFile(target);
+}
+
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  try{
   const args=process.argv.slice(2),options=new Map();let final=false;
   for(let i=0;i<args.length;i++){
    if(args[i]==='--final'){if(final)throw Error('Duplicate final flag');final=true;continue;}
-   if(!['--manifest','--metadata','--output'].includes(args[i])||!args[i+1]||options.has(args[i]))throw Error('Invalid preflight arguments');
+   if(!['--manifest','--metadata','--publisher-bundle','--bundle-root','--output'].includes(args[i])||!args[i+1]||options.has(args[i]))throw Error('Invalid preflight arguments');
    options.set(args[i],args[++i]);
   }
-  if(!['--manifest','--metadata','--output'].every(key=>options.has(key)))throw Error('Provide --manifest, --metadata and --output');
-  const manifest=await readFile(options.get('--manifest')),metadata=await readFile(options.get('--metadata'));
-  const report={...studySourcePreflight(JSON.parse(manifest),JSON.parse(metadata)),
-   inputs:{manifestSha256:hash(manifest),metadataSha256:hash(metadata)},mode:final?'final':'calibration'};
+  let result,inputs;
+  if(options.has('--publisher-bundle')||options.has('--bundle-root')){
+   if(!['--publisher-bundle','--bundle-root','--output'].every(key=>options.has(key))||options.has('--manifest')||options.has('--metadata'))
+    throw Error('Provide --publisher-bundle, --bundle-root and --output without arXiv inputs');
+   const bytes=await readFile(options.get('--publisher-bundle'));
+   result=await publishedStudySourcePreflight(JSON.parse(bytes),path=>readPublishedStudyArtifact(options.get('--bundle-root'),path));
+   inputs={publisherBundleManifestSha256:hash(bytes)};
+  }else{
+   if(!['--manifest','--metadata','--output'].every(key=>options.has(key)))throw Error('Provide --manifest, --metadata and --output');
+   const manifest=await readFile(options.get('--manifest')),metadata=await readFile(options.get('--metadata'));
+   result=studySourcePreflight(JSON.parse(manifest),JSON.parse(metadata));
+   inputs={manifestSha256:hash(manifest),metadataSha256:hash(metadata)};
+  }
+  const report={...result,inputs,mode:final?'final':'calibration'};
   await writeFile(options.get('--output'),JSON.stringify(report,null,2)+'\n',{flag:'wx'});
   console.log(JSON.stringify({version:report.version,counts:report.counts,finalSourceReady:report.finalSourceReady,mode:report.mode}));
   if(final){try{requireFinalStudySources(report);}catch(error){console.error(error.message);process.exitCode=2;}}
