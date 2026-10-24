@@ -359,6 +359,12 @@ test('isolated application daily allowance shares selection generation and local
  const p=prepareDocumentAnswerForPolicy(question,c,checkedPolicy),id=p.quoteUnits.find(u=>u.selectable)!.id,
   kernel=new KernelService(),formats:string[]=[],rowCounts:number[]=[];
  (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+ kernel.readDocumentNodes=async(owner,source,ids)=>{
+  void owner;void source;
+  return c.anchors.filter(hit=>ids.includes(hit.evidence_id)).map(({score,...hit})=>{
+   void score;return {...hit,reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'};
+  }) as Awaited<ReturnType<KernelService['readDocumentNodes']>>;
+ };
  try{
   process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
   process.env.DATABASE_URL='file:/pdf-data/benchmark.sqlite';process.env.AI_BUDGET_TEST_BYPASS='false';process.env.AI_MONTHLY_BUDGET='1';
