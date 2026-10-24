@@ -363,7 +363,7 @@ test('isolated application daily allowance shares selection generation and local
   void owner;void source;
   return c.anchors.filter(hit=>ids.includes(hit.evidence_id)).map(({score,...hit})=>{
    void score;return {...hit,reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'};
-  }) as Awaited<ReturnType<KernelService['readDocumentNodes']>>;
+  }) as Awaited<ReturnType<typeof kernel.readDocumentNodes>>;
  };
  try{
   process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';process.env.KERNEL_DATABASE_URL='postgresql://localhost/pdf_acceptance_20261006';
