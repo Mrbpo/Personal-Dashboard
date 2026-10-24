@@ -1,5 +1,6 @@
 import { database as db } from './database.ts';
 import { serviceValue } from './service-vault.ts';
+import {createHash} from 'node:crypto';
 const baseRates: Record<string,{input:number;output:number;context:number}> = {
   'gpt-5-mini': {input:0.25,output:2,context:400000},
   'gpt-5.4-mini': {input:0.75,output:4.5,context:400000},
@@ -21,19 +22,48 @@ export function estimateEmbeddingReservation(input:string[],model:string){
   const rate=configuredRate(model);
   return Math.max(0.000001,Buffer.byteLength(JSON.stringify(input))*rate.input/1e6);
 }
-/** The isolated candidate is text-only until its image accounting is verified.
- * Reserve both documented write lifetimes; never infer a token count from base64. */
-export function solGenerationReservation(body:any):number{
+function validateSolGeneration(body:any,allowImages=false):boolean{
   if(body.model!=='gpt-6.1-sol'||body.service_tier!=='default'||body.prompt_cache_retention!==undefined||
     body.prompt_cache_options?.mode!=='implicit'||body.prompt_cache_options?.ttl!=='30m'||
     Object.keys(body.prompt_cache_options).some(k=>!['mode','ttl'].includes(k))||body.tools?.length||
     !Number.isInteger(body.max_output_tokens)||body.max_output_tokens<1||body.max_output_tokens>6000||
     !Array.isArray(body.input)||body.input.some((m:any)=>typeof m?.content!=='string'&&
-      (!Array.isArray(m?.content)||m.content.some((c:any)=>c?.type!=='input_text'||typeof c.text!=='string'||c.prompt_cache_breakpoint!==undefined))))
-    throw new Error('Sol candidate requires bounded Standard text-only generation with explicit 30m caching');
-  const inputUpper=Buffer.byteLength(JSON.stringify(body))+4096;
-  const reserved=(inputUpper*5+body.max_output_tokens*10)/1e6;
+      (!Array.isArray(m?.content)||m.content.some((c:any)=>c?.type==='input_image'&&allowImages?
+        c.detail!=='original'||typeof c.image_url!=='string'||!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(c.image_url)||
+          Object.keys(c).some(k=>!['type','detail','image_url'].includes(k)):
+        c?.type!=='input_text'||typeof c.text!=='string'||c.prompt_cache_breakpoint!==undefined))))
+    throw new Error('Sol candidate requires bounded Standard text-only or counted original-image generation with explicit 30m caching');
+  const hasImages=body.input.some((m:any)=>Array.isArray(m.content)&&m.content.some((c:any)=>c.type==='input_image'));
+  if(hasImages&&(Object.keys(body).some(k=>!['model','store','reasoning','max_output_tokens','input','text','service_tier','prompt_cache_options'].includes(k))||
+    body.store!==false||body.input.some((m:any)=>Object.keys(m).some(k=>!['role','content'].includes(k)))))
+    throw new Error('Sol image counting does not support unmeasured request fields');
+  return hasImages;
+}
+function solReservationForInput(inputUpper:number,maxOutput:number):number{
+  const reserved=(inputUpper*5+maxOutput*10)/1e6;
   if(inputUpper>272000||reserved>.40)throw new Error('Sol candidate exceeds the verified per-request cost ceiling');
+  return reserved;
+}
+/** Text has a conservative UTF-8 bound. Image bytes are never treated as tokens. */
+export function solGenerationReservation(body:any):number{
+  validateSolGeneration(body);
+  return solReservationForInput(Buffer.byteLength(JSON.stringify(body))+4096,body.max_output_tokens);
+}
+async function countedSolReservation(body:any,wire:string,key:string,signal?:AbortSignal|null):Promise<number>{
+  if(!validateSolGeneration(body,true))return solGenerationReservation(body);
+  // A private projection of the sealed body includes every token-bearing field.
+  // No client count, saved measurement, remote image or conversation is accepted.
+  const countWire=JSON.stringify({model:body.model,input:body.input,reasoning:body.reasoning,text:body.text});
+  const response=await fetch('https://api.openai.com/v1/responses/input_tokens',{method:'POST',
+    headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:countWire,
+    signal:signal||AbortSignal.timeout(120000)});
+  const count=await response.json().catch(()=>null);
+  if(!response.ok||count?.object!=='response.input_tokens'||!Number.isSafeInteger(count.input_tokens)||count.input_tokens<1)
+    throw new Error('Sol image input count failed; generation was not sent');
+  const reserved=solReservationForInput(count.input_tokens+4096,body.max_output_tokens);
+  // Log only count and hashes, never source text, image bytes or credentials.
+  console.info('Sol counted generation budget',JSON.stringify({inputTokens:count.input_tokens,reserved,
+    requestSha256:createHash('sha256').update(wire).digest('hex'),countRequestSha256:createHash('sha256').update(countWire).digest('hex')}));
   return reserved;
 }
 /** Unknown TTL splits/model/tier retain the reservation, including old responses. */
@@ -94,8 +124,14 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   const sol=body.model==='gpt-6.1-sol';
   if(sol&&(endpoint!=='responses'||policy?.kind!=='document-answer'||process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true'))
     throw new Error('Sol generation is restricted to isolated study development');
-  const solReserved=sol?solGenerationReservation(body):undefined;
+  // Seal before the first await: callers cannot mutate evidence/model/schema
+  // between the count, budget reservation and generation transmission.
+  const solWire=sol?JSON.stringify(body):undefined;
+  if(sol)body=JSON.parse(solWire!);
+  if(sol)validateSolGeneration(body,true);
   if(!serviceValue('OPENAI_API_KEY')) throw new Error('请先配置 OpenAI API Key');
+  const key=serviceValue('OPENAI_API_KEY');
+  const solReserved=sol?await countedSolReservation(body,solWire!,key,signal):undefined;
   const maxOutput=endpoint==='embeddings'?0:Number(body.max_output_tokens);
   if(!Number.isFinite(maxOutput) || maxOutput<0 || maxOutput>128000) throw new Error('回答长度上限无效');
   // Reserve against a conservative estimate of this request, not the model's
@@ -112,7 +148,7 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   const reserved=solReserved??Math.max(0.000001,(tokens*rate.input*(astra?1.25:1)*(longInput?2:1)+maxOutput*rate.output*(longInput?1.5:1))/1e6+toolMax);
   const id=await reserveBudget(reserved,policy?.kind||endpoint,policy?.dailyLimit);
   // On an ambiguous timeout keep the reservation: provider may have already billed it.
-  const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
+  const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:solWire??JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
   const p=await response.clone().json().catch(()=>null);
   if(response.ok && p?.usage) {
     // An unverified model must not be settled at the requested mini rate.

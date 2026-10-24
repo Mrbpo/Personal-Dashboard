@@ -82,3 +82,49 @@ test('Sol reservation rejects oversized and altered transport; split writes are 
  assert.equal(solGenerationCharge({model:'gpt-6.1-sol',service_tier:'default',usage:{input_tokens:2,output_tokens:1,
   input_tokens_details:{cached_tokens:1,cache_write_tokens:2,cache_write_tokens_details:{ttl_30m_tokens:2,ttl_12h_tokens:0}}}}),null);
 });
+
+test('original-image generation uses a fresh exact count and sealed wire; count failures never generate or reserve',async()=>{
+ await database.prepare('SELECT count(*) n FROM ai_ledger').first();
+ const originalFetch=globalThis.fetch,saved=process.env.KERNEL_ADMIN_DEVELOPMENT_RUN;
+ const image='data:image/png;base64,'+'AAAA'.repeat(40000);
+ const makeBody=()=>({model:'gpt-6.1-sol',store:false,service_tier:'default',prompt_cache_options:{mode:'implicit',ttl:'30m'},
+  max_output_tokens:6000,reasoning:{effort:'medium'},text:{format:{type:'json_schema',name:'fixture',schema:{type:'object'}}},
+  input:[{role:'user',content:[{type:'input_text',text:'Original source'},{type:'input_image',detail:'original',image_url:image}]}]});
+ let body=makeBody(),mode='valid';const calls:string[]=[],sent:string[]=[];
+ const ledgerCount=async()=>Number((await database.prepare('SELECT count(*) n FROM ai_ledger').first<{n:number}>())!.n);
+ try{
+  process.env.KERNEL_ADMIN_DEVELOPMENT_RUN='true';
+  assert.throws(()=>solGenerationReservation(body),/text-only/,'saved/client counts cannot authorize the pure estimator');
+  globalThis.fetch=async(url,init)=>{
+   calls.push(String(url));const raw=String(init?.body),request=JSON.parse(raw);
+   if(String(url).endsWith('/input_tokens')){
+    assert.deepEqual(request,{model:'gpt-6.1-sol',input:makeBody().input,reasoning:body.reasoning,text:body.text});
+    body.model='changed-after-count';body.input[0].content[1].image_url='https://changed.invalid/image';
+    if(mode==='http')return Response.json({error:'unavailable'},{status:503});
+    return Response.json({object:'response.input_tokens',input_tokens:mode==='overflow'?100000:mode==='invalid'?'17001':17001});
+   }
+   assert.equal(String(url),'https://api.openai.com/v1/responses');sent.push(raw);
+   return Response.json({model:'gpt-6.1-sol',service_tier:'default',usage:{input_tokens:17001,output_tokens:20,
+    input_tokens_details:{cached_tokens:0,cache_write_tokens:0}}});
+  };
+  const frozen=JSON.stringify(body),before=await ledgerCount();
+  await paidOpenAI('responses',body,null,{kind:'document-answer',dailyLimit:200});
+  assert.equal(sent[0],frozen,'full original image/schema/model sent unchanged despite caller mutation');
+  assert.equal(calls.length,2,'one fresh count then one generation, no retry');
+  assert.equal(await ledgerCount(),before+1);
+  const row=await database.prepare('SELECT reserved,charged,status FROM ai_ledger ORDER BY rowid DESC LIMIT 1').first<{reserved:number;charged:number;status:string}>();
+  assert.equal(row!.reserved,((17001+4096)*5+6000*10)/1e6);assert.equal(row!.status,'settled');
+  assert.equal(row!.charged,(17001*2+20*10)/1e6);
+  for(mode of ['http','invalid','overflow']){
+   body=makeBody();const n:number=calls.length;
+   await assert.rejects(paidOpenAI('responses',body,null,{kind:'document-answer',dailyLimit:200}),/count failed|cost ceiling/);
+   assert.equal(calls.length,n+1,'a new count each attempt, no generation or retry on failure');
+   assert.equal(await ledgerCount(),before+1,'failed count cannot create a generation reservation');
+  }
+  body=makeBody();const n=calls.length;
+  await assert.rejects(paidOpenAI('responses',{...body,instructions:'unmeasured'},null,{kind:'document-answer',dailyLimit:200}),/unmeasured/);
+  body.input[0].content[1].image_url='https://remote.invalid/image';
+  await assert.rejects(paidOpenAI('responses',body,null,{kind:'document-answer',dailyLimit:200}),/original-image/);
+  assert.equal(calls.length,n,'unmeasured fields or mutable remote images are blocked before count');
+ }finally{globalThis.fetch=originalFetch;if(saved===undefined)delete process.env.KERNEL_ADMIN_DEVELOPMENT_RUN;else process.env.KERNEL_ADMIN_DEVELOPMENT_RUN=saved;}
+});

@@ -231,9 +231,17 @@ not enable this path. No automatic escalation, fallback, retry or production
 default change is introduced.
 
 The candidate uses Standard service and explicit implicit/30m prompt caching.
-Its verified budget envelope is currently text-only, no tools, at most 6000 output
-tokens and USD0.40 conservative reservation per request. Images, unverified large
-inputs and altered transport settings are refused before sending, never removed
+Its budget envelope has no tools, at most 6000 output tokens and a USD0.40
+conservative reservation per request. Text uses a UTF-8 upper bound. Original PNG
+image requests require a fresh server-side `/v1/responses/input_tokens` count
+including all input, reasoning and schema fields. The complete generation JSON
+is sealed before counting and that identical wire is sent after reservation;
+client counts, old measurements, external image URLs and unmeasured request
+fields cannot authorize generation. Failed/malformed/over-limit counts stop
+without generation or retry. Counts and both request hashes are logged without
+source contents or credentials. The counter is a separate request, not a model
+generation; this implementation does not assert that counter requests are free.
+Unverified inputs and altered transport settings are refused, never removed
 from source evidence to make a request fit. The usual mini path remains available
 with this option absent. The monthly ledger is not lifted or reset.
 
