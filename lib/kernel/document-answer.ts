@@ -844,8 +844,8 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
    pairs:Array<{imageId:string;supportId:string;referenceIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false}>;
    skippedSupportIds:string[];inputScope:'already-retrieved-selectable-text';structureRelationsVerified:false};
   structureRelationsVerified:false};
- originalPageImageRetention?:{policy:'provider-selected-text-original-page-v1';retainedImageIds:string[];skippedImageIds:string[];
-  pairs:Array<{imageId:string;supportIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false}>;
+ originalPageImageRetention?:{policy:'provider-selected-text-original-page-v1'|'selected-and-focused-original-page-v2';retainedImageIds:string[];skippedImageIds:string[];
+  pairs:Array<{imageId:string;supportIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false;basis?:'focused-nonquotable-page'}>;
   inputScope:'already-retrieved-original-page-images';structureRelationsVerified:false};
  mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v2';documentId:string;sourceHash:string;
   status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
@@ -931,28 +931,39 @@ export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAn
  * evidence. Text must already be a selectable support, never imageAnchors.
  * Explicitly provider-selected text also retains its offered original page
  * without requiring table/formula recognition. System-retained text alone
- * cannot trigger that broader image retention. Same-page binding never
+ * cannot trigger that broader image retention. A validated focused page with
+ * no quotable text can retain its original PNG when this source was explicitly
+ * selected; its text remains non-quotable. Same-page binding never
  * certifies a table's or formula's semantic relations. */
 export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,prepared:PreparedAnswer):StoredNodeTextSelection{
  if(!retained.providerReferenceIds.length)return retained;
  const ids=new Set(retained.referenceIds),selectedSupportIds=new Set(prepared.quoteUnits.filter(u=>ids.has(u.id)).map(u=>u.supportId)),
   providerIds=new Set(retained.providerReferenceIds),providerSupportIds=new Set(prepared.quoteUnits.filter(u=>providerIds.has(u.id)).map(u=>u.supportId)),
+  providerSources=new Set(prepared.supports.filter(s=>providerSupportIds.has(s.id)||s.kind==='image'&&providerIds.has(s.id)).map(supportSourceKey)),
   selectedText=prepared.supports.filter(s=>s.kind==='text'&&selectedSupportIds.has(s.id)),retainedImageIds:string[]=[],skippedImageIds:string[]=[],
   addedImageIds:string[]=[],originalImageIds:string[]=[],skippedOriginalImageIds:string[]=[],
+  focus=prepared.input.focusedText,quotableSupportIds=new Set(prepared.quoteUnits.filter(u=>u.selectable).map(u=>u.supportId)),
+  focusedNonquotableText=focus?prepared.supports.filter(s=>s.kind==='text'&&!quotableSupportIds.has(s.id)&&
+   providerSources.has(supportSourceKey(s))&&s.documentId===focus.source.documentId&&s.documentVersionId===focus.source.currentVersionId&&
+   s.sourceVersionId===focus.source.sourceVersionId&&s.sourceHash===focus.source.sourceHash&&
+   focus.pages.some(page=>page.evidenceId===s.evidenceId&&page.bodySha256===s.sha256)):[],
   originalPairs:NonNullable<StoredNodeTextSelection['originalPageImageRetention']>['pairs']=[],
   samePage=(text:Support,image:Support)=>text.kind==='text'&&text.documentId===image.documentId&&text.documentVersionId===image.documentVersionId&&
    text.sourceVersionId===image.sourceVersionId&&text.sourceHash===image.sourceHash&&text.evidenceId===image.evidenceId;
+ let focusedPageConsidered=false;
  for(const support of prepared.supports){
   if(support.kind!=='image'||!support.image||!('kind'in support.image)||support.image.kind!=='pdf-page'||ids.has(support.id))continue;
   const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[],
-   pageText=selectedText.filter(s=>samePage(s,support)),providerPageText=pageText.filter(s=>providerSupportIds.has(s.id));
-  if(!pageText.length||!native.length&&!providerPageText.length)continue;
+   pageText=selectedText.filter(s=>samePage(s,support)),providerPageText=pageText.filter(s=>providerSupportIds.has(s.id)),
+   focusedPageText=focusedNonquotableText.filter(s=>samePage(s,support)),nativePair=!!native.length&&!!pageText.length;
+  if(!nativePair&&!providerPageText.length&&!focusedPageText.length)continue;
+  if(focusedPageText.length)focusedPageConsidered=true;
   for(const observation of native)assertNativeTableObservation(observation,support.image);
-  if(ids.size>=64){(native.length?skippedImageIds:skippedOriginalImageIds).push(support.id);continue;}
+  if(ids.size>=64){(nativePair?skippedImageIds:skippedOriginalImageIds).push(support.id);continue;}
   ids.add(support.id);addedImageIds.push(support.id);
-  if(native.length)retainedImageIds.push(support.id);
-  else{originalImageIds.push(support.id);originalPairs.push({imageId:support.id,supportIds:providerPageText.map(s=>s.id),
-   relation:'same-stored-pdf-page',semanticRelationsVerified:false});}
+  if(nativePair)retainedImageIds.push(support.id);
+  else{originalImageIds.push(support.id);originalPairs.push({imageId:support.id,supportIds:[...providerPageText,...focusedPageText].map(s=>s.id),
+   relation:'same-stored-pdf-page',semanticRelationsVerified:false,...(focusedPageText.length?{basis:'focused-nonquotable-page' as const}:{})});}
  }
  const units=generationQuoteUnits(prepared),pairs:NonNullable<NonNullable<StoredNodeTextSelection['nativeTablePageRetention']>['imageTextPairing']>['pairs']=[],
   skippedSupportIds:string[]=[];
@@ -975,7 +986,7 @@ export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,
  return {...retained,referenceIds:[...retained.referenceIds,...addedImageIds,...textIds],
   systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...addedImageIds,...textIds],
   ...(pairs.length?{expandedSupportIds:[...new Set([...retained.expandedSupportIds,...pairs.map(pair=>pair.supportId)])]}:{}),
-  ...(originalImageIds.length||skippedOriginalImageIds.length?{originalPageImageRetention:{policy:'provider-selected-text-original-page-v1' as const,
+  ...(originalImageIds.length||skippedOriginalImageIds.length?{originalPageImageRetention:{policy:focusedPageConsidered?'selected-and-focused-original-page-v2' as const:'provider-selected-text-original-page-v1' as const,
    retainedImageIds:originalImageIds,skippedImageIds:skippedOriginalImageIds,pairs:originalPairs,
    inputScope:'already-retrieved-original-page-images' as const,structureRelationsVerified:false as const}}:{}),
   ...(nativeChanged?{nativeTablePageRetention:{policy:'selected-node-original-table-page-v1' as const,retainedImageIds,skippedImageIds,

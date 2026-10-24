@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {prepareDocumentAnswer,retainSelectedStoredNodeText,retainSelectedNativeTablePages,buildSelectedDocumentAnswerRequest,
  type DocumentAnswerContext,type StoredNodeTextSelection} from '../lib/kernel/document-answer.ts';
+import {focusedDocumentTextQuery,focusedTextQueryHash} from '../lib/kernel/document-focused-text.ts';
 
 const sha=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex');
 async function fixture():Promise<DocumentAnswerContext>{
@@ -66,4 +67,38 @@ test('original image retention records the existing reference cap without removi
  assert.deepEqual(result.referenceIds,ids);assert.deepEqual(result.originalPageImageRetention?.retainedImageIds,[]);
  assert.deepEqual(result.originalPageImageRetention?.skippedImageIds,['i0','i1']);
  assert.equal(result.originalPageImageRetention?.structureRelationsVerified,false);
+});
+
+test('focused non-quotable pages retain their original pixels without enabling text citations',async()=>{
+ const c=await fixture(),question='What does Source a report?',query=focusedDocumentTextQuery(question,'Source a')!;
+ c.focusedText={policy:'bounded-mentioned-source-relevance-v1',source:{documentId:'a',currentVersionId:'v-a',sourceVersionId:'sv-a',sourceHash:sha('a')},
+  querySha256:focusedTextQueryHash(query),pages:[{evidenceId:'a-page-2',bodySha256:sha(c.anchors[1].body)}],coverage:'unassessed',structureRelationsVerified:false};
+ const p=prepareDocumentAnswer(question,c),id=p.quoteUnits.find(u=>u.supportId==='e0')!.id;
+ // This boundary fixture represents an upstream visual-unit protocol decision;
+ // it does not assert why a parser/paired-image path made the units non-quotable.
+ for(const u of p.quoteUnits)if(u.supportId==='e1')u.selectable=false;
+ const selected=retainSelectedStoredNodeText({referenceIds:[id]},p),before=JSON.stringify(p),r=retainSelectedNativeTablePages(selected,p);
+ assert.deepEqual(r.referenceIds,[id,'i0','i1']);assert.equal(r.originalPageImageRetention?.policy,'selected-and-focused-original-page-v2');
+ assert.deepEqual(r.originalPageImageRetention?.pairs[1],{imageId:'i1',supportIds:['e1'],relation:'same-stored-pdf-page',semanticRelationsVerified:false,basis:'focused-nonquotable-page'});
+ assert.equal(JSON.stringify(p),before);assert.ok(p.quoteUnits.filter(u=>u.supportId==='e1').every(u=>!u.selectable));
+ const request=buildSelectedDocumentAnswerRequest(p,r.referenceIds,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},{scope:'application'}),
+  content=request.input.at(-1)!.content as Array<{type:string;image_url?:string}>;
+ assert.equal(content.filter(c=>c.type==='input_image').length,2);
+ assert.ok(!r.referenceIds.some(ref=>p.quoteUnits.some(u=>u.id===ref&&u.supportId==='e1')),'non-quotable text IDs never become citations');
+ assert.deepEqual(retainSelectedNativeTablePages(r,p),r);
+ const foreignId=p.quoteUnits.find(u=>u.supportId==='e2')!.id;
+ const foreign=retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:[foreignId]},p),p);
+ assert.deepEqual(foreign.referenceIds,[foreignId,'i2'],'a foreign-only selection cannot retain another source focused page');
+ for(const field of ['documentId','currentVersionId','sourceVersionId','sourceHash'] as const){
+  const bad=structuredClone(p);bad.input.focusedText!.source[field]='mismatch';
+  assert.deepEqual(retainSelectedNativeTablePages(selected,bad).referenceIds,[id,'i0']);
+ }
+ for(const field of ['evidenceId','bodySha256'] as const){
+  const bad=structuredClone(p);bad.input.focusedText!.pages[0][field]='mismatch';
+  assert.deepEqual(retainSelectedNativeTablePages(selected,bad).referenceIds,[id,'i0']);
+ }
+ const absent=structuredClone(p);delete absent.input.focusedText;
+ assert.deepEqual(retainSelectedNativeTablePages(selected,absent).referenceIds,[id,'i0']);
+ const quotable=structuredClone(p);for(const u of quotable.quoteUnits)u.selectable=true;
+ assert.deepEqual(retainSelectedNativeTablePages(selected,quotable).referenceIds,[id,'i0'],'ordinary system-only text does not trigger new images');
 });

@@ -283,3 +283,12 @@ than evicting selected references. This association means only “same registere
 PDF page”; it does not validate mathematical notation or certify a relationship.
 Original pixels and extracted text remain unchanged. Input-retention tests alone
 do not demonstrate formula fidelity or answer correctness.
+
+For a validated query-focused page whose text has no selectable quote units,
+the same pass can retain its registered original page image after the provider
+has selected evidence from that exact current source (Issue #215). This also
+covers text deliberately bound to an indivisible native visual unit. Focused
+source versions, page evidence and full body hash must match. The v2 retention
+receipt marks `focused-nonquotable-page`; the text's original eligibility and
+all unverified structural relationships stay unchanged. Missing focus, mismatched
+identity or a foreign-only/empty selection cannot activate this fallback.
