@@ -156,7 +156,7 @@ test('an oversized text byte estimate uses exact sealed input counting without l
   const row=await database.prepare('SELECT reserved,charged,status FROM ai_ledger ORDER BY rowid DESC LIMIT 1').first<{reserved:number;charged:number;status:string}>();
   assert.equal(row!.reserved,((19000+4096)*5+6000*10)/1e6);assert.equal(row!.status,'settled');
   for(mode of ['http','invalid','overflow']){
-   body=makeBody();const n=calls.length;
+   body=makeBody();const n:number=calls.length;
    await assert.rejects(paidOpenAI('responses',body,null,{kind:'document-answer',dailyLimit:200}),/count failed|cost ceiling/);
    assert.equal(calls.length,n+1);assert.equal(await countRows(),before+1,'failed count has no generation reservation');
   }
