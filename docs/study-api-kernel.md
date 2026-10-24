@@ -300,3 +300,13 @@ USD0.40 ceiling remain unchanged; unsupported projection fields, failed counts
 or a truly over-limit count still stop before generation. Small text requests
 continue using their byte bound without a counter. See the official
 [token counting guide](https://developers.openai.com/api/docs/guides/token-counting).
+
+### Source-reported event status (Issue #217)
+
+Generation prompt v8 makes the existing qualification rule explicit for event
+status: invitations, plans and proposals must not become completed actions just
+because the question assumes completion. It preserves source qualifications and
+ordinary grounded synthesis. The selector replaces the generation developer
+message with its own instruction, so this change does not alter the selector
+wire. Citation validation and the original source remain unchanged; there is no
+post-generation verb replacement or automatic answer repair.

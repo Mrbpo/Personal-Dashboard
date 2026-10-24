@@ -22,7 +22,7 @@ import {prepareSourceCellBindingCatalog,sourceCellBindingAnswerSchema,deriveSour
 import {prepareSourceQuantityCatalog,sourceQuantityAnswerSchema,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAggregations} from './document-source-quantities.ts';
 import {withDocumentScopeOutput,bindDocumentScopeAnnotations} from './document-scope-annotations.ts';
 
-export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v7';
+export const DOCUMENT_ANSWER_PROMPT_VERSION='grounded-document-answer-v8';
 export const DOCUMENT_ANSWER_REFERENCE_POLICY_VERSION='unique-existing-text-reference-v1';
 export const DOCUMENT_ANSWER_QUOTE_PROTOCOL_VERSION='source-quote-units-v1';
 export const DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16=8192;
@@ -703,7 +703,8 @@ export function buildDocumentAnswerRequest(prepared:ReturnType<typeof prepareDoc
    'The server restores verbatim quotations. Image IDs require the actual supplied image, which follows its support-ID label. '+
    'Cover all question-relevant items in an explicit supplied list, rather than returning only one example. '+
    'For quantities, state the counted object, unit, scope, processing stage and configuration; preserve distinct supported interpretations and qualifications. '+
-   'Preserve equations, qualifications and disagreement; do not invent facts from general knowledge. '+
+   'Preserve equations, uncertainty, source-reported event status, qualifications and disagreement; do not invent facts from general knowledge. '+
+   'An invitation, plan or proposal does not establish a completed action; preserve the source qualification rather than adopting a stronger assumption in the question. '+
    'This is study-content synthesis. Current deadlines, exam dates, course relationships and task status require canonical Kernel facts; '+
    'do not establish those business states from document evidence and decline if the question requires them. '+
    `For insufficient evidence, return insufficient-evidence with no claims and message exactly: ${DOCUMENT_ANSWER_INSUFFICIENT_MESSAGE} `+
