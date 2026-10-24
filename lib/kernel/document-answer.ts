@@ -844,6 +844,9 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
    pairs:Array<{imageId:string;supportId:string;referenceIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false}>;
    skippedSupportIds:string[];inputScope:'already-retrieved-selectable-text';structureRelationsVerified:false};
   structureRelationsVerified:false};
+ originalPageImageRetention?:{policy:'provider-selected-text-original-page-v1';retainedImageIds:string[];skippedImageIds:string[];
+  pairs:Array<{imageId:string;supportIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false}>;
+  inputScope:'already-retrieved-original-page-images';structureRelationsVerified:false};
  mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v2';documentId:string;sourceHash:string;
   status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
   inputScope:'available-original-quote-units';coverage:'unassessed';structureRelationsVerified:false};
@@ -926,20 +929,30 @@ export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAn
 /** Keep an already retrieved native table page and its existing text together.
  * A byte-limited parser grid stays unavailable; the PNG is still original
  * evidence. Text must already be a selectable support, never imageAnchors.
- * Same-page binding never certifies a table's semantic relations. */
+ * Explicitly provider-selected text also retains its offered original page
+ * without requiring table/formula recognition. System-retained text alone
+ * cannot trigger that broader image retention. Same-page binding never
+ * certifies a table's or formula's semantic relations. */
 export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,prepared:PreparedAnswer):StoredNodeTextSelection{
  if(!retained.providerReferenceIds.length)return retained;
  const ids=new Set(retained.referenceIds),selectedSupportIds=new Set(prepared.quoteUnits.filter(u=>ids.has(u.id)).map(u=>u.supportId)),
+  providerIds=new Set(retained.providerReferenceIds),providerSupportIds=new Set(prepared.quoteUnits.filter(u=>providerIds.has(u.id)).map(u=>u.supportId)),
   selectedText=prepared.supports.filter(s=>s.kind==='text'&&selectedSupportIds.has(s.id)),retainedImageIds:string[]=[],skippedImageIds:string[]=[],
+  addedImageIds:string[]=[],originalImageIds:string[]=[],skippedOriginalImageIds:string[]=[],
+  originalPairs:NonNullable<StoredNodeTextSelection['originalPageImageRetention']>['pairs']=[],
   samePage=(text:Support,image:Support)=>text.kind==='text'&&text.documentId===image.documentId&&text.documentVersionId===image.documentVersionId&&
    text.sourceVersionId===image.sourceVersionId&&text.sourceHash===image.sourceHash&&text.evidenceId===image.evidenceId;
  for(const support of prepared.supports){
   if(support.kind!=='image'||!support.image||!('kind'in support.image)||support.image.kind!=='pdf-page'||ids.has(support.id))continue;
-  const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[];
-  if(!native.length||!selectedText.some(s=>samePage(s,support)))continue;
+  const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[],
+   pageText=selectedText.filter(s=>samePage(s,support)),providerPageText=pageText.filter(s=>providerSupportIds.has(s.id));
+  if(!pageText.length||!native.length&&!providerPageText.length)continue;
   for(const observation of native)assertNativeTableObservation(observation,support.image);
-  if(ids.size>=64){skippedImageIds.push(support.id);continue;}
-  ids.add(support.id);retainedImageIds.push(support.id);
+  if(ids.size>=64){(native.length?skippedImageIds:skippedOriginalImageIds).push(support.id);continue;}
+  ids.add(support.id);addedImageIds.push(support.id);
+  if(native.length)retainedImageIds.push(support.id);
+  else{originalImageIds.push(support.id);originalPairs.push({imageId:support.id,supportIds:providerPageText.map(s=>s.id),
+   relation:'same-stored-pdf-page',semanticRelationsVerified:false});}
  }
  const units=generationQuoteUnits(prepared),pairs:NonNullable<NonNullable<StoredNodeTextSelection['nativeTablePageRetention']>['imageTextPairing']>['pairs']=[],
   skippedSupportIds:string[]=[];
@@ -956,15 +969,19 @@ export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,
     relation:'same-stored-pdf-page',semanticRelationsVerified:false});
   }
  }
- if(!retainedImageIds.length&&!skippedImageIds.length&&!pairs.length&&!skippedSupportIds.length)return retained;
+ const nativeChanged=retainedImageIds.length||skippedImageIds.length||pairs.length||skippedSupportIds.length;
+ if(!nativeChanged&&!originalImageIds.length&&!skippedOriginalImageIds.length)return retained;
  const textIds=pairs.flatMap(pair=>pair.referenceIds);
- return {...retained,referenceIds:[...retained.referenceIds,...retainedImageIds,...textIds],
-  systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...retainedImageIds,...textIds],
+ return {...retained,referenceIds:[...retained.referenceIds,...addedImageIds,...textIds],
+  systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...addedImageIds,...textIds],
   ...(pairs.length?{expandedSupportIds:[...new Set([...retained.expandedSupportIds,...pairs.map(pair=>pair.supportId)])]}:{}),
-  nativeTablePageRetention:{policy:'selected-node-original-table-page-v1',retainedImageIds,skippedImageIds,
+  ...(originalImageIds.length||skippedOriginalImageIds.length?{originalPageImageRetention:{policy:'provider-selected-text-original-page-v1' as const,
+   retainedImageIds:originalImageIds,skippedImageIds:skippedOriginalImageIds,pairs:originalPairs,
+   inputScope:'already-retrieved-original-page-images' as const,structureRelationsVerified:false as const}}:{}),
+  ...(nativeChanged?{nativeTablePageRetention:{policy:'selected-node-original-table-page-v1' as const,retainedImageIds,skippedImageIds,
    ...(pairs.length||skippedSupportIds.length?{imageTextPairing:{policy:'selected-original-table-page-text-v1',pairs,
     skippedSupportIds:[...new Set(skippedSupportIds)],inputScope:'already-retrieved-selectable-text',structureRelationsVerified:false}}:{}),
-   structureRelationsVerified:false}};
+   structureRelationsVerified:false}}:{})};
 }
 
 /** Explicit source-value lane only. Suggestions cannot delete already retrieved

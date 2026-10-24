@@ -265,3 +265,21 @@ Unrelated retrieval expansion is not repeated for every text citation. Image
 references retain full-context rechecks. The original audit packet, selected
 quotes, model, response persistence, number of audits and 55-second deadline are
 unchanged. There is no cross-request source cache, new model review or repair.
+
+### Original page images accompanying selected text (Issue #214)
+
+In the Kernel selected-answer path, an explicitly provider-selected text node
+retains its already-retrieved registered original PDF page image even when no
+table or formula structure was recognized. Pairing requires the exact document,
+parse version, source version, source hash and stored page evidence ID. It adds
+no retrieval, parser run or model phase. Text retained solely by system context
+expansion does not trigger this broader image retention. Existing native-table
+pairing stays available, including its unverified structure declarations.
+
+`originalPageImageRetention` records these automatic image additions separately
+from provider-selected IDs and table observations. The 64-reference limit and
+generation request budget gates still apply; skipped images are recorded rather
+than evicting selected references. This association means only “same registered
+PDF page”; it does not validate mathematical notation or certify a relationship.
+Original pixels and extracted text remain unchanged. Input-retention tests alone
+do not demonstrate formula fidelity or answer correctness.
