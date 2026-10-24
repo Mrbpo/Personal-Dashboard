@@ -853,6 +853,10 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
   inputScope:'available-original-quote-units';coverage:'unassessed';structureRelationsVerified:false};
  focusedTextRetention?:{policy:'bounded-mentioned-source-relevance-v1';retainedEvidenceIds:string[];skippedEvidenceIds:string[];
   textUtf8Bytes:number;addedReferenceIds:string[];coverage:'unassessed';structureRelationsVerified:false};
+ selectedSourceTextRetention?:{policy:'bounded-selected-source-version-text-v1';textUtf8Bytes:number;
+  sources:Array<Pick<Support,'documentId'|'documentVersionId'|'sourceVersionId'|'sourceHash'>&{
+   status:'retained'|'already-retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[]}>;
+  inputScope:'already-offered-selectable-text';coverage:'unassessed';structureRelationsVerified:false};
  coverage:'unassessed';structureRelationsVerified:false};
 
 /** Keep the existing text of selected storage nodes together. Storage adjacency
@@ -887,7 +891,7 @@ export function retainSelectedStoredNodeText(value:unknown,prepared:PreparedAnsw
  * Retain its already available selectable text atomically within
  * 32 KiB and the existing 64-reference bound. No new reads, sources, images or
  * structural assertions; other selected sources stay available for synthesis. */
-export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
+function retainNamedDocumentSelectionContext(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
  const retained=retainSelectedStoredNodeText(value,prepared);
  if(!retained.providerReferenceIds.length)return retained;
  // A bounded focus is an already validated subset of offered current text.
@@ -925,6 +929,39 @@ export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAn
  return {...retained,referenceIds:[...retained.referenceIds,...additions.map(u=>u.id)],
   systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...additions.map(u=>u.id)],
   expandedSupportIds:[...new Set([...retained.expandedSupportIds,...additions.map(u=>u.supportId)])],mentionedSourceRetention};
+}
+
+/** Preserve available context of explicitly selected text-source versions too.
+ * A filename match may refer to a different revision. No source is introduced,
+ * no hidden text becomes selectable and no chosen citation is later expanded.
+ * Whole offered version-text additions are atomic within the existing bounds;
+ * this does not establish full-document coverage or semantic dependencies. */
+export function retainDocumentSelectionContext(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
+ const retained=retainNamedDocumentSelectionContext(value,prepared);
+ if(!retained.providerReferenceIds.length)return retained;
+ const units=generationQuoteUnits(prepared),provider=new Set(retained.providerReferenceIds),
+  selectedSupportIds=new Set(prepared.quoteUnits.filter(u=>provider.has(u.id)).map(u=>u.supportId)),
+  selectedSources=[...new Set(prepared.supports.filter(s=>s.kind==='text'&&selectedSupportIds.has(s.id)).map(supportSourceKey))],
+  ids=new Set(retained.referenceIds),addedReferenceIds:string[]=[],expandedSupportIds:string[]=[],
+  sources:NonNullable<StoredNodeTextSelection['selectedSourceTextRetention']>['sources']=[];
+ let textUtf8Bytes=0;
+ for(const key of selectedSources){
+  const supports=prepared.supports.filter(s=>s.kind==='text'&&supportSourceKey(s)===key),supportIds=new Set(supports.map(s=>s.id)),
+   available=units.filter(u=>supportIds.has(u.supportId)),additions=available.filter(u=>!ids.has(u.id)),
+   size=available.reduce((sum,u)=>sum+Buffer.byteLength(u.text),0),status=!additions.length?'already-retained':
+    textUtf8Bytes+size>32768?'skipped-size-limit':ids.size+additions.length>64?'skipped-reference-limit':'retained',
+   source=supports[0];
+  sources.push({documentId:source.documentId,documentVersionId:source.documentVersionId,sourceVersionId:source.sourceVersionId,
+   sourceHash:source.sourceHash,status,textUtf8Bytes:size,addedReferenceIds:status==='retained'?additions.map(u=>u.id):[]});
+  if(status!=='retained')continue;
+  textUtf8Bytes+=size;
+  for(const unit of additions){ids.add(unit.id);addedReferenceIds.push(unit.id);expandedSupportIds.push(unit.supportId);}
+ }
+ if(!sources.length)return retained;
+ return {...retained,referenceIds:[...ids],systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...addedReferenceIds],
+  expandedSupportIds:[...new Set([...retained.expandedSupportIds,...expandedSupportIds])],
+  selectedSourceTextRetention:{policy:'bounded-selected-source-version-text-v1',textUtf8Bytes,sources,
+   inputScope:'already-offered-selectable-text',coverage:'unassessed',structureRelationsVerified:false}};
 }
 
 /** Keep an already retrieved native table page and its existing text together.

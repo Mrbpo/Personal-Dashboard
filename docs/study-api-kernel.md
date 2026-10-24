@@ -322,3 +322,19 @@ so its request remains unchanged. Validators accept either JSON key order;
 saved responses remain valid. No reviewer, automatic repair or production
 configuration is added. Actual source support and citation completeness must
 be evaluated independently of formatting and model-audit results.
+
+### Selected source-version context (Issue #220)
+
+The existing selection-retention step also preserves available text of an
+explicitly provider-selected text-source version, after its existing named and
+focused retention. Filename attribution can identify a different revision.
+Only already-offered selectable original units with the exact document,
+document-version, source-version and original hash can be added. Each version's
+text addition is atomic, with a shared 32 KiB allowance and the existing 64-ID
+limit. Existing selections are never evicted; oversized additions are skipped
+with a receipt. Image-only selections cannot trigger this text expansion.
+
+This adds no reader, source, image, model stage, post-generation citation
+expansion or automatic repair. The receipt keeps coverage and semantic
+relations unassessed. Retaining a definition in generation is independently
+testable and does not prove the answer will cite it correctly.

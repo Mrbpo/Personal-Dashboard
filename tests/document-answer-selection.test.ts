@@ -93,7 +93,12 @@ test('same-source identity survives ordinary and typed fallback selection in act
    assert.equal(calls,2,'no additional model phase');assert.ok('evidenceSelection' in result);
    assert.equal(result.evidenceSelection?.outcome,'provided-with-system-retention');
    assert.ok(result.evidenceSelection?.referenceIds.includes(identity.id));
-   assert.deepEqual(result.evidenceSelection?.sourceIdentityRetention?.addedReferenceIds,[identity.id]);
+   const identityReceipt=result.evidenceSelection?.sourceIdentityRetention;assert.ok(identityReceipt);
+   assert.deepEqual(identityReceipt.addedReferenceIds,sourceValues?[identity.id]:[],
+    'ordinary retention already supplied the identity; the typed lane retains its existing identity step');
+   assert.equal(identityReceipt.decisions[0].status,sourceValues?'retained':'already-selected');
+   if(!sourceValues)assert.ok(result.evidenceSelection?.textNodeRetention?.selectedSourceTextRetention?.sources
+    .some(source=>source.addedReferenceIds.includes(identity.id)),'the actual retention owner records its addition');
    assert.equal(result.evidenceSelection?.sourceIdentityRetention?.courseOwnershipVerified,false);
    if(sourceValues)assert.ok(result.evidenceSelection?.systemRetainedReferenceIds?.includes(identity.id),'typed receipt cannot overwrite common references');
   }
@@ -290,6 +295,60 @@ test('named-source retention refuses ambiguity, mixed versions and atomic size o
  assert.ok(retained.referenceIds.includes(p.quoteUnits.find(u=>u.text==='Original qualification.')!.id));
  assert.ok(retained.systemRetainedReferenceIds.every(id=>p.quoteUnits.some(u=>u.id===id)));
  assert.ok(retained.referenceIds.every(id=>!id.startsWith('i')),'no unselected images are added');
+});
+
+test('selected source-version context survives unnamed selection without introducing another version, source or image',async()=>{
+ const c=context();c.anchors.push({...c.anchors[0],id:'pg:va:2',page_number:2,evidence_id:'definition-a',
+  body:'The parameter is the sampling temperature, defined on another offered page.'},
+  {...c.anchors[0],id:'pg:old-va:3',page_number:3,source_version_id:'old-sv-a',evidence_id:'old-a',
+   body:'A different source version must not supply context.'});
+ const question='Explain the procedure.',p=prepareDocumentAnswer(question,c),id=p.quoteUnits[0].id,
+  definition=p.quoteUnits.find(u=>u.text.startsWith('The parameter'))!,before=JSON.stringify(p),
+  retained=retainDocumentSelectionContext({referenceIds:[id]},p),
+  packet=(req:ReturnType<typeof buildSelectedDocumentAnswerRequest>)=>JSON.parse(
+   (req.input.at(-1)!.content as {type:string;text:string}[])[0].text) as {quoteUnits:{id:string;text:string;quoteSha256:string}[]};
+ assert.ok(retained.referenceIds.includes(definition.id));assert.deepEqual(retained.providerReferenceIds,[id]);
+ assert.equal(retained.selectedSourceTextRetention?.sources[0].status,'retained');
+ assert.equal(retained.selectedSourceTextRetention?.coverage,'unassessed');
+ const req=buildSelectedDocumentAnswerRequest(p,retained.referenceIds,settings,policy);
+ assert.ok(packet(req).quoteUnits.some(u=>u.id===definition.id&&u.text===definition.text&&u.quoteSha256===definition.quoteSha256));
+ assert.doesNotMatch(JSON.stringify(req.input),/hidden-marker-947|different source version|input_image/);
+ assert.equal(JSON.stringify(p),before);
+ assert.deepEqual(retainDocumentSelectionContext({referenceIds:[]},p).referenceIds,[]);
+ assert.deepEqual(retainDocumentSelectionContext({referenceIds:['i0']},p).referenceIds,['i0'],'image-only selection cannot retain unrelated source text');
+ const saved=globalThis.fetch;let calls=0;
+ try{globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+   if(calls===1)return output({referenceIds:[id]});
+   assert.ok(packet(request).quoteUnits.some(u=>u.id===definition.id));return output(claim(definition.id));};
+  const result=await synthesizeDocumentAnswer(question,async()=>c,policy);
+  assert.equal(calls,2,'reuse existing selection and generation, no new model phase');
+  assert.equal(result.selectedUnits[0].selectionId,definition.id);
+ }finally{globalThis.fetch=saved;}
+});
+
+test('selected source-version retention skips oversized and reference-limited source additions atomically',()=>{
+ const large=context();large.images=[];large.anchors.push({...large.anchors[0],id:'pg:va:2',page_number:2,evidence_id:'large-a',body:'x'.repeat(34000)});
+ const p=prepareDocumentAnswer('Explain the procedure.',large),id=p.quoteUnits[0].id,r=retainDocumentSelectionContext({referenceIds:[id]},p);
+ assert.deepEqual(r.referenceIds,[id]);assert.equal(r.selectedSourceTextRetention?.sources[0].status,'skipped-size-limit');
+ assert.deepEqual(r.selectedSourceTextRetention?.sources[0].addedReferenceIds,[]);
+ const c=context();c.images=[];c.anchors=Array.from({length:63},(_,i)=>({...c.anchors[0],id:`pg:v${i}:1`,
+  document_id:`d${i}`,source_version_id:`sv${i}`,source_hash:`hash${i}`,evidence_id:`e${i}`,body:`Selected material ${i}.`}));
+ c.anchors.push(...[2,3].map(page=>({...c.anchors[0],id:`pg:v0:${page}`,page_number:page,evidence_id:`extra-${page}`,body:`Additional original page ${page}.`})));
+ const prepared=prepareDocumentAnswer('Explain the procedure.',c),selected=prepared.quoteUnits.slice(0,63).map(u=>u.id),
+  retained=retainDocumentSelectionContext({referenceIds:selected},prepared);
+ assert.deepEqual(retained.referenceIds,selected);assert.equal(retained.selectedSourceTextRetention?.sources[0].status,'skipped-reference-limit');
+ assert.deepEqual(retained.selectedSourceTextRetention?.sources[0].addedReferenceIds,[]);
+});
+
+test('selected source-version text budget is shared across source additions without evicting existing selections',()=>{
+ const c=context();c.images=[];
+ for(const [i,letter]of ['α','β'].entries())c.anchors.push({...c.anchors[i],id:`pg:v${i?'b':'a'}:2`,page_number:2,
+  evidence_id:`extra-${i}`,body:letter.repeat(9000)});
+ const p=prepareDocumentAnswer('Compare the procedures.',c),ids=p.quoteUnits.filter(u=>u.supportId==='e0'||u.supportId==='e1').map(u=>u.id),
+  retained=retainDocumentSelectionContext({referenceIds:ids},p),receipt=retained.selectedSourceTextRetention!;
+ assert.deepEqual(receipt.sources.map(s=>s.status),['retained','skipped-size-limit']);assert.ok(receipt.textUtf8Bytes<=32768);
+ assert.ok(ids.every(id=>retained.referenceIds.includes(id)));assert.deepEqual(receipt.sources[1].addedReferenceIds,[]);
+ assert.ok(!retained.referenceIds.some(id=>p.quoteUnits.find(u=>u.id===id)?.text.includes('β')));
 });
 
 test('stored-node retention respects the 64-ID bound atomically and leaves empty or invalid selection strict',()=>{
