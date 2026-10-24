@@ -19,6 +19,8 @@ export type DocumentCitationAuditBinding={inputFingerprint:string;quoteUnitManif
  providerSelections:DocumentAnswerSelections;claimIndex:number;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;answerTextContext?:'bound-answer-v1'};
 export type DocumentCitationAuditResponse={requestIdentity:string;providerRequestSha256:string;httpStatus:number;rawBody:string;rawSha256:string;
  binding?:ReturnType<typeof prepareDocumentCitationAudit>['binding'];bindingSha256?:string};
+/** Kernel-owned current-node reader, never a model/client-supplied assertion. */
+export type DocumentCitationTextRecheck=(binding:ReturnType<typeof prepareDocumentCitationAudit>['binding'])=>Promise<void>;
 export type DocumentCitationAuditPolicy={scope:'development';dailyLimit?:number;auditProfile?:EvidenceAuditProfile;beforeAttempt:(identity:string)=>Promise<void>;
  recordResponse:(response:Readonly<DocumentCitationAuditResponse>)=>Promise<void>};
 type Image=DocumentAnswerContext['images'][number];
@@ -178,11 +180,15 @@ export async function auditDocumentCitationClaim(question:string,readContext:()=
 /** Shared execution does not grant authority; both callers validate their own
  * policy first. The administrator entry above keeps its development guard. */
 async function executeCitationAudit(question:string,readContext:()=>Promise<DocumentAnswerContext>,
- binding:DocumentCitationAuditBinding,policy:Pick<DocumentCitationAuditPolicy,'dailyLimit'|'auditProfile'|'beforeAttempt'|'recordResponse'>,timeoutMs=30000){
+ binding:DocumentCitationAuditBinding,policy:Pick<DocumentCitationAuditPolicy,'dailyLimit'|'auditProfile'|'beforeAttempt'|'recordResponse'>,timeoutMs=30000,
+ focused?:{context:DocumentAnswerContext;recheck:DocumentCitationTextRecheck}){
  const original=structuredClone(binding);
- const prepared=prepareDocumentCitationAudit(question,await readContext(),original),request=buildDocumentCitationAuditRequest(prepared.packet,policy.auditProfile);
+ const prepared=prepareDocumentCitationAudit(question,focused?.context??await readContext(),original),request=buildDocumentCitationAuditRequest(prepared.packet,policy.auditProfile);
  const {providerRequestSha256,requestIdentity}=documentCitationAuditRequestIdentity(request,prepared.bindingSha256,policy.auditProfile);
- const recheck=async()=>{if(prepareDocumentCitationAudit(question,await readContext(),original).bindingSha256!==prepared.bindingSha256)
+ const recheck=async()=>{if(focused&&prepared.packet.references.every(ref=>ref.kind==='text')){
+   await focused.recheck(prepared.binding);return;
+  }
+  if(prepareDocumentCitationAudit(question,await readContext(),original).bindingSha256!==prepared.bindingSha256)
   throw new Error('Citation-local source changed during audit');};
  await policy.beforeAttempt(requestIdentity);await recheck();
  const response=await paidOpenAI('responses',request,AbortSignal.timeout(timeoutMs),{kind:'document-answer',dailyLimit:policy.dailyLimit??200});
@@ -212,7 +218,7 @@ export class DocumentCitationCheckError extends Error{
  * source substitution, claim deletion, text revision or retry. Individually
  * rejected references can be withheld after the original collective audit. */
 export async function checkApplicationDocumentCitations(question:string,readContext:()=>Promise<DocumentAnswerContext>,
- binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy){
+ binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy,recheckText?:DocumentCitationTextRecheck){
  await documentAnswerSettings(policy);
  if(policy.scope!=='application'||policy.citationCheck?.mode!=='selected-once')throw new Error('Explicit application citation check policy required');
  if(binding.answerTextContext!==undefined&&binding.answerTextContext!=='bound-answer-v1')throw new Error('Invalid application discourse context policy');
@@ -221,12 +227,18 @@ export async function checkApplicationDocumentCitations(question:string,readCont
  const removed:Array<ReturnType<typeof prepareDocumentCitationAudit>['binding']['citations'][number]&{
   judgment:'does-not-establish';reason:string;auditRequestIdentity:string;auditBindingSha256:string;rawResponseSha256:string}>=[];
  if(!Array.isArray(selections.claims)||selections.claims.length>30)throw new DocumentCitationCheckError('citation-check-incomplete');
+ // Share only the already-bound initial representation. Current cited nodes
+ // are still read before/after every model call; the full context is read again
+ // before releasing any answer. Images keep the existing complete rechecks.
+ let focused:{context:DocumentAnswerContext;recheck:DocumentCitationTextRecheck}|undefined;
+ try{if(recheckText)focused={context:await readContext(),recheck:recheckText};}
+ catch(error){throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});}
  for(let claimIndex=0;claimIndex<selections.claims.length;claimIndex++){
   try{
    const remaining=deadline-Date.now();if(remaining<1000)throw new Error('Citation check deadline reached');
    const audit=await executeCitationAudit(question,readContext,{...binding,providerSelections:selections,claimIndex,
     answerTextContext:'bound-answer-v1'},
-    {dailyLimit:policy.dailyLimit,beforeAttempt:check.beforeAttempt,recordResponse:check.recordResponse},Math.min(30000,remaining));
+    {dailyLimit:policy.dailyLimit,beforeAttempt:check.beforeAttempt,recordResponse:check.recordResponse},Math.min(30000,remaining),focused);
    if(Date.now()>deadline)throw new Error('Citation check deadline reached');
    audits.push(audit);
    if(audit.diagnostics.judgment!=='supported')throw new DocumentCitationCheckError('citation-support-not-established');
@@ -264,6 +276,12 @@ export async function checkApplicationDocumentCitations(question:string,readCont
    releasedSelectionsSha256:sha(JSON.stringify(released.providerSelections)),claimTextsSha256:sha(JSON.stringify(texts)),
    claimsUnchanged:true,semanticVerified:false,removed}};
  }catch(error){throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});}
+ if(focused&&!removed.length)try{
+  const current=prepareDocumentAnswer(question,await readContext(),binding.unitPolicy);
+  if(current.fingerprint!==binding.inputFingerprint||current.quoteUnitManifestSha256!==binding.quoteUnitManifestSha256)
+   throw new Error('Citation final source or context changed');
+ }catch(error){throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});}
+ if(focused&&Date.now()>deadline)throw new DocumentCitationCheckError('citation-check-incomplete',{cause:new Error('Citation check deadline reached')});
  return {mode:'selected-once' as const,version:DOCUMENT_CITATION_AUDIT_VERSION,claimCount:selections.claims.length,...release,
   status:'all-supported' as const,independentlyVerified:false as const,audits};
 }

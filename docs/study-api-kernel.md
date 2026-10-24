@@ -254,3 +254,14 @@ See the official [model](https://developers.openai.com/api/docs/models/gpt-6.1-s
 and [cache usage](https://developers.openai.com/api/docs/guides/prompt-caching)
 documentation. This configuration and fixture verification do not establish
 answer accuracy, full website API acceptance or independent blind performance.
+
+### Current text-node citation rechecks (Issue #213)
+
+The application validates the complete answer context before and after local
+citation checking. Between these reads, KernelService uses its existing current
+node reader to verify the cited text's owner, visibility, source/version, full
+body hash, locator and source name/origin before and after each audit call.
+Unrelated retrieval expansion is not repeated for every text citation. Image
+references retain full-context rechecks. The original audit packet, selected
+quotes, model, response persistence, number of audits and 55-second deadline are
+unchanged. There is no cross-request source cache, new model review or repair.

@@ -1,8 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {KernelService} from '../lib/kernel/service.ts';
-import {prepareDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
-import {checkApplicationDocumentCitations,auditDocumentCitationClaim,DocumentCitationCheckError,type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
+import {prepareDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext,type DocumentAnswerPolicy} from '../lib/kernel/document-answer.ts';
+import {checkApplicationDocumentCitations,auditDocumentCitationClaim,DocumentCitationCheckError,type DocumentCitationAuditResponse,type DocumentCitationTextRecheck,type DocumentCitationAuditPolicy} from '../lib/kernel/document-citation-audit.ts';
 process.env.DATABASE_URL=':memory:';process.env.OPENAI_API_KEY='unit-never-sent';process.env.AI_BUDGET_TEST_BYPASS='true';
 const question='What is the improvement?';
 function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,parents:[],images:[],anchors:[
@@ -15,20 +15,32 @@ const diagnostic=(judgment:string,count:number)=>({claimId:'c0',judgment,reason:
  objectUnitScope:{claim:'quantity',evidence:'cited quantity',alignment:'same'}});
 const check=(raw:DocumentCitationAuditResponse[],attempts:string[])=>({mode:'selected-once' as const,
  beforeAttempt:async(id:string)=>{attempts.push(id);},recordResponse:async(r:Readonly<DocumentCitationAuditResponse>)=>{raw.push(r);}});
+function currentNodes(kernel:KernelService,c:DocumentAnswerContext){
+ kernel.readDocumentNodes=async(owner,source,ids)=>{
+  assert.equal(owner,'owner');const nodes=c.anchors.filter(n=>ids.includes(n.evidence_id));assert.equal(nodes.length,ids.length);
+  for(const n of nodes)assert.deepEqual([n.document_id,n.source_version_id,n.source_hash,n.id],
+   [source.documentId,source.sourceVersionId,source.sourceHash,`pg:${source.currentVersionId}:${n.page_number}`]);
+  return nodes.map(({score,...n})=>{void score;return {...n,reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'};}) as Awaited<ReturnType<KernelService['readDocumentNodes']>>;
+ };
+}
+function contextReader(kernel:KernelService,c:DocumentAnswerContext){
+ (kernel as unknown as {studyAnswerContextReader:()=>Promise<()=>Promise<DocumentAnswerContext>>}).studyAnswerContextReader=async()=>async()=>c;
+}
 test('application check needs durable callbacks and does not weaken the administrator entry',async()=>{
  const raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],c=context(),p=prepareDocumentAnswer(question,c);
  const binding={inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,
   providerSelections:{status:'answered' as const,message:'',claims:[{text:'Gain.',citations:[{id:p.quoteUnits[0].id}]}]}};
- await assert.rejects(documentAnswerSettings({scope:'application',citationCheck:{mode:'selected-once'} as any}),/citation check policy/);
+ await assert.rejects(documentAnswerSettings({scope:'application',citationCheck:{mode:'selected-once'} as unknown as NonNullable<DocumentAnswerPolicy['citationCheck']>}),/citation check policy/);
  await assert.rejects(documentAnswerSettings({scope:'development',citationCheck:check(raw,attempts)}),/citation check policy/);
  await assert.rejects(checkApplicationDocumentCitations(question,async()=>c,binding,{scope:'application'}),/Explicit application/);
  let reads=0;await assert.rejects(auditDocumentCitationClaim(question,async()=>{reads++;return c;},{...binding,claimIndex:0},
-  {scope:'application',...check(raw,attempts)} as any),/development policy/);
+  {scope:'application',...check(raw,attempts)} as unknown as DocumentCitationAuditPolicy),/development policy/);
  assert.equal(reads,0);assert.equal(raw.length,0);
 });
 test('Kernel stops at unsupported actual citations without partial answer, uncited rescue or retry',async()=>{
  const kernel=new KernelService(),c=context(),p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[];
- (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+ currentNodes(kernel,c);
+ contextReader(kernel,c);
  const saved=globalThis.fetch;let calls=0;
  globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
   if(calls===1)return response({status:'answered',message:'',claims:[
@@ -93,8 +105,9 @@ test('application discourse rejects an invalid explicit mode before model work',
 test('opt-in explicit quantity mismatch preserves generation evidence and refuses before citation calls; off keeps the existing path',async()=>{
  for(const enabled of [false,true]){
   const kernel=new KernelService(),q='How long did training take?',c=context();c.anchors[0].body='Each model was trained for 100 epochs.';
+  currentNodes(kernel,c);
   const prepared=prepareDocumentAnswer(q,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch;
-  (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+  contextReader(kernel,c);
   let calls=0;globalThis.fetch=async()=>{calls++;return calls===1?response({status:'answered',message:'',claims:[
    {text:'Each model was trained for 100 epochs.',citations:[{id:prepared.quoteUnits[0].id}]}]}):response(diagnostic('supported',1));};
   try{const result=await kernel.answerStudyContent('owner',q,{},
@@ -112,8 +125,9 @@ test('opt-in explicit quantity mismatch preserves generation evidence and refuse
 test('release withholds only an individually rejected citation, keeping claims, unclear evidence and other claims citing that source',async()=>{
  const kernel=new KernelService(),c=context();c.anchors.push({...c.anchors[0],id:'pg:v2:1',document_id:'doc2',evidence_id:'e2',
   source_version_id:'sv2',source_hash:'hash2',body:'Additional potentially complementary context.'});
+ currentNodes(kernel,c);
  const p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch;
- (kernel as any).studyAnswerContextReader=async()=>async()=>c;
+ contextReader(kernel,c);
  const selections={status:'answered',message:'',claims:[{text:'A combined result.',citations:p.quoteUnits.map(u=>({id:u.id}))},
   {text:'Grounding improves by 36.4%.',citations:[{id:p.quoteUnits[1].id}]}]},original=JSON.stringify(selections);
  let calls=0;globalThis.fetch=async()=>{calls++;if(calls===1)return response(selections);
@@ -150,4 +164,39 @@ test('all-rejected and contradictory references cannot be rescued by citation wi
    assert.equal(calls,1);assert.equal(raw.length,1);
   }finally{globalThis.fetch=saved;}
  }
+});
+
+test('focused current-node checks retain per-call and final whole-context validation without changing audit requests',async()=>{
+ const saved=globalThis.fetch;
+ try{
+  for(const mode of ['valid','body','title','version','unrelated-final'] as const){
+   const c=context(),kernel=new KernelService();currentNodes(kernel,c);
+   const recheck=(kernel as unknown as {citationTextRecheck:(owner:string)=>DocumentCitationTextRecheck}).citationTextRecheck('owner');
+   const p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],requests:unknown[]=[];
+   let fullReads=0,nodeReads=0;const originalNodes=kernel.readDocumentNodes;
+   kernel.readDocumentNodes=async(...args)=>{nodeReads++;
+    const nodes=await originalNodes(...args);
+    if(mode==='body')nodes[0]={...nodes[0],body:nodes[0].body+' changed'};
+    if(mode==='title')nodes[0]={...nodes[0],name:'Other document'};
+    if(mode==='version')throw new Error('Current node version changed');
+    return nodes;
+   };
+   const binding={inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,
+    providerSelections:{status:'answered' as const,message:'',claims:[0,1].map(()=>({text:'Accuracy gain.',citations:[{id:p.quoteUnits[0].id}]}))}};
+   globalThis.fetch=async(_url,init)=>{requests.push(JSON.parse(String(init?.body)));
+    if(mode==='unrelated-final'&&requests.length===2)c.anchors[1].body+=' changed after final model response';
+    return response(diagnostic('supported',1));
+   };
+   const work=checkApplicationDocumentCitations(question,async()=>{fullReads++;return c;},binding,
+    {scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)},recheck);
+   if(mode==='valid'){
+    const result=await work;assert.equal(result.claimCount,2);assert.equal(requests.length,2);
+    assert.equal(fullReads,2,'initial and final whole-context reads');assert.equal(nodeReads,4,'before and after each model call');
+    assert.equal(raw.length,2);assert.equal(attempts.length,2);
+   }else{
+    await assert.rejects(work,(error:unknown)=>error instanceof DocumentCitationCheckError&&error.code==='citation-check-incomplete');
+    assert.equal(requests.length,mode==='unrelated-final'?2:0,'changed original text/title/version cannot reach a model; unrelated final drift cannot release an answer');
+   }
+  }
+ }finally{globalThis.fetch=saved;}
 });

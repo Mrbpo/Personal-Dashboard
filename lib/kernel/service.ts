@@ -24,7 +24,7 @@ import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvide
 import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
 import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
-import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
+import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationTextRecheck} from './document-citation-audit.ts';
 import {checkDocumentQuantityConsistency} from './document-quantity-consistency.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
@@ -1215,6 +1215,31 @@ export class KernelService {
     return readDocumentNodes(kernelPool(),owner,expectedSource,evidenceIds);
   }
 
+  /** Current access/version checks stay in the existing node reader. The audit
+   * compares entire original bodies, not just the quoted substring. */
+  private citationTextRecheck(owner:string):DocumentCitationTextRecheck{
+    return async binding=>{
+      const groups=new Map<string,typeof binding.citations>();
+      for(const unit of binding.citations){
+        if(unit.kind!=='text')throw new DocumentEvidenceChangedError();
+        const e=unit.evidence,key=JSON.stringify([e.documentId,e.documentVersionId,e.sourceVersionId,e.sourceHash]);
+        const items=groups.get(key)??[];items.push(unit);groups.set(key,items);
+      }
+      for(const units of groups.values()){
+        const e=units[0].evidence,ids=[...new Set(units.map(u=>u.evidence.evidenceId))],nodes=[];
+        for(let offset=0;offset<ids.length;offset+=14)nodes.push(...await this.readDocumentNodes(owner,
+          {documentId:e.documentId,currentVersionId:e.documentVersionId,sourceVersionId:e.sourceVersionId,sourceHash:e.sourceHash},ids.slice(offset,offset+14)));
+        for(const unit of units){
+          const evidence=unit.evidence,node=nodes.find(n=>n.evidence_id===evidence.evidenceId),
+            source=binding.sources.find(s=>s.documentId===evidence.documentId&&s.sourceHash===evidence.sourceHash);
+          if(!node||!source||node.name!==source.name||node.origin!==source.origin||node.origin_key!==source.originKey||
+            node.locator!==evidence.locator||createHash('sha256').update(node.body).digest('hex')!==evidence.sha256)
+            throw new DocumentEvidenceChangedError();
+        }
+      }
+    };
+  }
+
   readDocumentCitationSnapshot(owner:string,source:DocumentCitationSource,evidenceIds:string[]){
     return readDocumentCitationSnapshot(kernelPool(),owner,source,evidenceIds);
   }
@@ -1602,7 +1627,7 @@ export class KernelService {
       policy.onStage?.('citation-validation');
       const {released,...checked}=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
         quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
-        ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy);
+        ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy,this.citationTextRecheck(owner));
       citationCheck=checked;
       if(released){
         if(JSON.stringify(result.answer.claims.map(c=>c.text))!==JSON.stringify(released.answer.claims.map(c=>c.text)))
