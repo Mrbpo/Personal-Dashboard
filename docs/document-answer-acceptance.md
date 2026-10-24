@@ -1,5 +1,17 @@
 # 学习内容回答的验收入口
 
+## 最终验收前的来源版本预检（Issue #218）
+
+`node scripts/study-source-preflight.mjs --manifest <source-manifest.json> --metadata <cached-pdf-metadata.json> --output <new-report.json> --final`
+
+该只读命令复用现有 `documents` 来源清单和原生 PDF 元数据缓存，绑定实际 PDF SHA，分别报告论文编号、观测版本、标题提示及作者来源对齐状态。编号匹配不能掩盖标题提示缺失；标题匹配、观测到 v1、下载成功或自声明 `officialAnnotationPdfVersionMatch` 均不能证明作者标注对应版本。仅支持来自独立作者来源的显式 `authorSourcePdfSha256` 或 `authorSourcePdfRevision` 作为正向绑定，不能将刚下载的 SHA/观测版本复制到这两个字段来制造通过。
+
+当前工具针对现有 arXiv 题集的缓存格式，不是其他课程来源的通用解析器。它只检查来源前提，原准确率阈值、冻结样本分母及混合课程资料验收要求均保持不变。
+
+未知或不一致时，`--final` 写出诊断后以退出码 2 拒绝最终验收；不能随后继续付费运行并宣称已满足此前提。省略 `--final` 仅用于保留未知状态的校准调查。输出使用新文件，拒绝覆盖。来源绑定通过仍不代表 PDF 忠实度、结构、检索、答案、引用或拒答通过；这些成绩独立统计。
+
+不删除或替换不匹配样本，不改原始题目、Gold 或旧分数。应保留原件及获取版本，补充正确版本时使用新的来源/解析记录和新的冻结配置；历史结果继续按原资料解释。标题提示缺失也可能源于 TeX 或排版，不能自动判为错误文件。
+
 关联 Issue #68。`lib/kernel/document-answer.ts` 提供应用内、只读的内容回答模块，不新增页面、UI、服务或事实写入。
 
 ## 输入与输出
