@@ -310,3 +310,15 @@ ordinary grounded synthesis. The selector replaces the generation developer
 message with its own instruction, so this change does not alter the selector
 wire. Citation validation and the original source remain unchanged; there is no
 post-generation verb replacement or automatic answer repair.
+
+### Citation-first generation schema (Issue #219)
+
+Generation receipt v9 orders the existing claim properties as `citations`, then
+`text`, with the same required fields and unchanged developer instruction.
+[Structured Outputs preserves schema key order](https://developers.openai.com/api/docs/guides/structured-outputs#key-ordering).
+This is a bounded grounding experiment, not a guarantee of entailment or a
+claim about hidden reasoning. The selector replaces this schema with its own,
+so its request remains unchanged. Validators accept either JSON key order;
+saved responses remain valid. No reviewer, automatic repair or production
+configuration is added. Actual source support and citation completeness must
+be evaluated independently of formatting and model-audit results.
