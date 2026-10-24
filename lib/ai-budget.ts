@@ -4,6 +4,7 @@ const baseRates: Record<string,{input:number;output:number;context:number}> = {
   'gpt-5-mini': {input:0.25,output:2,context:400000},
   'gpt-5.4-mini': {input:0.75,output:4.5,context:400000},
   'gpt-6-astra': {input:10,output:50,context:1050000},
+  'gpt-6.1-sol': {input:2,output:10,context:1050000},
   'text-embedding-3-small': {input:0.02,output:0,context:8192},
 };
 /** Explicit aliases/snapshots from the official model page, never a prefix match. */
@@ -19,6 +20,35 @@ function configuredRate(model:string){
 export function estimateEmbeddingReservation(input:string[],model:string){
   const rate=configuredRate(model);
   return Math.max(0.000001,Buffer.byteLength(JSON.stringify(input))*rate.input/1e6);
+}
+/** The isolated candidate is text-only until its image accounting is verified.
+ * Reserve both documented write lifetimes; never infer a token count from base64. */
+export function solGenerationReservation(body:any):number{
+  if(body.model!=='gpt-6.1-sol'||body.service_tier!=='default'||body.prompt_cache_retention!==undefined||
+    body.prompt_cache_options?.mode!=='implicit'||body.prompt_cache_options?.ttl!=='30m'||
+    Object.keys(body.prompt_cache_options).some(k=>!['mode','ttl'].includes(k))||body.tools?.length||
+    !Number.isInteger(body.max_output_tokens)||body.max_output_tokens<1||body.max_output_tokens>6000||
+    !Array.isArray(body.input)||body.input.some((m:any)=>typeof m?.content!=='string'&&
+      (!Array.isArray(m?.content)||m.content.some((c:any)=>c?.type!=='input_text'||typeof c.text!=='string'||c.prompt_cache_breakpoint!==undefined))))
+    throw new Error('Sol candidate requires bounded Standard text-only generation with explicit 30m caching');
+  const inputUpper=Buffer.byteLength(JSON.stringify(body))+4096;
+  const reserved=(inputUpper*5+body.max_output_tokens*10)/1e6;
+  if(inputUpper>272000||reserved>.40)throw new Error('Sol candidate exceeds the verified per-request cost ceiling');
+  return reserved;
+}
+/** Unknown TTL splits/model/tier retain the reservation, including old responses. */
+export function solGenerationCharge(payload:any):number|null{
+  const u=payload?.usage,d=u?.input_tokens_details,w=d?.cache_write_tokens_details;
+  const values=[u?.input_tokens,u?.output_tokens,d?.cached_tokens,d?.cache_write_tokens];
+  if(payload?.model!=='gpt-6.1-sol'||payload.service_tier!=='default'||
+    !values.every(n=>Number.isSafeInteger(n)&&n>=0)||u.input_tokens>272000||d.cached_tokens+d.cache_write_tokens>u.input_tokens)return null;
+  let short=0,long=0;
+  if(d.cache_write_tokens){
+    if(![w?.ttl_30m_tokens,w?.ttl_12h_tokens].every(n=>Number.isSafeInteger(n)&&n>=0)||
+      w.ttl_30m_tokens+w.ttl_12h_tokens!==d.cache_write_tokens)return null;
+    short=w.ttl_30m_tokens;long=w.ttl_12h_tokens;
+  }else if(w&&(w.ttl_30m_tokens!==0||w.ttl_12h_tokens!==0))return null;
+  return ((u.input_tokens-d.cached_tokens-d.cache_write_tokens)*2+d.cached_tokens*.1+short*2.5+long*5+u.output_tokens*10)/1e6;
 }
 export function budgetMonth(now = new Date()) { return now.toLocaleDateString('en-CA',{timeZone:'America/Toronto'}).slice(0,7); }
 export class AiBudgetDeferredError extends Error {
@@ -59,8 +89,12 @@ export async function reserveBudget(amount:number,kind:string,dailyLimit?:number
   return id;
 }
 export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,signal?:AbortSignal|null,policy?:{kind:string;dailyLimit:number}) {
-  if(process.env.AI_BUDGET_TEST_BYPASS==='true' && process.env.NODE_ENV!=='production') return fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(body.model!=='gpt-6.1-sol'&&process.env.AI_BUDGET_TEST_BYPASS==='true' && process.env.NODE_ENV!=='production') return fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const rate=configuredRate(body.model);
+  const sol=body.model==='gpt-6.1-sol';
+  if(sol&&(endpoint!=='responses'||policy?.kind!=='document-answer'||process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true'))
+    throw new Error('Sol generation is restricted to isolated study development');
+  const solReserved=sol?solGenerationReservation(body):undefined;
   if(!serviceValue('OPENAI_API_KEY')) throw new Error('请先配置 OpenAI API Key');
   const maxOutput=endpoint==='embeddings'?0:Number(body.max_output_tokens);
   if(!Number.isFinite(maxOutput) || maxOutput<0 || maxOutput>128000) throw new Error('回答长度上限无效');
@@ -75,7 +109,7 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
     Math.min(rate.context,Buffer.byteLength(JSON.stringify(body))+4096):Math.min(rate.context,Math.max(1000,Math.ceil(inputBytes/2)));
   const longInput=astra&&tokens>272000;
   const toolMax=body.tools?.length ? Math.max(1,body.max_tool_calls || 1) * 0.02 : 0;
-  const reserved=Math.max(0.000001,(tokens*rate.input*(astra?1.25:1)*(longInput?2:1)+maxOutput*rate.output*(longInput?1.5:1))/1e6+toolMax);
+  const reserved=solReserved??Math.max(0.000001,(tokens*rate.input*(astra?1.25:1)*(longInput?2:1)+maxOutput*rate.output*(longInput?1.5:1))/1e6+toolMax);
   const id=await reserveBudget(reserved,policy?.kind||endpoint,policy?.dailyLimit);
   // On an ambiguous timeout keep the reservation: provider may have already billed it.
   const response=await fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal || AbortSignal.timeout(120000)});
@@ -87,6 +121,11 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
     const input=Number(p.usage.input_tokens ?? p.usage.prompt_tokens),output=Number(p.usage.output_tokens ?? 0);
     if(Number.isFinite(input)&&input>=0&&Number.isFinite(output)&&output>=0){
       let charged=(input*rate.input+output*rate.output)/1e6+toolMax;
+      if(sol){
+        const verified=solGenerationCharge(p);
+        if(verified===null||verified>reserved)return response;
+        charged=verified;
+      }
       if(astra){
         const actualInput=p.usage.input_tokens,actualOutput=p.usage.output_tokens;
         const details=p.usage.input_tokens_details;

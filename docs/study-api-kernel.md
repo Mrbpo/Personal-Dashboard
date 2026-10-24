@@ -218,3 +218,31 @@ Existing saved URLs without the new flag are not rewritten and retain their
 previous behavior. Explicit snapshot mode does not accept `nativeRegions=1`;
 native-region reading remains current-only. Snapshot text is stored parser
 output, not a guarantee of whole-PDF fidelity, table semantics or answer accuracy.
+
+### Isolated generator candidate (Issue #212)
+
+`STUDY_GENERATION_MODEL=gpt-6.1-sol` is a server-only, default-off development
+option. It requires the existing isolated process/database guard, Kernel backend,
+`select-then-answer` and `selected-once`. `OPENAI_MODEL` remains a mini model:
+selection, question routing and local citation auditing keep their existing
+models. Only answer generation changes. Actual requested generation and selection
+models are recorded separately; changing a global or client-supplied model does
+not enable this path. No automatic escalation, fallback, retry or production
+default change is introduced.
+
+The candidate uses Standard service and explicit implicit/30m prompt caching.
+Its verified budget envelope is currently text-only, no tools, at most 6000 output
+tokens and USD0.40 conservative reservation per request. Images, unverified large
+inputs and altered transport settings are refused before sending, never removed
+from source evidence to make a request fit. The usual mini path remains available
+with this option absent. The monthly ledger is not lifted or reset.
+
+Sol's reservation uses a UTF-8/request framing upper bound and the higher of its
+two documented cache-write rates. Settlement requires the exact returned model,
+Standard tier, valid disjoint cache-read/write counts and the actual 30m/12h write
+split. Missing or malformed usage retains the reservation for reconciliation.
+Old raw responses with unverified TTL accounting are not retroactively settled.
+See the official [model](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+and [cache usage](https://developers.openai.com/api/docs/guides/prompt-caching)
+documentation. This configuration and fixture verification do not establish
+answer accuracy, full website API acceptance or independent blind performance.

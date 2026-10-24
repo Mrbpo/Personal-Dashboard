@@ -83,6 +83,13 @@ export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REAS
  if(value!=='low'&&value!=='medium')throw new StudyAnswerError('configuration','invalid-generation-reasoning','答案推理配置无效');
  return value==='low'?undefined:value;
 }
+/** Server-only and default-off; never a client request or the global model. */
+export function studyGenerationModel(value=process.env.STUDY_GENERATION_MODEL){
+ if(value===undefined)return undefined;
+ if(value!=='gpt-6.1-sol')throw new StudyAnswerError('configuration','invalid-generation-model','生成候选模型配置无效');
+ assertDocumentDevelopmentRun();
+ return value;
+}
 /** Server-only, explicit generation envelope. Selection/defaults stay unchanged. */
 export function studyGenerationOutputTokens(value=process.env.STUDY_GENERATION_OUTPUT_TOKENS){
  if(value===undefined||value==='3000')return undefined;
@@ -141,6 +148,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
  if(scopeAnnotations&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'||studySourceValues()||studySourceQuantities()))
   throw new StudyAnswerError('configuration','scope-annotations-require-ordinary-selection-check','适用范围原文需要普通内核证据选择和引用核对');
  const generationReasoningEffort=studyGenerationReasoning();
+ const generationModel=studyGenerationModel();
+ if(generationModel&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','generation-model-requires-selection-check','生成候选模型需要内核证据选择和引用核对');
  const generationOutputTokens=studyGenerationOutputTokens();
  const generationVerbosity=studyGenerationVerbosity();
  const sourceIdentityContext=studySourceIdentityContext();
@@ -183,6 +193,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...(sourceQuantityContract?{sourceQuantityContract,recordSourceQuantityRawResponse:recorder!.recordSourceQuantityRaw,recordSourceQuantityDerivation:recorder!.recordSourceQuantities}:{}),
     ...(textContextWindows?{textContextWindows}:{}),
     ...(generationReasoningEffort?{generationReasoningEffort}:{}),
+    ...(generationModel?{generationModel}:{}),
     ...(generationOutputTokens?{generationOutputTokens}:{}),
     ...(generationVerbosity?{generationVerbosity}:{}),
     ...(sourceIdentityContext?{sourceIdentityContext}:{}),
@@ -207,9 +218,10 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
   return {answer,citations,meta:{valuable:false,takeaway:'',topic:'',assessment:'explored',evidence:'',vocabulary:[],
    citations,memories:[],web:[],webQuery:'',question,
    contextNote:`Kernel 当前证据：${result.textEvidenceCount} 条文本、${result.imageEvidenceCount} 张原图；历史对话仅用于理解追问。`,
-   study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:model,model:result.model,
+   study:{version:STUDY_APPLICATION_VERSION,backend:'kernel',status:result.answer.status,requestedModel:generationModel??model,model:result.model,
     ...(explicitRouting?{explicitRouting}:{}),
     retrievalQuestion,settings:{reasoningEffort:generationReasoningEffort??'low',maxOutputTokens:generationOutputTokens??3000,timeoutMs:55000,
+     ...(generationModel?{generationModel,evidenceSelectionModel:model}:{}),
      ...(generationOutputTokens?{generationOutputTokens,evidenceSelectionMaxOutputTokens:3000}:{}),
      ...(generationVerbosity?{generationVerbosity,evidenceSelectionVerbosity:'low'}:{}),
      ...(sourceIdentityContext?{sourceIdentityContext}:{}),
