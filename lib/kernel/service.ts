@@ -1568,8 +1568,9 @@ export class KernelService {
             contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,
               expansionUnavailable:visualReason,...(text.status==='unavailable'?{textExpansionUnavailable:text.reason}:{})};
             if(text.status==='unavailable')return retainFocusedText();
-            const expanded=mergeStudyEvidence(base,text.context);
-            if(!expanded)return retainFocusedText();
+            const merged=mergeStudyEvidence(base,text.context);
+            if(!merged)return retainFocusedText();
+            const expanded={...merged,persistedTextProof:text.manifest};
             const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),settings=await documentAnswerSettings(policy);
             let request;
             try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
