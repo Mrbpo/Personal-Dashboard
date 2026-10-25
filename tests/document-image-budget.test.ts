@@ -257,3 +257,44 @@ test('explicit figure caption admits its missing original page within the shared
   assert.equal(calls,4,'source drift blocks publication without retry');
  }finally{kernel.searchDocumentText=search;kernel.searchNativeTableCandidates=tables;globalThis.fetch=saved;}
 });
+
+test('question source routing separates resolved title from lexical terms and preserves cross-source or explicit strict intent',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const owner='scope-owner-'+randomUUID(),
+  target=await pdfFixture(owner,1,false,true,{1:'Danger zone. Original labels; relationships unverified.'}),
+  other=await pdfFixture(owner,1,false,true,{1:'Danger zone. Another current source.'}),
+  question=`In ${target.document.name}, which capabilities overlap in the danger zone?`,
+  originalSearch=kernel.searchDocumentText,saved=globalThis.fetch,reads:Array<{query:string;strict:boolean|undefined;documentIds:string[]}>=[];
+ let mode:'named-document'|'cross-source'|'unknown'='named-document',routeCalls=0,generatorCalls=0;
+ try{
+  kernel.searchDocumentText=async(...args)=>{
+   const hits=await originalSearch.apply(kernel,args);reads.push({query:args[1],strict:args[2]?.strict,documentIds:hits.map(hit=>hit.document_id)});return hits;
+  };
+  globalThis.fetch=async(_url,init)=>{
+   const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
+   if(request.text.format.name==='study_document_query_scope'){
+    routeCalls++;assert.equal(input.question,question);assert.equal(input.namedSource.documentId,target.source.documentId);
+    return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},
+     output_text:JSON.stringify({scope:mode,reason:'Synthetic scope intent; no answer inference.'})});
+   }
+   generatorCalls++;assert.equal(input.question,question,'original answering question is never rewritten');
+   const documents=new Set(input.evidence.filter((item:{kind:string})=>item.kind==='text').map((item:{documentId:string})=>item.documentId));
+   assert.ok(documents.has(target.source.documentId));if(mode!=='named-document')assert.ok(documents.has(other.source.documentId),'cross-source and unknown preserve both sources');
+   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},
+    output_text:JSON.stringify({status:'insufficient-evidence',message:'Synthetic routing test only.',claims:[]})});
+  };
+  const policy={scope:'application' as const,sourceRouting:{mode:'question-scope' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}}},
+   options={includeParents:true,includeImages:true,semantic:false,hybrid:false,aiRerank:false};
+  for(const decision of ['named-document','cross-source','unknown'] as const){
+   mode=decision;reads.length=0;const result=await kernel.answerStudyContent(owner,question,options,policy);
+   assert.equal(result.sourceRouting?.decision.scope,decision);assert.equal(result.sourceRouting?.retrieval.titleSpanRemoved,decision==='named-document');
+   if(decision==='named-document'){
+    assert.ok(!reads[0].query.includes(target.document.name));assert.notEqual(reads[0].strict,true);
+    assert.deepEqual(reads[0].documentIds,[target.source.documentId],'real lexical search recalls the original despite unobserved question words');
+   }else{assert.equal(reads[0].query,question);assert.ok(reads[0].documentIds.includes(other.source.documentId));}
+  }
+  mode='named-document';reads.length=0;await kernel.answerStudyContent(owner,question,{...options,strict:true},policy);
+  assert.equal(reads[0].strict,true,'a caller explicit lexical constraint remains intact');assert.deepEqual(reads[0].documentIds,[]);
+  assert.equal(routeCalls,4);assert.equal(generatorCalls,4);
+ }finally{kernel.searchDocumentText=originalSearch;globalThis.fetch=saved;}
+});

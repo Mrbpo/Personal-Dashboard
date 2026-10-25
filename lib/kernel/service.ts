@@ -1480,7 +1480,7 @@ export class KernelService {
           if(JSON.stringify(current)!==JSON.stringify(mentioned))throw new DocumentEvidenceChangedError();
         });
         if(sourceRouting.decision.scope==='named-document')routedOptions={...searchOptions,
-          sourceHint:{selectedDocumentTitle:mentioned.matches[0].title},strict:true,relatedDocuments:false};
+          sourceHint:{selectedDocumentTitle:mentioned.matches[0].title},relatedDocuments:false};
       }
     }
     if(sourceRouting)policy.onStage?.('retrieval');
@@ -1498,7 +1498,11 @@ export class KernelService {
       (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===pageSource.title)?{source:pageSource,
         ...(requestedPage?{physicalPage:requestedPage}:quotedLiteral?{quotedLiteral,onLocation:(value:DocumentQuotedTextLocation)=>{quotedTextLocation=value;}}:
           {figureNumber:requestedFigure!,onFigureLocation:(value:DocumentFigureLocation)=>{figureCaptionLocation=value;}})}:undefined;
-    const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes,imagePageFocus);
+    // Source identity is a filter, not a keyword or an implicit all-term match.
+    // Cross-source/unknown decisions retain their original relevance query.
+    const rankedQuestion=sourceRouting?.decision.scope==='named-document'?
+      focusedDocumentTextQuery(retrievalQuestion??question,sourceRouting.source.title)??(retrievalQuestion??question):retrievalQuestion??question;
+    const originalRankedRead=await this.studyAnswerContextReader(owner,rankedQuestion,routedOptions,true,identityCourseCodes,imagePageFocus);
     let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
     let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>|ReturnType<typeof classificationGuardAnswerObservation>;
     let sourceIdentityContext:DocumentAnswerContext['sourceIdentityContext'];
@@ -1522,7 +1526,7 @@ export class KernelService {
         read=async()=>{
           const ranked=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
           if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
-          const base=await this.authorImageTableContext(owner,retrievalQuestion??question,ranked,selected);
+          const base=await this.authorImageTableContext(owner,rankedQuestion,ranked,selected);
           const complete=await this.readCompleteDocumentSource(owner,selected);
           const retainFocusedText=async(seed:DocumentAnswerContext=base):Promise<DocumentAnswerContext>=>{
             if(!focusAllowed)return seed;
@@ -1709,7 +1713,8 @@ export class KernelService {
     if(quotedTextLocation)contextExpansion={...contextExpansion,quotedTextLocation:{source:pageSource,...quotedTextLocation}};
     if(figureCaptionLocation)contextExpansion={...contextExpansion,figureCaptionLocation:{source:pageSource,...figureCaptionLocation}};
     return {...result,...(releasedAnswer?{answer:releasedAnswer.answer,selectedUnits:releasedAnswer.selectedUnits}:{}),
-      contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
+      contextExpansion,...(sourceRouting?{sourceRouting:{...sourceRouting,retrieval:{policy:'resolved-title-relevance-query-v1' as const,
+        querySha256:focusedTextQueryHash(rankedQuestion),titleSpanRemoved:rankedQuestion!==(retrievalQuestion??question),strict:routedOptions.strict??false}}}:{}),...(citationCheck?{citationCheck}:{}),
       ...(contentTagRouting?{contentTagRouting}:{}),...(classificationRouting?{classificationRouting}:{}),...(sourceIdentityContext?{sourceIdentityContext}:{})};
   }
 
