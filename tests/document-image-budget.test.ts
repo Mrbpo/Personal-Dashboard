@@ -120,6 +120,35 @@ test('late original region survives earlier full pages across sources without ch
  await assert.rejects(kernel.readDocumentParents(owner,ranked,{includeImages:true}),/no longer current|not current/);
 });
 
+test('late native table original reaches generation while ranked text and explicit page priority remain intact',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const owner='late-table-budget-'+randomUUID(),early=await pdfFixture(owner,14),late=await pdfFixture(owner,1,true),
+  candidates=await kernel.searchNativeTableCandidates(owner,'budgettable',{documentId:late.source.documentId}),
+  search=kernel.searchDocumentText,tables=kernel.searchNativeTableCandidates,saved=globalThis.fetch;
+ assert.equal(candidates.length,1);let calls=0,explicit=false;
+ try{
+  kernel.searchDocumentText=async(_owner,_question,options)=>early.hits.slice(0,options?.limit??14)
+   .map(({reader_selection:_selection,retrieval_mode:_mode,...hit})=>({...hit,score:1,retrieval_mode:'keyword' as const}));
+  kernel.searchNativeTableCandidates=async()=>candidates;
+  globalThis.fetch=async(_url,init)=>{
+   calls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text),selection=input.imageSelection;
+   assert.equal(selection.accounting.images,6);assert.ok(selection.accounting.imageInputTokens<=DOCUMENT_IMAGE_LIMITS.imageInputTokens);
+   assert.ok(input.evidence.some((e:{kind:string;sha256:string})=>e.kind==='image'&&e.sha256===candidates[0].assetSha256),
+    'the actual generator receives the original table absent from the top14 lexical pages');
+   for(const hit of early.hits)assert.ok(input.evidence.some((e:{kind:string;evidenceId:string;sha256:string})=>
+    e.kind==='text'&&e.evidenceId===hit.evidence_id&&e.sha256===sha(hit.body)),'ranked text bytes remain');
+   if(explicit){assert.equal(selection.included[0].source.documentId,early.source.documentId);assert.equal(selection.included[0].physicalPage,14);}
+   else assert.equal(selection.included[0].sha256,candidates[0].assetSha256);
+   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({
+    status:'insufficient-evidence',message:'Synthetic image transport check, not content acceptance.',claims:[]})});
+  };
+  const options={includeParents:true,includeImages:true,semantic:false,aiRerank:false};
+  await kernel.answerStudyContent(owner,'Compare budgettable evidence.',options);
+  explicit=true;await kernel.answerStudyContent(owner,`In ${early.document.name}, describe page 14.`,options,{scope:'application'});
+  assert.equal(calls,2,'two transport scenarios, no provider calls or model retries');
+ }finally{kernel.searchDocumentText=search;kernel.searchNativeTableCandidates=tables;globalThis.fetch=saved;}
+});
+
 test('actual PG composition: 14 same-PDF and interleaved multi-PDF anchors retain text; shared table/author budget and rereads stay stable',
  {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
  await migrateKernel();const pool=kernelPool(),owner='budget-owner-'+randomUUID();
@@ -195,7 +224,9 @@ test('actual PG composition: 14 same-PDF and interleaved multi-PDF anchors retai
   assert.equal(input.evidence.filter((item:{kind:string})=>item.kind==='text').length,14);
   assert.equal(input.imageSelection.accounting.images,8,'six PDF pages, one author PNG and one unique table page');
   assert.equal(input.imageSelection.included.filter((item:{attachmentId:string})=>item.attachmentId===mixed.images[0].attachmentId).length,1);
-  assert.ok(input.imageSelection.omitted.length>0);assert.equal(input.imageSelection.included.at(-1).anchorRank,16);
+  assert.ok(input.imageSelection.omitted.length>0);
+  assert.deepEqual(input.imageSelection.included.slice(0,2).map((i:{sha256:string})=>i.sha256),candidates.map(i=>i.assetSha256),
+   'bounded original table pages reserve their existing shared capacity before ordinary pages');
   const identity=sha(JSON.stringify(input));if(inputIdentity)assert.equal(identity,inputIdentity);inputIdentity=identity;
   if(hide)await kernel.hideParsedDocument(owner,table.source.documentId);
   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({

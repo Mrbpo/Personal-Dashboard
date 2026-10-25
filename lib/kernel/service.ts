@@ -1418,6 +1418,11 @@ export class KernelService {
           requestedImages.push(...visual.images);
         }
       }
+      // Reserve the existing bounded table candidates' original pages before
+      // ordinary images fill the same budget. Explicit requested pages above
+      // still win; an incomplete parser grid remains an unavailable observation.
+      const supplemental=tableCandidates.length?await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
+        imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined):null;
       let context:DocumentAnswerContext&{accounting?:DocumentContextRead['accounting']}=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,
         ...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
@@ -1430,9 +1435,7 @@ export class KernelService {
           ...(context.accounting?{accounting:{...context.accounting,anchorCount:context.anchors.length+extras.length,
             imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
       }
-      if(!tableCandidates.length)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
-      const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
-        imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined);
+      if(!supplemental)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
       const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
       const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
       const enriched={...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
