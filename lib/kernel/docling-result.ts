@@ -4,6 +4,7 @@ import {DOCLING_SOURCE_MATH_VERSION,doclingMathRaw,type DoclingMathNode,type Doc
 export const DOCLING_PARSER_VERSION = 'docling-v4-list-markers-search';
 export const DOCLING_TEXT_PARSER_VERSION = 'docling-v4-list-markers-text-search';
 export const DOCLING_NUL_PROJECTION_VERSION = 'nul-unknown-v1';
+export const DOCLING_EMPTY_TABLE_OBSERVATION_VERSION = 'empty-native-table-unknown-v1';
 // Apply the native-artifact bounds before allocating a search-text grid too.
 export const DOCLING_TABLE_GRID_LIMITS=Object.freeze({cells:10000,rows:1000,columns:200});
 export function configuredDoclingParser(): string {
@@ -241,6 +242,16 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   function tableText(node: Json, ancestors: Set<string>,reference:string): string {
     const data = object(node.data);
     if (!data) throw new Error('Docling table has no structured data');
+    // An explicit empty detection asserts no cells or relationships. Archive it
+    // as unavailable native structure without inventing search-text table rows.
+    if(data.num_rows===0&&data.num_cols===0&&Array.isArray(data.table_cells)&&!data.table_cells.length&&
+      (data.grid===undefined||(Array.isArray(data.grid)&&!data.grid.length))&&!nodeContent(node)){
+      const pageNumbers=[...new Set(provenance(node).map(location=>location.page_no as number))];
+      nativeTables.push({reference,pageNumbers,raw:structuredClone(node),cellTexts:[],
+        captions:list(node.captions).map(value=>{const caption=resolve(value);return {reference:caption.ref,raw:structuredClone(caption.node)};})});
+      for(const page of pageNumbers)warnings.push(`第 ${page} 页 [${DOCLING_EMPTY_TABLE_OBSERVATION_VERSION}] Docling 声明空表格；保留原始区域，单元格与结构关系未知，请核对原 PDF`);
+      return '';
+    }
     for(const [key,limit] of [['num_rows',DOCLING_TABLE_GRID_LIMITS.rows],['num_cols',DOCLING_TABLE_GRID_LIMITS.columns]] as const){
       const declared=data[key];
       if(declared!==undefined&&(!Number.isSafeInteger(declared)||(declared as number)<1||(declared as number)>limit))

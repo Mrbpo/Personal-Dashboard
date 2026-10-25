@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import { decodeDoclingResult, DOCLING_NUL_PROJECTION_VERSION } from '../lib/kernel/docling-result.ts';
+import { decodeDoclingResult, DOCLING_NUL_PROJECTION_VERSION, DOCLING_EMPTY_TABLE_OBSERVATION_VERSION } from '../lib/kernel/docling-result.ts';
+import {prepareNativeTableArtifact,nativeTableSearchStrings} from '../lib/kernel/document-table-candidates.ts';
 
 const ref = (name: string) => ({$ref: `#/${name}`});
 const item = (content: string, page = 1, extra: Record<string, unknown> = {}) => ({text: content, prov: [{page_no: page}], ...extra});
@@ -21,6 +22,35 @@ function tableResult(data:Record<string,unknown>){
  doc.tables=[{prov:[{page_no:1}],data}];
  return value;
 }
+
+test('explicit empty table detections retain raw unknown structure and surrounding text',()=>{
+ const value=result(),doc=value.document.json_content;
+ const empty={num_rows:0,num_cols:0,table_cells:[],grid:[]};
+ doc.body.children.push(ref('tables/0'));
+ doc.tables=[{self_ref:'#/tables/0',prov:[{page_no:1,bbox:{l:1,t:20,r:100,b:10,coord_origin:'BOTTOMLEFT'}}],data:empty}];
+ const before=JSON.stringify(value),decoded=decodeDoclingResult(value,1,{formulaEnriched:false});
+ assert.equal(JSON.stringify(value),before);
+ assert.equal(decoded.pages[0].text,'Readable introduction');
+ assert.equal(decoded.nativeTables.length,1);
+ assert.deepEqual(decoded.nativeTables[0].raw,doc.tables[0]);
+ assert.deepEqual(decoded.nativeTables[0].cellTexts,[]);
+ assert.deepEqual(decoded.nativeTables[0].pageNumbers,[1]);
+ assert(decoded.warnings.some(w=>w.includes(DOCLING_EMPTY_TABLE_OBSERVATION_VERSION)));
+ const artifact=prepareNativeTableArtifact(decoded.nativeTables[0]);
+ assert.equal(artifact.status,'unavailable');assert(artifact.reasons.includes('unsupported-grid'));
+ assert.equal(nativeTableSearchStrings(artifact),'');
+});
+
+test('empty detection exception neither repairs invalid grids nor certifies an unreadable page as blank',()=>{
+ for(const data of [
+  {num_rows:0,num_cols:1,table_cells:[]},{num_rows:1,num_cols:0,table_cells:[]},
+  {num_rows:0,num_cols:0,table_cells:[{text:'conflict',start_row_offset_idx:0,start_col_offset_idx:0}]},
+  {num_rows:0,num_cols:0,table_cells:[],grid:[['conflict']]},
+  {num_rows:0,num_cols:0},
+ ])assert.throws(()=>decodeDoclingResult(tableResult(data),1),/invalid or oversized declared grid/);
+ const onlyEmpty=tableResult({num_rows:0,num_cols:0,table_cells:[],grid:[]});
+ assert.throws(()=>decodeDoclingResult(onlyEmpty,1,{verifiedBlankPages:[1]}),/has content but no readable transcription/);
+});
 
 test('table projection rejects out-of-grid starts and duplicate starts even when text is empty',()=>{
  const cell=(text:string,row=0,col=0)=>({text,start_row_offset_idx:row,start_col_offset_idx:col});
