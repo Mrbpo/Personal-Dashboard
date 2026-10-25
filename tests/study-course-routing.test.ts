@@ -5,7 +5,7 @@ const {kernel}=await import('../lib/kernel/service.ts'),tutor=await import('../l
 
 test('opt-in literal course routing reaches shared Kernel scope without persisting one course',async()=>{
  const names=['STUDY_ANSWER_BACKEND','STUDY_COURSE_ROUTING','OPENAI_MODEL','STUDY_SOURCE_SCOPE','STUDY_CITATION_CHECK','STUDY_SOURCE_VALUES','STUDY_SOURCE_QUANTITIES','STUDY_TEXT_CONTEXT_WINDOWS'] as const,
-  env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved={courses:kernel.listCourses,counts:kernel.documentRoutingCounts,unmapped:kernel.hasUnmappedCourseDocuments,answer:kernel.answerStudyContent,fetch:globalThis.fetch};
+  env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved={courses:kernel.listCourses,counts:kernel.documentRoutingCounts,unmapped:kernel.hasUnmappedCourseDocuments,find:kernel.findMentionedDocumentSources,answer:kernel.answerStudyContent,fetch:globalThis.fetch};
  const calls:any[]=[];let catalogCalls=0,providerCalls=0,unmapped=false;
  const courses=[{id:'chem-fall',code:'CHMA10H3',name:'Chemistry',enabled:true},
   {id:'chem-spring',code:'CHMA10H3',name:'Chemistry',enabled:true},{id:'stats',code:'STAB22H3',name:'Statistics',enabled:true}];
@@ -14,6 +14,7 @@ test('opt-in literal course routing reaches shared Kernel scope without persisti
   process.env.STUDY_ANSWER_BACKEND='kernel';process.env.STUDY_COURSE_ROUTING='explicit-codes-v1';process.env.OPENAI_MODEL='gpt-5.4-mini';
   for(const name of names.slice(3))process.env[name]='off';
   kernel.listCourses=async()=>{catalogCalls++;return courses as any;};
+  kernel.findMentionedDocumentSources=async()=>({status:'not-mentioned',matches:[]});
   kernel.documentRoutingCounts=async()=>({eligibleDocuments:5,routedDocuments:3,eligiblePages:5,routedPages:3});
   kernel.hasUnmappedCourseDocuments=async(owner,ids)=>{assert.equal(owner,'route-owner');assert.deepEqual([...ids].sort(),['chem-fall','chem-spring','stats']);return unmapped;};
   kernel.answerStudyContent=async(owner,question,options)=>{calls.push({owner,question,options});return {
@@ -51,7 +52,7 @@ test('opt-in literal course routing reaches shared Kernel scope without persisti
   await assert.rejects(tutor.sendTutor('route-owner',id,'course-multi-request-01','A changed question',[],false),(e:any)=>e.code==='idempotency-scope-conflict');
   assert.equal(calls.length,8);assert.equal(providerCalls,0);
  }finally{
-  kernel.listCourses=saved.courses;kernel.documentRoutingCounts=saved.counts;kernel.hasUnmappedCourseDocuments=saved.unmapped;kernel.answerStudyContent=saved.answer;globalThis.fetch=saved.fetch;
+  kernel.listCourses=saved.courses;kernel.documentRoutingCounts=saved.counts;kernel.hasUnmappedCourseDocuments=saved.unmapped;kernel.findMentionedDocumentSources=saved.find;kernel.answerStudyContent=saved.answer;globalThis.fetch=saved.fetch;
   for(const name of names){if(env[name]===undefined)delete process.env[name];else process.env[name]=env[name];}
  }
 });

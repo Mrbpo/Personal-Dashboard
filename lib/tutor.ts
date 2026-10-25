@@ -165,11 +165,12 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     if(!activeCourse&&backend==='kernel'&&!explicitTarget){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
       const literalCourseRoute=routeQuestionCourseCodes(question,courses);
+      let namedDocuments:Awaited<ReturnType<typeof kernel.findMentionedDocumentSources>>|undefined;
       const hasDocumentAttribution=async()=>{
         // A literal course request still needs a valid course. A document name
         // only removes a keyword false positive; it never becomes a filter.
         if(literalCourseRoute.status!=='none')return false;
-        const named=await kernel.findMentionedDocumentSources(owner,question,{routingScope});
+        const named=namedDocuments??=await kernel.findMentionedDocumentSources(owner,question,{routingScope});
         if(named.uniqueTitleSources){
           documentAttribution={policy:'multiple-mentioned-documents-before-course-guard-v1',sources:named.uniqueTitleSources,
             courseOwnershipVerified:false,scopeApplied:false};
@@ -188,7 +189,10 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
             // Re-resolve successful query context against today's catalog; old
             // course IDs and assistant text are never source evidence.
             const inherited=routeQuestionCourseCodes(previous.observations.map((o:{code:string})=>o.code).join(' '),courses);
-            if(inherited.status==='resolved')courseRouting={...inherited,inputOrigin:'successful-history',fromMessageId:prior!.id};
+            // Current named sources take precedence over an inferred old topic.
+            // Ambiguous names also cannot authorize the old course as a fallback.
+            if(inherited.status==='resolved'&&!await hasDocumentAttribution()&&namedDocuments?.status==='not-mentioned')
+              courseRouting={...inherited,inputOrigin:'successful-history',fromMessageId:prior!.id};
           }
         }
         if(courseRouting.status==='resolved'){
