@@ -15,7 +15,7 @@ function assertPin(value:unknown){if(value!==undefined&&(typeof value!=='string'
 export function documentSourceTextViewRequest(documentId:string,query:URLSearchParams){
  if(!query.has('scope'))return;
  if(query.get('scope')!==DOCUMENT_SOURCE_TEXT_VIEW_SCOPE||query.get('evidence')!=='1'||
-  ['snapshot','evidenceId','nativeRegions','preview'].some(key=>query.has(key)))invalid();
+  ['snapshot','evidenceId','nativeRegions','parserRegions','preview'].some(key=>query.has(key)))invalid();
  const source={documentId,currentVersionId:query.get('version')??'',sourceVersionId:query.get('sourceVersion')??'',sourceHash:query.get('sourceHash')??''};
  if(Object.values(source).some(value=>!value.trim()||value.length>1000))invalid();
  const manifestSha256=query.has('manifest')?query.get('manifest')!:undefined;assertPin(manifestSha256);

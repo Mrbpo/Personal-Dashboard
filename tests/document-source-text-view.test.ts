@@ -61,7 +61,7 @@ test('source-view request scope is explicit, bounded and never silently becomes 
  assert.deepEqual(documentSourceTextViewRequest(source.documentId,query),{source,manifestSha256:undefined});
  query.set('manifest',read.manifest.manifestSha256);assert.equal(documentSourceTextViewRequest(source.documentId,query)?.manifestSha256,read.manifest.manifestSha256);
  assert.equal(documentSourceTextViewRequest(source.documentId,new URLSearchParams({evidence:'1',snapshot:'1',evidenceId:'actual-node-1'})),undefined,'legacy node/snapshot route is unchanged');
- for(const [key,value] of [['scope','unknown'],['evidence','0'],['version',''],['manifest','not-a-hash'],['snapshot','1'],['evidenceId','actual-node-1'],['nativeRegions','1'],['preview','1']]){
+ for(const [key,value] of [['scope','unknown'],['evidence','0'],['version',''],['manifest','not-a-hash'],['snapshot','1'],['evidenceId','actual-node-1'],['nativeRegions','1'],['parserRegions','1'],['preview','1']]){
   const bad=new URLSearchParams(query);bad.set(key,value);assert.throws(()=>documentSourceTextViewRequest(source.documentId,bad));
  }
  assert.throws(()=>documentSourceTextViewRequest('x'.repeat(1001),query));
