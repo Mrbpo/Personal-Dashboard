@@ -198,7 +198,7 @@ test('audit restores the entire original selection object and only its actual se
  assert.ok(Array.isArray(content));const input=JSON.parse(content[0].text!);
  assert.deepEqual(input,{question,claim:{claimId:'c0',text:'Two samples are compared.'},
   references:[{refId:'r0',kind:'text',quote:body,source:prepared.packet.references[0].source},{refId:'r1',kind:'image',source:prepared.packet.references[1].source}]});
- assert.equal(request.model,'gpt-5.4-mini');assert.deepEqual(request.reasoning,{effort:'low'});assert.equal(request.max_output_tokens,1000);
+ assert.equal(request.model,'gpt-5.4-mini');assert.deepEqual(request.reasoning,{effort:'low'});assert.equal(request.max_output_tokens,2000);
  const image=content.find(item=>item.type==='input_image');assert.ok(image&&'image_url' in image);
  assert.equal(image.image_url,'data:image/png;base64,'+bytes.toString('base64'));assert.equal(image.detail,'original');
  const legacyHigh=structuredClone(request),legacyContent=legacyHigh.input[1].content;
@@ -232,7 +232,7 @@ test('Kernel policy and current-source binding fail before fetch; valid calls re
   const c=context();if(changed)c.anchors[0].body+=' Changed.';return complete(c);
  };
  globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
-  assert.equal(request.max_output_tokens,1000);return Response.json(response());};
+  assert.equal(request.max_output_tokens,2000);return Response.json(response());};
  try{
   await assert.rejects(kernel.auditSelectedStudySourceClaim('owner',question,source,binding(),policy(raw)),/isolated administrator/);
   assert.equal(reads,0);assert.equal(calls,0);
