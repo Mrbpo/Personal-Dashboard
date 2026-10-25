@@ -98,7 +98,7 @@ test('Kernel development entry makes three isolated calls and changes citations 
  globalThis.fetch=async(_url,init)=>{
   const request=JSON.parse(String(init?.body)),content=request.input[1].content,input=JSON.parse(content[0].text);calls++;
   assert.equal(j.attempts.length,calls);assert.equal(j.states[0].event,'original');
-  assert.equal(request.max_output_tokens,1000);assert.deepEqual(request.reasoning,{effort:'low'});
+  assert.equal(request.max_output_tokens,calls===2?1000:2000);assert.deepEqual(request.reasoning,{effort:'low'});
   assert.ok(j.attempts.at(-1)!.inputTokenUpper>16384);assert.ok(j.attempts.at(-1)!.fundingUpperUSD>=j.attempts.at(-1)!.usageUpperUSD);
   if(calls===1){assert.deepEqual(withoutSources(input.references),[{refId:'r0',kind:'text',quote:body}]);assert.equal(content.length,1);return response(local(false));}
   if(calls===2){assert.equal(input.claim,'There are 12 samples.');assert.equal(input.references.length,2);return response({status:'candidate-references',referenceIds:['i0']});}
