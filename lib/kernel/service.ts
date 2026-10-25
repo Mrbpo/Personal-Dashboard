@@ -64,8 +64,9 @@ type OrigSearchPage={document_id:string;current_version_id:string;source_version
 async function origSearchPages(db:Pick<PoolClient,'query'>,owner:string,id:string,page?:number,lock=false){
  const rows=(await db.query<OrigSearchPage>(`SELECT d.id document_id,d.current_version_id,v.source_version_id,d.source_hash,
   coalesce(d.course_id,'') course_id,s.raw_sha256,s.raw_value->>'mime' mime,v.parser_version,v.page_count,
-  p.page_number,p.evidence_id,p.body,p.content_kind,p.search_text,p.search_hint_provenance,s.raw_value->'batchProvenance' progress,
-  pv.manifest->'content'->'layout' layout
+  p.page_number,p.evidence_id,p.body,p.content_kind,p.search_text,p.search_hint_provenance,
+  CASE WHEN p.page_number=coalesce($3::integer,1) THEN s.raw_value->'batchProvenance' END progress,
+  CASE WHEN p.page_number=coalesce($3::integer,1) THEN pv.manifest->'content'->'layout' END layout
   FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
   JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
   JOIN document_text_pages p ON p.version_id=v.id
@@ -77,6 +78,10 @@ async function origSearchPages(db:Pick<PoolClient,'query'>,owner:string,id:strin
   ORDER BY p.page_number ${lock?'FOR UPDATE OF d,p,v,s':''}`,[owner,id,page??null])).rows;
  if(!rows.length||rows.some(r=>r.mime==='application/pdf'&&(r.raw_sha256!==r.source_hash||r.content_kind!=='page')))throw new DocumentEvidenceChangedError();
  if(page===undefined&&(rows.length!==rows[0].page_count||rows.some((r,i)=>r.page_number!==i+1)))throw new DocumentEvidenceChangedError();
+ // Common metadata belongs to this one SQL snapshot. Transmit/decode it once,
+ // then share it across its pages; every later read still queries current data.
+ const {progress,layout}=rows[0];
+ for(const row of rows){row.progress=progress;row.layout=layout;}
  return rows;
 }
 function origSearchInput(owner:string,row:OrigSearchPage):OrigSearchInput{
