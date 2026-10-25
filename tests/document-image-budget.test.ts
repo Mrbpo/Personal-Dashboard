@@ -230,20 +230,30 @@ test('explicit figure caption admits its missing original page within the shared
   kernel.searchNativeTableCandidates=async()=>[];
   globalThis.fetch=async(_url,init)=>{
    calls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
+   if(request.text.format.name!=='document_evidence_selection'){
+    const pixels=request.input[1].content.filter((part:{type:string})=>part.type==='input_image')
+     .map((part:{image_url:string})=>sha(Buffer.from(part.image_url.split(',')[1],'base64')));
+    assert.ok(pixels.includes(sha(target.pngs[14])),'the explicit original survives a foreign-only selector');
+    assert.ok(input.quoteUnits.some((unit:{text:string})=>unit.text===other.hits[0].body),'foreign selected text remains');
+    if(hide)await kernel.hideParsedDocument(owner,target.source.documentId);
+    return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({
+     status:'insufficient-evidence',message:'Synthetic routing check only.',claims:[]})});
+   }
    assert.equal(input.imageSelection.included[0].physicalPage,15);assert.equal(input.imageSelection.accounting.images,6);
    for(const hit of ranked){
     const support=input.evidence.find((item:{kind:string;evidenceId:string})=>item.kind==='text'&&item.evidenceId===hit.evidence_id);
     assert.ok(support,'all ranked and other-source text remains');assert.equal(support.sha256,sha(hit.body));
    }
-   if(hide)await kernel.hideParsedDocument(owner,target.source.documentId);
-   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({
-    status:'insufficient-evidence',message:'Synthetic routing check only.',claims:[]})});
+   const foreign=input.evidence.find((item:{kind:string;documentId:string})=>item.kind==='text'&&item.documentId===other.source.documentId),
+    unit=input.quoteUnits.find((unit:{supportId:string})=>unit.supportId===foreign.id);
+   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({referenceIds:[unit.id]})});
   };
   const question=`In ${target.document.name}, describe Figure 7.`,options={includeParents:true,includeImages:true,semantic:false,aiRerank:false};
-  const result=await kernel.answerStudyContent(owner,question,options,{scope:'application'}),location=JSON.parse(JSON.stringify(result.contextExpansion)).figureCaptionLocation;
+  const policy={scope:'application' as const,evidenceSelection:'select-then-answer' as const},
+   result=await kernel.answerStudyContent(owner,question,options,policy),location=JSON.parse(JSON.stringify(result.contextExpansion)).figureCaptionLocation;
   assert.equal(location.status,'available');assert.equal(location.semanticsVerified,false);assert.equal(location.figureRegionRelationship,'unknown');
-  assert.deepEqual(location.pages.map((page:{physicalPage:number})=>page.physicalPage),[15]);assert.equal(calls,1);
-  hide=true;await assert.rejects(kernel.answerStudyContent(owner,question,options,{scope:'application'}),/no longer current|not current/);
-  assert.equal(calls,2,'source drift blocks publication without retry');
+  assert.deepEqual(location.pages.map((page:{physicalPage:number})=>page.physicalPage),[15]);assert.equal(calls,2);
+  hide=true;await assert.rejects(kernel.answerStudyContent(owner,question,options,policy),/no longer current|not current/);
+  assert.equal(calls,4,'source drift blocks publication without retry');
  }finally{kernel.searchDocumentText=search;kernel.searchNativeTableCandidates=tables;globalThis.fetch=saved;}
 });

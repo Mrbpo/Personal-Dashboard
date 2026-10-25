@@ -20,7 +20,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText,projectDocume
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText,
- explicitDocumentFigure,locateDocumentFigureCaption,type DocumentFigureLocation,type DocumentQuotedTextLocation,type FocusedDocumentText} from './document-focused-text.ts';
+ explicitDocumentFigure,locateDocumentFigureCaption,type DocumentFigureCaptionCandidate,type DocumentFigureLocation,type DocumentQuotedTextLocation,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
@@ -1380,6 +1380,7 @@ export class KernelService {
       }
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
       const requestedPages:DocumentEvidenceHit[]=[];
+      let figureCaptionCandidate:DocumentFigureCaptionCandidate|undefined;
       let requestedImages:DocumentAnswerContext['images']=[];
       if(imageBudget&&imagePageFocus){
         const source=imagePageFocus.source;
@@ -1395,7 +1396,14 @@ export class KernelService {
             location=imagePageFocus.quotedLiteral?locateDocumentQuotedText(imagePageFocus.quotedLiteral,pages):locateDocumentFigureCaption(imagePageFocus.figureNumber!,pages);
           const observation=text.status==='unavailable'?{...location,reason:'source-text:'+text.reason}:location;
           if(observation.policy==='literal-quoted-text-candidates-v1')imagePageFocus.onLocation?.(observation);
-          else imagePageFocus.onFigureLocation?.(observation);
+          else{
+            imagePageFocus.onFigureLocation?.(observation);
+            if(observation.status==='available'){
+              const page=observation.pages[0];figureCaptionCandidate={policy:'explicit-current-figure-page-v1',source,
+                figureNumber:observation.figureNumber,physicalPage:page.physicalPage,evidenceId:page.evidenceId,bodySha256:page.bodySha256,
+                semanticsVerified:false,figureRegionRelationship:'unknown'};
+            }
+          }
           if(location.status==='available'){
             const nodes=await readDocumentNodes(kernelPool(),owner,source,location.pages.map(page=>page.evidenceId));
             if(nodes.some((node,index)=>node.page_number!==location.pages[index].physicalPage||focusedTextQueryHash(node.body)!==location.pages[index].bodySha256))throw new DocumentEvidenceChangedError();
@@ -1417,6 +1425,8 @@ export class KernelService {
         const extras=requestedPages.filter(page=>!context.anchors.some(hit=>hit.evidence_id===page.evidence_id));
         const images=[...new Map([...requestedImages,...context.images].map(image=>[image.attachmentId,image])).values()];
         context={...context,anchors:[...context.anchors,...extras],images,imageSelection:imageBudget!.snapshot(),
+          ...(figureCaptionCandidate&&requestedImages.some(image=>'kind'in image&&image.kind==='pdf-page'&&
+            image.anchorEvidenceId===figureCaptionCandidate!.evidenceId&&image.physicalPage===figureCaptionCandidate!.physicalPage)?{figureCaptionCandidate}:{}),
           ...(context.accounting?{accounting:{...context.accounting,anchorCount:context.anchors.length+extras.length,
             imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
       }

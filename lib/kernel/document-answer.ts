@@ -8,7 +8,8 @@ import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudy
  type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead,type LiteralCourseIdentityContext} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
-import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,type FocusedDocumentText} from './document-focused-text.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentFigure,documentFigureCaptionCount,
+ type DocumentFigureCaptionCandidate,type FocusedDocumentText} from './document-focused-text.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
@@ -38,6 +39,7 @@ type Image=AuthorImage|(NativeTableObservedImage&{pageRegions?:StudyPdfPageRegio
  * Kernel reader: arbitrary caller JSON is never a substitute for current data. */
 export type DocumentAnswerContext={anchors:DocumentEvidenceHit[];
  focusedText?:FocusedDocumentText;
+ figureCaptionCandidate?:DocumentFigureCaptionCandidate;
  sourceIdentityContext?:LiteralCourseIdentityContext;
  /** Kernel configuration only; original page boundaries and bodies stay intact. */
  textQuotePolicy?:'stored-page-v1';
@@ -534,6 +536,20 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const mentionedSource=mentionedSourceIdentity(question,documentMetadata,supports);
+ const figureCaptionCandidate=context.figureCaptionCandidate?structuredClone(context.figureCaptionCandidate):undefined;
+ if(figureCaptionCandidate){
+  const candidate=figureCaptionCandidate,source=candidate.source,
+   sameSource=(s:Support)=>s.documentId===source.documentId&&s.documentVersionId===source.currentVersionId&&
+    s.sourceVersionId===source.sourceVersionId&&s.sourceHash===source.sourceHash&&s.evidenceId===candidate.evidenceId,
+   text=supports.filter(s=>s.kind==='text'&&sameSource(s)&&s.sha256===candidate.bodySha256),
+   images=supports.filter(s=>s.kind==='image'&&sameSource(s)&&s.image&&'kind'in s.image&&s.image.kind==='pdf-page'&&s.image.physicalPage===candidate.physicalPage);
+  if(candidate.policy!=='explicit-current-figure-page-v1'||candidate.semanticsVerified!==false||candidate.figureRegionRelationship!=='unknown'||
+   !mentionedSource||explicitDocumentFigure(question,mentionedSource.title)!==candidate.figureNumber||source.documentId!==mentionedSource.documentId||
+   source.currentVersionId!==mentionedSource.documentVersionId||source.sourceVersionId!==mentionedSource.sourceVersionId||source.sourceHash!==mentionedSource.sourceHash||
+   text.length!==1||images.length!==1||!context.anchors.some(hit=>hit.id===`pg:${source.currentVersionId}:${candidate.physicalPage}`&&
+    hit.evidence_id===candidate.evidenceId&&hit.body===text[0].text&&hit.document_id===source.documentId&&hit.source_version_id===source.sourceVersionId&&hit.source_hash===source.sourceHash)||
+   documentFigureCaptionCount(candidate.figureNumber,text[0]?.text??'')!==1)throw Error('Invalid explicit figure page binding');
+ }
  const focusedText=context.focusedText;
  if(focusedText){
   const source=focusedText.source,query=mentionedSource&&focusedDocumentTextQuery(question,mentionedSource.title);
@@ -594,11 +610,13 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  }
  const fingerprintInput=boundReads.length?{input,sourceObservations:boundReads}:input;
  const baseFingerprint=sourceIdentityBindings.length?{input:fingerprintInput,sourceIdentityBindings}:fingerprintInput;
+ const candidateFingerprint=figureCaptionCandidate?{input:baseFingerprint,figureCaptionCandidate}:baseFingerprint;
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,...(visualUnitManifest?{visualUnitManifest}:{}),input,warnings,unavailableParents,
+  ...(figureCaptionCandidate?{figureCaptionCandidate}:{}),
   ...(context.pdfNavigation?{pdfNavigation:context.pdfNavigation}:{}),
   ...(regionReads.length?{pdfPageRegionReads:structuredClone(regionReads)}:{}),
   ...(sourceIdentityBindings.length?{sourceIdentityBindings}:{}),
-  fingerprint:sha(JSON.stringify(context.pdfNavigation?.pages.length?{input:baseFingerprint,navigationObservations:context.pdfNavigation.pages.map(p=>p.observationSha256)}:baseFingerprint))};
+  fingerprint:sha(JSON.stringify(context.pdfNavigation?.pages.length?{input:candidateFingerprint,navigationObservations:context.pdfNavigation.pages.map(p=>p.observationSha256)}:candidateFingerprint))};
 }
 
 /** Optional metadata never displaces original text or PNGs. Source drift uses
@@ -847,8 +865,8 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
    pairs:Array<{imageId:string;supportId:string;referenceIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false}>;
    skippedSupportIds:string[];inputScope:'already-retrieved-selectable-text';structureRelationsVerified:false};
   structureRelationsVerified:false};
- originalPageImageRetention?:{policy:'provider-selected-text-original-page-v1'|'selected-and-focused-original-page-v2';retainedImageIds:string[];skippedImageIds:string[];
-  pairs:Array<{imageId:string;supportIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false;basis?:'focused-nonquotable-page'}>;
+ originalPageImageRetention?:{policy:'provider-selected-text-original-page-v1'|'selected-and-focused-original-page-v2'|'selected-and-requested-figure-page-v3';retainedImageIds:string[];skippedImageIds:string[];
+  pairs:Array<{imageId:string;supportIds:string[];relation:'same-stored-pdf-page';semanticRelationsVerified:false;basis?:'focused-nonquotable-page'|'explicit-figure-caption-page'}>;
   inputScope:'already-retrieved-original-page-images';structureRelationsVerified:false};
  mentionedSourceRetention?:{policy:'bounded-mentioned-source-text-v2';documentId:string;sourceHash:string;
   status:'retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[];
@@ -990,20 +1008,26 @@ export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,
   originalPairs:NonNullable<StoredNodeTextSelection['originalPageImageRetention']>['pairs']=[],
   samePage=(text:Support,image:Support)=>text.kind==='text'&&text.documentId===image.documentId&&text.documentVersionId===image.documentVersionId&&
    text.sourceVersionId===image.sourceVersionId&&text.sourceHash===image.sourceHash&&text.evidenceId===image.evidenceId;
- let focusedPageConsidered=false;
+ let focusedPageConsidered=false,requestedFigureConsidered=false;
  for(const support of prepared.supports){
   if(support.kind!=='image'||!support.image||!('kind'in support.image)||support.image.kind!=='pdf-page'||ids.has(support.id))continue;
   const native=support.tableObservations?.filter(o=>o.version==='docling-native-observation-v1')??[],
    pageText=selectedText.filter(s=>samePage(s,support)),providerPageText=pageText.filter(s=>providerSupportIds.has(s.id)),
-   focusedPageText=focusedNonquotableText.filter(s=>samePage(s,support)),nativePair=!!native.length&&!!pageText.length;
-  if(!nativePair&&!providerPageText.length&&!focusedPageText.length)continue;
+   focusedPageText=focusedNonquotableText.filter(s=>samePage(s,support)),candidate=prepared.figureCaptionCandidate,
+   figurePageText=candidate&&support.documentId===candidate.source.documentId&&support.documentVersionId===candidate.source.currentVersionId&&
+    support.sourceVersionId===candidate.source.sourceVersionId&&support.sourceHash===candidate.source.sourceHash&&support.evidenceId===candidate.evidenceId&&
+    support.image.physicalPage===candidate.physicalPage?prepared.supports.filter(s=>samePage(s,support)&&s.sha256===candidate.bodySha256):[],
+   nativePair=!!native.length&&!!pageText.length;
+  if(!nativePair&&!providerPageText.length&&!focusedPageText.length&&!figurePageText.length)continue;
   if(focusedPageText.length)focusedPageConsidered=true;
+  if(figurePageText.length)requestedFigureConsidered=true;
   for(const observation of native)assertNativeTableObservation(observation,support.image);
   if(ids.size>=64){(nativePair?skippedImageIds:skippedOriginalImageIds).push(support.id);continue;}
   ids.add(support.id);addedImageIds.push(support.id);
   if(nativePair)retainedImageIds.push(support.id);
-  else{originalImageIds.push(support.id);originalPairs.push({imageId:support.id,supportIds:[...providerPageText,...focusedPageText].map(s=>s.id),
-   relation:'same-stored-pdf-page',semanticRelationsVerified:false,...(focusedPageText.length?{basis:'focused-nonquotable-page' as const}:{})});}
+  else{originalImageIds.push(support.id);originalPairs.push({imageId:support.id,supportIds:[...new Set([...providerPageText,...focusedPageText,...figurePageText].map(s=>s.id))],
+   relation:'same-stored-pdf-page',semanticRelationsVerified:false,...(figurePageText.length?{basis:'explicit-figure-caption-page' as const}:
+    focusedPageText.length?{basis:'focused-nonquotable-page' as const}:{})});}
  }
  const units=generationQuoteUnits(prepared),pairs:NonNullable<NonNullable<StoredNodeTextSelection['nativeTablePageRetention']>['imageTextPairing']>['pairs']=[],
   skippedSupportIds:string[]=[];
@@ -1026,7 +1050,8 @@ export function retainSelectedNativeTablePages(retained:StoredNodeTextSelection,
  return {...retained,referenceIds:[...retained.referenceIds,...addedImageIds,...textIds],
   systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...addedImageIds,...textIds],
   ...(pairs.length?{expandedSupportIds:[...new Set([...retained.expandedSupportIds,...pairs.map(pair=>pair.supportId)])]}:{}),
-  ...(originalImageIds.length||skippedOriginalImageIds.length?{originalPageImageRetention:{policy:focusedPageConsidered?'selected-and-focused-original-page-v2' as const:'provider-selected-text-original-page-v1' as const,
+  ...(originalImageIds.length||skippedOriginalImageIds.length?{originalPageImageRetention:{policy:requestedFigureConsidered?'selected-and-requested-figure-page-v3' as const:
+   focusedPageConsidered?'selected-and-focused-original-page-v2' as const:'provider-selected-text-original-page-v1' as const,
    retainedImageIds:originalImageIds,skippedImageIds:skippedOriginalImageIds,pairs:originalPairs,
    inputScope:'already-retrieved-original-page-images' as const,structureRelationsVerified:false as const}}:{}),
   ...(nativeChanged?{nativeTablePageRetention:{policy:'selected-node-original-table-page-v1' as const,retainedImageIds,skippedImageIds,

@@ -77,6 +77,13 @@ export function explicitDocumentFigure(question:string,title:string):number|null
 export type DocumentFigureLocation={policy:'literal-figure-caption-candidate-v1';figureNumber:number;
  status:'available'|'unavailable';reason:string|null;semanticsVerified:false;figureRegionRelationship:'unknown';
  pages:Array<{physicalPage:number;evidenceId:string;bodySha256:string;role:'caption-match-candidate'}>};
+export type DocumentFigureCaptionCandidate={policy:'explicit-current-figure-page-v1';source:DocumentContextSource;figureNumber:number;
+ physicalPage:number;evidenceId:string;bodySha256:string;semanticsVerified:false;figureRegionRelationship:'unknown'};
+export function documentFigureCaptionCount(figureNumber:number,body:string):number{
+ if(!Number.isSafeInteger(figureNumber)||figureNumber<1||figureNumber>9999)return 0;
+ const caption=new RegExp(`^\\s*(?:figure|fig\\.?|图)\\s*${figureNumber}(?:\\s*[:：]\\s*\\S|\\.\\s+[^\\d\\s])`,'gimu');
+ return [...body.normalize('NFKC').matchAll(caption)].length;
+}
 /** A unique line-start caption is a page candidate, never proof of which
  * region it describes. References in prose are not caption observations. */
 export function locateDocumentFigureCaption(figureNumber:number,pages:Array<{physicalPage:number;evidenceId:string;body:string}>):DocumentFigureLocation{
@@ -87,11 +94,10 @@ export function locateDocumentFigureCaption(figureNumber:number,pages:Array<{phy
  if(!pages.length||pages.length>512||pages.some((page,index)=>page.physicalPage!==index+1||!page.evidenceId)||
   new Set(pages.map(page=>page.evidenceId)).size!==pages.length)return unavailable('incomplete-page-sequence');
  if(pages.reduce((n,page)=>n+Buffer.byteLength(page.body),0)>262144)return unavailable('source-text-byte-limit');
- const caption=new RegExp(`^\\s*(?:figure|fig\\.?|图)\\s*${figureNumber}(?:\\s*[:：]\\s*\\S|\\.\\s+[^\\d\\s])`,'gimu');
  let found:typeof pages[number]|undefined;
  for(const page of pages){
-  const matches=[...page.body.normalize('NFKC').matchAll(caption)];if(!matches.length)continue;
-  if(found||matches.length!==1)return unavailable('ambiguous-caption');found=page;
+  const count=documentFigureCaptionCount(figureNumber,page.body);if(!count)continue;
+  if(found||count!==1)return unavailable('ambiguous-caption');found=page;
  }
  if(!found)return unavailable('caption-not-found');
  return {...result,status:'available',pages:[{physicalPage:found.physicalPage,evidenceId:found.evidenceId,

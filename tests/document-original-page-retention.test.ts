@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
-import {prepareDocumentAnswer,retainSelectedStoredNodeText,retainSelectedNativeTablePages,buildSelectedDocumentAnswerRequest,
+import {prepareDocumentAnswer,retainSelectedStoredNodeText,retainSelectedNativeTablePages,buildSelectedDocumentAnswerRequest,buildDocumentEvidenceSelectionRequest,
  type DocumentAnswerContext,type StoredNodeTextSelection} from '../lib/kernel/document-answer.ts';
 import {focusedDocumentTextQuery,focusedTextQueryHash} from '../lib/kernel/document-focused-text.ts';
 
@@ -101,4 +101,45 @@ test('focused non-quotable pages retain their original pixels without enabling t
  assert.deepEqual(retainSelectedNativeTablePages(selected,absent).referenceIds,[id,'i0']);
  const quotable=structuredClone(p);for(const u of quotable.quoteUnits)u.selectable=true;
  assert.deepEqual(retainSelectedNativeTablePages(selected,quotable).referenceIds,[id,'i0'],'ordinary system-only text does not trigger new images');
+});
+
+async function figureFixture(){
+ const c=await fixture();c.anchors[1].body='Figure 7: Original demonstration, whose structure remains unverified.';
+ c.figureCaptionCandidate={policy:'explicit-current-figure-page-v1',source:c.images[1].source,figureNumber:7,physicalPage:2,
+  evidenceId:c.anchors[1].evidence_id,bodySha256:sha(c.anchors[1].body),semanticsVerified:false,figureRegionRelationship:'unknown'};
+ return c;
+}
+
+test('explicit current figure page survives a nonempty foreign selector without changing its wire or source text',async()=>{
+ const c=await figureFixture(),question='In Source a, describe Figure 7.',plain={...c};delete plain.figureCaptionCandidate;
+ const p=prepareDocumentAnswer(question,c),baseline=prepareDocumentAnswer(question,plain),settings={model:'gpt-5.4-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:3000};
+ assert.notEqual(p.fingerprint,baseline.fingerprint,'internal candidate participates in revalidation');
+ assert.deepEqual(buildDocumentEvidenceSelectionRequest(p,settings),buildDocumentEvidenceSelectionRequest(baseline,settings),'selector request bytes stay identical');
+ const foreign=p.quoteUnits.find(u=>u.supportId==='e2')!.id,selected=retainSelectedStoredNodeText({referenceIds:[foreign]},p),
+  result=retainSelectedNativeTablePages(selected,p);
+ assert.ok(result.referenceIds.includes(foreign)&&result.referenceIds.includes('i1')&&result.referenceIds.includes('i2'));
+ assert.deepEqual(result.providerReferenceIds,[foreign]);assert.equal(result.originalPageImageRetention?.policy,'selected-and-requested-figure-page-v3');
+ const pair=result.originalPageImageRetention!.pairs.find(pair=>pair.imageId==='i1')!;
+ assert.equal(pair.basis,'explicit-figure-caption-page');assert.equal(pair.semanticRelationsVerified,false);
+ const request=buildSelectedDocumentAnswerRequest(p,result.referenceIds,settings),parts=request.input.at(-1)!.content as Array<{type:string;image_url?:string}>,
+  hashes=parts.filter(part=>part.type==='input_image').map(part=>sha(Buffer.from(part.image_url!.split(',')[1],'base64')));
+ assert.equal(hashes.filter(h=>h===c.images[1].sha256).length,2,'two source-distinct fixture originals have identical synthetic pixels');
+ assert.deepEqual(retainSelectedNativeTablePages(result,p),result);
+ assert.deepEqual(retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:[]},p),p).referenceIds,[]);
+ c.anchors[2].body='Foreign passage. '.repeat(16000);const full=prepareDocumentAnswer(question,c),ids=full.quoteUnits.filter(u=>u.supportId==='e2').slice(0,64).map(u=>u.id);
+ assert.equal(ids.length,64);const capped=retainSelectedNativeTablePages(retainSelectedStoredNodeText({referenceIds:ids},full),full);
+ assert.deepEqual(capped.referenceIds,ids);assert.ok(capped.originalPageImageRetention?.skippedImageIds.includes('i1'));
+});
+
+test('explicit figure binding rejects wrong question, source tuple, page, body, number, missing original and verified semantics',async()=>{
+ const question='In Source a, describe Figure 7.';
+ const mutations:Array<(c:DocumentAnswerContext)=>void>=[
+  ...(['documentId','currentVersionId','sourceVersionId','sourceHash'] as const).map(field=>(c:DocumentAnswerContext)=>{c.figureCaptionCandidate!.source={...c.figureCaptionCandidate!.source,[field]:'wrong'};}),
+  c=>{c.figureCaptionCandidate!.bodySha256=sha('wrong');},c=>{c.figureCaptionCandidate!.evidenceId='wrong';},
+  c=>{c.figureCaptionCandidate!.physicalPage=1;},c=>{c.figureCaptionCandidate!.figureNumber=8;},
+  c=>{c.anchors[1].body='No caption';c.figureCaptionCandidate!.bodySha256=sha(c.anchors[1].body);},
+  c=>{c.images=c.images.filter((_,index)=>index!==1);},c=>{c.figureCaptionCandidate!.semanticsVerified=true as false;},
+ ];
+ for(const mutate of mutations){const c=await figureFixture();mutate(c);assert.throws(()=>prepareDocumentAnswer(question,c),/explicit figure page binding/);}
+ const wrongQuestion=await figureFixture();assert.throws(()=>prepareDocumentAnswer('In Source a, describe Figure 8.',wrongQuestion),/explicit figure page binding/);
 });
