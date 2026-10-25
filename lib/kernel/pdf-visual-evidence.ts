@@ -16,7 +16,8 @@ export const pdfVisualCanonical=(value:unknown):string=>JSON.stringify(value,(_k
  ?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR||'./data/library');
 const isSha=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
-export const PDF_VISUAL_STORAGE_LIMITS=Object.freeze({pages:500,assets:1500,bytes:256*1024*1024});
+// Persist complete lossless source evidence; request images remain separately bounded below.
+export const PDF_VISUAL_STORAGE_LIMITS=Object.freeze({pages:500,assets:1500,bytes:1024*1024*1024});
 export const PDF_VISUAL_READ_LIMITS=DOCUMENT_IMAGE_LIMITS;
 export class PdfVisualEvidenceError extends Error{
  readonly code:'source-changed'|'unavailable'|'count-limit'|'byte-limit'|'input-limit'|'invalid';
