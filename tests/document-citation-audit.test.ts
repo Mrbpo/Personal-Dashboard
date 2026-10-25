@@ -102,50 +102,6 @@ test('local requests retain restored text and image source identity without chan
  assert.throws(()=>prepareDocumentCitationAudit(question,changed,binding(c)),/source or context changed/);
 });
 
-test('full original pages bind only already offered same-page parser text; regions, hidden text and mismatches cannot borrow it',()=>{
- const c=context();c.images=[{kind:'pdf-page',attachmentId:'original-page',assetId:hash(bytes),anchorEvidenceId:'original-evidence',
-  physicalPage:1,rawPdfSha256:source.sourceHash,manifestSha256:hash('original-render-manifest'),source,mime:'image/png',
-  sha256:hash(bytes),byteLength:bytes.length,width:1,height:1,bytes,provenance:{rawPdfSha256:source.sourceHash,
-   pageRenderSha256:hash(bytes),pageSizePoints:{width:1,height:1},rotation:0,rendererPolicy:'fixture-original-render',
-   sourcePageCropBox:{x:0,y:0,width:1,height:1}}}];
- c.anchors.push({...c.anchors[0],id:'pg:version:2',page_number:2,evidence_id:'another-page',body:'UNRELATED_PAGE_POISON'});
- const original=binding(c);original.providerSelections.claims[0].citations=[{id:'i0'}];
- const prepared=prepareDocumentCitationAudit(question,c,original),request=buildDocumentCitationAuditRequest(prepared.packet),
-  reference=prepared.packet.references[0];if(reference.kind!=='image'||!reference.pageTextObservation)throw Error('Missing page observation');
- const observation=reference.pageTextObservation,input=auditInput(request);
- assert.equal(observation.text,body);assert.equal(observation.bodySha256,hash(body));assert.equal(observation.parserVersion,'fixture-v1');
- assert.equal(observation.physicalPage,1);assert.equal(observation.originalImageAuthoritative,true);
- assert.equal(observation.semanticRelationsVerified,false);assert.equal(observation.originalDocumentCompletenessVerified,false);
- assert.equal(input.references.length,1);assert.equal(input.references[0].kind,'image');assert.equal(input.references[0].pageTextObservation.text,body);
- assert.equal(prepared.binding.citations[0].pageTextObservationSha256,hash(JSON.stringify(observation)));
- assert.equal(JSON.stringify(request).includes('UNRELATED_PAGE_POISON'),false);
- const content=request.input[1].content;assert.ok(Array.isArray(content));
- assert.equal(content.filter(item=>item.type==='input_image').length,1);
- for(const delta of [{text:'changed without hash'},{physicalPage:2},{evidenceId:'another-page'},
-  {renderManifestSha256:hash('other-render')},{rawPdfSha256:'other-source'},
-  {semanticRelationsVerified:true},{originalImageAuthoritative:false},{extra:'unbound'}]){
-  const bad=structuredClone(prepared.packet),ref=bad.references[0];if(ref.kind!=='image')throw Error('Missing image');
-  Object.assign(ref.pageTextObservation!,delta);
-  assert.throws(()=>buildDocumentCitationAuditRequest(bad),/page text observation/);
- }
- const wrongSource=structuredClone(prepared.packet);wrongSource.references[0].source.sourceVersionId='wrong-version';
- assert.throws(()=>buildDocumentCitationAuditRequest(wrongSource),/page text observation/);
- const stale=structuredClone(c);stale.anchors[0].body+=' changed';
- assert.throws(()=>prepareDocumentCitationAudit(question,stale,original),/source or context changed/);
- const localImage=(ctx:DocumentAnswerContext)=>{
-  const b=binding(ctx);b.providerSelections.claims[0].citations=[{id:'i0'}];return prepareDocumentCitationAudit(question,ctx,b).packet.references[0];};
- const region=structuredClone(c);if(!('kind'in region.images[0]))throw Error('Missing PDF image');region.images[0].kind='pdf-region';
- assert.equal(Object.hasOwn(localImage(region),'pageTextObservation'),false);
- const large=structuredClone(c);large.anchors[0].body='x'.repeat(8193);
- assert.equal(Object.hasOwn(localImage(large),'pageTextObservation'),false,'Oversized observations are omitted, never truncated.');
- const onlyImage=structuredClone(c),{score:_score,...node}=onlyImage.anchors[0];
- onlyImage.imageAnchors=[{...node,reader_selection:'evidence-node-ids',retrieval_mode:'reader-selection',evidence_body:'full-page'}];
- onlyImage.anchors=onlyImage.anchors.slice(1);
- assert.equal(Object.hasOwn(localImage(onlyImage),'pageTextObservation'),false,'Image-only identity anchors do not become quotable text.');
- const mismatch=structuredClone(c);mismatch.anchors[0].id='pg:foreign-version:1';
- assert.throws(()=>localImage(mismatch),/genuine current page/);
-});
-
 test('a named question and a different cited document both remain visible to the existing audit',()=>{
  const scopedQuestion='According to Original study, how many samples are compared?',c=context();
  c.images=[];c.anchors[0].name='Different study';

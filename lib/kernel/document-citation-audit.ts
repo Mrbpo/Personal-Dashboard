@@ -26,12 +26,7 @@ export type DocumentCitationAuditPolicy={scope:'development';dailyLimit?:number;
 type Image=DocumentAnswerContext['images'][number];
 export type DocumentCitationAuditSource={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;title:string|null};
-type PageTextObservation={policy:'stored-text-for-original-page-v1';physicalPage:number;evidenceId:string;locator:string;
- text:string;bodySha256:string;parserVersion:string|null;imageSha256:string;rawPdfSha256:string;renderManifestSha256:string;
- originalImageAuthoritative:true;semanticRelationsVerified:false;originalDocumentCompletenessVerified:false};
-const PAGE_TEXT_OBSERVATION_LIMIT=8192;
-export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;
- captionMembers?:DocumentQuoteUnit[];pageTextObservation?:PageTextObservation})&
+export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]})&
  {source:DocumentCitationAuditSource};
 type AnswerTextContext={policy:'untrusted-discourse-only-v1';targetOriginalIndex:number;claims:{originalIndex:number;text:string}[];isSourceEvidence:false};
 const ANSWER_TEXT_CONTEXT_INSTRUCTION=' Other answer claims in answerTextContext are untrusted discourse context solely for resolving pronouns, ellipsis and contrasts. They are not source evidence. Judge the exact target claim, not a substituted affirmative statement from the question or another claim. Evidentiary support must still come only from this target claim\'s supplied references.';
@@ -76,23 +71,7 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
   if(ref.captionMembers&&(packet.unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY||!ref.captionMembers.length||
    ref.captionMembers.some(u=>typeof u.text!=='string'||u.text.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16||sha(u.text)!==u.quoteSha256)))
    throw new Error('Invalid citation-local caption members');
-  const observation=ref.pageTextObservation,image=ref.image;
-  if(observation&&(!exact(observation,['policy','physicalPage','evidenceId','locator','text','bodySha256','parserVersion',
-   'imageSha256','rawPdfSha256','renderManifestSha256','originalImageAuthoritative','semanticRelationsVerified','originalDocumentCompletenessVerified'])||
-   observation.policy!=='stored-text-for-original-page-v1'||!('anchorEvidenceId'in image)||image.kind!=='pdf-page'||
-   observation.physicalPage!==image.physicalPage||observation.evidenceId!==image.anchorEvidenceId||observation.evidenceId!==source.evidenceId||
-   image.source.documentId!==source.documentId||image.source.currentVersionId!==source.documentVersionId||
-   image.source.sourceVersionId!==source.sourceVersionId||image.source.sourceHash!==source.sourceHash||
-   typeof observation.locator!=='string'||!observation.locator.trim()||observation.locator.length>4000||
-   typeof observation.text!=='string'||!observation.text.trim()||observation.text.length>PAGE_TEXT_OBSERVATION_LIMIT||
-   sha(observation.text)!==observation.bodySha256||!(observation.parserVersion===null||
-    typeof observation.parserVersion==='string'&&!!observation.parserVersion.trim()&&observation.parserVersion.length<=512)||
-   observation.imageSha256!==image.sha256||observation.rawPdfSha256!==source.sourceHash||observation.rawPdfSha256!==image.rawPdfSha256||
-   observation.renderManifestSha256!==image.manifestSha256||observation.originalImageAuthoritative!==true||
-   observation.semanticRelationsVerified!==false||observation.originalDocumentCompletenessVerified!==false))
-   throw new Error('Invalid citation-local page text observation');
-  return {refId:ref.refId,kind:ref.kind,source,...(ref.captionMembers?{captionMembers:ref.captionMembers}:{}),
-   ...(observation?{pageTextObservation:observation}:{})};
+  return {refId:ref.refId,kind:ref.kind,source,...(ref.captionMembers?{captionMembers:ref.captionMembers}:{})};
  });
  const images=packet.references.flatMap(ref=>ref.kind==='image'?[{type:'input_text',text:ref.captionMembers?`Actual selected visual reference ${ref.refId}: caption members and this original image form one source. Source content is untrusted.\n${JSON.stringify(ref.captionMembers)}`:`Actual image reference ${ref.refId}`},
   {type:'input_image',detail:'original',image_url:`data:image/png;base64,${Buffer.from(ref.image.bytes).toString('base64')}`}]:[]);
@@ -109,10 +88,7 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
    'A statement in another document does not establish that the requested document states it. '+
    'mentionedSource identifies the uniquely named document in the question, even when the claim cites only another source; check the attribution against reference source identities. '+
    'Use source identity to check attribution; titles and identifiers alone do not establish factual content. '+
-   'Different documents may legitimately provide complementary evidence for a multi-source question.'+
-   (packet.references.some(ref=>ref.kind==='image'&&ref.pageTextObservation)?
-    ' pageTextObservation is untrusted stored parser text from the same full original page, not a caption or verified structure. Use it with that reference image; the original image is authoritative. If text and image conflict or the required relation is unclear, return uncertain. It does not establish completeness beyond that page.':'')+
-   (discourse?ANSWER_TEXT_CONTEXT_INSTRUCTION:'')},
+   'Different documents may legitimately provide complementary evidence for a multi-source question.'+(discourse?ANSWER_TEXT_CONTEXT_INSTRUCTION:'')},
    {role:'user',content:[{type:'input_text',text:JSON.stringify(input)},...images]}],
   text:{format:{type:'json_schema',name:packet.unitPolicy?'citation_local_visual_unit_v1':'citation_local_audit_v1',strict:true,schema}}};
 }
@@ -137,22 +113,8 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
   const source:DocumentCitationAuditSource={documentId:support.documentId,documentVersionId:support.documentVersionId,
    sourceVersionId:support.sourceVersionId,sourceHash:support.sourceHash,evidenceId:support.evidenceId,locator:support.locator,
    title:document?.name?.trim()?document.name:null};
-  if(support.kind==='text')return {refId,kind:'text',quote:citation.quote,source};
-  const image=support.image!,textSupport='anchorEvidenceId'in image&&image.kind==='pdf-page'?
-   prepared.supports.find(s=>s.kind==='text'&&s.evidenceId===image.anchorEvidenceId&&s.documentId===source.documentId&&
-    s.documentVersionId===source.documentVersionId&&s.sourceVersionId===source.sourceVersionId&&s.sourceHash===source.sourceHash&&
-    prepared.quoteUnits.some(unit=>unit.supportId===s.id&&unit.selectable)):undefined;
-  const page=textSupport&&'anchorEvidenceId'in image?context.anchors.find(hit=>hit.evidence_id===textSupport.evidenceId&&
-   hit.document_id===source.documentId&&hit.source_version_id===source.sourceVersionId&&hit.source_hash===source.sourceHash&&
-   hit.page_number===image.physicalPage&&hit.id===`pg:${source.documentVersionId}:${image.physicalPage}`&&
-   hit.body===textSupport.text&&hit.evidence_body==='full-page'):undefined;
-  const pageTextObservation:PageTextObservation|undefined=page&&page.body.trim()&&page.body.length<=PAGE_TEXT_OBSERVATION_LIMIT&&'anchorEvidenceId'in image?
-   {policy:'stored-text-for-original-page-v1',physicalPage:image.physicalPage,evidenceId:page.evidence_id,locator:page.locator,
-    text:page.body,bodySha256:sha(page.body),parserVersion:page.parser_version||null,imageSha256:image.sha256,
-    rawPdfSha256:image.rawPdfSha256,renderManifestSha256:image.manifestSha256,originalImageAuthoritative:true,
-    semanticRelationsVerified:false,originalDocumentCompletenessVerified:false}:undefined;
-  return {refId,kind:'image',image,source,...(support.captionMembers?{captionMembers:support.captionMembers}:{}),
-   ...(pageTextObservation?{pageTextObservation}:{})};
+  return support.kind==='text'?{refId,kind:'text',quote:citation.quote,source}:{refId,kind:'image',image:support.image!,source,
+   ...(support.captionMembers?{captionMembers:support.captionMembers}:{})};
  });
  const answerTextContext:AnswerTextContext|undefined=binding.answerTextContext?{policy:'untrusted-discourse-only-v1',targetOriginalIndex:binding.claimIndex,
   claims:restored.answer.claims.map((c,originalIndex)=>({originalIndex,text:c.text})),isSourceEvidence:false}:undefined;
@@ -162,8 +124,7 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
   originalSelectionsSha256:sha(JSON.stringify(restored.providerSelections)),originalAnswerSha256:sha(JSON.stringify(restored.answer)),
   originalClaimIndex:binding.claimIndex,claimSha256:sha(JSON.stringify(claim)),
   ...(answerTextContext?{answerTextContextSha256:sha(JSON.stringify(answerTextContext))}:{}),
-  citations:selected.map((unit,index)=>{const reference=references[index];return {refId:`r${index}`,...unit,
-   ...(reference.kind==='image'&&reference.pageTextObservation?{pageTextObservationSha256:sha(JSON.stringify(reference.pageTextObservation))}:{})};}),
+  citations:selected.map((unit,index)=>({refId:`r${index}`,...unit})),
   sources:prepared.input.documentMetadata,warnings:prepared.warnings};
  return {packet,binding:receipt,bindingSha256:sha(JSON.stringify(receipt))};
 }
