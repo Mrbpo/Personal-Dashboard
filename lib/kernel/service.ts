@@ -19,7 +19,7 @@ import {nativeWhitespaceFingerprint} from './native-whitespace.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
-import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,type FocusedDocumentText} from './document-focused-text.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
@@ -33,7 +33,7 @@ import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerClu
 import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentPageRegions,readDocumentPageRegionsForImages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,readCompleteDocumentText,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
- type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
+ type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest,type DocumentParentReadOptions} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type DocumentVectorScope} from './document-vector.ts';
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,readPdfInternalLinkEvidence,pdfVisualBlobHashes,
@@ -1139,7 +1139,7 @@ export class KernelService {
     return readDocumentOutline(kernelPool(),owner,source);
   }
 
-  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean;identityCourseCodes?:string[]}={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
+  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:DocumentParentReadOptions={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
     return readDocumentParents(kernelPool(),owner,anchors,options,imageBudget);
   }
 
@@ -1344,7 +1344,8 @@ export class KernelService {
   /** Shared existing retrieval/current-source callback; the default answering
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true,identityCourseCodes?:string[]){
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true,identityCourseCodes?:string[],
+    imagePageFocus?:{source:DocumentContextSource;physicalPage:number}){
     const {includeParents=false,includeImages=false,...searchOptions}={...options,
       ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     const limit=searchOptions.limit??14;
@@ -1371,7 +1372,12 @@ export class KernelService {
           throw new DocumentEvidenceChangedError();
       }
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
-      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
+      const preferredPdfPageEvidenceIds=imagePageFocus?current.filter(hit=>hit.document_id===imagePageFocus.source.documentId&&
+        hit.source_hash===imagePageFocus.source.sourceHash&&hit.source_version_id===imagePageFocus.source.sourceVersionId&&
+        hit.id===`pg:${imagePageFocus.source.currentVersionId}:${imagePageFocus.physicalPage}`&&hit.page_number===imagePageFocus.physicalPage)
+        .map(hit=>hit.evidence_id):[];
+      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,
+        ...(preferredPdfPageEvidenceIds.length?{preferredPdfPageEvidenceIds}:{}),...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
       if(!tableCandidates.length)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
       const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
@@ -1429,7 +1435,13 @@ export class KernelService {
     if(sourceRouting)policy.onStage?.('retrieval');
     if(policy.sourceIdentityContext&&!searchOptions.includeParents)throw new Error('Source identity context requires the original parent reader');
     const identityCourseCodes=policy.sourceIdentityContext?[...new Set(observeLiteralCourseCodes(question).map(observation=>observation.code))]:undefined;
-    const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes);
+    const mentionedForImages=policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages?
+      await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope}):undefined;
+    const pageSource=mentionedForImages?.status==='resolved'?mentionedForImages.matches[0]:undefined;
+    const requestedPage=pageSource?explicitDocumentPage(question,pageSource.title):null;
+    const imagePageFocus=pageSource&&requestedPage&&(!routedOptions.documentId||routedOptions.documentId===pageSource.documentId)&&
+      (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===pageSource.title)?{source:pageSource,physicalPage:requestedPage}:undefined;
+    const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes,imagePageFocus);
     let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
     let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>|ReturnType<typeof classificationGuardAnswerObservation>;
     let sourceIdentityContext:DocumentAnswerContext['sourceIdentityContext'];
@@ -1443,7 +1455,7 @@ export class KernelService {
     let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
     let read:()=>Promise<DocumentAnswerContext>=rankedRead;
     if(policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages){
-      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
+      const mentioned=mentionedForImages!;
       if(mentioned.status==='resolved'){
         const selected=mentioned.matches[0];
         const focusQuery=focusedDocumentTextQuery(question,selected.title),focusAllowed=focusQuery&&

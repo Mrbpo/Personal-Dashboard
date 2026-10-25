@@ -15,3 +15,18 @@ export function focusedDocumentTextQuery(question:string,title:string):string|nu
  return /[\p{L}\p{N}]/u.test(residual)?residual:null;
 }
 export const focusedTextQueryHash=(query:string)=>createHash('sha256').update(query).digest('hex');
+
+/** A literal page is a physical-page candidate, not a verified printed label.
+ * Ambiguous lists/ranges stay on ordinary retrieval. Ignore title digits. */
+export function explicitDocumentPage(question:string,title:string):number|null{
+ const residual=focusedDocumentTextQuery(question,title);
+ if(!residual)return null;
+ const matches=[...residual.matchAll(/\bpage\s+([1-9]\d*)\b|第\s*([1-9]\d*)\s*页/giu)];
+ if(!matches.length)return null;
+ for(const match of matches){
+  const tail=residual.slice(match.index!+match[0].length);
+  if(/^(?:\.\d|\s*(?:[-–—,/]\s*\d|(?:and|to)\s+\d))/iu.test(tail))return null;
+ }
+ const pages=[...new Set(matches.map(match=>Number(match[1]??match[2])))];
+ return pages.length===1&&Number.isSafeInteger(pages[0])?pages[0]:null;
+}

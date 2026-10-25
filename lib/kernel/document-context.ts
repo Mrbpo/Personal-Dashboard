@@ -502,13 +502,18 @@ export async function readDocumentImages(db:Queryable,owner:string,source:Docume
  }
  await currentSource(db,owner,identity(current));return images;
 }
-export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean;identityCourseCodes?:string[]}={},
+export type DocumentParentReadOptions={includeImages?:boolean;identityCourseCodes?:string[];preferredPdfPageEvidenceIds?:string[]};
+export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:DocumentParentReadOptions={},
  imageBudget?:DocumentImageBudget):Promise<DocumentContextRead>{
- if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>!['includeImages','identityCourseCodes'].includes(key))
+ if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>!['includeImages','identityCourseCodes','preferredPdfPageEvidenceIds'].includes(key))
   ||(options.includeImages!==undefined&&typeof options.includeImages!=='boolean'))invalid('At most 14 original ranked anchors are allowed');
  if(options.identityCourseCodes!==undefined&&(!Array.isArray(options.identityCourseCodes)||options.identityCourseCodes.length>32||
   options.identityCourseCodes.some(code=>typeof code!=='string'||observeLiteralCourseCodes(code).length!==1||observeLiteralCourseCodes(code)[0].code!==code)))
   invalid('Identity context requires at most32 normalized literal course codes');
+ const preferred=options.preferredPdfPageEvidenceIds??[];
+ if(!Array.isArray(preferred)||preferred.length>1||new Set(preferred).size!==preferred.length||
+  preferred.some(id=>typeof id!=='string'||!anchors.some(anchor=>anchor.evidence_id===id))||(preferred.length&&!options.includeImages))
+  invalid('A preferred PDF page must be one of the current ranked anchors');
  const loaded=new Map<string,Awaited<ReturnType<typeof structuredSource>>>(),parents=new Map<string,DocumentParentContext>();
  for(const [anchorIndex,anchor] of anchors.entries()){
   let data=loaded.get(anchor.document_id);
@@ -564,6 +569,17 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
   }
  }
  const images:Array<DocumentImageEvidence|PdfVisualImageEvidence>=[],budget=options.includeImages?(imageBudget??createDocumentImageBudget()):undefined;
+ // Only an existing ranked page can claim priority. Read the full original
+ // before crops/ordinary images consume the same global budget; ranks and all
+ // text/parent order remain unchanged. The ordinary pass still verifies assets.
+ if(budget)for(const id of preferred){
+  const index=anchors.findIndex(anchor=>anchor.evidence_id===id),anchor=anchors[index],data=loaded.get(anchor.document_id)!;
+  if(data.current.mime!=='application/pdf'||!data.nodes.some(node=>node.kind==='page'&&node.evidenceId===id))continue;
+  const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),[id],undefined,
+   {pageAssetsOnly:true,selection:{budget,anchorRank:index+1}});
+  if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
+  images.push(...visuals.images);
+ }
  if(budget)for(const [index,anchor] of anchors.entries()){
   const data=loaded.get(anchor.document_id)!,rank=index+1;
   const captions=[...parents.values()].filter(parent=>parent.firstAnchorRank===rank).flatMap(parent=>parent.nodes)

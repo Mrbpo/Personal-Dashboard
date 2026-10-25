@@ -98,6 +98,32 @@ test('actual PG composition: 14 same-PDF and interleaved multi-PDF anchors retai
  const same=await kernel.readDocumentParents(owner,single.hits,{includeImages:true});
  assert.equal(same.anchors.length,14);assert.equal(same.images.length,6);assert.equal(same.imageSelection?.omitted.length,8);
  assert.deepEqual((await kernel.readDocumentParents(owner,interleaved,{includeImages:true})).imageSelection,mixed.imageSelection);
+ const priorityOptions={includeImages:true,preferredPdfPageEvidenceIds:[single.hits[13].evidence_id]};
+ const preferred=await kernel.readDocumentParents(owner,single.hits,priorityOptions);
+ assert.deepEqual(preferred.anchors,same.anchors,'priority never replaces or reorders ranked text');
+ assert.deepEqual(preferred.parents,same.parents,'priority never rewrites parent ranks');
+ assert.deepEqual(preferred.images.map(image=>'physicalPage'in image?image.physicalPage:null),[14,1,2,3,4,5]);
+ assert.deepEqual(preferred.imageSelection?.included.map(item=>item.anchorRank),[14,1,2,3,4,5]);
+ assert.equal(preferred.imageSelection?.omitted.length,8);
+ assert.deepEqual((await kernel.readDocumentParents(owner,single.hits,priorityOptions)).imageSelection,preferred.imageSelection);
+ await assert.rejects(kernel.readDocumentParents(owner,single.hits,{includeImages:true,preferredPdfPageEvidenceIds:[a.hits[0].evidence_id]}),/current ranked anchors/);
+ const originalSearch=kernel.searchDocumentText,originalTableSearch=kernel.searchNativeTableCandidates,originalFetch=globalThis.fetch;
+ let priorityCalls=0;
+ try{
+  kernel.searchDocumentText=async()=>single.hits.map(({reader_selection:_selection,retrieval_mode:_mode,...hit})=>({...hit,score:1,retrieval_mode:'keyword' as const}));
+  kernel.searchNativeTableCandidates=async()=>[];
+  globalThis.fetch=async(_url,init)=>{
+   priorityCalls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
+   assert.equal(input.imageSelection.included[0].physicalPage,14,'actual application generator receives the requested original first');
+   assert.equal(input.imageSelection.accounting.images,6);
+   assert.equal(input.evidence.filter((item:{kind:string})=>item.kind==='text').length,14);
+   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({
+    status:'insufficient-evidence',message:'Synthetic plumbing check only.',claims:[]})});
+  };
+  await kernel.answerStudyContent(owner,`In ${single.document.name}, describe the diagram on page 14.`,
+   {semantic:false,aiRerank:false,includeParents:true,includeImages:true},{scope:'application'});
+  assert.equal(priorityCalls,1);
+ }finally{kernel.searchDocumentText=originalSearch;kernel.searchNativeTableCandidates=originalTableSearch;globalThis.fetch=originalFetch;}
  await assert.rejects(readPdfVisualEvidence(pool,owner,single.source),error=>error instanceof PdfVisualEvidenceError&&error.code==='input-limit');
  const complete=await kernel.readCompleteDocumentSource(owner,single.source);
  assert.equal(complete.status,'unavailable','complete source remains all-or-unavailable');

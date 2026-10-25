@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {focusedDocumentTextQuery,focusedTextQueryHash} from '../lib/kernel/document-focused-text.ts';
+import {focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage} from '../lib/kernel/document-focused-text.ts';
 import {prepareDocumentAnswer,retainDocumentSelectionContext,buildSelectedDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),title='Original Research Paper.pdf',question='In Original Research Paper, what domain was evaluated?';
 const source={documentId:'target',currentVersionId:'v',sourceVersionId:'sv',sourceHash:'source-hash'};
@@ -20,6 +20,16 @@ test('supplemental query removes only the verified NFKC title span',()=>{
  assert.equal(focusedDocumentTextQuery('In another paper, what domain?',title),null);
  assert.equal(focusedDocumentTextQuery('Original Research Paper',title),null);
  assert.equal(focusedDocumentTextQuery('Original Research Paper and Original Research Paper: compare?',title),'and Original Research Paper: compare?');
+});
+
+test('literal page preference ignores title numbers and refuses ambiguous ranges',()=>{
+ assert.equal(explicitDocumentPage(`In ${title}, what does the cartoon on page 25 represent?`,title),25);
+ assert.equal(explicitDocumentPage(`关于《${title}》，第２５页的图是什么？`,title),25);
+ for(const suffix of ['pages 25 and 26','page 25-26','page 25,26','page 25 to 26','page 25.3','page 25 and page 26','the year 2025'])
+  assert.equal(explicitDocumentPage(`In ${title}, ${suffix}?`,title),null,suffix);
+ const numberedTitle='Research page 25.pdf';
+ assert.equal(explicitDocumentPage(`In ${numberedTitle}, describe the image.`,numberedTitle),null);
+ assert.equal(explicitDocumentPage('In another source, page 25?',title),null);
 });
 test('focused original text survives selection without deleting another selected source',()=>{
  const c=fixture(),p=prepareDocumentAnswer(question,c),other=p.quoteUnits.find(q=>q.supportId==='e1')!,
