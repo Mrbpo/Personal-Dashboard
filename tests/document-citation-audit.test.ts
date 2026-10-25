@@ -9,7 +9,7 @@ import {migrateKernel,kernelPool} from '../lib/kernel/db.ts';
 import {prepareDocumentAnswer,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 import {COMPLETE_DOCUMENT_SOURCE_LIMITS,type CompleteDocumentSourceRead} from '../lib/kernel/document-context.ts';
 import {prepareDocumentCitationAudit,buildDocumentCitationAuditRequest,validateDocumentCitationAudit,documentCitationAuditRequestIdentity,
- type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
+ DOCUMENT_CITATION_RELEASE_POLICY,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationAuditResponse} from '../lib/kernel/document-citation-audit.ts';
 
 const postgresUrl=process.env.KERNEL_DATABASE_URL;
 process.env.DATABASE_URL=':memory:';
@@ -145,6 +145,31 @@ test('local diagnostics reject explicit contradictions while retaining complemen
  assert.throws(()=>validateDocumentCitationAudit({...v,citationFindings:{...v.citationFindings,r1:{judgment:'contradicts',reason:'Explicit opposite.'}}},['r0','r1']),/diagnostics/);
  assert.throws(()=>validateDocumentCitationAudit({...v,objectUnitScope:{...v.objectUnitScope,alignment:'different'}},['r0','r1']),/diagnostics/);
  assert.equal(validateDocumentCitationAudit({...v,judgment:'unsupported',objectUnitScope:{...v.objectUnitScope,alignment:'different'}},['r0','r1']).judgment,'unsupported');
+});
+
+test('application release protocol binds a final judged subset without changing legacy diagnostic authority',()=>{
+ const c=context(),b=binding(c),legacy=prepareDocumentCitationAudit(question,c,b),
+  current=prepareDocumentCitationAudit(question,c,{...b,referenceRelease:DOCUMENT_CITATION_RELEASE_POLICY}),
+  request=buildDocumentCitationAuditRequest(current.packet),input=auditInput(request);
+ assert.deepEqual(current.packet.references,legacy.packet.references);
+ assert.equal(input.referenceRelease,DOCUMENT_CITATION_RELEASE_POLICY);
+ assert.notEqual(current.bindingSha256,legacy.bindingSha256);
+ assert.equal(current.binding.referenceRelease,DOCUMENT_CITATION_RELEASE_POLICY);
+ assert.ok(request.text.format.schema.required.includes('retainedReferenceIds'));
+ assert.equal(Object.hasOwn(buildDocumentCitationAuditRequest(legacy.packet).text.format.schema.properties,'retainedReferenceIds'),false);
+ const d=diagnostics();assert.equal(validateDocumentCitationAudit(d,['r0','r1']).judgment,'supported');
+ assert.throws(()=>validateDocumentCitationAudit(d,['r0','r1'],DOCUMENT_CITATION_RELEASE_POLICY),/diagnostics/);
+ assert.equal(validateDocumentCitationAudit({...d,retainedReferenceIds:['r0','r1']},['r0','r1'],DOCUMENT_CITATION_RELEASE_POLICY).judgment,'supported');
+});
+
+test('a supported final subset cannot be empty, duplicate, foreign, reordered or known noncontributing',()=>{
+ const d={...diagnostics(),retainedReferenceIds:['r0','r1']},validate=(value:unknown)=>validateDocumentCitationAudit(value,['r0','r1'],DOCUMENT_CITATION_RELEASE_POLICY);
+ for(const ids of [[],['r0','r0'],['r2'],['r1','r0']])assert.throws(()=>validate({...d,retainedReferenceIds:ids}),/diagnostics/);
+ const noncontributing={...d,citationFindings:{...d.citationFindings,r1:{judgment:'does-not-establish',reason:'Does not contribute.'}}};
+ assert.throws(()=>validate(noncontributing),/diagnostics/);
+ assert.equal(validate({...noncontributing,retainedReferenceIds:['r0']}).judgment,'supported');
+ assert.throws(()=>validate({...noncontributing,retainedReferenceIds:['r0'],citationFindings:{...noncontributing.citationFindings,r1:{judgment:'contradicts',reason:'Explicit contradiction cannot be hidden.'}}}),/diagnostics/);
+ assert.equal(validate({...noncontributing,judgment:'unsupported',retainedReferenceIds:[]}).judgment,'unsupported');
 });
 async function development<T>(work:()=>Promise<T>){
  const names=['DATABASE_URL','KERNEL_DATABASE_URL','KERNEL_ADMIN_DEVELOPMENT_RUN'] as const;

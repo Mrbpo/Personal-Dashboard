@@ -439,7 +439,7 @@ test('isolated application daily allowance shares selection generation and local
     return output({referenceIds:[id]});}
    if(format==='grounded_document_answer_units')return output(claim(id));
    assert.equal(format,'citation_local_visual_unit_v1');
-   return output({claimId:'c0',judgment:'supported',reason:'Synthetic fixture only.',citationFindings:{r0:{judgment:'supports',reason:'Synthetic original text.'}},
+   return output({claimId:'c0',judgment:'supported',retainedReferenceIds:['r0'],reason:'Synthetic fixture only.',citationFindings:{r0:{judgment:'supports',reason:'Synthetic original text.'}},
     objectUnitScope:{claim:'sample count',evidence:'sample count',alignment:'same'}});};
   const result=await kernel.answerStudyContent('owner',question,{},checkedPolicy);
   assert.equal(result.answer.status,'answered');assert.equal(attempts.length,1);assert.equal(raw.length,1);

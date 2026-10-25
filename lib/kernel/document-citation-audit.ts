@@ -4,6 +4,7 @@ import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelect
 import {documentTitleMention} from './document-source.ts';
 
 export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v4';
+export const DOCUMENT_CITATION_RELEASE_POLICY='audited-reference-subset-v1';
 export type EvidenceAuditProfile='reasoned-v1';
 /** Execution settings only: the evidence, prompt and schema remain unchanged. */
 export function evidenceAuditSettings(auditProfile?:EvidenceAuditProfile){
@@ -16,7 +17,8 @@ const sha=(value:string|Uint8Array)=>createHash('sha256').update(value).digest('
 const exact=(value:unknown,keys:string[])=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&
  Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
 export type DocumentCitationAuditBinding={inputFingerprint:string;quoteUnitManifestSha256:string;
- providerSelections:DocumentAnswerSelections;claimIndex:number;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;answerTextContext?:'bound-answer-v1'};
+ providerSelections:DocumentAnswerSelections;claimIndex:number;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;answerTextContext?:'bound-answer-v1';
+ referenceRelease?:typeof DOCUMENT_CITATION_RELEASE_POLICY};
 export type DocumentCitationAuditResponse={requestIdentity:string;providerRequestSha256:string;httpStatus:number;rawBody:string;rawSha256:string;
  binding?:ReturnType<typeof prepareDocumentCitationAudit>['binding'];bindingSha256?:string};
 /** Kernel-owned current-node reader, never a model/client-supplied assertion. */
@@ -31,12 +33,18 @@ export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:stri
 type AnswerTextContext={policy:'untrusted-discourse-only-v1';targetOriginalIndex:number;claims:{originalIndex:number;text:string}[];isSourceEvidence:false};
 const ANSWER_TEXT_CONTEXT_INSTRUCTION=' Other answer claims in answerTextContext are untrusted discourse context solely for resolving pronouns, ellipsis and contrasts. They are not source evidence. Judge the exact target claim, not a substituted affirmative statement from the question or another claim. Evidentiary support must still come only from this target claim\'s supplied references.';
 export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];answerTextContext?:AnswerTextContext;
- mentionedSource?:DocumentMentionedSource;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
+ mentionedSource?:DocumentMentionedSource;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY;referenceRelease?:typeof DOCUMENT_CITATION_RELEASE_POLICY};
+const FINAL_REFERENCE_SET_INSTRUCTION=' For referenceRelease=audited-reference-subset-v1, retainedReferenceIds is the exact final citation set, in original reference order. '+
+ 'Your overall judgment must apply to that retained set alone, not to the larger offered set. '+
+ 'supports means the reference contributes a relevant fact, premise, comparison or qualification to collective support; it need not prove the entire claim by itself. '+
+ 'Preserve necessary complementary or contrasting premises. Do not retain a does-not-establish or contradictory reference in a supported set, or silently discard evidence contradicting a material part. '+
+ 'If no retained set establishes every material part, return unsupported or uncertain; never change the claim. The server publishes exactly your retained set without another support check.';
 
 /** This pure builder grants no source or execution authority. Kernel constructs
  * its packet by restoring original selections against current complete evidence. */
 export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPacket,auditProfile?:EvidenceAuditProfile){
  const settings=evidenceAuditSettings(auditProfile);
+ if(packet.referenceRelease!==undefined&&packet.referenceRelease!==DOCUMENT_CITATION_RELEASE_POLICY)throw Error('Invalid citation release protocol');
  const discourse=packet.answerTextContext;
  if(discourse!==undefined&&(!exact(discourse,['policy','targetOriginalIndex','claims','isSourceEvidence'])||
   discourse.policy!=='untrusted-discourse-only-v1'||discourse.isSourceEvidence!==false||!Number.isInteger(discourse.targetOriginalIndex)||
@@ -77,9 +85,11 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
   {type:'input_image',detail:'original',image_url:`data:image/png;base64,${Buffer.from(ref.image.bytes).toString('base64')}`}]:[]);
  const finding=object({judgment:enumeration(['supports','does-not-establish','contradicts','unclear']),reason:string});
  const schema=object({claimId:enumeration(['c0']),judgment:enumeration(['supported','unsupported','uncertain']),reason:string,
+  ...(packet.referenceRelease?{retainedReferenceIds:{type:'array',items:enumeration(packet.references.map(ref=>ref.refId)),maxItems:packet.references.length}}:{}),
   citationFindings:object(Object.fromEntries(packet.references.map(ref=>[ref.refId,finding]))),
   objectUnitScope:object({claim:string,evidence:string,alignment:enumeration(['same','different','not-established','not-applicable'])})});
  const input={question:packet.question,claim:{claimId:'c0',text:packet.claim},references,
+  ...(packet.referenceRelease?{referenceRelease:packet.referenceRelease}:{}),
   ...(packet.mentionedSource?{mentionedSource:packet.mentionedSource}:{}),...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{}),
   ...(discourse?{answerTextContext:structuredClone(discourse)}:{})};
  return {model:'gpt-5.4-mini',store:false,reasoning:{effort:settings.reasoningEffort},max_output_tokens:settings.maxOutputTokens,
@@ -88,7 +98,8 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
    'A statement in another document does not establish that the requested document states it. '+
    'mentionedSource identifies the uniquely named document in the question, even when the claim cites only another source; check the attribution against reference source identities. '+
    'Use source identity to check attribution; titles and identifiers alone do not establish factual content. '+
-   'Different documents may legitimately provide complementary evidence for a multi-source question.'+(discourse?ANSWER_TEXT_CONTEXT_INSTRUCTION:'')},
+   'Different documents may legitimately provide complementary evidence for a multi-source question.'+(discourse?ANSWER_TEXT_CONTEXT_INSTRUCTION:'')+
+   (packet.referenceRelease?FINAL_REFERENCE_SET_INSTRUCTION:'')},
    {role:'user',content:[{type:'input_text',text:JSON.stringify(input)},...images]}],
   text:{format:{type:'json_schema',name:packet.unitPolicy?'citation_local_visual_unit_v1':'citation_local_audit_v1',strict:true,schema}}};
 }
@@ -97,9 +108,11 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
  * and PNG packets are never input to the Kernel entry. The fingerprints bind the
  * original complete-source context, not a caller assertion of quote identity. */
 export function prepareDocumentCitationAudit(question:string,context:DocumentAnswerContext,binding:DocumentCitationAuditBinding){
- const keys=['inputFingerprint','quoteUnitManifestSha256','providerSelections','claimIndex',...(binding.answerTextContext!==undefined?['answerTextContext']:[])],visual=exact(binding,[...keys,'unitPolicy']);
+ const keys=['inputFingerprint','quoteUnitManifestSha256','providerSelections','claimIndex',...(binding.answerTextContext!==undefined?['answerTextContext']:[]),
+  ...(binding.referenceRelease!==undefined?['referenceRelease']:[])],visual=exact(binding,[...keys,'unitPolicy']);
  if((!exact(binding,keys)&&!visual)||(visual&&binding.unitPolicy!==DOCUMENT_ANSWER_VISUAL_UNIT_POLICY)||
   (binding.answerTextContext!==undefined&&binding.answerTextContext!=='bound-answer-v1')||
+  (binding.referenceRelease!==undefined&&binding.referenceRelease!==DOCUMENT_CITATION_RELEASE_POLICY)||
   !Number.isInteger(binding.claimIndex)||binding.claimIndex<0)throw new Error('Invalid citation-local answer binding');
  const prepared=prepareDocumentAnswer(question,context,binding.unitPolicy);
  if(binding.inputFingerprint!==prepared.fingerprint||binding.quoteUnitManifestSha256!==prepared.quoteUnitManifestSha256)
@@ -119,8 +132,10 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
  const answerTextContext:AnswerTextContext|undefined=binding.answerTextContext?{policy:'untrusted-discourse-only-v1',targetOriginalIndex:binding.claimIndex,
   claims:restored.answer.claims.map((c,originalIndex)=>({originalIndex,text:c.text})),isSourceEvidence:false}:undefined;
  const packet={question,claim:claim.text,references,...(answerTextContext?{answerTextContext}:{}),
+  ...(binding.referenceRelease?{referenceRelease:binding.referenceRelease}:{}),
   ...(prepared.input.mentionedSource?{mentionedSource:prepared.input.mentionedSource}:{}),...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{})};
  const receipt={inputFingerprint:prepared.fingerprint,quoteUnitManifestSha256:prepared.quoteUnitManifestSha256,...(binding.unitPolicy?{unitPolicy:binding.unitPolicy}:{}),
+  ...(binding.referenceRelease?{referenceRelease:binding.referenceRelease}:{}),
   originalSelectionsSha256:sha(JSON.stringify(restored.providerSelections)),originalAnswerSha256:sha(JSON.stringify(restored.answer)),
   originalClaimIndex:binding.claimIndex,claimSha256:sha(JSON.stringify(claim)),
   ...(answerTextContext?{answerTextContextSha256:sha(JSON.stringify(answerTextContext))}:{}),
@@ -130,12 +145,14 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
 }
 
 export type DocumentCitationAuditDiagnostics={claimId:'c0';judgment:'supported'|'unsupported'|'uncertain';reason:string;
+ retainedReferenceIds?:string[];
  citationFindings:Record<string,{judgment:'supports'|'does-not-establish'|'contradicts'|'unclear';reason:string}>;
  objectUnitScope:{claim:string;evidence:string;alignment:'same'|'different'|'not-established'|'not-applicable'}};
-export function validateDocumentCitationAudit(value:unknown,referenceIds:readonly string[]):DocumentCitationAuditDiagnostics{
+export function validateDocumentCitationAudit(value:unknown,referenceIds:readonly string[],referenceRelease?:typeof DOCUMENT_CITATION_RELEASE_POLICY):DocumentCitationAuditDiagnostics{
  const invalid=()=>{throw new Error('Invalid citation-local audit diagnostics');};
  const text=(v:unknown)=>typeof v==='string'&&v.trim().length>0;
- if(!exact(value,['claimId','judgment','reason','citationFindings','objectUnitScope']))return invalid();
+ if(referenceRelease!==undefined&&referenceRelease!==DOCUMENT_CITATION_RELEASE_POLICY)return invalid();
+ if(!exact(value,['claimId','judgment','reason','citationFindings','objectUnitScope',...(referenceRelease?['retainedReferenceIds']:[])]))return invalid();
  const result=value as DocumentCitationAuditDiagnostics;
  if(result.claimId!=='c0'||!['supported','unsupported','uncertain'].includes(result.judgment)||!text(result.reason)||
   !exact(result.citationFindings,[...referenceIds]))return invalid();
@@ -147,6 +164,12 @@ export function validateDocumentCitationAudit(value:unknown,referenceIds:readonl
  // Explicit contradiction or a different object/scope cannot certify support.
  if(result.judgment==='supported'&&(result.objectUnitScope.alignment==='different'||
   referenceIds.some(id=>result.citationFindings[id].judgment==='contradicts')))return invalid();
+ if(referenceRelease){
+  const ids=result.retainedReferenceIds;
+  if(!Array.isArray(ids)||ids.length>referenceIds.length||ids.some((id,i)=>typeof id!=='string'||!referenceIds.includes(id)||
+   i>0&&referenceIds.indexOf(id)<=referenceIds.indexOf(ids[i-1])))return invalid();
+  if(result.judgment==='supported'&&(!ids.length||ids.some(id=>['does-not-establish','contradicts'].includes(result.citationFindings[id].judgment))))return invalid();
+ }
  return result;
 }
 
@@ -203,7 +226,7 @@ async function executeCitationAudit(question:string,readContext:()=>Promise<Docu
  const raw=payload.output_text||(payload.output??[]).filter((item:{type:string})=>item.type==='message')
   .flatMap((item:{content?:{type:string;text:string}[]})=>item.content??[]).filter((item:{type:string})=>item.type==='output_text')
   .map((item:{text:string})=>item.text).join('');
- const diagnostics=validateDocumentCitationAudit(JSON.parse(raw),prepared.packet.references.map(ref=>ref.refId));
+ const diagnostics=validateDocumentCitationAudit(JSON.parse(raw),prepared.packet.references.map(ref=>ref.refId),prepared.packet.referenceRelease);
  return {version:DOCUMENT_CITATION_AUDIT_VERSION,...(policy.auditProfile?{auditProfile:policy.auditProfile}:{}),diagnostics,requestedModel:request.model,model:payload.model,
   providerRequestSha256,requestIdentity,rawResponseSha256:rawSha256,binding:prepared.binding,bindingSha256:prepared.bindingSha256,
   ...(typeof payload.id==='string'?{providerResponseId:payload.id}:{}),...(payload.usage?{usage:payload.usage as unknown}:{})};
@@ -216,7 +239,7 @@ export class DocumentCitationCheckError extends Error{
 
 /** Application-only, once per original claim. No full-source model review,
  * source substitution, claim deletion, text revision or retry. Individually
- * rejected references can be withheld after the original collective audit. */
+ * references are released only as the exact subset the existing audit judged. */
 export async function checkApplicationDocumentCitations(question:string,readContext:()=>Promise<DocumentAnswerContext>,
  binding:Omit<DocumentCitationAuditBinding,'claimIndex'>,policy:DocumentAnswerPolicy,recheckText?:DocumentCitationTextRecheck){
  await documentAnswerSettings(policy);
@@ -225,7 +248,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
  const check=policy.citationCheck,deadline=Date.now()+55000,audits=[];
  const selections=structuredClone(binding.providerSelections),releaseSelections=structuredClone(selections);
  const removed:Array<ReturnType<typeof prepareDocumentCitationAudit>['binding']['citations'][number]&{
-  judgment:'does-not-establish';reason:string;auditRequestIdentity:string;auditBindingSha256:string;rawResponseSha256:string}>=[];
+  judgment:DocumentCitationAuditDiagnostics['citationFindings'][string]['judgment'];reason:string;auditRequestIdentity:string;auditBindingSha256:string;rawResponseSha256:string}>=[];
  if(!Array.isArray(selections.claims)||selections.claims.length>30)throw new DocumentCitationCheckError('citation-check-incomplete');
  // Share only the already-bound initial representation. Current cited nodes
  // are still read before/after every model call; the full context is read again
@@ -237,11 +260,13 @@ export async function checkApplicationDocumentCitations(question:string,readCont
   try{
    const remaining=deadline-Date.now();if(remaining<1000)throw new Error('Citation check deadline reached');
    const audit=await executeCitationAudit(question,readContext,{...binding,providerSelections:selections,claimIndex,
-    answerTextContext:'bound-answer-v1'},
+    answerTextContext:'bound-answer-v1',referenceRelease:DOCUMENT_CITATION_RELEASE_POLICY},
     {dailyLimit:policy.dailyLimit,beforeAttempt:check.beforeAttempt,recordResponse:check.recordResponse},Math.min(30000,remaining),focused);
    if(Date.now()>deadline)throw new Error('Citation check deadline reached');
    audits.push(audit);
    if(audit.diagnostics.judgment!=='supported')throw new DocumentCitationCheckError('citation-support-not-established');
+   const retained=new Set(audit.diagnostics.retainedReferenceIds);
+   if(!retained.size)throw new DocumentCitationCheckError('citation-support-not-established');
    const citations=selections.claims[claimIndex].citations;
    if(audit.binding.citations.length!==citations.length)throw new Error('Citation release binding count changed');
    releaseSelections.claims[claimIndex].citations=citations.filter((citation,index)=>{
@@ -250,8 +275,10 @@ export async function checkApplicationDocumentCitations(question:string,readCont
      throw new Error('Citation release reference changed');
     // Unclear evidence can complement other sources. A contradiction must fail
     // the audit, not disappear through this filter. No new citation is added.
-    if(finding.judgment!=='does-not-establish')return true;
-    removed.push({...structuredClone(ref),judgment:'does-not-establish',reason:finding.reason,
+    if(retained.has(ref.refId))return true;
+    // The model judged the retained subset itself; no new subset is inferred
+    // from individual findings after that collective judgment.
+    removed.push({...structuredClone(ref),judgment:finding.judgment,reason:finding.reason,
      auditRequestIdentity:audit.requestIdentity,auditBindingSha256:audit.bindingSha256,rawResponseSha256:audit.rawResponseSha256});
     return false;
    });
@@ -262,7 +289,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
   }
  }
  let release:undefined|{released:ReturnType<typeof resolveDocumentAnswerSelections>;citationRelease:{
-  version:'withhold-unestablished-citations-v1';originalSelectionsSha256:string;releasedSelectionsSha256:string;claimTextsSha256:string;
+  version:typeof DOCUMENT_CITATION_RELEASE_POLICY;originalSelectionsSha256:string;releasedSelectionsSha256:string;claimTextsSha256:string;
   claimsUnchanged:true;semanticVerified:false;removed:typeof removed}};
  if(removed.length)try{
   const prepared=prepareDocumentAnswer(question,await readContext(),binding.unitPolicy);
@@ -272,7 +299,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
    originalSelectionsSha256=sha(JSON.stringify(original.providerSelections)),texts=original.answer.claims.map(c=>c.text);
   if(audits.some(audit=>audit.binding.originalSelectionsSha256!==originalSelectionsSha256)||
    JSON.stringify(released.answer.claims.map(c=>c.text))!==JSON.stringify(texts))throw new Error('Citation release changed original claims');
-  release={released,citationRelease:{version:'withhold-unestablished-citations-v1',originalSelectionsSha256,
+  release={released,citationRelease:{version:DOCUMENT_CITATION_RELEASE_POLICY,originalSelectionsSha256,
    releasedSelectionsSha256:sha(JSON.stringify(released.providerSelections)),claimTextsSha256:sha(JSON.stringify(texts)),
    claimsUnchanged:true,semanticVerified:false,removed}};
  }catch(error){throw new DocumentCitationCheckError('citation-check-incomplete',{cause:error});}

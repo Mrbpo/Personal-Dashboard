@@ -11,6 +11,7 @@ function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,p
  body,locator:'p1',page_number:1,evidence_id:`e${i}`,parser_version:'fixture',score:1,evidence_body:'full-page'}))};}
 const response=(value:unknown)=>Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',usage:{input_tokens:100,output_tokens:30},output_text:JSON.stringify(value)});
 const diagnostic=(judgment:string,count:number)=>({claimId:'c0',judgment,reason:'Synthetic orchestration fixture.',
+ retainedReferenceIds:judgment==='supported'?Array.from({length:count},(_,i)=>`r${i}`):[],
  citationFindings:Object.fromEntries(Array.from({length:count},(_,i)=>[`r${i}`,{judgment:i?'unclear':judgment==='supported'?'supports':'does-not-establish',reason:'Fixture.'}])),
  objectUnitScope:{claim:'quantity',evidence:'cited quantity',alignment:'same'}});
 const check=(raw:DocumentCitationAuditResponse[],attempts:string[])=>({mode:'selected-once' as const,
@@ -131,7 +132,7 @@ test('release withholds only an individually rejected citation, keeping claims, 
  const selections={status:'answered',message:'',claims:[{text:'A combined result.',citations:p.quoteUnits.map(u=>({id:u.id}))},
   {text:'Grounding improves by 36.4%.',citations:[{id:p.quoteUnits[1].id}]}]},original=JSON.stringify(selections);
  let calls=0;globalThis.fetch=async()=>{calls++;if(calls===1)return response(selections);
-  const d=diagnostic('supported',calls===2?3:1);if(calls===2)d.citationFindings.r1.judgment='does-not-establish';return response(d);};
+  const d=diagnostic('supported',calls===2?3:1);if(calls===2){d.citationFindings.r1.judgment='does-not-establish';d.retainedReferenceIds=['r0','r2'];}return response(d);};
  try{
   const result=await kernel.answerStudyContent('owner',question,{}, {scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)});
   assert.equal(calls,3,'One generation and the same two original-claim audits, without repair calls');
@@ -155,7 +156,8 @@ test('all-rejected and contradictory references cannot be rescued by citation wi
    providerSelections:{status:'answered' as const,message:'',claims:[{text:'A supported result.',citations:p.quoteUnits.map(u=>({id:u.id}))}]}};
   let calls=0,reads=0;globalThis.fetch=async()=>{calls++;const d=diagnostic('supported',2);
    d.citationFindings.r1.judgment='does-not-establish';
-   if(mode==='all-rejected')d.citationFindings.r0.judgment='does-not-establish';
+   d.retainedReferenceIds=['r0'];
+   if(mode==='all-rejected'){d.citationFindings.r0.judgment='does-not-establish';d.judgment='unsupported';d.retainedReferenceIds=[];}
    if(mode==='contradiction')d.citationFindings.r0.judgment='contradicts';
    return response(d);};
   try{await assert.rejects(checkApplicationDocumentCitations(question,async()=>{reads++;if(mode==='drift'&&reads===4)c.anchors[0].body+=' changed';return c;},
@@ -164,6 +166,33 @@ test('all-rejected and contradictory references cannot be rescued by citation wi
    assert.equal(calls,1);assert.equal(raw.length,1);
   }finally{globalThis.fetch=saved;}
  }
+});
+
+test('application publishes exactly the jointly judged set, rather than inferring another set from findings',async()=>{
+ const c=context(),p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch,
+  binding={inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,
+   providerSelections:{status:'answered' as const,message:'',claims:[{text:'A source-bound observation.',citations:p.quoteUnits.map(u=>({id:u.id}))}]}};
+ globalThis.fetch=async()=>{const d=diagnostic('supported',2);d.citationFindings.r1.judgment='supports';d.retainedReferenceIds=['r1'];return response(d);};
+ try{
+  const result=await checkApplicationDocumentCitations(question,async()=>c,binding,{scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)});
+  assert.deepEqual(result.released?.providerSelections.claims[0].citations,[{id:p.quoteUnits[1].id}]);
+  assert.equal(result.citationRelease?.version,'audited-reference-subset-v1');
+  assert.equal(result.citationRelease?.removed[0].judgment,'supports','do not relabel a discarded redundant support as unsupported');
+  assert.equal(result.released?.answer.claims[0].text,binding.providerSelections.claims[0].text);
+  assert.equal(raw.length,1);assert.equal(attempts.length,1,'no additional model layer or repair call');
+ }finally{globalThis.fetch=saved;}
+});
+
+test('a legacy all-reference judgment cannot authorize new application subset release',async()=>{
+ const c=context(),p=prepareDocumentAnswer(question,c),raw:DocumentCitationAuditResponse[]=[],attempts:string[]=[],saved=globalThis.fetch,
+  binding={inputFingerprint:p.fingerprint,quoteUnitManifestSha256:p.quoteUnitManifestSha256,
+   providerSelections:{status:'answered' as const,message:'',claims:[{text:'A source-bound observation.',citations:[{id:p.quoteUnits[0].id}]}]}};
+ globalThis.fetch=async()=>{const {retainedReferenceIds:_,...legacy}=diagnostic('supported',1);return response(legacy);};
+ try{
+  await assert.rejects(checkApplicationDocumentCitations(question,async()=>c,binding,{scope:'application',model:'gpt-5.4-mini',citationCheck:check(raw,attempts)}),
+   (error:unknown)=>error instanceof DocumentCitationCheckError&&error.code==='citation-check-incomplete');
+  assert.equal(raw.length,1,'legacy result retained without claiming sufficient release authority');assert.equal(attempts.length,1);
+ }finally{globalThis.fetch=saved;}
 });
 
 test('focused current-node checks retain per-call and final whole-context validation without changing audit requests',async()=>{
