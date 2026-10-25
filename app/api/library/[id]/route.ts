@@ -1,8 +1,18 @@
 import {apiOwner,apiError} from '@/lib/api-guard';
 import {getDocument,readBlob,removeDocument} from '@/lib/library';
 import {kernel} from '@/lib/kernel/service';
+import {documentSourceTextViewRequest,DOCUMENT_SOURCE_TEXT_VIEW_SCOPE} from '@/lib/kernel/document-source-text-view';
 export async function GET(r:Request,{params}:{params:Promise<{id:string}>}){try{
  const owner=await apiOwner(r),id=(await params).id,query=new URL(r.url).searchParams;
+ const viewRequest=documentSourceTextViewRequest(id,query);
+ if(viewRequest){
+  const sourceTextView=await kernel.readDocumentSourceTextView(owner,viewRequest.source,viewRequest.manifestSha256);
+  const pinned=sourceTextView.status==='available'?new URLSearchParams({evidence:'1',scope:DOCUMENT_SOURCE_TEXT_VIEW_SCOPE,
+   version:sourceTextView.source.currentVersionId,sourceVersion:sourceTextView.source.sourceVersionId,sourceHash:sourceTextView.source.sourceHash,
+   manifest:sourceTextView.manifest.manifestSha256}):undefined;
+  return Response.json({sourceTextView,...(pinned?{sourceViewUrl:`/api/library/${encodeURIComponent(id)}?${pinned}`}:{})},
+   {status:sourceTextView.status==='available'?200:409,headers:{'Cache-Control':'no-store'}});
+ }
  if(query.get('evidence')==='1'){
   const source={documentId:id,currentVersionId:query.get('version')||'',sourceVersionId:query.get('sourceVersion')||'',sourceHash:query.get('sourceHash')||''};
   const evidenceId=query.get('evidenceId')||'';

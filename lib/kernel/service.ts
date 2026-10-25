@@ -3,6 +3,7 @@ import {documentSourceName} from '../document-source-name.ts';
 import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
+import {readDocumentSourceTextView} from './document-source-text-view.ts';
 import {contentTagIngestionMode,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
 import {recordIngestedContentClassification} from './content-classification-ingestion.ts';
 import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
@@ -1259,6 +1260,9 @@ export class KernelService {
   }
   readCompleteDocumentText(owner:string,expectedSource:DocumentContextSource){
     return readCompleteDocumentText(kernelPool(),owner,expectedSource);
+  }
+  readDocumentSourceTextView(owner:string,expectedSource:DocumentContextSource,manifestSha256?:string){
+    return readDocumentSourceTextView(kernelPool(),owner,expectedSource,manifestSha256);
   }
 
   /** Explicit selected-source route. Complete refers to source coverage, never
