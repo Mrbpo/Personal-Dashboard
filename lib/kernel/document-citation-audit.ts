@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy,type DocumentMentionedSource} from './document-answer.ts';
 import {documentTitleMention} from './document-source.ts';
-import {assertSourceTextCitation,type SourceTextCitation} from './document-source-text-citation.ts';
+import {assertSourceTextCitation,sourceTextCitationTransport,type SourceTextCitation} from './document-source-text-citation.ts';
 
 export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v4';
 export const DOCUMENT_CITATION_RELEASE_POLICY='audited-reference-subset-v1';
@@ -77,7 +77,7 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
    assertSourceTextCitation({id:'source-text:'+ref.view.viewSha256,view:ref.view});
    const expected=ref.view.source;
    if(source.documentId!==expected.documentId||source.documentVersionId!==expected.currentVersionId||source.sourceVersionId!==expected.sourceVersionId||source.sourceHash!==expected.sourceHash||source.locator!=='all-current-stored-text')throw Error('Source text audit identity differs');
-   return {refId:ref.refId,kind:ref.kind,source,view:ref.view};
+   return {refId:ref.refId,kind:ref.kind,source,view:sourceTextCitationTransport(ref.view)};
   }
   if(ref.kind==='text'){
    if(typeof ref.quote!=='string'||!ref.quote.trim()||ref.quote.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16)throw new Error('Invalid citation-local quote');

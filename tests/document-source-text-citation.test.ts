@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {KernelService} from '../lib/kernel/service.ts';
 import {prepareDocumentAnswer,buildDocumentEvidenceSelectionRequest,buildSelectedDocumentAnswerRequest,
  resolveDocumentAnswerSelections,documentAnswerSettings,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
-import {assertSourceTextCitation,prepareSourceTextCitations} from '../lib/kernel/document-source-text-citation.ts';
+import {assertSourceTextCitation,prepareSourceTextCitations,sourceTextCitationTransport} from '../lib/kernel/document-source-text-citation.ts';
 import type {DocumentTextSourceManifest} from '../lib/kernel/document-context.ts';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),canonical=(v:unknown)=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)
  ?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
@@ -76,7 +76,7 @@ test('Kernel generation and existing audit receive the same complete view withou
   if(calls===1){assert.equal(input.sourceTextCitations,undefined);value={referenceIds:ids};}
   else if(calls===2){assert.equal(input.sourceTextCitations[0].id,scope.id);value={status:'answered',message:'',
    claims:[{text:'Deserts are listed but not elaborated in the supplied document text.',citations:[{id:scope.id}]}]};}
-  else{assert.equal(calls,3);assert.deepEqual(input.references[0].view,scope.view);assert.equal(input.references[0].kind,'source-text');
+  else{assert.equal(calls,3);assert.deepEqual(input.references[0].view,sourceTextCitationTransport(scope.view));assert.equal(input.references[0].kind,'source-text');
    assert.equal('evidenceId' in input.references[0].source,false);
    value={claimId:'c0',judgment:'supported',reason:'Synthetic orchestration fixture, not content acceptance.',retainedReferenceIds:['r0'],
     citationFindings:{r0:{judgment:'supports',reason:'Entire supplied text.'}},objectUnitScope:{claim:'supplied text',evidence:'supplied text',alignment:'same'}};}
@@ -88,4 +88,19 @@ test('Kernel generation and existing audit receive the same complete view withou
   assert.equal(calls,3);assert.equal(raw.length,1);assert.equal(attempts.length,1);assert.equal(result.answer.status,'answered');
   assert.equal(result.selectedUnits[0].evidence.kind,'source-text');
  }finally{globalThis.fetch=saved;}
+});
+
+test('repeated parser warnings use lossless bounded transport without changing original source-view hashes',()=>{
+ const c=fixture(),warnings=['warning '+ 'x'.repeat(17000),'second warning','second warning'];
+ for(const anchor of c.anchors)Object.assign(anchor,{parser_warnings:[...warnings]});
+ const p=prepareDocumentAnswer(question,{...c,sourceTextCitationPolicy:'current-source-view-v1'}),scope=p.sourceTextCitations[0];
+ assert.ok(scope);assert.ok(Buffer.byteLength(canonical(scope.view))>65536);
+ const transport=sourceTextCitationTransport(scope.view),{encoding,parserWarningDictionary,nodes,...rest}=transport;
+ assert.equal(encoding,'deduplicated-parser-warnings-v1');assert.equal(parserWarningDictionary.length,2);
+ assert.ok(Buffer.byteLength(canonical(transport))<65536);
+ const restored={...rest,nodes:nodes.map(({parserWarningIndexes,...node})=>({...node,parserWarnings:parserWarningIndexes.map(i=>parserWarningDictionary[i])}))};
+ assert.deepEqual(restored,scope.view);assertSourceTextCitation({id:scope.id,view:restored});
+ const changed=structuredClone(restored);changed.nodes[0].parserWarnings.pop();assert.throws(()=>assertSourceTextCitation({id:scope.id,view:changed}));
+ const tooLarge=fixture();Object.assign(tooLarge.anchors[0],{parser_warnings:['x'.repeat(65536)]});
+ assert.deepEqual(prepareSourceTextCitations({...tooLarge,sourceTextCitationPolicy:'current-source-view-v1'}),[]);
 });

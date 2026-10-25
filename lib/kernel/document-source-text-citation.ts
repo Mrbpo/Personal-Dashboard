@@ -17,12 +17,21 @@ export type SourceTextCitationSelection={claimIndex:number;citationIndex:number;
  startUtf16:null;endUtf16:null;quoteSha256:string};
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),canonical=(v:unknown)=>JSON.stringify(v,(_k,x)=>x&&typeof x==='object'&&!Array.isArray(x)
  ?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
+/** Lossless transport only: the full view hash still binds every original
+ * warning and node. Repeated document-wide warnings need not be sent per page. */
+export function sourceTextCitationTransport(view:View){
+ const parserWarningDictionary:string[]=[],indexes=new Map<string,number>();
+ const nodes=view.nodes.map(({parserWarnings,...node})=>({...node,parserWarningIndexes:parserWarnings.map(warning=>{
+  let index=indexes.get(warning);if(index===undefined){index=parserWarningDictionary.length;indexes.set(warning,index);parserWarningDictionary.push(warning);}return index;
+ })}));
+ return {...view,encoding:'deduplicated-parser-warnings-v1' as const,parserWarningDictionary,nodes};
+}
 export function assertSourceTextCitation(citation:SourceTextCitation){
  const {view}=citation,{viewSha256,...unsigned}=view;
  if(citation.id!=='source-text:'+viewSha256||view.status!=='available'||view.scope!==DOCUMENT_SOURCE_TEXT_VIEW_SCOPE||
   view.coverage!=='all-current-persisted-nodes'||view.currentSourceOnly!==true||view.originalFileCompletenessVerified!==false||
   view.visualCompletenessVerified!==false||view.textFaithfulness!=='unassessed'||sha(canonical(unsigned))!==viewSha256||
-  Buffer.byteLength(canonical(view))>SOURCE_TEXT_CITATION_LIMITS.viewUtf8Bytes||
+  Buffer.byteLength(canonical(sourceTextCitationTransport(view)))>SOURCE_TEXT_CITATION_LIMITS.viewUtf8Bytes||
   view.nodes.reduce((n,p)=>n+Buffer.byteLength(p.body),0)>SOURCE_TEXT_CITATION_LIMITS.bodyUtf8Bytes||
   view.nodes.some((n,i)=>n.storedNodeNumber!==i+1||sha(n.body)!==n.bodySha256))throw Error('Source text citation changed or exceeds bounds');
 }
@@ -32,7 +41,7 @@ export function prepareSourceTextCitations(context:DocumentAnswerContext):Source
  const manifest=context.persistedTextProof,view=buildDocumentSourceTextView({status:'available',manifest,
   context:{anchors:context.anchors.filter(a=>a.document_id===manifest.source.documentId)}});
  if(view.status!=='available')return [];
- if(manifest.sourceBodyUtf8Bytes>SOURCE_TEXT_CITATION_LIMITS.bodyUtf8Bytes||Buffer.byteLength(canonical(view))>SOURCE_TEXT_CITATION_LIMITS.viewUtf8Bytes)return [];
+ if(manifest.sourceBodyUtf8Bytes>SOURCE_TEXT_CITATION_LIMITS.bodyUtf8Bytes||Buffer.byteLength(canonical(sourceTextCitationTransport(view)))>SOURCE_TEXT_CITATION_LIMITS.viewUtf8Bytes)return [];
  const result={id:'source-text:'+view.viewSha256,view};assertSourceTextCitation(result);return [result];
 }
 export function sourceTextCitationEvidence(citation:SourceTextCitation):SourceTextCitationEvidence{
