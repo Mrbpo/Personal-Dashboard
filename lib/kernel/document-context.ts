@@ -580,15 +580,18 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
   if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
   images.push(...visuals.images);
  }
- if(budget)for(const [index,anchor] of anchors.entries()){
+ // Give existing original crops across all ranked pages a chance before full
+ // pages fill the shared budget. Each pass reads only its kind, including
+ // checksum checks for omissions; no new assets or text reordering.
+ if(budget)for(const assetKind of ['pdf-region','pdf-page'] as const)for(const [index,anchor] of anchors.entries()){
   const data=loaded.get(anchor.document_id)!,rank=index+1;
   const captions=[...parents.values()].filter(parent=>parent.firstAnchorRank===rank).flatMap(parent=>parent.nodes)
    .filter(node=>node.kind==='caption').map(node=>node.evidenceId);
-  for(const caption of new Set(captions))for(const image of await readDocumentImages(db,owner,identity(data.current),[caption]))
+  if(assetKind==='pdf-region')for(const caption of new Set(captions))for(const image of await readDocumentImages(db,owner,identity(data.current),[caption]))
    if(budget.include(image,rank)&&!images.some(value=>value.attachmentId===image.attachmentId))images.push(image);
   const pageAnchors=data.nodes.filter(node=>node.kind==='page'&&anchor.evidence_id===node.evidenceId).map(node=>node.evidenceId);
   if(pageAnchors.length&&data.current.mime==='application/pdf')try{const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors,
-   undefined,{selection:{budget,anchorRank:rank}});
+   undefined,{selection:{budget,anchorRank:rank,assetKind}});
    if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
    for(const image of visuals.images)if(!images.some(value=>value.attachmentId===image.attachmentId))images.push(image);
   }catch(error){if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();throw error;}

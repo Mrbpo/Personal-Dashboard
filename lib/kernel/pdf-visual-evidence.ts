@@ -207,11 +207,12 @@ export async function readPdfInternalLinkEvidence(db:Queryable,owner:string,sour
 /** Multiple real regions may share one real page; never invent caption nodes. */
 export async function readPdfVisualEvidence(db:Queryable,owner:string,source:DocumentContextSource,pageEvidenceIds?:string[],
  limits:{images:number;bytes:number;imageInputTokens:number}=PDF_VISUAL_READ_LIMITS,
- options:{selection?:{budget:DocumentImageBudget;anchorRank:number};pageAssetsOnly?:boolean}={}){
+ options:{selection?:{budget:DocumentImageBudget;anchorRank:number;assetKind?:'pdf-page'|'pdf-region'};pageAssetsOnly?:boolean}={}){
   // Runtime image identity uses the validated current row, not caller display metadata.
   source=await current(db,owner,{...source});
  if(![limits.images,limits.bytes,limits.imageInputTokens].every(n=>Number.isSafeInteger(n)&&n>0)||limits.images>PDF_VISUAL_READ_LIMITS.images||
   limits.bytes>PDF_VISUAL_READ_LIMITS.bytes||limits.imageInputTokens>PDF_VISUAL_READ_LIMITS.imageInputTokens)throw new PdfVisualEvidenceError('invalid','Invalid bounded PDF visual read');
+ if(options.selection?.assetKind&&!['pdf-page','pdf-region'].includes(options.selection.assetKind))throw new PdfVisualEvidenceError('invalid','Invalid PDF asset kind');
  const row=(await db.query<{manifest:{content:ContentManifest;bindings:Array<{index:number;anchorEvidenceId:string}>};manifest_sha256:string;content_sha256:string}>(
   'SELECT manifest,manifest_sha256,content_sha256 FROM document_pdf_visual_manifests WHERE version_id=$1 AND source_version_id=$2 AND source_hash=$3',
   [source.currentVersionId,source.sourceVersionId,source.sourceHash])).rows[0];
@@ -231,7 +232,8 @@ export async function readPdfVisualEvidence(db:Queryable,owner:string,source:Doc
   const binding=bindings[index];if(binding.index!==index||binding.anchorEvidenceId!==pages[asset.physicalPage-1]?.evidence_id||
    !['pdf-page','pdf-region'].includes(asset.kind)||!isSha(asset.sha256)||asset.provenance.rawPdfSha256!==source.sourceHash||
    ![asset.width,asset.height,asset.byteLength].every(n=>Number.isSafeInteger(n)&&n>0))throw new PdfVisualEvidenceError('invalid','PDF image binding differs');
-  return (!pageEvidenceIds||pageEvidenceIds.includes(binding.anchorEvidenceId))&&(!options.pageAssetsOnly||asset.kind==='pdf-page')?[{asset,binding}]:[];});
+  return (!pageEvidenceIds||pageEvidenceIds.includes(binding.anchorEvidenceId))&&(!options.pageAssetsOnly||asset.kind==='pdf-page')&&
+   (!options.selection?.assetKind||asset.kind===options.selection.assetKind)?[{asset,binding}]:[];});
  if(!options.selection&&selected.length>limits.images)throw new PdfVisualEvidenceError('count-limit','PDF image count exceeds limit; none silently dropped');
  if(!options.selection&&selected.reduce((sum,{asset})=>sum+asset.byteLength,0)>limits.bytes)throw new PdfVisualEvidenceError('byte-limit','PDF images exceed byte limit');
  if(!options.selection&&selected.reduce((sum,{asset})=>sum+2*Math.ceil(asset.width/32)*Math.ceil(asset.height/32)+1,0)>limits.imageInputTokens)

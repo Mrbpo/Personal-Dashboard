@@ -55,12 +55,24 @@ const unavailable={status:'unavailable' as const,regions:[],pageSizes:[],reason:
 
 /** Blank PDFs, coloured PNGs and a fabricated native table are explicitly
  * synthetic plumbing fixtures. They assert composition, never OCR fidelity. */
-async function pdfFixture(owner:string,count:number,withTable=false,small=false,textByPage:Record<number,string>={}){
+async function pdfFixture(owner:string,count:number,withTable=false,small=false,textByPage:Record<number,string>={},regionPages:number[]=[]){
  const id='budget-'+randomUUID(),pdf=await PDFDocument.create();for(let i=0;i<count;i++)pdf.addPage([612,792]);
  const bytes=await pdf.save(),sourceHash=sha(bytes),pngs:Buffer[]=[];
  for(let i=0;i<count;i++)pngs.push(await sharp({create:{width:small?32:1932,height:small?32:2500,channels:3,
   background:{r:i+10,g:60,b:90}}}).png().toBuffer());
- let index=0;const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout:unavailable},async()=>pngs[index++]);
+ let layout:Parameters<typeof preparePdfVisualEvidence>[0]['layout']=unavailable;
+ if(regionPages.length){
+  const copyIndices=Array.from({length:count},(_,i)=>i),raw={status:'success',document:{json_content:{
+   pages:Object.fromEntries(copyIndices.map(i=>[i+1,{page_no:i+1,size:{width:612,height:792}}])),
+   texts:copyIndices.map(i=>({self_ref:'#/texts/'+i,label:'text',text:'Synthetic fixture transcription.',prov:[{page_no:i+1}]})),
+   pictures:regionPages.map(page=>({prov:[{page_no:page,bbox:{l:10,t:750,r:110,b:650,coord_origin:'BOTTOMLEFT'}}],captions:[],children:[]})),
+   body:{children:[...copyIndices.map(i=>({$ref:'#/texts/'+i})),...regionPages.map((_,i)=>({$ref:'#/pictures/'+i}))]}}}};
+  const resultBlobSha256=await saveBlob(Buffer.from(JSON.stringify({identity:{owner,documentId:id,sourceHash,totalPages:count,inputHash:sourceHash,copyIndices},result:raw})));
+  layout=decodeDoclingResult(raw,count,{formulaEnriched:false,verifiedBlankPages:copyIndices.map(i=>i+1)}).visualLayout;
+  layout.resultReferences=[{resultBlobSha256,derivedInputSha256:sourceHash,copyIndices}];
+  layout.regions=layout.regions.map(region=>({...region,resultBlobSha256,derivedInputSha256:sourceHash,copyIndices}));
+ }
+ let index=0;const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout},async()=>pngs[index++]);
  let nativeTables;
  if(withTable){
   const raw={status:'success',document:{json_content:{pages:Object.fromEntries(Array.from({length:count},(_,i)=>[i+1,{page_no:i+1}])),
@@ -84,6 +96,29 @@ async function pdfFixture(owner:string,count:number,withTable=false,small=false,
  for(let offset=0;offset<nodes.length;offset+=14)hits.push(...await readDocumentNodes(kernelPool(),owner,identity,nodes.slice(offset,offset+14).map(node=>node.evidenceId)));
  return {document,pages,source:identity,nodes,hits,pngs};
 }
+
+test('late original region survives earlier full pages across sources without changing text or explicit-page priority',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const owner='region-budget-'+randomUUID(),early=await pdfFixture(owner,7),
+  late=await pdfFixture(owner,1,false,false,{},[1]),ranked=[...early.hits,late.hits[0]],before=JSON.stringify(ranked);
+ const context=await kernel.readDocumentParents(owner,ranked,{includeImages:true}),selected=context.imageSelection!;
+ assert.equal(JSON.stringify(context.anchors),before,'all original text and ranks remain unchanged');
+ assert.equal(selected.included[0].kind,'pdf-region');assert.equal(selected.included[0].anchorRank,8);
+ assert.equal(selected.included[0].source.documentId,late.source.documentId);
+ assert.equal(selected.accounting.images,7);assert.ok(selected.accounting.imageInputTokens<=DOCUMENT_IMAGE_LIMITS.imageInputTokens);
+ assert.equal(selected.omitted.at(-1)?.source.documentId,late.source.documentId);
+ assert.equal(selected.omitted.at(-1)?.kind,'pdf-page','late full page still cannot fit; its actual region can');
+ const preferred=await kernel.readDocumentParents(owner,ranked,{includeImages:true,preferredPdfPageEvidenceIds:[late.hits[0].evidence_id]});
+ assert.equal(preferred.imageSelection!.included[0].kind,'pdf-page');
+ assert.equal(preferred.imageSelection!.included[0].source.documentId,late.source.documentId);
+ assert.equal(preferred.imageSelection!.included[1].kind,'pdf-region');
+ assert.deepEqual(preferred.anchors,context.anchors);assert.deepEqual(preferred.parents,context.parents);
+ const omitted=selected.omitted.at(-1)!,path=resolve(process.env.LIBRARY_DIR||'./data/library',omitted.sha256),bytes=await readFile(path);
+ try{await writeFile(path,'corrupt omitted page');await assert.rejects(kernel.readDocumentParents(owner,ranked,{includeImages:true}),/checksum/);}
+ finally{await writeFile(path,bytes);}
+ await kernel.hideParsedDocument(owner,late.source.documentId);
+ await assert.rejects(kernel.readDocumentParents(owner,ranked,{includeImages:true}),/no longer current|not current/);
+});
 
 test('actual PG composition: 14 same-PDF and interleaved multi-PDF anchors retain text; shared table/author budget and rereads stay stable',
  {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
