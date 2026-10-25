@@ -20,7 +20,7 @@ import { documentSearchText, splitDocumentText, searchDocumentText,projectDocume
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
 import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText,
- type DocumentQuotedTextLocation,type FocusedDocumentText} from './document-focused-text.ts';
+ explicitDocumentFigure,locateDocumentFigureCaption,type DocumentFigureLocation,type DocumentQuotedTextLocation,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
@@ -1351,7 +1351,8 @@ export class KernelService {
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true,identityCourseCodes?:string[],
-    imagePageFocus?:{source:DocumentContextSource;physicalPage?:number;quotedLiteral?:string;onLocation?:(value:DocumentQuotedTextLocation)=>void}){
+    imagePageFocus?:{source:DocumentContextSource;physicalPage?:number;quotedLiteral?:string;figureNumber?:number;
+      onLocation?:(value:DocumentQuotedTextLocation)=>void;onFigureLocation?:(value:DocumentFigureLocation)=>void}){
     const {includeParents=false,includeImages=false,...searchOptions}={...options,
       ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     const limit=searchOptions.limit??14;
@@ -1388,10 +1389,13 @@ export class KernelService {
           if(existing)requestedPages.push(existing);
           else{const pages=await readDocumentSourcePages(kernelPool(),owner,source),page=pages.nodes.find(node=>node.kind==='page'&&node.ordinal+1===imagePageFocus.physicalPage);
             if(page)requestedPages.push(...await readDocumentNodes(kernelPool(),owner,source,[page.evidenceId]));}
-        }else if(imagePageFocus.quotedLiteral){
-          const text=await this.readCompleteDocumentText(owner,source),location=locateDocumentQuotedText(imagePageFocus.quotedLiteral,
-            text.status==='available'?text.context.anchors.filter(hit=>hit.content_kind==='page').map(hit=>({physicalPage:hit.page_number,evidenceId:hit.evidence_id,body:hit.body})):[]);
-          imagePageFocus.onLocation?.(text.status==='unavailable'?{...location,reason:'source-text:'+text.reason}:location);
+        }else if(imagePageFocus.quotedLiteral||imagePageFocus.figureNumber!==undefined){
+          const text=await this.readCompleteDocumentText(owner,source),pages=text.status==='available'?
+            text.context.anchors.filter(hit=>hit.content_kind==='page').map(hit=>({physicalPage:hit.page_number,evidenceId:hit.evidence_id,body:hit.body})):[],
+            location=imagePageFocus.quotedLiteral?locateDocumentQuotedText(imagePageFocus.quotedLiteral,pages):locateDocumentFigureCaption(imagePageFocus.figureNumber!,pages);
+          const observation=text.status==='unavailable'?{...location,reason:'source-text:'+text.reason}:location;
+          if(observation.policy==='literal-quoted-text-candidates-v1')imagePageFocus.onLocation?.(observation);
+          else imagePageFocus.onFigureLocation?.(observation);
           if(location.status==='available'){
             const nodes=await readDocumentNodes(kernelPool(),owner,source,location.pages.map(page=>page.evidenceId));
             if(nodes.some((node,index)=>node.page_number!==location.pages[index].physicalPage||focusedTextQueryHash(node.body)!==location.pages[index].bodySha256))throw new DocumentEvidenceChangedError();
@@ -1477,10 +1481,13 @@ export class KernelService {
     const pageSource=mentionedForImages?.status==='resolved'?mentionedForImages.matches[0]:undefined;
     const requestedPage=pageSource?explicitDocumentPage(question,pageSource.title):null;
     const quotedLiteral=pageSource&&!requestedPage?documentQuotedLiteral(question,pageSource.title):null;
+    const requestedFigure=pageSource&&!requestedPage&&!quotedLiteral?explicitDocumentFigure(question,pageSource.title):null;
     let quotedTextLocation:DocumentQuotedTextLocation|undefined;
-    const imagePageFocus=pageSource&&(requestedPage||quotedLiteral)&&(!routedOptions.documentId||routedOptions.documentId===pageSource.documentId)&&
+    let figureCaptionLocation:DocumentFigureLocation|undefined;
+    const imagePageFocus=pageSource&&(requestedPage||quotedLiteral||requestedFigure)&&(!routedOptions.documentId||routedOptions.documentId===pageSource.documentId)&&
       (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===pageSource.title)?{source:pageSource,
-        ...(requestedPage?{physicalPage:requestedPage}:{quotedLiteral:quotedLiteral!,onLocation:(value:DocumentQuotedTextLocation)=>{quotedTextLocation=value;}})}:undefined;
+        ...(requestedPage?{physicalPage:requestedPage}:quotedLiteral?{quotedLiteral,onLocation:(value:DocumentQuotedTextLocation)=>{quotedTextLocation=value;}}:
+          {figureNumber:requestedFigure!,onFigureLocation:(value:DocumentFigureLocation)=>{figureCaptionLocation=value;}})}:undefined;
     const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes,imagePageFocus);
     let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
     let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>|ReturnType<typeof classificationGuardAnswerObservation>;
@@ -1690,6 +1697,7 @@ export class KernelService {
       }
     }
     if(quotedTextLocation)contextExpansion={...contextExpansion,quotedTextLocation:{source:pageSource,...quotedTextLocation}};
+    if(figureCaptionLocation)contextExpansion={...contextExpansion,figureCaptionLocation:{source:pageSource,...figureCaptionLocation}};
     return {...result,...(releasedAnswer?{answer:releasedAnswer.answer,selectedUnits:releasedAnswer.selectedUnits}:{}),
       contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
       ...(contentTagRouting?{contentTagRouting}:{}),...(classificationRouting?{classificationRouting}:{}),...(sourceIdentityContext?{sourceIdentityContext}:{})};

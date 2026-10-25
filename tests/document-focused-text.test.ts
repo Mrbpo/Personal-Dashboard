@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText} from '../lib/kernel/document-focused-text.ts';
+import {focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText,
+ explicitDocumentFigure,locateDocumentFigureCaption} from '../lib/kernel/document-focused-text.ts';
 import {prepareDocumentAnswer,retainDocumentSelectionContext,buildSelectedDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),title='Original Research Paper.pdf',question='In Original Research Paper, what domain was evaluated?';
 const source={documentId:'target',currentVersionId:'v',sourceVersionId:'sv',sourceHash:'source-hash'};
@@ -53,6 +54,31 @@ test('quoted location falls back on ambiguity, missing text, limits or incomplet
  for(const pages of [[page,{...page,physicalPage:2,evidenceId:'p2'}],[{...page,body:literal+' '+literal}],
   [{...page,physicalPage:2}],[],[{...page,body:'x'.repeat(262145)}],[{...page,body:'Different source text.'}]]){
   const result=locateDocumentQuotedText(literal,pages);assert.equal(result.status,'unavailable');assert.deepEqual(result.pages,[]);
+ }
+});
+
+test('explicit figure caption locates only the unique literal page, not prose mentions or a verified region',()=>{
+ const pages=[{physicalPage:1,evidenceId:'p1',body:'As shown in Figure 1, we compare the methods.'},
+  {physicalPage:2,evidenceId:'p2',body:'Background.\n\nFigure1: Tree construction process.\nOriginal diagram labels.'}],before=JSON.stringify(pages);
+ assert.equal(explicitDocumentFigure(`In ${title}, Figure 1's demonstration: compare the colors.`,title),1);
+ assert.equal(explicitDocumentFigure(`关于《${title}》，图１中的颜色？`,title),1);
+ const located=locateDocumentFigureCaption(1,pages);assert.equal(located.status,'available');
+ assert.deepEqual(located.pages,[{physicalPage:2,evidenceId:'p2',bodySha256:sha(pages[1].body),role:'caption-match-candidate'}]);
+ assert.equal(located.semanticsVerified,false);assert.equal(located.figureRegionRelationship,'unknown');assert.equal(JSON.stringify(pages),before);
+ assert.equal(locateDocumentFigureCaption(1,[{...pages[0],body:'Fig. 1. A compact caption.'}]).status,'available');
+ assert.equal(locateDocumentFigureCaption(1,[{...pages[0],body:'图１：原始图注'}]).status,'available');
+});
+
+test('figure routing falls back on ambiguous labels, duplicate captions, wrong numbers and bounded-source failures',()=>{
+ for(const suffix of ['Figure 1 and 2','Figure 1-2','Figure 1.2','Figure 1 and Figure 2','Figure 10000','in 2024'])
+  assert.equal(explicitDocumentFigure(`In ${title}, ${suffix}?`,title),null,suffix);
+ assert.equal(explicitDocumentFigure('In another source, Figure 1?',title),null);
+ assert.equal(explicitDocumentFigure('In Research Figure 1.pdf, describe the diagram.','Research Figure 1.pdf'),null);
+ const page={physicalPage:1,evidenceId:'p1',body:'Figure 1: Original caption.'};
+ for(const pages of [[],[{...page,body:'As shown in Figure 1: the model works.'}],[{...page,body:'Figure 10: Other caption.'}],
+  [{...page,body:'Figure 1.2 More specific object.'}],[page,{...page,physicalPage:2,evidenceId:'p2'}],
+  [{...page,body:page.body+'\n'+page.body}],[{...page,physicalPage:2}],[{...page,body:'x'.repeat(262145)}]]){
+  const result=locateDocumentFigureCaption(1,pages);assert.equal(result.status,'unavailable');assert.deepEqual(result.pages,[]);
  }
 });
 test('focused original text survives selection without deleting another selected source',()=>{

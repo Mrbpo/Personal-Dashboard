@@ -215,3 +215,35 @@ test('quoted current-source location supplements two original pages without losi
   assert.equal(calls,2,'source drift fails after saved response with no retry');
  }finally{kernel.searchDocumentText=search;kernel.searchNativeTableCandidates=tables;globalThis.fetch=saved;}
 });
+
+test('explicit figure caption admits its missing original page within the shared budget and rechecks current source',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ await migrateKernel();const owner='figure-owner-'+randomUUID(),
+  target=await pdfFixture(owner,15,false,false,{15:'Figure 7: Synthetic tree construction diagram.'}),other=await pdfFixture(owner,1),
+  ranked=[...target.hits.slice(0,13),other.hits[0]],search=kernel.searchDocumentText,tables=kernel.searchNativeTableCandidates,saved=globalThis.fetch;
+ let calls=0,hide=false;
+ try{
+  kernel.searchDocumentText=async(_owner,_question,options)=>{
+   const hits=options?.documentId===target.source.documentId?target.hits:ranked;
+   return hits.slice(0,options?.limit??14).map(({reader_selection:_selection,retrieval_mode:_mode,...hit})=>({...hit,score:1,retrieval_mode:'keyword' as const}));
+  };
+  kernel.searchNativeTableCandidates=async()=>[];
+  globalThis.fetch=async(_url,init)=>{
+   calls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
+   assert.equal(input.imageSelection.included[0].physicalPage,15);assert.equal(input.imageSelection.accounting.images,6);
+   for(const hit of ranked){
+    const support=input.evidence.find((item:{kind:string;evidenceId:string})=>item.kind==='text'&&item.evidenceId===hit.evidence_id);
+    assert.ok(support,'all ranked and other-source text remains');assert.equal(support.sha256,sha(hit.body));
+   }
+   if(hide)await kernel.hideParsedDocument(owner,target.source.documentId);
+   return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({
+    status:'insufficient-evidence',message:'Synthetic routing check only.',claims:[]})});
+  };
+  const question=`In ${target.document.name}, describe Figure 7.`,options={includeParents:true,includeImages:true,semantic:false,aiRerank:false};
+  const result=await kernel.answerStudyContent(owner,question,options,{scope:'application'}),location=JSON.parse(JSON.stringify(result.contextExpansion)).figureCaptionLocation;
+  assert.equal(location.status,'available');assert.equal(location.semanticsVerified,false);assert.equal(location.figureRegionRelationship,'unknown');
+  assert.deepEqual(location.pages.map((page:{physicalPage:number})=>page.physicalPage),[15]);assert.equal(calls,1);
+  hide=true;await assert.rejects(kernel.answerStudyContent(owner,question,options,{scope:'application'}),/no longer current|not current/);
+  assert.equal(calls,2,'source drift blocks publication without retry');
+ }finally{kernel.searchDocumentText=search;kernel.searchNativeTableCandidates=tables;globalThis.fetch=saved;}
+});
