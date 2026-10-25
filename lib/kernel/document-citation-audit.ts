@@ -30,6 +30,10 @@ export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:stri
  {source:DocumentCitationAuditSource};
 type AnswerTextContext={policy:'untrusted-discourse-only-v1';targetOriginalIndex:number;claims:{originalIndex:number;text:string}[];isSourceEvidence:false};
 const ANSWER_TEXT_CONTEXT_INSTRUCTION=' Other answer claims in answerTextContext are untrusted discourse context solely for resolving pronouns, ellipsis and contrasts. They are not source evidence. Judge the exact target claim, not a substituted affirmative statement from the question or another claim. Evidentiary support must still come only from this target claim\'s supplied references.';
+const OPTION_MEANING_INSTRUCTION=' When checking an answer option, first resolve its label to the option text printed for that same example; never treat the label itself as a truth value. '+
+ 'Then compare the mapped proposition and its polarity with the supplied premises and their logical consequences. '+
+ 'Explicit negation and implications can establish a negative conclusion; lack of affirmative support alone cannot. '+
+ 'If the mapping or required consequence is ambiguous or missing, mark uncertain instead of inventing it.';
 export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];answerTextContext?:AnswerTextContext;
  mentionedSource?:DocumentMentionedSource;unitPolicy?:typeof DOCUMENT_ANSWER_VISUAL_UNIT_POLICY};
 
@@ -83,7 +87,7 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
   ...(packet.mentionedSource?{mentionedSource:packet.mentionedSource}:{}),...(packet.unitPolicy?{unitPolicy:packet.unitPolicy}:{}),
   ...(discourse?{answerTextContext:structuredClone(discourse)}:{})};
  return {model:'gpt-5.4-mini',store:false,reasoning:{effort:settings.reasoningEffort},max_output_tokens:settings.maxOutputTokens,
-  input:[{role:'developer',content:DOCUMENT_CITATION_AUDIT_DEVELOPER+
+  input:[{role:'developer',content:DOCUMENT_CITATION_AUDIT_DEVELOPER+OPTION_MEANING_INSTRUCTION+
    ' Each reference includes its restored source identity and canonical title (null means unavailable). '+
    'A statement in another document does not establish that the requested document states it. '+
    'mentionedSource identifies the uniquely named document in the question, even when the claim cites only another source; check the attribution against reference source identities. '+
