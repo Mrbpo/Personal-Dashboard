@@ -16,6 +16,43 @@ export function focusedDocumentTextQuery(question:string,title:string):string|nu
 }
 export const focusedTextQueryHash=(query:string)=>createHash('sha256').update(query).digest('hex');
 
+export type DocumentSectionIntervalCandidates={policy:'literal-section-interval-candidates-v1';status:'available'|'unavailable';reason:string|null;
+ labels:string[];ranges:Array<{label:string;startPage:number;boundaryPage:number;startUtf16:number;boundaryUtf16:number;boundaryLabel:string}>;
+ pages:Array<{physicalPage:number;evidenceId:string;bodySha256:string}>;semanticsVerified:false;coverage:'unassessed'};
+/** A literal heading interval is only a bounded reading candidate. Keep the
+ * boundary page too: neither columns nor section membership are inferred. */
+export function locateDocumentSectionIntervals(question:string,title:string,pages:Array<{physicalPage:number;evidenceId:string;body:string}>):DocumentSectionIntervalCandidates|undefined{
+ const query=focusedDocumentTextQuery(question,title);if(!query)return;
+ const matches=[...query.matchAll(/\bsections?\s+([1-9]\d*(?:\.\d+)+(?:\s*(?:,|and|&)\s*[1-9]\d*(?:\.\d+)+)*)|第?\s*([1-9]\d*(?:\.\d+)+)\s*节/giu)];
+ if(!matches.length)return;
+ const labels=[...new Set(matches.flatMap(m=>(m[1]??m[2]).match(/[1-9]\d*(?:\.\d+)+/g)!))],
+  result:DocumentSectionIntervalCandidates={policy:'literal-section-interval-candidates-v1',status:'unavailable',reason:null,
+   labels,ranges:[],pages:[],semanticsVerified:false,coverage:'unassessed'},unavailable=(reason:string)=>({...result,reason});
+ if(labels.length>4||labels.some(label=>label.split('.').some(n=>String(Number(n))!==n))||
+  matches.some(m=>/^\s*(?:[-–—]|to)\s*\d/iu.test(query.slice(m.index!+m[0].length))))return unavailable('ambiguous-section-labels');
+ const ordered=[...pages].sort((a,b)=>a.physicalPage-b.physicalPage);
+ if(!ordered.length||ordered.length>512||ordered.some(p=>!Number.isInteger(p.physicalPage)||p.physicalPage<1||!p.evidenceId)||
+  new Set(ordered.map(p=>p.physicalPage)).size!==ordered.length||new Set(ordered.map(p=>p.evidenceId)).size!==ordered.length||
+  ordered.reduce((n,p)=>n+Buffer.byteLength(p.body),0)>262144)return unavailable('unavailable-source-pages');
+ const headings=ordered.flatMap(page=>[...page.body.matchAll(/^[ \t]*(?:#{1,6}[ \t]+)?([1-9]\d*(?:\.\d+)+)[ \t]+[^\r\n]+/gm)]
+  .map(m=>({label:m[1],physicalPage:page.physicalPage,offset:m.index!}))),ranges:DocumentSectionIntervalCandidates['ranges']=[],selected=new Set<number>();
+ for(const label of labels){
+  const found=headings.filter(h=>h.label===label);if(found.length!==1)return unavailable(found.length?'ambiguous-heading':'heading-unavailable');
+  const start=found[0],parts=label.split('.'),prefix=parts.slice(0,-1).join('.')+'.',next=prefix+(Number(parts.at(-1))+1),
+   boundary=headings.find(h=>(h.physicalPage>start.physicalPage||h.physicalPage===start.physicalPage&&h.offset>start.offset)&&
+    h.label.split('.').length===parts.length&&h.label.startsWith(prefix));
+  if(!boundary||boundary.label!==next)return unavailable('next-sibling-heading-unavailable');
+  if(boundary.physicalPage-start.physicalPage+1>14)return unavailable('section-page-limit');
+  for(let page=start.physicalPage;page<=boundary.physicalPage;page++){
+   if(!ordered.some(p=>p.physicalPage===page))return unavailable('section-page-gap');selected.add(page);
+  }
+  ranges.push({label,startPage:start.physicalPage,boundaryPage:boundary.physicalPage,startUtf16:start.offset,boundaryUtf16:boundary.offset,boundaryLabel:boundary.label});
+ }
+ const selectedPages=ordered.filter(p=>selected.has(p.physicalPage));
+ if(selectedPages.length>14||selectedPages.reduce((n,p)=>n+Buffer.byteLength(p.body),0)>FOCUSED_TEXT_LIMITS.bodyUtf8Bytes)return unavailable('section-text-limit');
+ return {...result,status:'available',ranges,pages:selectedPages.map(p=>({physicalPage:p.physicalPage,evidenceId:p.evidenceId,bodySha256:focusedTextQueryHash(p.body)}))};
+}
+
 /** A literal page is a physical-page candidate, not a verified printed label.
  * Ambiguous lists/ranges stay on ordinary retrieval. Ignore title digits. */
 export function explicitDocumentPage(question:string,title:string):number|null{

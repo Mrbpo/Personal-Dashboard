@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText,
- explicitDocumentFigure,locateDocumentFigureCaption} from '../lib/kernel/document-focused-text.ts';
+ explicitDocumentFigure,locateDocumentFigureCaption,locateDocumentSectionIntervals} from '../lib/kernel/document-focused-text.ts';
 import {prepareDocumentAnswer,retainDocumentSelectionContext,buildSelectedDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),title='Original Research Paper.pdf',question='In Original Research Paper, what domain was evaluated?';
 const source={documentId:'target',currentVersionId:'v',sourceVersionId:'sv',sourceHash:'source-hash'};
@@ -16,6 +16,46 @@ function fixture(){
    pages:[{evidenceId:'ev-2',bodySha256:sha(anchors[2].body)}],coverage:'unassessed',structureRelationsVerified:false}};
  return context;
 }
+test('explicit section lists retain observed sibling intervals and boundary pages without claiming membership',()=>{
+ const pages=['Preface.','2.1 Calibration\nOriginal method.','Original continuation.','End.\n2.2 Other method',
+  '2.3 Evaluation\nOriginal evaluation.','Continuation.','End.\n2.4 Discussion'].map((body,i)=>({physicalPage:i+1,evidenceId:'p'+i,body})),
+  q=`In ${title}, compare Sections 2.1 and 2.3.`,before=JSON.stringify(pages),r=locateDocumentSectionIntervals(q,title,pages)!;
+ assert.equal(r.status,'available');assert.deepEqual(r.pages.map(p=>p.physicalPage),[2,3,4,5,6,7]);
+ assert.deepEqual(r.ranges.map(r=>[r.label,r.startPage,r.boundaryPage]),[['2.1',2,4],['2.3',5,7]]);
+ assert.equal(r.semanticsVerified,false);assert.equal(r.coverage,'unassessed');assert.equal(JSON.stringify(pages),before);
+ assert.equal(locateDocumentSectionIntervals(`在《${title}》中比较第2.1节和第2.3节。`,title,pages)?.status,'available');
+ assert.equal(locateDocumentSectionIntervals(`In ${title}, compare Section2.1?`,title,pages),undefined);
+ assert.equal(locateDocumentSectionIntervals(`In ${title}, explain the methods.`,title,pages),undefined);
+ assert.equal(locateDocumentSectionIntervals('Compare Section 2.1 in another paper.',title,pages),undefined);
+ for(const changed of [pages.filter(p=>p.physicalPage!==3),pages.map(p=>p.physicalPage===3?{...p,body:p.body+'\n2.1 Duplicate'}:p),
+  pages.map(p=>p.physicalPage===4?{...p,body:'2.5 Wrong sibling'}:p),pages.map(p=>p.physicalPage===3?{...p,body:'x'.repeat(32769)}:p)])
+  assert.equal(locateDocumentSectionIntervals(q,title,changed)?.status,'unavailable');
+ assert.equal(locateDocumentSectionIntervals(`In ${title}, compare Section 2.1-2.3.`,title,pages)?.status,'unavailable');
+});
+
+test('section continuation survives selection with foreign evidence; empty and full reference selections are not expanded',()=>{
+ const bodies=['Unrelated background.\n'.repeat(1800),'2.1 Calibration\nFirst study.','NECESSARY_CONTINUATION_A',
+  'Closing method.\n2.2 Other method','2.3 Evaluation\nDifferent studies.','NECESSARY_CONTINUATION_B','Closing evaluation.\n2.4 Discussion'],
+  q=`In ${title}, does Section 2.3 cite more studies than Section 2.1?`,base=fixture().anchors[0],
+  anchors=bodies.map((body,i)=>({...base,id:`pg:v:${i+1}`,page_number:i+1,evidence_id:'section-'+i,locator:'original:'+i,body})),
+  c:DocumentAnswerContext={anchors:[...anchors,{...fixture().anchors[1],body:'FOREIGN_SELECTED_EVIDENCE'}],parents:[],images:[],sourceContentIsUntrusted:true,
+   focusedText:{policy:'bounded-mentioned-source-relevance-v1',source,querySha256:focusedTextQueryHash(focusedDocumentTextQuery(q,title)!),
+    pages:[anchors[1],anchors[4]].map(a=>({evidenceId:a.evidence_id,bodySha256:sha(a.body)})),coverage:'unassessed',structureRelationsVerified:false}},
+  p=prepareDocumentAnswer(q,c),ids=['e1','e4','e7'].map(id=>p.quoteUnits.find(u=>u.supportId===id)!.id),
+  baseline=retainDocumentSelectionContext({referenceIds:ids},{...p,sectionIntervalCandidates:undefined}),
+  repaired=retainDocumentSelectionContext({referenceIds:ids},p),needed=p.quoteUnits.find(u=>u.supportId==='e2')!;
+ assert.equal(baseline.referenceIds.includes(needed.id),false,'Existing page/focus retention loses unselected continuation.');
+ assert.equal(repaired.referenceIds.includes(needed.id),true);assert.ok(ids.every(id=>repaired.referenceIds.includes(id)));
+ assert.equal(repaired.sectionTextRetention?.status,'retained');assert.equal(repaired.sectionTextRetention?.structureRelationsVerified,false);
+ const wire=JSON.stringify(buildSelectedDocumentAnswerRequest(p,repaired.referenceIds,{model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000}));
+ for(const text of ['NECESSARY_CONTINUATION_A','NECESSARY_CONTINUATION_B','FOREIGN_SELECTED_EVIDENCE'])assert.ok(wire.includes(text));
+ assert.deepEqual(retainDocumentSelectionContext({referenceIds:[]},p).referenceIds,[]);
+ const changed=structuredClone(c);changed.anchors.at(-1)!.body='Other original text.\n'.repeat(4000);
+ const large=prepareDocumentAnswer(q,changed),full=large.quoteUnits.filter(u=>u.supportId==='e7').slice(0,64).map(u=>u.id);assert.equal(full.length,64);
+ const limited=retainDocumentSelectionContext({referenceIds:full},large);
+ assert.equal(limited.sectionTextRetention?.status,'skipped-reference-limit');assert.deepEqual(limited.referenceIds,full);
+});
+
 test('supplemental query removes only the verified NFKC title span',()=>{
  assert.equal(focusedDocumentTextQuery('In Ｏriginal Research Paper, what domain?',title),'In  , what domain?');
  assert.equal(focusedDocumentTextQuery('In another paper, what domain?',title),null);

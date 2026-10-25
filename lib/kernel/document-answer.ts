@@ -8,8 +8,8 @@ import {COMPLETE_DOCUMENT_SOURCE_LIMITS,STUDY_PDF_PAGE_REGION_LIMITS,assertStudy
  type StudyPdfPageRegionObservation,type StudyPdfPageRegionRead,type LiteralCourseIdentityContext} from './document-context.ts';
 import {validateCompleteStudySource,type CompleteStudySourceProof} from './document-study-source.ts';
 import {documentTitleMention,buildDocumentQueryScopeRequest,validateDocumentQueryScope,type ResolvedDocumentSource} from './document-source.ts';
-import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentFigure,documentFigureCaptionCount,
- type DocumentFigureCaptionCandidate,type FocusedDocumentText} from './document-focused-text.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentFigure,documentFigureCaptionCount,locateDocumentSectionIntervals,
+ type DocumentSectionIntervalCandidates,type DocumentFigureCaptionCandidate,type FocusedDocumentText} from './document-focused-text.ts';
 import type {DocumentCitationAuditResponse} from './document-citation-audit.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {assertPreparedDoclingTextContextWindows,type PreparedDoclingTextContextWindows} from './docling-source-regions.ts';
@@ -536,6 +536,10 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const documentMetadata=[...new Map([...context.anchors,...context.imageAnchors??[]].map(hit=>[hit.document_id,{documentId:hit.document_id,
   name:hit.name,origin:hit.origin,originKey:hit.origin_key,sourceHash:hit.source_hash}])).values()];
  const mentionedSource=mentionedSourceIdentity(question,documentMetadata,supports);
+ const sectionIntervalCandidates=mentionedSource?locateDocumentSectionIntervals(question,mentionedSource.title,context.anchors
+  .filter(hit=>hit.document_id===mentionedSource.documentId&&hit.source_version_id===mentionedSource.sourceVersionId&&
+   hit.source_hash===mentionedSource.sourceHash&&hit.id===`pg:${mentionedSource.documentVersionId}:${hit.page_number}`)
+  .map(hit=>({physicalPage:hit.page_number,evidenceId:hit.evidence_id,body:hit.body}))):undefined;
  const figureCaptionCandidate=context.figureCaptionCandidate?structuredClone(context.figureCaptionCandidate):undefined;
  if(figureCaptionCandidate){
   const candidate=figureCaptionCandidate,source=candidate.source,
@@ -611,12 +615,14 @@ export function prepareDocumentAnswer(question:string,context:DocumentAnswerCont
  const fingerprintInput=boundReads.length?{input,sourceObservations:boundReads}:input;
  const baseFingerprint=sourceIdentityBindings.length?{input:fingerprintInput,sourceIdentityBindings}:fingerprintInput;
  const candidateFingerprint=figureCaptionCandidate?{input:baseFingerprint,figureCaptionCandidate}:baseFingerprint;
+ const scopedFingerprint=sectionIntervalCandidates?{input:candidateFingerprint,sectionIntervalCandidates}:candidateFingerprint;
  return {supports,quoteUnits,quoteUnitManifest,quoteUnitManifestSha256,...(visualUnitManifest?{visualUnitManifest}:{}),input,warnings,unavailableParents,
+  ...(sectionIntervalCandidates?{sectionIntervalCandidates}:{}),
   ...(figureCaptionCandidate?{figureCaptionCandidate}:{}),
   ...(context.pdfNavigation?{pdfNavigation:context.pdfNavigation}:{}),
   ...(regionReads.length?{pdfPageRegionReads:structuredClone(regionReads)}:{}),
   ...(sourceIdentityBindings.length?{sourceIdentityBindings}:{}),
-  fingerprint:sha(JSON.stringify(context.pdfNavigation?.pages.length?{input:candidateFingerprint,navigationObservations:context.pdfNavigation.pages.map(p=>p.observationSha256)}:candidateFingerprint))};
+  fingerprint:sha(JSON.stringify(context.pdfNavigation?.pages.length?{input:scopedFingerprint,navigationObservations:context.pdfNavigation.pages.map(p=>p.observationSha256)}:scopedFingerprint))};
 }
 
 /** Optional metadata never displaces original text or PNGs. Source drift uses
@@ -873,6 +879,9 @@ export type StoredNodeTextSelection={policy:'selected-stored-node-text-v1';provi
   inputScope:'available-original-quote-units';coverage:'unassessed';structureRelationsVerified:false};
  focusedTextRetention?:{policy:'bounded-mentioned-source-relevance-v1';retainedEvidenceIds:string[];skippedEvidenceIds:string[];
   textUtf8Bytes:number;addedReferenceIds:string[];coverage:'unassessed';structureRelationsVerified:false};
+ sectionTextRetention?:{candidates:DocumentSectionIntervalCandidates;source:DocumentMentionedSource;
+  status:'retained'|'skipped-size-limit'|'skipped-reference-limit'|'unavailable-text';textUtf8Bytes:number;addedReferenceIds:string[];
+  coverage:'unassessed';structureRelationsVerified:false};
  selectedSourceTextRetention?:{policy:'bounded-selected-source-version-text-v1';textUtf8Bytes:number;
   sources:Array<Pick<Support,'documentId'|'documentVersionId'|'sourceVersionId'|'sourceHash'>&{
    status:'retained'|'already-retained'|'skipped-size-limit'|'skipped-reference-limit';textUtf8Bytes:number;addedReferenceIds:string[]}>;
@@ -912,8 +921,24 @@ export function retainSelectedStoredNodeText(value:unknown,prepared:PreparedAnsw
  * 32 KiB and the existing 64-reference bound. No new reads, sources, images or
  * structural assertions; other selected sources stay available for synthesis. */
 function retainNamedDocumentSelectionContext(value:unknown,prepared:PreparedAnswer):StoredNodeTextSelection{
- const retained=retainSelectedStoredNodeText(value,prepared);
+ let retained=retainSelectedStoredNodeText(value,prepared);
  if(!retained.providerReferenceIds.length)return retained;
+ const sections=prepared.sectionIntervalCandidates,source=prepared.input.mentionedSource;
+ if(sections?.status==='available'&&source){
+  const supports=sections.pages.map(page=>prepared.supports.find(s=>s.kind==='text'&&s.documentId===source.documentId&&
+   s.documentVersionId===source.documentVersionId&&s.sourceVersionId===source.sourceVersionId&&s.sourceHash===source.sourceHash&&
+   s.evidenceId===page.evidenceId&&s.sha256===page.bodySha256)),supportIds=new Set(supports.filter(s=>s!==undefined).map(s=>s.id)),
+   units=generationQuoteUnits(prepared).filter(unit=>supportIds.has(unit.supportId)),ids=new Set(retained.referenceIds),
+   additions=units.filter(unit=>!ids.has(unit.id)),textUtf8Bytes=units.reduce((n,u)=>n+Buffer.byteLength(u.text),0),
+   status=supports.some(s=>!s||!units.some(u=>u.supportId===s.id))?'unavailable-text':textUtf8Bytes>FOCUSED_TEXT_LIMITS.bodyUtf8Bytes?
+    'skipped-size-limit':ids.size+additions.length>64?'skipped-reference-limit':'retained';
+  const sectionTextRetention:NonNullable<StoredNodeTextSelection['sectionTextRetention']>={candidates:sections,source,status,textUtf8Bytes,
+   addedReferenceIds:status==='retained'?additions.map(u=>u.id):[],coverage:'unassessed',structureRelationsVerified:false};
+  if(status==='retained')return {...retained,referenceIds:[...retained.referenceIds,...additions.map(u=>u.id)],
+   systemRetainedReferenceIds:[...retained.systemRetainedReferenceIds,...additions.map(u=>u.id)],
+   expandedSupportIds:[...new Set([...retained.expandedSupportIds,...additions.map(u=>u.supportId)])],sectionTextRetention};
+  retained={...retained,sectionTextRetention};
+ }
  // A bounded focus is an already validated subset of offered current text.
  // Keep whole pages in lexical relevance order, never evict another source or
  // treat an empty selector response as sufficient evidence.
