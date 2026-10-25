@@ -1233,10 +1233,11 @@ export class KernelService {
         const items=groups.get(key)??[];items.push(unit);groups.set(key,items);
       }
       for(const units of groups.values()){
-        const e=units[0].evidence,ids=[...new Set(units.map(u=>u.evidence.evidenceId))],nodes=[];
+        const e=units[0].evidence,ids=[...new Set(units.flatMap(u=>u.kind==='text'?[u.evidence.evidenceId]:[]))],nodes=[];
         for(let offset=0;offset<ids.length;offset+=14)nodes.push(...await this.readDocumentNodes(owner,
           {documentId:e.documentId,currentVersionId:e.documentVersionId,sourceVersionId:e.sourceVersionId,sourceHash:e.sourceHash},ids.slice(offset,offset+14)));
         for(const unit of units){
+          if(unit.kind!=='text')throw new DocumentEvidenceChangedError();
           const evidence=unit.evidence,node=nodes.find(n=>n.evidence_id===evidence.evidenceId),
             source=binding.sources.find(s=>s.documentId===evidence.documentId&&s.sourceHash===evidence.sourceHash);
           if(!node||!source||node.name!==source.name||node.origin!==source.origin||node.origin_key!==source.originKey||
@@ -1691,6 +1692,7 @@ export class KernelService {
         return context;
       };
     }
+    if(policy.sourceTextCitations){const previousRead=read;read=async()=>({...await previousRead(),sourceTextCitationPolicy:policy.sourceTextCitations});}
     const generated=await synthesizeDocumentAnswer(question,read,policy);
     const quantityCheck=policy.quantityConsistency?checkDocumentQuantityConsistency(question,generated.answer):undefined;
     const blocked=quantityCheck?.status==='explicit-incompatible-quantity';

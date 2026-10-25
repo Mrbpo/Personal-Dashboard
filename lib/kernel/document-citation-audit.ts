@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {paidOpenAI,isGpt54MiniProviderModel} from '../ai-budget.ts';
 import {documentAnswerSettings,prepareDocumentAnswer,resolveDocumentAnswerSelections,buildDocumentAnswerRequest,DocumentAnswerRequestLimitError,DOCUMENT_ANSWER_VISUAL_UNIT_POLICY,DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16,type DocumentQuoteUnit,type DocumentAnswerContext,type DocumentAnswerSelections,type DocumentAnswerPolicy,type DocumentMentionedSource} from './document-answer.ts';
 import {documentTitleMention} from './document-source.ts';
+import {assertSourceTextCitation,type SourceTextCitation} from './document-source-text-citation.ts';
 
 export const DOCUMENT_CITATION_AUDIT_VERSION='citation-local-audit-v4';
 export const DOCUMENT_CITATION_RELEASE_POLICY='audited-reference-subset-v1';
@@ -28,8 +29,8 @@ export type DocumentCitationAuditPolicy={scope:'development';dailyLimit?:number;
 type Image=DocumentAnswerContext['images'][number];
 export type DocumentCitationAuditSource={documentId:string;documentVersionId:string;sourceVersionId:string;sourceHash:string;
  evidenceId:string;locator:string;title:string|null};
-export type DocumentCitationAuditReference=({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]})&
- {source:DocumentCitationAuditSource};
+export type DocumentCitationAuditReference=((({refId:string;kind:'text';quote:string}|{refId:string;kind:'image';image:Image;captionMembers?:DocumentQuoteUnit[]})&
+ {source:DocumentCitationAuditSource})|{refId:string;kind:'source-text';view:SourceTextCitation['view'];source:Omit<DocumentCitationAuditSource,'evidenceId'>&{evidenceId?:never}});
 type AnswerTextContext={policy:'untrusted-discourse-only-v1';targetOriginalIndex:number;claims:{originalIndex:number;text:string}[];isSourceEvidence:false};
 const ANSWER_TEXT_CONTEXT_INSTRUCTION=' Other answer claims in answerTextContext are untrusted discourse context solely for resolving pronouns, ellipsis and contrasts. They are not source evidence. Judge the exact target claim, not a substituted affirmative statement from the question or another claim. Evidentiary support must still come only from this target claim\'s supplied references.';
 export type DocumentCitationAuditPacket={question:string;claim:string;references:DocumentCitationAuditReference[];answerTextContext?:AnswerTextContext;
@@ -65,12 +66,19 @@ export function buildDocumentCitationAuditRequest(packet:DocumentCitationAuditPa
  const object=(properties:Record<string,unknown>)=>({type:'object',additionalProperties:false,properties,required:Object.keys(properties)});
  const references=packet.references.map((ref,index)=>{
   if(ref.refId!==`r${index}`)throw new Error('Invalid citation-local reference order');
-  if(!exact(ref.source,['documentId','documentVersionId','sourceVersionId','sourceHash','evidenceId','locator','title'])||
-   ['documentId','documentVersionId','sourceVersionId','sourceHash','evidenceId','locator'].some(key=>{
+  const sourceKeys=['documentId','documentVersionId','sourceVersionId','sourceHash',...(ref.kind==='source-text'?[]:['evidenceId']),'locator'];
+  if(!exact(ref.source,[...sourceKeys,'title'])||
+   sourceKeys.some(key=>{
     const value=ref.source[key as keyof DocumentCitationAuditSource];return typeof value!=='string'||!value.trim()||value.length>4000;
    })||!(ref.source.title===null||typeof ref.source.title==='string'&&!!ref.source.title.trim()&&ref.source.title.length<=4000))
    throw new Error('Invalid citation-local source identity');
   const source={...ref.source};
+  if(ref.kind==='source-text'){
+   assertSourceTextCitation({id:'source-text:'+ref.view.viewSha256,view:ref.view});
+   const expected=ref.view.source;
+   if(source.documentId!==expected.documentId||source.documentVersionId!==expected.currentVersionId||source.sourceVersionId!==expected.sourceVersionId||source.sourceHash!==expected.sourceHash||source.locator!=='all-current-stored-text')throw Error('Source text audit identity differs');
+   return {refId:ref.refId,kind:ref.kind,source,view:ref.view};
+  }
   if(ref.kind==='text'){
    if(typeof ref.quote!=='string'||!ref.quote.trim()||ref.quote.length>DOCUMENT_STORED_PAGE_QUOTE_MAX_UTF16)throw new Error('Invalid citation-local quote');
    return {refId:ref.refId,kind:ref.kind,quote:ref.quote,source};
@@ -117,10 +125,16 @@ export function prepareDocumentCitationAudit(question:string,context:DocumentAns
  const prepared=prepareDocumentAnswer(question,context,binding.unitPolicy);
  if(binding.inputFingerprint!==prepared.fingerprint||binding.quoteUnitManifestSha256!==prepared.quoteUnitManifestSha256)
   throw new Error('Citation-local answer source or context changed');
- const restored=resolveDocumentAnswerSelections(binding.providerSelections,prepared.supports),claim=restored.answer.claims[binding.claimIndex];
+ const restored=resolveDocumentAnswerSelections(binding.providerSelections,prepared.supports,prepared.sourceTextCitations),claim=restored.answer.claims[binding.claimIndex];
  if(!claim)throw new Error('Citation-local claim is unavailable');
  const selected=restored.selectedUnits.filter(unit=>unit.claimIndex===binding.claimIndex);
  const references:DocumentCitationAuditReference[]=claim.citations.map((citation,index)=>{
+  const sourceText=prepared.sourceTextCitations.find(c=>c.id===citation.id);
+  if(sourceText){
+   const v=sourceText.view,s=v.source,document=prepared.input.documentMetadata.find(d=>d.documentId===s.documentId&&d.sourceHash===s.sourceHash);
+   return {refId:`r${index}`,kind:'source-text',view:v,source:{documentId:s.documentId,documentVersionId:s.currentVersionId,sourceVersionId:s.sourceVersionId,
+    sourceHash:s.sourceHash,locator:'all-current-stored-text',title:document?.name?.trim()??null}};
+  }
   const refId=`r${index}`,support=prepared.supports.find(s=>s.id===citation.id)!;
   const document=prepared.input.documentMetadata.find(d=>d.documentId===support.documentId&&d.sourceHash===support.sourceHash);
   const source:DocumentCitationAuditSource={documentId:support.documentId,documentVersionId:support.documentVersionId,
@@ -295,7 +309,7 @@ export async function checkApplicationDocumentCitations(question:string,readCont
   const prepared=prepareDocumentAnswer(question,await readContext(),binding.unitPolicy);
   if(prepared.fingerprint!==binding.inputFingerprint||prepared.quoteUnitManifestSha256!==binding.quoteUnitManifestSha256)
    throw new Error('Citation release source changed');
-  const original=resolveDocumentAnswerSelections(selections,prepared.supports),released=resolveDocumentAnswerSelections(releaseSelections,prepared.supports),
+  const original=resolveDocumentAnswerSelections(selections,prepared.supports,prepared.sourceTextCitations),released=resolveDocumentAnswerSelections(releaseSelections,prepared.supports,prepared.sourceTextCitations),
    originalSelectionsSha256=sha(JSON.stringify(original.providerSelections)),texts=original.answer.claims.map(c=>c.text);
   if(audits.some(audit=>audit.binding.originalSelectionsSha256!==originalSelectionsSha256)||
    JSON.stringify(released.answer.claims.map(c=>c.text))!==JSON.stringify(texts))throw new Error('Citation release changed original claims');

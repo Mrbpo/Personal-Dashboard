@@ -7,6 +7,32 @@ const {studyAnswerBackend,studyEvidenceSelection,studyCitationCheck,studySourceS
 const {documentAnswerSettings,DocumentModelResponseError}=await import('../lib/kernel/document-answer.ts');
 const tutor=await import('../lib/tutor.ts');
 const {SourceValueHeaderError}=await import('../lib/kernel/document-source-values.ts');
+
+test('source-text citation configuration reaches Kernel and publishes an explicit manifest-bound view URL',async()=>{
+ const {studySourceTextCitations}=await import('../lib/study-answer.ts');
+ assert.equal(studySourceTextCitations('off'),undefined);assert.equal(studySourceTextCitations('current-source-view-v1'),'current-source-view-v1');
+ assert.throws(()=>studySourceTextCitations('guess'),StudyAnswerError);
+ const values={STUDY_SOURCE_TEXT_CITATIONS:'current-source-view-v1',STUDY_ANSWER_BACKEND:'kernel',STUDY_EVIDENCE_SELECTION:'select-then-answer',
+  STUDY_CITATION_CHECK:'selected-once',STUDY_SOURCE_VALUES:'off',STUDY_SOURCE_QUANTITIES:'off',STUDY_SCOPE_ANNOTATIONS:'off',
+  STUDY_SOURCE_SCOPE:'off',OPENAI_MODEL:'gpt-5.4-mini',STUDY_CITATION_TRACE_DIR:`${process.cwd()}/data/source-text-fixture-never-written`},
+  env=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]])),saved=kernel.answerStudyContent;
+ let calls=0;
+ try{
+  Object.assign(process.env,values);
+  kernel.answerStudyContent=async(_owner,_question,_scope,policy)=>{calls++;assert.equal(policy?.sourceTextCitations,'current-source-view-v1');await documentAnswerSettings(policy);
+   const evidence={kind:'source-text',documentId:'real-doc',documentVersionId:'version',sourceVersionId:'sv',sourceHash:'hash',scope:'current-persisted-text-v1',
+    locator:'all-current-stored-text',manifestSha256:'a'.repeat(64),viewSha256:'b'.repeat(64),sourceNodeCount:4};
+   return {answer:{status:'answered',message:'',claims:[{text:'A text-scope conclusion.',citations:[]}]},selectedUnits:[{claimIndex:0,citationIndex:0,evidence}],
+    sourceDocuments:[{documentId:'real-doc',name:'Scope.pdf'}],warnings:[],textEvidenceCount:4,imageEvidenceCount:0,model:null} as unknown as Awaited<ReturnType<typeof saved>>;};
+  const result=await answerKernelStudy('owner','Synthetic source-scope question','',[]),url=new URL(result.citations[0].url,'http://test');
+  assert.equal(url.pathname,'/api/library/real-doc');assert.equal(url.searchParams.get('scope'),'current-persisted-text-v1');
+  assert.equal(url.searchParams.get('manifest'),'a'.repeat(64));assert.equal(url.searchParams.get('sourceVersion'),'sv');
+  assert.equal(url.searchParams.has('evidenceId'),false);assert.equal(url.searchParams.has('snapshot'),false);assert.equal(result.answer,'A text-scope conclusion. [S1]');
+  process.env.STUDY_EVIDENCE_SELECTION='single-pass';
+  await assert.rejects(answerKernelStudy('owner','Synthetic question','',[]),(e:unknown)=>e instanceof StudyAnswerError&&e.code==='source-text-citations-require-selection-check');
+  assert.equal(calls,1);
+ }finally{kernel.answerStudyContent=saved;for(const[k,v]of Object.entries(env))if(v===undefined)delete process.env[k];else process.env[k]=v;}
+});
 test('literal scope output is opt-in, reaches the application policy and rejects specialized contracts',async()=>{
  const {studyScopeAnnotations}=await import('../lib/study-answer.ts');
  assert.equal(studyScopeAnnotations('off'),undefined);assert.equal(studyScopeAnnotations('literal-source-v1'),'literal-source-v1');

@@ -24,7 +24,9 @@ export function documentSourceTextViewRequest(documentId:string,query:URLSearchP
 
 /** Pure projection of a Kernel-authorized read, not an authorization method.
  * Preserve original node boundaries and IDs: no synthetic cross-page quote. */
-export function buildDocumentSourceTextView(read:DocumentTextSourceRead,manifestSha256?:string){
+type SourceTextViewRead=Extract<DocumentTextSourceRead,{status:'unavailable'}>|{
+ status:'available';manifest:DocumentTextSourceRead['manifest'];context:Pick<Extract<DocumentTextSourceRead,{status:'available'}>['context'],'anchors'>};
+export function buildDocumentSourceTextView(read:SourceTextViewRead,manifestSha256?:string){
  assertPin(manifestSha256);
  const {manifest}=read,{manifestSha256:actual,...unsignedManifest}=manifest;
  if(sha(canonical(unsignedManifest))!==actual)invalid();

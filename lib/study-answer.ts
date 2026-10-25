@@ -51,6 +51,10 @@ export function studyCitationCheck(value=process.env.STUDY_CITATION_CHECK??'off'
  if(value!=='off'&&value!=='selected-once')throw new StudyAnswerError('configuration','invalid-citation-check','引用核对配置无效');
  return value==='off'?undefined:value;
 }
+export function studySourceTextCitations(value=process.env.STUDY_SOURCE_TEXT_CITATIONS??'off'){
+ if(value!=='off'&&value!=='current-source-view-v1')throw new StudyAnswerError('configuration','invalid-source-text-citations','全文引用配置无效');
+ return value==='off'?undefined:value;
+}
 export function studySourceValues(value=process.env.STUDY_SOURCE_VALUES??'off'){
  if(value!=='off'&&value!=='difference-v1'&&value!=='cell-bindings-v2')throw new StudyAnswerError('configuration','invalid-source-values','来源值配置无效');
  return value==='off'?undefined:value;
@@ -166,6 +170,9 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
   throw new StudyAnswerError('configuration','cell-bindings-require-native-declarations','单元格绑定需要启用原生单元格观察');
  const quantityConsistency=studyQuantityConsistency();
  const sourceQuantityContract=studySourceQuantities();
+ const sourceTextCitations=studySourceTextCitations();
+ if(sourceTextCitations&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
+  throw new StudyAnswerError('configuration','source-text-citations-require-selection-check','全文引用需要内核、证据选择和引用核对');
  if(sourceQuantityContract&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
   throw new StudyAnswerError('configuration','source-quantities-require-selection-check','来源数值绑定需要内核、证据选择和引用核对');
  if(textContextWindows&&(studyAnswerBackend()!=='kernel'||evidenceSelection!=='select-then-answer'||citationMode!=='selected-once'))
@@ -188,6 +195,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
    semantic:process.env.KERNEL_DOCUMENT_SEMANTIC==='true',hybrid:process.env.KERNEL_DOCUMENT_HYBRID==='true',
    aiRerank:process.env.KERNEL_DOCUMENT_RERANK==='true'},
    {scope:'application',model:model as DocumentAnswerModel,reasoningEffort:'low',maxOutputTokens:3000,timeoutMs:55000,evidenceSelection,citationCheck,
+    ...(sourceTextCitations?{sourceTextCitations}:{}),
     ...(scopeAnnotations?{scopeAnnotations}:{}),
     ...(quantityConsistency?{quantityConsistency}:{}),
     ...(sourceQuantityContract?{sourceQuantityContract,recordSourceQuantityRawResponse:recorder!.recordSourceQuantityRaw,recordSourceQuantityDerivation:recorder!.recordSourceQuantities}:{}),
@@ -206,6 +214,11 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
   const citations=[...refs].map(([key,ref])=>{
    const evidence=JSON.parse(key) as (typeof selected)[number]['evidence'];
    const name=result.sourceDocuments.find(document=>document.documentId===evidence.documentId)?.name??evidence.documentId;
+   if(evidence.kind==='source-text'){
+    const query=new URLSearchParams({evidence:'1',scope:evidence.scope,version:evidence.documentVersionId,sourceVersion:evidence.sourceVersionId,
+     sourceHash:evidence.sourceHash,manifest:evidence.manifestSha256});
+    return {ref,title:`${name} · 正文全文`,url:`/api/library/${encodeURIComponent(evidence.documentId)}?${query}`,parser_warnings:result.warnings,evidence};
+   }
    const query=new URLSearchParams({evidence:'1',snapshot:'1',version:evidence.documentVersionId,sourceVersion:evidence.sourceVersionId,
     sourceHash:evidence.sourceHash,evidenceId:evidence.evidenceId});
    return {ref,title:`${name} · ${evidence.locator}`,url:`/api/library/${encodeURIComponent(evidence.documentId)}?${query}`,
@@ -227,6 +240,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
      ...(sourceIdentityContext?{sourceIdentityContext}:{}),
      ...(nativeCellObservations?{nativeCellObservations}:{}),
      ...(textContextWindows?{textContextWindows}:{}),
+     ...(sourceTextCitations?{sourceTextCitations}:{}),
      ...(scopeAnnotations?{scopeAnnotations}:{}),
      ...(generationReasoningEffort?{evidenceSelectionReasoningEffort:'low'}:{})},
     inputFingerprint:result.inputFingerprint,providerRequestSha256:result.providerRequestSha256,
@@ -240,6 +254,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     ...('sourceRouting' in result?{sourceRouting:result.sourceRouting}:{}),
     ...('evidenceSelection' in result?{evidenceSelection:result.evidenceSelection}:{}),
     ...('citationCheck' in result?{citationCheck:result.citationCheck}:{}),
+    ...('sourceTextCitationCatalog' in result?{sourceTextCitationCatalog:result.sourceTextCitationCatalog}:{}),
     ...('quantityConsistency' in result?{quantityConsistency:result.quantityConsistency}:{}),
     ...('sourceQuantityContract' in result?{sourceQuantityContract:result.sourceQuantityContract}:{}),
     ...('sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?{sourceQuantityDerivation:result.sourceQuantityDerivation,
