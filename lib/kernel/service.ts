@@ -19,7 +19,8 @@ import {nativeWhitespaceFingerprint} from './native-whitespace.ts';
 import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
  type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
 import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
-import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,type FocusedDocumentText} from './document-focused-text.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText,
+ type DocumentQuotedTextLocation,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
 import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
 import {bindDocumentQuestionName} from './document-name-binding.ts';
@@ -1350,7 +1351,7 @@ export class KernelService {
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
     options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true,identityCourseCodes?:string[],
-    imagePageFocus?:{source:DocumentContextSource;physicalPage:number}){
+    imagePageFocus?:{source:DocumentContextSource;physicalPage?:number;quotedLiteral?:string;onLocation?:(value:DocumentQuotedTextLocation)=>void}){
     const {includeParents=false,includeImages=false,...searchOptions}={...options,
       ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     const limit=searchOptions.limit??14;
@@ -1377,32 +1378,42 @@ export class KernelService {
           throw new DocumentEvidenceChangedError();
       }
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
-      const preferredPdfPageEvidenceIds=imagePageFocus?current.filter(hit=>hit.document_id===imagePageFocus.source.documentId&&
-        hit.source_hash===imagePageFocus.source.sourceHash&&hit.source_version_id===imagePageFocus.source.sourceVersionId&&
-        hit.id===`pg:${imagePageFocus.source.currentVersionId}:${imagePageFocus.physicalPage}`&&hit.page_number===imagePageFocus.physicalPage)
-        .map(hit=>hit.evidence_id):[];
-      let requestedPage:DocumentEvidenceHit|undefined;
+      const requestedPages:DocumentEvidenceHit[]=[];
       let requestedImages:DocumentAnswerContext['images']=[];
-      if(imageBudget&&imagePageFocus&&!preferredPdfPageEvidenceIds.length){
-        // Literal page requests may be absent from lexical top-14. Read exactly
-        // that owned current source node, never replace the original ranking.
-        const source=imagePageFocus.source,pages=await readDocumentSourcePages(kernelPool(),owner,source),
-          page=pages.nodes.find(node=>node.kind==='page'&&node.ordinal+1===imagePageFocus.physicalPage);
-        if(page){
-          [requestedPage]=await readDocumentNodes(kernelPool(),owner,source,[page.evidenceId]);
-          const visual=await readPdfVisualEvidence(kernelPool(),owner,source,[page.evidenceId],undefined,
-            {pageAssetsOnly:true,selection:{budget:imageBudget,anchorRank:current.length+1}});
+      if(imageBudget&&imagePageFocus){
+        const source=imagePageFocus.source;
+        if(imagePageFocus.physicalPage!==undefined){
+          const existing=current.find(hit=>hit.document_id===source.documentId&&hit.source_hash===source.sourceHash&&
+            hit.source_version_id===source.sourceVersionId&&hit.id===`pg:${source.currentVersionId}:${imagePageFocus.physicalPage}`);
+          if(existing)requestedPages.push(existing);
+          else{const pages=await readDocumentSourcePages(kernelPool(),owner,source),page=pages.nodes.find(node=>node.kind==='page'&&node.ordinal+1===imagePageFocus.physicalPage);
+            if(page)requestedPages.push(...await readDocumentNodes(kernelPool(),owner,source,[page.evidenceId]));}
+        }else if(imagePageFocus.quotedLiteral){
+          const text=await this.readCompleteDocumentText(owner,source),location=locateDocumentQuotedText(imagePageFocus.quotedLiteral,
+            text.status==='available'?text.context.anchors.filter(hit=>hit.content_kind==='page').map(hit=>({physicalPage:hit.page_number,evidenceId:hit.evidence_id,body:hit.body})):[]);
+          imagePageFocus.onLocation?.(text.status==='unavailable'?{...location,reason:'source-text:'+text.reason}:location);
+          if(location.status==='available'){
+            const nodes=await readDocumentNodes(kernelPool(),owner,source,location.pages.map(page=>page.evidenceId));
+            if(nodes.some((node,index)=>node.page_number!==location.pages[index].physicalPage||focusedTextQueryHash(node.body)!==location.pages[index].bodySha256))throw new DocumentEvidenceChangedError();
+            requestedPages.push(...nodes);
+          }
+        }
+        let extraRank=current.length;
+        for(const page of requestedPages){
+          const rank=current.findIndex(hit=>hit.evidence_id===page.evidence_id),visual=await readPdfVisualEvidence(kernelPool(),owner,source,[page.evidence_id],undefined,
+            {pageAssetsOnly:true,selection:{budget:imageBudget,anchorRank:rank>=0?rank+1:++extraRank}});
           if(visual.registered&&visual.renderStatus!=='available')throw new DocumentContextError('DOCUMENT_IMAGE_UNAVAILABLE','Requested current PDF page image unavailable');
-          requestedImages=visual.images;
+          requestedImages.push(...visual.images);
         }
       }
       let context:DocumentAnswerContext&{accounting?:DocumentContextRead['accounting']}=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,
-        ...(preferredPdfPageEvidenceIds.length?{preferredPdfPageEvidenceIds}:{}),...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
+        ...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
-      if(requestedPage){
+      if(requestedPages.length){
+        const extras=requestedPages.filter(page=>!context.anchors.some(hit=>hit.evidence_id===page.evidence_id));
         const images=[...new Map([...requestedImages,...context.images].map(image=>[image.attachmentId,image])).values()];
-        context={...context,anchors:[...context.anchors,requestedPage],images,imageSelection:imageBudget!.snapshot(),
-          ...(context.accounting?{accounting:{...context.accounting,anchorCount:context.anchors.length+1,
+        context={...context,anchors:[...context.anchors,...extras],images,imageSelection:imageBudget!.snapshot(),
+          ...(context.accounting?{accounting:{...context.accounting,anchorCount:context.anchors.length+extras.length,
             imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
       }
       if(!tableCandidates.length)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
@@ -1465,8 +1476,11 @@ export class KernelService {
       await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope}):undefined;
     const pageSource=mentionedForImages?.status==='resolved'?mentionedForImages.matches[0]:undefined;
     const requestedPage=pageSource?explicitDocumentPage(question,pageSource.title):null;
-    const imagePageFocus=pageSource&&requestedPage&&(!routedOptions.documentId||routedOptions.documentId===pageSource.documentId)&&
-      (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===pageSource.title)?{source:pageSource,physicalPage:requestedPage}:undefined;
+    const quotedLiteral=pageSource&&!requestedPage?documentQuotedLiteral(question,pageSource.title):null;
+    let quotedTextLocation:DocumentQuotedTextLocation|undefined;
+    const imagePageFocus=pageSource&&(requestedPage||quotedLiteral)&&(!routedOptions.documentId||routedOptions.documentId===pageSource.documentId)&&
+      (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===pageSource.title)?{source:pageSource,
+        ...(requestedPage?{physicalPage:requestedPage}:{quotedLiteral:quotedLiteral!,onLocation:(value:DocumentQuotedTextLocation)=>{quotedTextLocation=value;}})}:undefined;
     const originalRankedRead=await this.studyAnswerContextReader(owner,retrievalQuestion??question,routedOptions,true,identityCourseCodes,imagePageFocus);
     let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
     let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>|ReturnType<typeof classificationGuardAnswerObservation>;
@@ -1675,6 +1689,7 @@ export class KernelService {
         releasedAnswer=released;
       }
     }
+    if(quotedTextLocation)contextExpansion={...contextExpansion,quotedTextLocation:{source:pageSource,...quotedTextLocation}};
     return {...result,...(releasedAnswer?{answer:releasedAnswer.answer,selectedUnits:releasedAnswer.selectedUnits}:{}),
       contextExpansion,...(sourceRouting?{sourceRouting}:{}),...(citationCheck?{citationCheck}:{}),
       ...(contentTagRouting?{contentTagRouting}:{}),...(classificationRouting?{classificationRouting}:{}),...(sourceIdentityContext?{sourceIdentityContext}:{})};

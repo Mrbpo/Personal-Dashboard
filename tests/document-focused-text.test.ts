@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage} from '../lib/kernel/document-focused-text.ts';
+import {focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText} from '../lib/kernel/document-focused-text.ts';
 import {prepareDocumentAnswer,retainDocumentSelectionContext,buildSelectedDocumentAnswerRequest,type DocumentAnswerContext} from '../lib/kernel/document-answer.ts';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),title='Original Research Paper.pdf',question='In Original Research Paper, what domain was evaluated?';
 const source={documentId:'target',currentVersionId:'v',sourceVersionId:'sv',sourceHash:'source-hash'};
@@ -30,6 +30,30 @@ test('literal page preference ignores title numbers and refuses ambiguous ranges
  const numberedTitle='Research page 25.pdf';
  assert.equal(explicitDocumentPage(`In ${numberedTitle}, describe the image.`,numberedTitle),null);
  assert.equal(explicitDocumentPage('In another source, page 25?',title),null);
+});
+
+test('quoted literal locates lost word spaces as candidates while preserving raw bodies and unknown neighbor relation',()=>{
+ const literal='MATRIX FACTORISATION DERIVATION',pages=[{physicalPage:1,evidenceId:'p1',body:'Unrelated introduction.'},
+  {physicalPage:2,evidenceId:'p2',body:'F MATRIXFACTORISATIONDERIVATION\nFirst derivation.'},
+  {physicalPage:3,evidenceId:'p3',body:'A following page; section membership is unknown.'}],before=JSON.stringify(pages),
+  extracted=documentQuotedLiteral(`In "${title}", based on “${literal}”, compare the methods.`,title);
+ assert.equal(extracted,literal);const result=locateDocumentQuotedText(extracted!,pages);
+ assert.equal(result.status,'available');assert.equal(result.semanticsVerified,false);assert.equal(result.adjacentPageRelationship,'unknown');
+ assert.deepEqual(result.pages.map(p=>[p.physicalPage,p.evidenceId,p.role]),[[2,'p2','literal-match-candidate'],[3,'p3','next-page-candidate']]);
+ assert.equal(result.pages[0].bodySha256,sha(pages[1].body));assert.equal(JSON.stringify(pages),before);
+ assert.equal(locateDocumentQuotedText(literal,pages.slice(0,2)).pages.length,1,'last-page match cannot invent a neighbor');
+ assert.equal(documentQuotedLiteral(`关于《${title}》，“线性代数课程学习要求”是什么？`,title),'线性代数课程学习要求');
+});
+
+test('quoted location falls back on ambiguity, missing text, limits or incomplete page sequences',()=>{
+ const literal='MATRIX FACTORISATION DERIVATION',page={physicalPage:1,evidenceId:'p1',body:literal};
+ assert.equal(documentQuotedLiteral(`In ${title}, "${literal}" and "Probability distribution estimation"?`,title),null);
+ assert.equal(documentQuotedLiteral(`In ${title}, "Figure 1"?`,title),null);
+ assert.equal(documentQuotedLiteral(`In another source, "${literal}"?`,title),null);
+ for(const pages of [[page,{...page,physicalPage:2,evidenceId:'p2'}],[{...page,body:literal+' '+literal}],
+  [{...page,physicalPage:2}],[],[{...page,body:'x'.repeat(262145)}],[{...page,body:'Different source text.'}]]){
+  const result=locateDocumentQuotedText(literal,pages);assert.equal(result.status,'unavailable');assert.deepEqual(result.pages,[]);
+ }
 });
 test('focused original text survives selection without deleting another selected source',()=>{
  const c=fixture(),p=prepareDocumentAnswer(question,c),other=p.quoteUnits.find(q=>q.supportId==='e1')!,

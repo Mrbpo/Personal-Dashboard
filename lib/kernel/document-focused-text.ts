@@ -30,3 +30,36 @@ export function explicitDocumentPage(question:string,title:string):number|null{
  const pages=[...new Set(matches.map(match=>Number(match[1]??match[2])))];
  return pages.length===1&&Number.isSafeInteger(pages[0])?pages[0]:null;
 }
+
+const compactLiteral=(value:string)=>value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
+const specificLiteral=(value:string)=>Array.from(value).length<=160&&
+ ((compactLiteral(value).length>=16&&(value.match(/[\p{L}\p{N}]+/gu)?.length??0)>=3)||(value.match(/\p{Script=Han}/gu)?.length??0)>=8);
+/** User-supplied literal only. It is a page locator, never a verified heading. */
+export function documentQuotedLiteral(question:string,title:string):string|null{
+ const residual=focusedDocumentTextQuery(question,title);if(!residual)return null;
+ const candidates=[...residual.matchAll(/"([^"\n]{1,200})"|“([^”\n]{1,200})”|「([^」\n]{1,200})」/gu)]
+  .map(match=>(match[1]??match[2]??match[3]).trim()).filter(specificLiteral),unique=new Map(candidates.map(value=>[compactLiteral(value),value]));
+ return unique.size===1?[...unique.values()][0]:null;
+}
+export type DocumentQuotedTextLocation={policy:'literal-quoted-text-candidates-v1';literalSha256:string;
+ status:'available'|'unavailable';reason:string|null;semanticsVerified:false;adjacentPageRelationship:'unknown';
+ pages:Array<{physicalPage:number;evidenceId:string;bodySha256:string;role:'literal-match-candidate'|'next-page-candidate'}>};
+/** Match despite lost whitespace without rewriting text or claiming section
+ * membership. A following physical page is just an explicitly unknown neighbor. */
+export function locateDocumentQuotedText(literal:string,pages:Array<{physicalPage:number;evidenceId:string;body:string}>):DocumentQuotedTextLocation{
+ const result:DocumentQuotedTextLocation={policy:'literal-quoted-text-candidates-v1',literalSha256:focusedTextQueryHash(literal),
+  status:'unavailable',reason:null,semanticsVerified:false,adjacentPageRelationship:'unknown',pages:[]};
+ const unavailable=(reason:string)=>({...result,reason});
+ if(!specificLiteral(literal))return unavailable('literal-not-specific');
+ if(!pages.length||pages.length>512||pages.some((page,index)=>page.physicalPage!==index+1||!page.evidenceId)||
+  new Set(pages.map(page=>page.evidenceId)).size!==pages.length)return unavailable('incomplete-page-sequence');
+ if(pages.reduce((n,page)=>n+Buffer.byteLength(page.body),0)>262144)return unavailable('source-text-byte-limit');
+ const needle=compactLiteral(literal);let found=-1;
+ for(const[index,page]of pages.entries()){
+  const body=compactLiteral(page.body),position=body.indexOf(needle);if(position<0)continue;
+  if(found>=0||body.indexOf(needle,position+1)>=0)return unavailable('ambiguous-literal');found=index;
+ }
+ if(found<0)return unavailable('literal-not-found');
+ return {...result,status:'available',pages:pages.slice(found,found+2).map((page,index)=>({physicalPage:page.physicalPage,
+  evidenceId:page.evidenceId,bodySha256:focusedTextQueryHash(page.body),role:index?'next-page-candidate':'literal-match-candidate'}))};
+}
