@@ -110,14 +110,14 @@ test('actual PG composition: 14 same-PDF and interleaved multi-PDF anchors retai
  const originalSearch=kernel.searchDocumentText,originalTableSearch=kernel.searchNativeTableCandidates,originalFetch=globalThis.fetch;
  let priorityCalls=0;
  try{
-  kernel.searchDocumentText=async(_owner,_question,options)=>single.hits.slice(0,options?.limit??14)
+  kernel.searchDocumentText=async(_owner,_question,options)=>single.hits.slice(0,Math.min(options?.limit??14,13))
    .map(({reader_selection:_selection,retrieval_mode:_mode,...hit})=>({...hit,score:1,retrieval_mode:'keyword' as const}));
   kernel.searchNativeTableCandidates=async()=>[];
   globalThis.fetch=async(_url,init)=>{
    priorityCalls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
    assert.equal(input.imageSelection.included[0].physicalPage,14,'actual application generator receives the requested original first');
    assert.equal(input.imageSelection.accounting.images,6);
-   assert.equal(input.evidence.filter((item:{kind:string})=>item.kind==='text').length,14);
+   assert.equal(input.evidence.filter((item:{kind:string})=>item.kind==='text').length,14,'all 13 ranked nodes plus the requested page absent from lexical search');
    return Response.json({status:'completed',model:'gpt-5-mini',usage:{input_tokens:100,output_tokens:10},output_text:JSON.stringify({
     status:'insufficient-evidence',message:'Synthetic plumbing check only.',claims:[]})});
   };

@@ -33,7 +33,7 @@ import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerClu
 import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
 import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentPageRegions,readDocumentPageRegionsForImages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
  readCompleteDocumentSource,readCompleteDocumentText,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
- type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest,type DocumentParentReadOptions} from './document-context.ts';
+ type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest,type DocumentParentReadOptions,type DocumentContextRead} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
 import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type DocumentVectorScope} from './document-vector.ts';
 import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,readPdfInternalLinkEvidence,pdfVisualBlobHashes,
@@ -1376,9 +1376,30 @@ export class KernelService {
         hit.source_hash===imagePageFocus.source.sourceHash&&hit.source_version_id===imagePageFocus.source.sourceVersionId&&
         hit.id===`pg:${imagePageFocus.source.currentVersionId}:${imagePageFocus.physicalPage}`&&hit.page_number===imagePageFocus.physicalPage)
         .map(hit=>hit.evidence_id):[];
-      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,
+      let requestedPage:DocumentEvidenceHit|undefined;
+      let requestedImages:DocumentAnswerContext['images']=[];
+      if(imageBudget&&imagePageFocus&&!preferredPdfPageEvidenceIds.length){
+        // Literal page requests may be absent from lexical top-14. Read exactly
+        // that owned current source node, never replace the original ranking.
+        const source=imagePageFocus.source,pages=await readDocumentSourcePages(kernelPool(),owner,source),
+          page=pages.nodes.find(node=>node.kind==='page'&&node.ordinal+1===imagePageFocus.physicalPage);
+        if(page){
+          [requestedPage]=await readDocumentNodes(kernelPool(),owner,source,[page.evidenceId]);
+          const visual=await readPdfVisualEvidence(kernelPool(),owner,source,[page.evidenceId],undefined,
+            {pageAssetsOnly:true,selection:{budget:imageBudget,anchorRank:current.length+1}});
+          if(visual.registered&&visual.renderStatus!=='available')throw new DocumentContextError('DOCUMENT_IMAGE_UNAVAILABLE','Requested current PDF page image unavailable');
+          requestedImages=visual.images;
+        }
+      }
+      let context:DocumentAnswerContext&{accounting?:DocumentContextRead['accounting']}=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,
         ...(preferredPdfPageEvidenceIds.length?{preferredPdfPageEvidenceIds}:{}),...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
+      if(requestedPage){
+        const images=[...new Map([...requestedImages,...context.images].map(image=>[image.attachmentId,image])).values()];
+        context={...context,anchors:[...context.anchors,requestedPage],images,imageSelection:imageBudget!.snapshot(),
+          ...(context.accounting?{accounting:{...context.accounting,anchorCount:context.anchors.length+1,
+            imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
+      }
       if(!tableCandidates.length)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
       const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
         imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined);
