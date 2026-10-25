@@ -110,7 +110,8 @@ test('actual PG composition: 14 same-PDF and interleaved multi-PDF anchors retai
  const originalSearch=kernel.searchDocumentText,originalTableSearch=kernel.searchNativeTableCandidates,originalFetch=globalThis.fetch;
  let priorityCalls=0;
  try{
-  kernel.searchDocumentText=async()=>single.hits.map(({reader_selection:_selection,retrieval_mode:_mode,...hit})=>({...hit,score:1,retrieval_mode:'keyword' as const}));
+  kernel.searchDocumentText=async(_owner,_question,options)=>single.hits.slice(0,options?.limit??14)
+   .map(({reader_selection:_selection,retrieval_mode:_mode,...hit})=>({...hit,score:1,retrieval_mode:'keyword' as const}));
   kernel.searchNativeTableCandidates=async()=>[];
   globalThis.fetch=async(_url,init)=>{
    priorityCalls++;const request=JSON.parse(String(init?.body)),input=JSON.parse(request.input[1].content[0].text);
