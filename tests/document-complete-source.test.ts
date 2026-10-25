@@ -102,9 +102,11 @@ test('application retains a missed current paragraph and its selected original P
   evidenceSelection:'select-then-answer',beforeAttempt:async identity=>{
    attempts++;assert.ok(observed&&observed.status==='available');
    const expanded=mergeStudyEvidence(base,observed.context);assert.ok(expanded);
-   const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),request=buildDocumentEvidenceSelectionRequest(prepared,
+   const prepared=prepareDocumentAnswerForPolicy(question,{...expanded,persistedTextProof:observed.manifest},policy),request=buildDocumentEvidenceSelectionRequest(prepared,
     {model:'gpt-5.4-mini',reasoningEffort:'low',maxOutputTokens:3000},policy),input=JSON.parse((request.input[1].content as any[])[0].text);
    assert.equal(identity,hash(JSON.stringify({version:DOCUMENT_EVIDENCE_SELECTION_VERSION,providerRequestSha256:hash(JSON.stringify(request)),fingerprint:prepared.fingerprint})));
+   assert.equal(prepared.persistedTextCoverage?.sourceManifestSha256,observed.manifest.manifestSha256);
+   assert.equal('persistedTextCoverage' in input,false,'coverage changes the provenance fingerprint, not selector evidence');
    assert.ok(input.quoteUnits.some((q:{text:string})=>q.text===item.pages[19].text));
    assert.equal(expanded.images.length,1);assert.equal(hash(expanded.images[0].bytes),hash(png));
    assert.equal('completeSourceProof' in input,false);assert.equal(observed.manifest.visualCompletenessVerified,false);
