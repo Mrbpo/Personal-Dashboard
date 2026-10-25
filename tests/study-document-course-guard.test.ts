@@ -44,3 +44,45 @@ test('a unique current document resolves academic keyword false positives withou
   for(const n of names){if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}
  }
 });
+
+test('independently named documents can compare experiments without choosing a course or narrowing caller scope',async()=>{
+ const names=['STUDY_ANSWER_BACKEND','STUDY_COURSE_ROUTING','OPENAI_MODEL','STUDY_SOURCE_SCOPE','STUDY_CITATION_CHECK',
+  'STUDY_SOURCE_VALUES','STUDY_SOURCE_QUANTITIES','STUDY_TEXT_CONTEXT_WINDOWS'] as const,
+  env=Object.fromEntries(names.map(n=>[n,process.env[n]])),saved={courses:kernel.listCourses,counts:kernel.documentRoutingCounts,
+   find:kernel.findMentionedDocumentSources,answer:kernel.answerStudyContent,fetch:globalThis.fetch};
+ const sources=[{documentId:'paper-a',title:'Independent Evaluation Methods.pdf',currentVersionId:'v1',sourceVersionId:'s1',sourceHash:'h1'},
+  {documentId:'paper-b',title:'Reliable Inference Experiments.pdf',currentVersionId:'v2',sourceVersionId:'s2',sourceHash:'h2'}],
+  scope={excludedCourseIds:['stats'],origins:['upload']},calls:any[]=[];
+ let unique=true,lookups=0;
+ try{
+  process.env.STUDY_ANSWER_BACKEND='kernel';process.env.OPENAI_MODEL='gpt-5.4-mini';for(const n of names.slice(3))process.env[n]='off';
+  kernel.listCourses=async()=>[{id:'chem',code:'CHMA10H3',name:'Chemistry',enabled:true},{id:'stats',code:'STAB22H3',name:'Statistics',enabled:true}] as any;
+  kernel.documentRoutingCounts=async()=>({eligibleDocuments:3,routedDocuments:3,eligiblePages:3,routedPages:3});
+  kernel.findMentionedDocumentSources=async()=>{lookups++;return {status:'ambiguous',matches:sources,
+   ...(unique?{uniqueTitleSources:sources}:{})};};
+  kernel.answerStudyContent=async(owner,question,options)=>{calls.push({owner,question,options});return {
+   answer:{status:'insufficient-evidence',message:'Synthetic wiring only.',claims:[]},selectedUnits:[],sourceDocuments:[],
+   warnings:[],textEvidenceCount:0,imageEvidenceCount:0,model:'gpt-5.4-mini'} as any;};
+  globalThis.fetch=async()=>{throw Error('No provider calls in course-entry boundary check');};
+  const question=`对比《${sources[0].title}》和《${sources[1].title}》的实验内容。`;
+  for(const mode of ['off','explicit-codes-v1']){
+   process.env.STUDY_COURSE_ROUTING=mode;const id=await tutor.createTutorThread('multi-owner','');
+   await tutor.sendTutor('multi-owner',id,'multi-document-title-'+mode,question,[],false,'',scope);
+   const call=calls.at(-1);assert.equal(call.owner,'multi-owner');assert.equal(call.question,question);
+   assert.deepEqual(call.options.routingScope,scope);assert.equal(call.options.courseId,undefined);
+   assert.equal(call.options.documentId,undefined);assert.equal(call.options.sourceHint,undefined);
+   const state=await tutor.tutorState('multi-owner',id);assert.equal(state.threads.find(t=>t.id===id)?.course_id,'');
+   assert.deepEqual(state.messages.at(-1)!.meta.study.documentAttribution,{policy:'multiple-mentioned-documents-before-course-guard-v1',
+    sources,courseOwnershipVerified:false,scopeApplied:false});
+   unique=false;await assert.rejects(tutor.sendTutor('multi-owner',id,'duplicate-document-title-'+mode,question,[],false,'',scope),
+    (e:any)=>e.code==='course-scope-ambiguous');unique=true;
+   const before=lookups;await assert.rejects(tutor.sendTutor('multi-owner',id,'unknown-course-title-'+mode,'CHMA100 assignment '+question,[],false,'',scope),
+    (e:any)=>e.code==='course-scope-ambiguous');assert.equal(lookups,before,'unknown literal course is still rejected before title rescue');
+  }
+  assert.equal(calls.length,2);
+ }finally{
+  kernel.listCourses=saved.courses;kernel.documentRoutingCounts=saved.counts;kernel.findMentionedDocumentSources=saved.find;
+  kernel.answerStudyContent=saved.answer;globalThis.fetch=saved.fetch;
+  for(const n of names){if(env[n]===undefined)delete process.env[n];else process.env[n]=env[n];}
+ }
+});

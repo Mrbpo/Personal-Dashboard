@@ -68,7 +68,20 @@ test('different current documents with the same normalized title and multiple na
  const result=await findMentionedDocumentSources(metadata([a,b,c]).pool,'alice',`Compare “${a.title}” with “${c.title}”.`);
  assert.deepEqual(result,{status:'ambiguous',matches:[a,b]});
  const distinct=await findMentionedDocumentSources(metadata([a,c]).pool,'alice',`Compare “${a.title}” with “${c.title}”.`);
- assert.deepEqual(distinct,{status:'ambiguous',matches:[a,c]});
+ assert.deepEqual(distinct,{status:'ambiguous',matches:[a,c],uniqueTitleSources:[a,c]});
+});
+
+test('multiple title attribution requires every matching row to have its own non-overlapping span and stays bounded',async()=>{
+ const a=doc('a','Independent Evaluation Methods.pdf'),b=doc('b','Practical Matrix Calculations.pdf'),
+  c=doc('c','Reliable Inference Experiments.pdf'),question=`Compare “${a.title}”, “${b.title}” and “${c.title}”.`;
+ assert.deepEqual((await findMentionedDocumentSources(metadata([a,b,c]).pool,'alice',question)).uniqueTitleSources,[a,b,c]);
+ assert.equal((await findMentionedDocumentSources(metadata([a,b,c,{...b,documentId:'later-duplicate'}]).pool,'alice',question)).uniqueTitleSources,undefined,
+  'a duplicate after the legacy first two results must invalidate the complete set');
+ const short=doc('short','Probability Lecture Notes.pdf'),long=doc('long','Advanced Probability Lecture Notes.pdf');
+ assert.equal((await findMentionedDocumentSources(metadata([short,long]).pool,'alice',`Use “${long.title}”.`)).uniqueTitleSources,undefined);
+ const many=Array.from({length:9},(_,i)=>doc('d'+i,`Independent Source Number ${i}.pdf`)),q=many.map(d=>`“${d.title}”`).join(' versus ');
+ const result=await findMentionedDocumentSources(metadata(many).pool,'alice',q);
+ assert.equal(result.status,'ambiguous');assert.equal(result.matches.length,2);assert.equal(result.uniqueTitleSources,undefined,'no truncated set is certified');
 });
 
 test('conservative Han-title boundary, rejected early substrings and empty input do not conceal a unique full title',async()=>{

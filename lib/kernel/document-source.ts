@@ -32,7 +32,9 @@ export function validateDocumentQueryScope(value:unknown):DocumentQueryScope{
   throw new Error('Invalid question source scope response');
  return {...v};
 }
-export type MentionedDocumentSources={status:'not-mentioned'|'resolved'|'ambiguous';matches:ResolvedDocumentSource[]};
+export type MentionedDocumentSources={status:'not-mentioned'|'resolved'|'ambiguous';matches:ResolvedDocumentSource[];
+ /** Complete bounded set of independently named sources; never an exclusive retrieval scope. */
+ uniqueTitleSources?:ResolvedDocumentSource[]};
 /** Literal accent spelling only. Never evaluate TeX, remove diacritics, expand
  * unknown commands or alter stored names. Offsets map back to the NFKC input. */
 function literalTitleAccents(value:string){
@@ -155,16 +157,23 @@ export async function findMentionedDocumentSources(pool:Pool,owner:string,questi
     AND newer.origin=d.origin AND newer.origin_key=d.origin_key AND NOT newer.hidden
     AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
   ORDER BY d.id`,args)).rows;
- const matches:ResolvedDocumentSource[]=[];
+ const matches:ResolvedDocumentSource[]=[],spans:Array<{start:number;end:number}>=[];
  for(const row of rows){
   const mention=documentTitleMention(question,row.title);if(!mention)continue;
   const title=literalTitleAccents(mention.text).text,words=title.match(/[\p{L}\p{N}]+/gu)??[];
   if(!((Array.from(title).length>=12&&words.filter(word=>Array.from(word).length>=2).length>=2)||
    (title.match(/\p{Script=Han}/gu)?.length??0)>=8))continue;
   matches.push(row);
-  if(matches.length===2)break;
+  spans.push(mention);
  }
- return {status:matches.length===1?'resolved':matches.length?'ambiguous':'not-mentioned',matches};
+ // Inspect every matching row before certifying distinct names: a duplicate
+ // appearing later in metadata must not be hidden by the old two-row cap.
+ // Overlapping mentions (including PDF-stem collisions) do not identify
+ // independent sources. Keep the old bounded ambiguous result for callers.
+ const unique=matches.length>1&&matches.length<=8&&spans.every((span,i)=>spans.every((other,j)=>
+  i===j||span.end<=other.start||other.end<=span.start));
+ return {status:matches.length===1?'resolved':matches.length?'ambiguous':'not-mentioned',matches:matches.slice(0,2),
+  ...(unique?{uniqueTitleSources:matches}:{})};
 }
 
 export function requireResolvedDocumentSource(resolution:DocumentSourceResolution):ResolvedDocumentSource{

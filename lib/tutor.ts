@@ -158,8 +158,9 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     const recentQuestions = context.filter(m => m.role === 'user').slice(-2).map(m => m.body).join(' ');
     let activeCourse=thread.course_id;
     let answerScope=routingScope,courseRouting:QuestionCourseRoute|undefined;
-    let documentAttribution:{policy:'unique-mentioned-document-before-course-guard-v1';source:ResolvedDocumentSource;
-      courseOwnershipVerified:false;scopeApplied:false}|undefined;
+    let documentAttribution:({policy:'unique-mentioned-document-before-course-guard-v1';source:ResolvedDocumentSource}|
+      {policy:'multiple-mentioned-documents-before-course-guard-v1';sources:ResolvedDocumentSource[]})&
+      {courseOwnershipVerified:false;scopeApplied:false}|undefined;
     const explicitTarget=routingScope?.courseIds!==undefined||routingScope?.documentIds!==undefined;
     if(!activeCourse&&backend==='kernel'&&!explicitTarget){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
@@ -169,6 +170,11 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
         // only removes a keyword false positive; it never becomes a filter.
         if(literalCourseRoute.status!=='none')return false;
         const named=await kernel.findMentionedDocumentSources(owner,question,{routingScope});
+        if(named.uniqueTitleSources){
+          documentAttribution={policy:'multiple-mentioned-documents-before-course-guard-v1',sources:named.uniqueTitleSources,
+            courseOwnershipVerified:false,scopeApplied:false};
+          return true;
+        }
         if(named.status!=='resolved')return false;
         documentAttribution={policy:'unique-mentioned-document-before-course-guard-v1',source:named.matches[0],
           courseOwnershipVerified:false,scopeApplied:false};
