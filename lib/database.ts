@@ -97,7 +97,7 @@ const schema = [
   `CREATE INDEX IF NOT EXISTS idx_changes_detected ON changes(detected_at)`,
   `CREATE INDEX IF NOT EXISTS idx_changes_course ON changes(course_id)`,
   `CREATE TABLE IF NOT EXISTS sync_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL, course_states_json TEXT NOT NULL DEFAULT '{}', error TEXT, started_at TEXT NOT NULL, finished_at TEXT)`,
-  `CREATE TABLE IF NOT EXISTS settings (owner_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT 'America/Toronto', daily_minutes INTEGER NOT NULL DEFAULT 150, updated_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS settings (owner_id TEXT PRIMARY KEY, timezone TEXT NOT NULL DEFAULT 'America/Toronto', updated_at TEXT NOT NULL)`,
   `PRAGMA optimize`,
 ];
 
