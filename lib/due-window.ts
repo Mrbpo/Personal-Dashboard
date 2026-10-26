@@ -1,6 +1,7 @@
 import type { LearningTask } from './domain.ts';
 
 export const DUE_WINDOW_DAYS = 16;
+export const OVERDUE_WINDOW_DAYS = 7;
 type DeadlineTask = Pick<LearningTask, 'id' | 'dueAt' | 'dueDate' | 'duePrecision' | 'localStatus' | 'canvasStatus' | 'cancelledAt'>;
 
 export function calendarDay(now: number, timezone: string) {
@@ -27,11 +28,16 @@ export function taskDeadline(task: DeadlineTask, timezone: string, now = Date.no
   return Number.isFinite(instant) ? { day: calendarDay(instant, timezone), overdue: instant < now, instant } : null;
 }
 
+export function deadlineWindowBounds(timezone: string, now = Date.now()) {
+  const today = calendarDay(now, timezone);
+  return {start:addCalendarDays(today,-OVERDUE_WINDOW_DAYS),end:addCalendarDays(today,DUE_WINDOW_DAYS)};
+}
+
 export function dueWindow<T extends DeadlineTask>(tasks: T[], timezone: string, now = Date.now()): T[] {
-  const end = addCalendarDays(calendarDay(now, timezone), DUE_WINDOW_DAYS);
+  const {start,end} = deadlineWindowBounds(timezone,now);
   return tasks.filter(task => task.localStatus === 'active' && task.canvasStatus !== 'completed' && !task.cancelledAt)
     .map(task => ({ task, deadline: taskDeadline(task, timezone, now) }))
-    .filter((row): row is { task: T; deadline: NonNullable<ReturnType<typeof taskDeadline>> } => Boolean(row.deadline && row.deadline.day < end))
+    .filter((row): row is { task: T; deadline: NonNullable<ReturnType<typeof taskDeadline>> } => Boolean(row.deadline && row.deadline.day >= start && row.deadline.day < end))
     .sort((a, b) => a.deadline.day.localeCompare(b.deadline.day) || (a.deadline.instant ?? -Infinity) - (b.deadline.instant ?? -Infinity) || a.task.id.localeCompare(b.task.id))
     .map(row => row.task);
 }

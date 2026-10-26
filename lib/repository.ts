@@ -286,16 +286,16 @@ export async function listChanges() {
 }
 
 export async function getSettings(ownerId: string) {
-  const row = await getDatabase().prepare("SELECT * FROM settings WHERE owner_id=?").bind(ownerId).first<D1Row>();
-  return row ? { timezone: row.timezone, dailyMinutes: row.daily_minutes, displayName: String(row.display_name || "") } : { timezone: "America/Toronto", dailyMinutes: 150, displayName: "" };
+  const row = await getDatabase().prepare("SELECT timezone,display_name FROM settings WHERE owner_id=?").bind(ownerId).first<D1Row>();
+  return row ? { timezone: row.timezone, displayName: String(row.display_name || "") } : { timezone: "America/Toronto", displayName: "" };
 }
 
-export async function saveSettings(ownerId: string, timezone: string, dailyMinutes: number, displayName?: string) {
+export async function saveSettings(ownerId: string, timezone: string, displayName?: string) {
   const name = displayName ?? (await getSettings(ownerId)).displayName;
   await getDatabase().prepare(
-    `INSERT INTO settings (owner_id, timezone, daily_minutes, updated_at, display_name) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(owner_id) DO UPDATE SET timezone=excluded.timezone, daily_minutes=excluded.daily_minutes, updated_at=excluded.updated_at, display_name=excluded.display_name`
-  ).bind(ownerId, timezone, dailyMinutes, new Date().toISOString(), name).run();
+    `INSERT INTO settings (owner_id, timezone, updated_at, display_name) VALUES (?, ?, ?, ?)
+     ON CONFLICT(owner_id) DO UPDATE SET timezone=excluded.timezone, updated_at=excluded.updated_at, display_name=excluded.display_name`
+  ).bind(ownerId, timezone, new Date().toISOString(), name).run();
 }
 
 export async function listCourseSettings() {

@@ -17,10 +17,8 @@ export async function PUT(request: Request) {
     return Response.json({ error: "显示姓名请控制在 40 个字符以内" }, { status: 400 });
   }
   const timezone = payload.timezone?.trim() || "America/Toronto";
-  // Retired capacity settings remain in history; ordinary settings updates do not rewrite them.
-  const dailyMinutes = (await getSettings(user!.userId)).dailyMinutes;
   try { new Intl.DateTimeFormat("en", { timeZone: timezone }).format(); }
   catch { return Response.json({ error: "无效时区" }, { status: 400 }); }
-  await saveSettings(user!.userId, timezone, dailyMinutes, payload.displayName?.trim());
+  await saveSettings(user!.userId, timezone, payload.displayName?.trim());
   return Response.json(await getSettings(user!.userId));
 }

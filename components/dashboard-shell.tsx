@@ -142,9 +142,8 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
   const nextDeadline = visibleTasks.find((task: any) => task.tone !== 'overdue');
   const coursesDueSoon = visibleCourses.filter((course: any) => course.upcomingCount > 0).sort((a: any, b: any) => b.upcomingCount - a.upcomingCount).slice(0, 8);
   const taskGroups = [
-    { key: 'must', title: '未完成的逾期作业', note: '保留最后确认的截止日期与当前状态', tasks: visibleTasks.filter((task: any) => task.tone === 'overdue') },
-    { key: 'advance', title: '近期截止', note: '今天起 7 个日历日内', tasks: visibleTasks.filter((task: any) => task.tone === 'soon') },
-    { key: 'review', title: '未来截止', note: '第 8 至第 16 个日历日内，尚未开放的作业也保留', tasks: visibleTasks.filter((task: any) => task.tone === 'future') },
+    { key: 'must', title: '最近一周逾期', note: '过去 7 个日历日至现在，尚未完成', tasks: visibleTasks.filter((task: any) => task.tone === 'overdue') },
+    { key: 'advance', title: '临近截止', note: '今天起 16 个日历日内，尚未开放的作业也保留', tasks: visibleTasks.filter((task: any) => task.tone !== 'overdue') },
   ];
 
   async function previewSync() {
@@ -225,7 +224,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
               </div>
               <div className="status-ledger-frame grid gap-px rounded-2xl border bg-border sm:grid-cols-3">
                 <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">下一个截止</p><p className="mt-1 truncate text-sm font-semibold">{nextDeadline ? `${nextDeadline.course} · ${nextDeadline.due}` : "暂无确定截止"}</p></div>
-                <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">日期范围</p><p className="mt-1 text-sm font-semibold">今天起 16 个日历日 · 另含未完成逾期</p></div>
+                <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">日期范围</p><p className="mt-1 text-sm font-semibold">未来 16 天 · 最近一周逾期</p></div>
                 <div className="bg-card p-3"><p className="text-[11px] font-semibold text-muted-foreground">阻塞与逾期</p><p className={`mt-1 text-sm font-semibold ${overdueCount + nextCount ? "text-amber-700" : "text-emerald-700"}`}>{overdueCount} 项逾期 · {nextCount} 项受限</p></div>
               </div>
               {taskGroups.map((group) => group.tasks.length ? <details key={group.key} open className={`group/list ledger-group ledger-${group.key} min-w-0 overflow-hidden border bg-card`}><summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5"><div><h3 className="text-sm font-semibold after:ml-1 after:text-primary after:content-['＋'] group-open/list:after:content-['－']">{group.title}</h3><p className="mt-0.5 text-xs text-muted-foreground">{group.note}</p></div><Badge variant="secondary">{group.tasks.length} 项</Badge></summary><div className="divide-y">{group.tasks.map((task: any) => {
@@ -258,7 +257,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
                   </article>
                 );
               })}</div></details> : null)}
-              {loaded && visibleTasks.length === 0 && visibleCourses.length > 0 && <div className="rounded-3xl border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">没有未完成的逾期作业或未来 16 天内的明确截止作业。</div>}
+              {loaded && visibleTasks.length === 0 && visibleCourses.length > 0 && <div className="rounded-3xl border border-dashed bg-card p-8 text-center text-sm text-muted-foreground">没有最近一周逾期或未来 16 天内截止的未完成作业。</div>}
               <AiUsagePanel />
             </section>
 

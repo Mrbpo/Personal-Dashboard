@@ -8,6 +8,9 @@ const repository = await import('../lib/repository.ts');
 test('dashboard reads canonical deadline tasks without reading or rewriting retired plan history', async () => {
   const db = repository.getDatabase();
   const day = '2026-10-13';
+  assert.equal(await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_plans'").first(),null);
+  // Simulate an upgraded database; the retired table is no longer provisioned.
+  await db.prepare('CREATE TABLE daily_plans(date TEXT PRIMARY KEY,plan_json TEXT,source_version TEXT,ai_available INTEGER,generated_at TEXT)').run();
   // Invalid legacy JSON would break the dashboard if a plan read still existed.
   await db.prepare('INSERT INTO daily_plans(date,plan_json,source_version,ai_available,generated_at) VALUES(?,?,?,?,?)')
     .bind(day, 'retired invalid JSON', 'historical-version', 1, 'historical-time').run();
@@ -21,6 +24,8 @@ test('dashboard reads canonical deadline tasks without reading or rewriting reti
   kernel.taskRows = async () => [
     { ...base, id: 'first-date', due_date: day },
     { ...base, id: 'second-date', due_date: '2026-10-15' },
+    { ...base, id: 'week-overdue', due_date: '2026-10-06' },
+    { ...base, id: 'old-overdue', due_date: '2026-10-05' },
     { ...base, id: 'outside', title: 'Later', due_date: '2026-10-29' },
     { ...base, id: 'cancelled', title: 'Cancelled', due_date: day, cancelled_at: '2026-10-12T12:00:00Z' },
   ];
@@ -28,7 +33,7 @@ test('dashboard reads canonical deadline tasks without reading or rewriting reti
     synced_at: null, start_at: null, end_at: null }];
   try {
     const result = await repository.dashboardData(day, 'America/Toronto', Date.parse('2026-10-13T18:00:00Z'));
-    assert.deepEqual(result.tasks.map(task => task.id), ['first-date', 'second-date']);
+    assert.deepEqual(result.tasks.map(task => task.id), ['week-overdue','first-date', 'second-date']);
     assert.equal(result.tasks[0].canvasStatus, 'locked');
     assert.equal('plan' in result, false);
     assert.equal('aiAvailable' in result, false);
