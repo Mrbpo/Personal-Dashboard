@@ -2,6 +2,7 @@ import {kernel} from './kernel/service.ts';
 import {serviceValue} from './service-vault.ts';
 import {DocumentModelResponseError,type DocumentAnswerModel} from './kernel/document-answer.ts';
 import {DocumentCitationCheckError} from './kernel/document-citation-audit.ts';
+import {DocumentContextError} from './kernel/document-context.ts';
 import {SourceValueHeaderError} from './kernel/document-source-values.ts';
 import {SourceCellBindingError} from './kernel/document-source-cell-bindings.ts';
 import {SourceQuantityOperationError} from './kernel/document-source-quantities.ts';
@@ -91,7 +92,7 @@ export function studyGenerationReasoning(value=process.env.STUDY_GENERATION_REAS
 export function studyGenerationModel(value=process.env.STUDY_GENERATION_MODEL){
  if(value===undefined)return undefined;
  if(value!=='gpt-6.1-sol')throw new StudyAnswerError('configuration','invalid-generation-model','生成候选模型配置无效');
- assertDocumentDevelopmentRun();
+ if(process.env.STUDY_ALLOW_CANDIDATE_GENERATION!=='true')assertDocumentDevelopmentRun();
  return value;
 }
 /** Server-only, explicit generation envelope. Selection/defaults stay unchanged. */
@@ -270,6 +271,7 @@ export async function answerKernelStudy(owner:string,question:string,courseId:st
     semanticVerified:false,wholeAnswerVerified:false}}};
  }catch(error){
   if(error instanceof StudyAnswerError)throw error;
+  if(error instanceof DocumentContextError)throw new StudyAnswerError('structure-storage',error.code,'来源页面结构尚不可用，请先完成资料解析；本轮未发布答案',{cause:error});
   if(error instanceof DocumentModelResponseError)throw new StudyAnswerError(stage,error.code,
    error.code==='model-output-limit'?'模型在输出限制内未完成回答，本轮未发布答案':'模型响应未完成，本轮未发布答案',{cause:error});
   if(error instanceof SourceCellBindingError)throw new StudyAnswerError(error.stage,error.code,'来源单元格或完整标签路径未通过绑定验证，本轮未发布答案',{cause:error});

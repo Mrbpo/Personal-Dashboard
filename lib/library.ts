@@ -44,7 +44,17 @@ export async function saveDocument(owner:string,course:string,origin:string,key:
   await db.prepare('UPDATE library_documents SET folder_path=? WHERE id=? AND owner_id=?').bind(folderPath,id,owner).run();
   return id;
 }
-export async function listDocuments(owner:string) {return (await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results.map(document=>({...document,folder_path:inferredFolder(document)}));}
+export async function listDocuments(owner:string) {
+ const documents=(await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results;
+ if(process.env.STUDY_ANSWER_BACKEND!=='kernel')return documents.map(document=>({...document,folder_path:inferredFolder(document)}));
+ const pdfIds=documents.filter(document=>document.mime==='application/pdf').map(document=>document.id);
+ const heads=new Map((await kernel.selectedStudyDocuments(owner,pdfIds)).map(source=>[source.id,source]));
+ return documents.map(document=>{
+  const pdf=document.mime==='application/pdf',ready=heads.get(document.id)?.sourceHash===document.hash;
+  return {...document,folder_path:inferredFolder(document),...(pdf?{kernelStatus:ready?'ready':'not-indexed',
+   status:ready?'ready':document.status==='ready'?'pending':document.status}:{})};
+ });
+}
 export async function listSourceFailures(owner:string){return (await db.prepare('SELECT origin,origin_key,course_id,name,error,updated_at FROM library_source_failures WHERE owner_id=? ORDER BY updated_at DESC').bind(owner).all()).results;}
 export async function recordSourceFailure(owner:string,origin:string,key:string,course:string,name:string,error:string){await db.prepare('INSERT INTO library_source_failures VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,origin,origin_key) DO UPDATE SET course_id=excluded.course_id,name=excluded.name,error=excluded.error,updated_at=excluded.updated_at').bind(owner,origin,key,course,name.slice(0,200),error,new Date().toISOString()).run();}
 export async function clearSourceFailure(owner:string,origin:string,key:string){await db.prepare('DELETE FROM library_source_failures WHERE owner_id=? AND origin=? AND origin_key=?').bind(owner,origin,key).run();}
@@ -243,6 +253,14 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const persistedRows:CandidateRow[]=persisted.filter(row=>compatibilityIds.has(row.document_id)
       ? allowed.get(row.document_id)?.hash===row.source_hash : !path)
     .map(row=>({...row,parser_warnings:row.parser_warnings||[],folder_path:allowed.get(row.document_id)?.folder_path||'',contentScore:row.score}));
+  if(process.env.STUDY_ANSWER_BACKEND==='kernel'){
+    // Legacy rows remain available for migration but cannot become a second
+    // content authority or silently fill gaps in the Kernel result.
+    return persistedRows.slice(0,Math.min(options.limit??20,240)).map(row=>{
+      if(!row.id||typeof row.body!=='string'||typeof row.locator!=='string')throw new Error('Kernel evidence is incomplete');
+      return {...row,id:row.id,body:row.body,locator:row.locator,score:row.contentScore??0};
+    });
+  }
   let raw:CandidateRow[]=[];
   if(strict){
     raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;

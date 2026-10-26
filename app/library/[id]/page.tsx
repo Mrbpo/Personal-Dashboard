@@ -7,20 +7,25 @@ import {previewDocument} from '@/lib/library';
 import {MiniAiFeedback} from '@/components/mini-ai-feedback';
 import {PdfFormulaReparse} from '@/components/pdf-formula-reparse';
 import {getPdfFormulaReparseStatus} from '@/lib/pdf-formula-reparse';
+import {LibraryStudyPanel} from '@/components/library-study-panel';
+import {studyAnswerBackend} from '@/lib/study-answer';
 
 export const dynamic='force-dynamic';
 
-export default async function Page({params}:{params:Promise<{id:string}>}){
+export default async function Page({params,searchParams}:{params:Promise<{id:string}>;searchParams:Promise<{page?:string|string[]}>}){
   const owner=await getCurrentOwner();
   if(!owner)return <PageFrame eyebrow="PRIVATE LIBRARY" title="请先登录" description="登录后才可预览私人资料。"><Button asChild><Link href="/login">前往登录</Link></Button></PageFrame>;
   const {id}=await params;
+  const requestedPage=(await searchParams).page;
+  const initialPage=typeof requestedPage==='string'&&/^[1-9]\d*$/.test(requestedPage)&&Number.isSafeInteger(Number(requestedPage))?Number(requestedPage):1;
   let preview;
   try{preview=await previewDocument(owner.userId,id);}catch{return <PageFrame eyebrow="PRIVATE LIBRARY" title="无法打开资料" description="资料可能已被移除或暂时不可用。"><Button asChild variant="outline"><Link href="/library">返回资料库</Link></Button></PageFrame>;}
   const {document,text,pages}=preview,source=`/api/library/${encodeURIComponent(id)}?preview=1`,formulaStatus=document.mime==='application/pdf'?await getPdfFormulaReparseStatus(owner.userId,id):null;
   return <PageFrame eyebrow="LIBRARY PREVIEW" title={document.name} description={`${document.course_id||'通用资料'} · ${document.folder_path||'根目录'} · ${document.size===0?0:Math.max(1,Math.round(document.size/1024))} KB`}>
     <div className="mb-4 flex flex-wrap gap-2"><Button asChild variant="outline"><Link href="/library">返回资料目录</Link></Button><Button asChild variant="outline"><a href={`/api/library/${encodeURIComponent(id)}`}>下载原件</a></Button></div>
     {document.mime==='application/pdf'?<>
-      <PdfReaderShell source={source} name={document.name} documentId={document.id}/>
+      <PdfReaderShell source={source} name={document.name} documentId={document.id} initialPage={initialPage}/>
+      {studyAnswerBackend()==='kernel'&&<div className="mt-6"><LibraryStudyPanel initialDocumentIds={[document.id]} embedded/></div>}
       <section className="mt-8 overflow-hidden rounded-2xl border bg-card" id="text-version">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-4"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-muted-foreground">TEXT VERSION</p><h2 className="mt-1 text-xl font-semibold">PDF 文字版本</h2></div><span className="text-sm text-muted-foreground">{pages.length?`${pages.length} 页已转换`:document.status==='error'?'正在重新尝试转换':'正在转换'}</span></div>
         {formulaStatus&&<PdfFormulaReparse documentId={id} initialStatus={formulaStatus}/>}

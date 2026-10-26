@@ -4,9 +4,13 @@ import Link from 'next/link';
 import {Button} from './ui/button';
 import {ConfirmReview} from './confirm-review';
 import {MiniAiFeedback} from './mini-ai-feedback';
+import {LibraryStudyPanel} from './library-study-panel';
 type State={threads:any[];messages:any[];archive:any[];vocabulary:any[];questionCount:number};
 const empty:State={threads:[],messages:[],archive:[],vocabulary:[],questionCount:0};
-export function StudyWorkbench({courses}:{courses:{id:string;code:string}[]}){
+export function StudyWorkbench({courses,kernelEnabled=false}:{courses:{id:string;code:string}[];kernelEnabled?:boolean}){
+ return kernelEnabled?<LibraryStudyPanel/>:<LegacyStudyWorkbench courses={courses}/>;
+}
+function LegacyStudyWorkbench({courses}:{courses:{id:string;code:string}[]}){
  const [data,setData]=useState<State>(empty),[thread,setThread]=useState(''),[course,setCourse]=useState(''),[tab,setTab]=useState('对话'),[question,setQuestion]=useState(''),[files,setFiles]=useState<File[]>([]),[online,setOnline]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState('');const [publicQuery,setPublicQuery]=useState('');const fileRef=useRef<HTMLInputElement>(null);const current=useRef('');
  async function refresh(id=thread){const r=await fetch('/api/tutor'+(id?'?thread='+encodeURIComponent(id):''));const j=await r.json();if(!r.ok)throw new Error(j.error);if(current.current===id)setData(j);}
  useEffect(()=>{current.current=thread;void refresh(thread).catch(e=>setError(e.message));},[thread]);

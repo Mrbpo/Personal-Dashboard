@@ -130,8 +130,9 @@ export async function paidOpenAI(endpoint:'responses'|'embeddings',body:any,sign
   if(body.model!=='gpt-6.1-sol'&&process.env.AI_BUDGET_TEST_BYPASS==='true' && process.env.NODE_ENV!=='production') return fetch(`https://api.openai.com/v1/${endpoint}`,{method:'POST',headers:{Authorization:`Bearer ${serviceValue('OPENAI_API_KEY')}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
   const rate=configuredRate(body.model);
   const sol=body.model==='gpt-6.1-sol';
-  if(sol&&(endpoint!=='responses'||policy?.kind!=='document-answer'||process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true'))
-    throw new Error('Sol generation is restricted to isolated study development');
+  if(sol&&(endpoint!=='responses'||policy?.kind!=='document-answer'||
+    (process.env.STUDY_ALLOW_CANDIDATE_GENERATION!=='true'&&process.env.KERNEL_ADMIN_DEVELOPMENT_RUN!=='true')))
+    throw new Error('Sol generation requires explicit application configuration or isolated study development');
   // Seal before the first await: callers cannot mutate evidence/model/schema
   // between the count, budget reservation and generation transmission.
   const solWire=sol?JSON.stringify(body):undefined;

@@ -5,6 +5,9 @@ import { dirname, resolve } from "node:path";
 type RowObject = Record<string, unknown>;
 
 const schema = [
+  `CREATE TABLE IF NOT EXISTS tutor_study_requests (owner_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL, payload_hash TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(owner_id,request_id))`,
+  `CREATE TABLE IF NOT EXISTS tutor_study_sessions (thread_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, query_mode TEXT NOT NULL, document_ids_json TEXT NOT NULL DEFAULT '[]', revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS tutor_study_scope_versions (thread_id TEXT NOT NULL, revision INTEGER NOT NULL, query_mode TEXT NOT NULL, document_ids_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(thread_id,revision))`,
   `CREATE TABLE IF NOT EXISTS tutor_memory (thread_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, through_count INTEGER NOT NULL, summary TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS tutor_memory_vectors (message_id TEXT NOT NULL, model TEXT NOT NULL, vector TEXT NOT NULL, PRIMARY KEY(message_id,model))`,
   `CREATE TABLE IF NOT EXISTS library_parse_pages (document_id TEXT NOT NULL, parser TEXT NOT NULL, page INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(document_id,parser,page))`,

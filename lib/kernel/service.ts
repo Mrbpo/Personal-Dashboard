@@ -13,6 +13,8 @@ import {contentTopicJobMode,queueIngestedTopicJobs,runDocumentTopicJob} from './
 import {contentTagAnswerObservation} from './content-tag-routing.ts';
 import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
 import {classificationGuardAnswerObservation} from './classification-route-guard.ts';
+import {answerCourseFacts as readCourseFacts,refreshCourseFactValidity as refreshFactValidity} from './course-facts.ts';
+import {queueDocumentCourseFactJob,runDocumentCourseFactJob,assertDocumentCourseFactBatch,type DocumentCourseFactBatch} from './document-course-facts.ts';
 import {observeLiteralCourseCodes} from './question-course-routing.ts';
 import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
@@ -129,6 +131,7 @@ type CandidateInput = {
   confidence: number; authority: string; locator: string;
   acquiredAt: string; publishedAt?: string | null; validFrom?: string | null;
   pendingReason?: string;
+  forcePending?: boolean;
 };
 
 const stableId = (...parts: string[]) => createHash('sha256').update(parts.join('\u0000')).digest('hex');
@@ -261,8 +264,15 @@ async function acceptCandidate(client: PoolClient, candidateId: string, reason: 
 async function recordCandidate(client: PoolClient, input: CandidateInput): Promise<string> {
   if(!Number.isFinite(input.confidence)||input.confidence<0||input.confidence>1)
     throw new Error('Candidate confidence must be between 0 and 1');
-  if(!['course_payload','enabled','task_payload','due','cancelled','local_status','event_payload'].includes(input.attribute))
+  if(!['course_payload','enabled','task_payload','due','cancelled','local_status','event_payload','course_policy','course_requirement','exam'].includes(input.attribute))
     throw new Error('Unsupported canonical attribute');
+  if(['course_policy','course_requirement','exam'].includes(input.attribute)){
+    const value=input.value as Record<string,unknown>;
+    if(!value||value.schemaVersion!==1||typeof value.text!=='string'||!value.text.trim()||
+      !['assignment','due','submission','grading','policy','exam'].includes(String(value.kind))||
+      (value.date!==null&&(typeof value.date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.date))))
+      throw new Error('Invalid course fact candidate');
+  }
   if(input.attribute==='due'){
     const due=input.value as Deadline;
     if(!due||typeof due.original!=='string'||
@@ -283,11 +293,12 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
   const evidenceId = stableId(input.sourceVersionId,input.locator);
   await client.query(
     `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,published_at,original_excerpt,
-      parsed_value,confidence,valid_from,locator)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
+      parsed_value,confidence,valid_from,locator,validity_basis)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING`,
     [evidenceId,input.sourceVersionId,input.source,input.sourceItemId,input.acquiredAt,safeDate(input.publishedAt),
       input.originalExcerpt,JSON.stringify(input.value),input.confidence,
-      safeDate(input.validFrom)??safeDate(input.publishedAt)??input.acquiredAt,input.locator]);
+      safeDate(input.validFrom)??safeDate(input.publishedAt)??input.acquiredAt,input.locator,
+      safeDate(input.validFrom)?'explicit':safeDate(input.publishedAt)?'published':'observed']);
   const candidateId = stableId(input.entityId,input.attribute,evidenceId);
   await client.query(
     `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority,reason)
@@ -299,6 +310,7 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
     [input.entityId,input.attribute,JSON.stringify(input.value)])).rows[0];
   const status = (await client.query<{status:string}>('SELECT status FROM candidate_facts WHERE id=$1',[candidateId])).rows[0].status;
   if (status !== 'pending') return candidateId;
+  if(input.forcePending)return candidateId;
   if (existing?.same_value) {
     if(input.authority==='canvas' && ['task_payload','due'].includes(input.attribute)){
       const types=(await client.query<{chosen_type:string;incoming_type:string}>(
@@ -1083,7 +1095,7 @@ export class KernelService {
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
       if(tagMetadata==='metadata-v1')await recordContentMetadataTags(client,owner,document.id,parsedVersion);
       if(tagMetadata==='metadata-classifications-v1')await recordIngestedContentClassification(client,owner,document.id,parsedVersion);
-      if(options.pdfVisuals||options.sourceMath){
+      if(options.pdfVisuals||options.sourceMath||document.mime==='application/pdf'){
         const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
         if(options.pdfVisuals)await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
         await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,
@@ -1097,6 +1109,7 @@ export class KernelService {
           sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''},pageEvidenceIds);
       }
       if(topicJobs==='controlled-v1')await queueIngestedTopicJobs(client,owner,document.id,parsedVersion);
+      await queueDocumentCourseFactJob(client,owner,document.id,parsedVersion);
       if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
         await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
@@ -1386,7 +1399,7 @@ export class KernelService {
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
       const requestedPages:DocumentEvidenceHit[]=[];
       let figureCaptionCandidate:DocumentFigureCaptionCandidate|undefined;
-      let requestedImages:DocumentAnswerContext['images']=[];
+      const requestedImages:DocumentAnswerContext['images']=[];
       if(imageBudget&&imagePageFocus){
         const source=imagePageFocus.source;
         if(imagePageFocus.physicalPage!==undefined){
@@ -1947,6 +1960,66 @@ export class KernelService {
   async documentTextHeads(owner:string){
     return (await kernelPool().query<{id:string;source_hash:string}>(
       'SELECT id,source_hash FROM document_texts WHERE owner_id=$1 AND hidden=false AND current_version_id IS NOT NULL',[owner])).rows;
+  }
+
+  answerCourseFacts(owner:string,question:string,options:{asOf?:string;history?:boolean}={}){
+    return readCourseFacts(kernelPool(),owner,question,options);
+  }
+
+  refreshCourseFactValidity(kind:'hourly'|'daily',now=new Date()){
+    return refreshFactValidity(kernelPool(),kind,now);
+  }
+
+  runDocumentCourseFactJob(job:IngestionJob){
+    return runDocumentCourseFactJob(job,(batch,claimed)=>this.registerDocumentFactCandidates(batch,claimed));
+  }
+
+  async queueDocumentCourseFacts(owner:string,documentId:string){
+    return kernelTransaction(async client=>{
+      const row=(await client.query<{id:string}>(`SELECT v.id FROM document_texts d JOIN document_text_versions v
+       ON v.id=d.current_version_id AND v.document_id=d.id WHERE d.id=$1 AND d.owner_id=$2 AND NOT d.hidden`,
+       [documentId,owner])).rows[0];
+      if(!row)throw new Error('Document unavailable');
+      return queueDocumentCourseFactJob(client,owner,documentId,row.id);
+    });
+  }
+
+  async registerDocumentFactCandidates(batch:DocumentCourseFactBatch,job:IngestionJob){
+    return kernelTransaction(async client=>{
+      await assertDocumentCourseFactBatch(client,batch,job);
+      const ids:string[]=[];
+      for(const candidate of batch.candidates){
+        const entityId=stableId(batch.owner,'course_fact',batch.documentId,candidate.identityKey);
+        await client.query(`INSERT INTO entities(id,owner_id,kind,course_id,term_id,identity_key)
+          VALUES ($1,$2,'course_fact',$3,(SELECT term_id FROM courses WHERE id=$3),$4)
+          ON CONFLICT(id) DO NOTHING`,[entityId,batch.owner,batch.courseId,`${batch.documentId}:${candidate.identityKey}`]);
+        const id=await recordCandidate(client,{entityId,attribute:candidate.attribute,value:candidate.value,
+          sourceVersionId:batch.sourceVersionId,source:`document:course-fact`,sourceItemId:batch.sourceItemId,
+          originalExcerpt:candidate.originalExcerpt,confidence:candidate.confidence,authority:'document-candidate',
+          locator:candidate.locator,acquiredAt:batch.acquiredAt,forcePending:true,
+          pendingReason:'PDF parser candidate; verify applicability and identity before acceptance'});
+        await client.query(`INSERT INTO document_course_fact_candidates(candidate_id,owner_id,document_id,version_id,
+          source_version_id,source_hash,page_number,page_evidence_id,body_sha256,start_utf16,end_utf16,parser_version,extractor_version)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(candidate_id) DO NOTHING`,
+          [id,batch.owner,batch.documentId,batch.versionId,batch.sourceVersionId,batch.sourceHash,candidate.pageNumber,
+            candidate.evidenceId,candidate.pageBodySha256,candidate.startUtf16,candidate.endUtf16,batch.parserVersion,candidate.extractorVersion]);
+        ids.push(id);
+      }
+      return {candidateIds:ids,status:'pending-review' as const};
+    });
+  }
+
+  async selectedStudyDocuments(owner:string,ids:string[]){
+    if(!ids.length)return [];
+    return (await kernelPool().query<{id:string;name:string;versionId:string;sourceVersionId:string;sourceHash:string}>(`
+      SELECT d.id,d.name,v.id "versionId",v.source_version_id "sourceVersionId",d.source_hash "sourceHash"
+      FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+      JOIN source_item_versions s ON s.id=v.source_version_id
+      WHERE d.owner_id=$1 AND d.id=ANY($2::text[]) AND NOT d.hidden
+      AND s.raw_value->>'mime'='application/pdf' AND v.page_count>0
+      AND NOT EXISTS(SELECT 1 FROM document_texts n WHERE n.owner_id=d.owner_id AND n.origin=d.origin
+        AND n.origin_key=d.origin_key AND NOT n.hidden AND(n.created_at>d.created_at OR(n.created_at=d.created_at AND n.id>d.id)))
+      ORDER BY d.id`,[owner,ids])).rows;
   }
 
   async parsedDocument(owner:string,id:string) {

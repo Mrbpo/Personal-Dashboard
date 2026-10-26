@@ -12,6 +12,7 @@ import {answerKernelStudy,studyAnswerBackend,studyRoutingScope,studyRoutingScope
 import type {DocumentRoutingScope} from './kernel/document-routing-scope.ts';
 import {routeQuestionCourseCodes,QUESTION_COURSE_ROUTING_VERSION,type QuestionCourseRoute} from './kernel/question-course-routing.ts';
 import {kernel} from './kernel/service.ts';
+import {readStudySession,validateStudyDocuments,studySessionWitness,type StudySession} from './study-session.ts';
 import type {ResolvedDocumentSource} from './kernel/document-source.ts';
 
 export type Attachment = { name: string; mime: string; data: string; size: number; hash?: string };
@@ -57,9 +58,24 @@ async function rows(id: string) {
   for(const row of result){const attachments=JSON.parse(row.attachments_json) as Attachment[];if(attachments.some(a=>a.data)){for(const a of attachments)if(a.data){a.hash=await saveBlob(Buffer.from(a.data,'base64'));a.data='';}row.attachments_json=JSON.stringify(attachments);await db.prepare('UPDATE tutor_messages SET attachments_json=? WHERE id=?').bind(row.attachments_json,row.id).run();}}
   return result;
 }
-export async function createTutorThread(owner: string, courseId: string) {
+export async function createTutorThread(owner: string, courseId: string, request?:{id:string;payloadHash:string}) {
   if (courseId && !(await listCourseSettings()).some(c => c.id === courseId && c.enabled)) throw new Error('请选择有效课程');
   const id = crypto.randomUUID(), now = new Date().toISOString();
+  if(request){
+    await db.batch([
+      db.prepare(`INSERT INTO tutor_threads SELECT ?,?,?,?,?,? WHERE NOT EXISTS(
+        SELECT 1 FROM tutor_study_requests WHERE owner_id=? AND request_id=?)`)
+        .bind(id,owner,courseId,'新学习对话',now,now,owner,request.id),
+      db.prepare(`INSERT INTO tutor_study_requests(owner_id,request_id,thread_id,payload_hash,created_at)
+        SELECT ?,?,?,?,? FROM tutor_threads WHERE id=? ON CONFLICT(owner_id,request_id) DO NOTHING`)
+        .bind(owner,request.id,id,request.payloadHash,now,id),
+    ]);
+    const binding=await db.prepare('SELECT thread_id,payload_hash FROM tutor_study_requests WHERE owner_id=? AND request_id=?')
+      .bind(owner,request.id).first<{thread_id:string;payload_hash:string}>();
+    if(!binding||binding.payload_hash!==request.payloadHash)
+      throw new StudyAnswerError('configuration','scope-conflict','请求标识已用于其他问题或资料范围，请重新发送');
+    return binding.thread_id;
+  }
   await db.prepare('INSERT INTO tutor_threads VALUES (?, ?, ?, ?, ?, ?)').bind(id, owner, courseId, '新学习对话', now, now).run();
   return id;
 }
@@ -94,7 +110,11 @@ export async function updateTutor(owner: string, value: { messageId?: string; st
 }
 export async function deleteTutorThread(owner: string, id: string) {
   await owned(owner, id);
-  await db.batch([db.prepare('DELETE FROM tutor_memory WHERE thread_id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM tutor_memory_vectors WHERE message_id IN (SELECT id FROM tutor_messages WHERE thread_id=?)').bind(id),db.prepare('DELETE FROM tutor_messages WHERE thread_id=?').bind(id), db.prepare('DELETE FROM tutor_threads WHERE id=? AND owner_id=?').bind(id, owner)]);
+  await db.batch([
+    db.prepare('DELETE FROM tutor_study_requests WHERE thread_id=? AND owner_id=?').bind(id,owner),
+    db.prepare('DELETE FROM tutor_study_scope_versions WHERE thread_id=?').bind(id),
+    db.prepare('DELETE FROM tutor_study_sessions WHERE thread_id=? AND owner_id=?').bind(id,owner),
+    db.prepare('DELETE FROM tutor_memory WHERE thread_id=? AND owner_id=?').bind(id,owner),db.prepare('DELETE FROM tutor_memory_vectors WHERE message_id IN (SELECT id FROM tutor_messages WHERE thread_id=?)').bind(id),db.prepare('DELETE FROM tutor_messages WHERE thread_id=?').bind(id), db.prepare('DELETE FROM tutor_threads WHERE id=? AND owner_id=?').bind(id, owner)]);
 }
 export async function tutorAttachment(owner: string, messageId: string, index: number) {
   const row = await db.prepare('SELECT m.* FROM tutor_messages m JOIN tutor_threads t ON t.id=m.thread_id WHERE m.id=? AND t.owner_id=?').bind(messageId, owner).first<MessageRow>();
@@ -127,8 +147,9 @@ export function dominantCourse(evidence:string[]){
  return ranked[0][1]>=2&&ranked[0][1]-(ranked[1]?.[1]||0)>=2?ranked[0][0]:'';
 }
 function needsCourseScope(question:string){return /(?:本课|课程|作业|实验|截止|提交|老师|教授)|\b(?:lecture|lab|assignment|quiz|exam|syllabus|due|piazza|canvas)\b/i.test(question);}
-export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='',requestedScope?:DocumentRoutingScope) {
+export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='',requestedScope?:DocumentRoutingScope,studySession?:StudySession,factQuery:{asOf?:string;history?:boolean}={}) {
   const thread = await owned(owner, threadId);
+  const sessionWitness=studySession?studySessionWitness(studySession,question,factQuery):undefined;
   const routingScope=studyRoutingScope(requestedScope),routingWitness=studyRoutingScopeWitness(routingScope);
   if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestId)) throw new Error('请求标识无效');
   if (question.length > 6000 || (!question.trim() && !attachments.length)) throw new Error('请输入问题（最多 6000 字）或上传附件');
@@ -143,11 +164,22 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     const existing=history.find(m=>m.id===`${threadId}:${requestId}`);
     if(existing){
       const metadata=JSON.parse(existing.meta_json),prior=metadata.requestRouting;
+      if((sessionWitness||metadata.requestStudy)&&(existing.body!==question||sessionWitness?.fingerprint!==metadata.requestStudy?.fingerprint))
+        throw new StudyAnswerError('configuration','idempotency-scope-conflict','请求标识已用于其它问题或资料范围，请使用新的请求标识');
       if((routingWitness||prior||metadata.courseRouting)&&(existing.body!==question||prior?.fingerprint!==routingWitness?.fingerprint))
         throw new StudyAnswerError('configuration','idempotency-scope-conflict','请求标识已用于其它问题或范围，请使用新的请求标识');
       return;
     }
-    if (!hasAI()) throw new Error('请先在设置中配置 AI 接入');
+    if(studySession){
+      const current=await readStudySession(owner,threadId);
+      if(JSON.stringify(current)!==JSON.stringify(studySession))throw new StudyAnswerError('configuration','scope-conflict','资料范围已变化，请刷新后重试');
+      if(studyAnswerBackend()!=='kernel')throw new StudyAnswerError('configuration','routing-requires-kernel','资料问答需要启用内核路径');
+      if(sessionWitness!.effectiveMode!=='facts'){
+        if(!studySession.documentIds.length)throw new StudyAnswerError('configuration','document-selection-required','请从资料库选择 PDF 后提问，课程安排可切换到课程事实模式');
+        await validateStudyDocuments(owner,studySession.documentIds);
+      }
+    }
+    if (sessionWitness?.effectiveMode!=='facts'&&!hasAI()) throw new Error('请先在设置中配置 AI 接入');
     // All attachments in the conversation remain available; cap prevents silently dropping old files.
     const previousFiles = history.flatMap(m => JSON.parse(m.attachments_json) as Attachment[]);
     if (previousFiles.reduce((s,a) => s+a.size,0) + attachments.reduce((s,a) => s+a.size,0) > 20*1024*1024) throw new Error('本会话附件已超过 20 MB，请新建会话');
@@ -156,12 +188,12 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
     const courseRoutingMode=studyCourseRouting();
     if(courseRoutingMode&&backend!=='kernel')throw new StudyAnswerError('configuration','course-routing-requires-kernel','课程路由需要启用内核问答');
     const recentQuestions = context.filter(m => m.role === 'user').slice(-2).map(m => m.body).join(' ');
-    let activeCourse=thread.course_id;
-    let answerScope=routingScope,courseRouting:QuestionCourseRoute|undefined;
+    let activeCourse=studySession?'':thread.course_id;
+    let answerScope=studySession?{documentIds:studySession.documentIds}:routingScope,courseRouting:QuestionCourseRoute|undefined;
     let documentAttribution:({policy:'unique-mentioned-document-before-course-guard-v1';source:ResolvedDocumentSource}|
       {policy:'multiple-mentioned-documents-before-course-guard-v1';sources:ResolvedDocumentSource[]})&
       {courseOwnershipVerified:false;scopeApplied:false}|undefined;
-    const explicitTarget=routingScope?.courseIds!==undefined||routingScope?.documentIds!==undefined;
+    const explicitTarget=Boolean(studySession)||routingScope?.courseIds!==undefined||routingScope?.documentIds!==undefined;
     if(!activeCourse&&backend==='kernel'&&!explicitTarget){
       const courses=(await listCourseSettings()).filter(course=>course.enabled);
       const literalCourseRoute=routeQuestionCourseCodes(question,courses);
@@ -236,15 +268,32 @@ export async function sendTutor(owner: string, threadId: string, requestId: stri
       if(activeCourse){await db.prepare('UPDATE tutor_threads SET course_id=? WHERE id=? AND owner_id=? AND course_id=?').bind(activeCourse,threadId,owner,'').run();thread.course_id=activeCourse;}
     }
     if(backend==='kernel'){
-      if(previousFiles.length||attachments.length)throw new StudyAnswerError('parsing','attachment-not-indexed','内核问答请先将附件加入资料库并等待解析完成；本轮未调用模型');
-      const result=await answerKernelStudy(owner,question,activeCourse,context,answerScope),now=new Date().toISOString();
-      const resultMeta=courseRouting||documentAttribution?{...result.meta,study:{...result.meta.study,
+      if(sessionWitness?.effectiveMode!=='facts'&&(previousFiles.length||attachments.length))throw new StudyAnswerError('parsing','attachment-not-indexed','内核问答请先将附件加入资料库并等待解析完成；本轮未调用模型');
+      let result:{answer:string;meta:Record<string,any>};
+      if(sessionWitness?.effectiveMode==='facts')result=await kernel.answerCourseFacts(owner,question,factQuery);
+      else{
+        result=await answerKernelStudy(owner,question,activeCourse,studySession?context.filter(row=>{
+          const saved=JSON.parse(row.meta_json).requestStudy??JSON.parse(row.meta_json).studySession;
+          return saved?.revision===studySession.revision;
+        }):context,answerScope);
+        if(sessionWitness?.effectiveMode==='combined'){
+          const facts=await kernel.answerCourseFacts(owner,question,factQuery);
+          const citations=(facts.meta.citations??[]) as Array<Record<string,unknown>>,renamed=citations.map((item,index)=>({...item,ref:`F${index+1}`}));
+          let text=facts.answer;
+          citations.forEach((item,index)=>{text=text.split(`[${item.ref}]`).join(`[F${index+1}]`);});
+          result={answer:`资料内容\n${result.answer}\n\n当前课程事实\n${text}`,meta:{...result.meta,citations:[...(result.meta.citations??[]),...renamed],facts:facts.meta}};
+        }
+      }
+      const now=new Date().toISOString();
+      const baseMeta:Record<string,any>={valuable:false,takeaway:'',topic:'',assessment:'explored',evidence:'',vocabulary:[],memories:[],web:[],...result.meta,
+        ...(sessionWitness?{studySession:sessionWitness}:{})};
+      const resultMeta=courseRouting||documentAttribution?{...baseMeta,study:{...baseMeta.study,
         ...(courseRouting?{courseRouting}:{}),...(documentAttribution?{documentAttribution}:{})}}:result.meta;
       if(!leaseValid)throw new Error('会话锁已失效，请刷新后重试');
       await owned(owner,threadId);
       await db.batch([
-        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}`,threadId,'user',question,'[]',JSON.stringify({...(routingWitness?{requestRouting:routingWitness}:{}),...(courseRouting?{courseRouting}:{})}),0,now),
-        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}:answer`,threadId,'assistant',result.answer,'[]',JSON.stringify(resultMeta),0,now),
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}`,threadId,'user',question,'[]',JSON.stringify({...(routingWitness?{requestRouting:routingWitness}:{}),...(sessionWitness?{requestStudy:sessionWitness}:{}),...(courseRouting?{courseRouting}:{})}),0,now),
+        db.prepare('INSERT INTO tutor_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(`${threadId}:${requestId}:answer`,threadId,'assistant',result.answer,'[]',JSON.stringify({...baseMeta,...resultMeta}),0,now),
         db.prepare('UPDATE tutor_threads SET title=?, updated_at=? WHERE id=? AND owner_id=?').bind(history.length?thread.title:question.slice(0,60),now,threadId,owner),
       ]);
       return;
