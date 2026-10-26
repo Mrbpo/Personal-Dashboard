@@ -19,7 +19,21 @@ test('16 local calendar days include the last day and exclude the end, across sp
     task('exact-end', { dueAt: '2026-03-17T04:00:00Z' }),
     task('old-overdue', { duePrecision: 'date', dueDate: '2025-10-01' }),
   ], zone, now);
-  assert.deepEqual(rows.map(row => row.id), ['old-overdue', 'date-last', 'exact-last']);
+  assert.deepEqual(rows.map(row => row.id), ['date-last', 'exact-last']);
+});
+
+test('past seven local calendar days retain the boundary and exclude older overdue without mutating tasks', () => {
+  const now = Date.parse('2026-11-03T17:00:00Z');
+  const rows = [
+    task('old-date', {duePrecision:'date',dueDate:'2026-10-26'}),
+    task('week-date', {duePrecision:'date',dueDate:'2026-10-27'}),
+    task('old-exact', {dueAt:'2026-10-27T03:59:59Z'}),
+    task('week-exact', {dueAt:'2026-10-27T04:00:00Z'}),
+    task('today-overdue', {dueAt:'2026-11-03T16:00:00Z'}),
+  ];
+  const before = structuredClone(rows);
+  assert.deepEqual(dueWindow(rows,zone,now).map(row=>row.id),['week-date','week-exact','today-overdue']);
+  assert.deepEqual(rows,before);
 });
 
 test('fall DST window ends at local midnight, not 16 times 24 hours', () => {
