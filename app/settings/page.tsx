@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 export default async function SettingsPage() {
   const { user, authorized } = await requireOwnerPage("/settings");
   if (!authorized) return <PageFrame eyebrow="PRIVATE" title="无法访问">请使用网站所有者账号登录。</PageFrame>;
-  const settings = await getSettings(user.userId).catch(() => ({ timezone: "America/Toronto", dailyMinutes: 150 }));
+  const settings = await getSettings(user.userId).catch(() => ({ timezone: "America/Toronto" }));
   const courses = await listCourseSettings().catch(() => []);
   const piazza = await getPiazzaStatus().catch(() => ({ connected: false, status: "disconnected", classes: [], lastSyncedAt: null, postCount: 0, error: null, autoLoginEnabled: false, lastAutoLoginAt: null, autoLoginError: null }));
   const services = [
@@ -29,7 +29,7 @@ export default async function SettingsPage() {
     { name: "私人访问", ready: hasCustomOwnerPassword() || Boolean(process.env.OWNER_ACCESS_KEY) || process.env.NODE_ENV !== "production", detail: hasCustomOwnerPassword() ? "自定义密码与恢复密钥已启用" : process.env.NODE_ENV === "production" ? "生成的访问密钥已启用" : "本地开发模式" },
   ];
   return (
-    <PageFrame eyebrow="PREFERENCES" title="个人与学习设置" description="设置显示姓名、时区和每日学习时间。">
+    <PageFrame eyebrow="PREFERENCES" title="个人设置" description="设置显示姓名和截止时间使用的时区。">
       <SettingsForm initial={settings} />
       <AccessPasswordSettings configured={hasCustomOwnerPassword()} />
       <ServiceSettings />
@@ -37,7 +37,7 @@ export default async function SettingsPage() {
       <AiFeedbackSettings />
       <DeploymentSettings />
       <section className="mt-6 rounded-3xl border bg-card p-6 shadow-sm">
-        <h2 className="font-semibold">纳入计划的课程</h2>
+        <h2 className="font-semibold">显示的课程</h2>
         <div className="mt-4"><CourseSettings initial={courses} /></div>
       </section>
       <PiazzaSettings initial={piazza} />
