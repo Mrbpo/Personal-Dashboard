@@ -79,7 +79,6 @@ const schema = [
   `CREATE INDEX IF NOT EXISTS idx_tasks_status_due ON tasks(canvas_status, due_at)`,
   `CREATE TABLE IF NOT EXISTS task_overrides (task_id TEXT PRIMARY KEY, local_status TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS course_summaries (course_id TEXT PRIMARY KEY, summary TEXT NOT NULL, priorities_json TEXT NOT NULL DEFAULT '[]', risks_json TEXT NOT NULL DEFAULT '[]', ai_available INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS daily_plans (date TEXT PRIMARY KEY, plan_json TEXT NOT NULL, source_version TEXT NOT NULL, ai_available INTEGER NOT NULL DEFAULT 0, generated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS schedule_events (id TEXT PRIMARY KEY, external_uid TEXT NOT NULL, source_name TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', start_at TEXT NOT NULL, end_at TEXT NOT NULL, all_day INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_source_uid ON schedule_events(source_name, external_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_schedule_range ON schedule_events(start_at, end_at)`,

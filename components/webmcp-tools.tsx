@@ -30,7 +30,7 @@ export function WebMcpTools() {
     register({
       name: "get_due_assignments",
       title: "读取近期截止作业",
-      description: "读取未完成的逾期作业和今天起未来16个日历日内截止的作业。",
+      description: "读取最近7个日历日内已逾期未完成的作业，以及今天起未来16个日历日内截止的作业。",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true, untrustedContentHint: true },
       execute: async () => jsonOrThrow(await fetch("/api/dashboard?date=" + await todayForSettings())),
