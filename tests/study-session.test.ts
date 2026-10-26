@@ -52,6 +52,10 @@ test('selection survives refresh, rejects stale revisions, foreign threads and a
   finally{await releaseLease('tutor:'+thread,token);}
   const versions=(await db.prepare('SELECT revision FROM tutor_study_scope_versions WHERE thread_id=? ORDER BY revision').bind(thread).all()).results;
   assert.deepEqual(versions.map(row=>row.revision),[0,1]);
+  kernel.selectedStudyDocuments=async()=>[];
+  const cleared=await session.updateStudySession('scope-alice',thread,{queryMode:'document',documentIds:[],scopeRevision:current.revision});
+  assert.deepEqual(cleared.documentIds,[],'all removed/unavailable selections can be cleared without broadening retrieval');
+  assert.equal(cleared.revision,2);
  }finally{kernel.selectedStudyDocuments=saved;}
 });
 test('facts ignore unavailable selected PDF, persist exact request mode and reject idempotency scope changes',async()=>{
