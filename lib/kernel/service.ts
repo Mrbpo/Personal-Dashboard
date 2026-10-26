@@ -925,7 +925,7 @@ export class KernelService {
 
   async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;originalName?:string|null;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
-    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
+    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;pageStructure?:'physical-pages-v1';
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
@@ -933,6 +933,8 @@ export class KernelService {
     const tagMetadata=contentTagIngestionMode(),topicJobs=contentTopicJobMode();
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
+    if(options.pageStructure!==undefined&&(options.pageStructure!=='physical-pages-v1'||document.mime!=='application/pdf'||
+      pages.some(page=>page.contentKind==='time_segment')))throw new Error('Physical page structure requires a PDF page adapter');
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
       pages.some((page,index)=>page.pageNumber!==index+1||typeof page.text!=='string'||!page.locator)||
       !pages.some(page=>page.text.trim()))throw new Error('Document transcription is incomplete');
@@ -989,6 +991,7 @@ export class KernelService {
     const nativeWhitespace=nativeWhitespaceFingerprint(batchProvenance);
     const nativeRegionText=nativeRegionFingerprint(batchProvenance);
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(options.pageStructure?{pageStructure:options.pageStructure}:{}),
       ...(sourceName?{sourceName}:{}),
       ...(nativeWhitespace?{nativeWhitespace}:{}),
       ...(nativeRegionText?{nativeRegionText}:{}),
@@ -1095,7 +1098,7 @@ export class KernelService {
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
       if(tagMetadata==='metadata-v1')await recordContentMetadataTags(client,owner,document.id,parsedVersion);
       if(tagMetadata==='metadata-classifications-v1')await recordIngestedContentClassification(client,owner,document.id,parsedVersion);
-      if(options.pdfVisuals||options.sourceMath||document.mime==='application/pdf'){
+      if(options.pdfVisuals||options.sourceMath||options.pageStructure==='physical-pages-v1'){
         const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
         if(options.pdfVisuals)await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
         await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,

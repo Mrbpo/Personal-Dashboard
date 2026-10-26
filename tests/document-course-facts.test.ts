@@ -59,7 +59,8 @@ test('incremental PDF jobs persist only pending candidates with owned current-pa
  const uid=randomUUID(),owner='document-facts:'+uid,saved=process.env.KERNEL_DOCUMENT_FACTS,fetchSaved=globalThis.fetch;
  const add=async(name:string,mime='application/pdf',parser='fixture-pdf-facts-v1')=>{
   const body='Assignment 1: Trees\nDue: 2026-11-03\nLate submissions lose 5%.',doc={id:sha(uid+name),ownerId:owner,courseId:'',name:name+'.pdf',hash:sha(body),mime,origin:'fixture-document-facts',originKey:uid+name};
-  await kernel.ingestParsedDocument(doc,[{pageNumber:1,locator:'page 1',text:body}],{parserVersion:parser,extractionMethod:'fixture'});return doc;
+  await kernel.ingestParsedDocument(doc,[{pageNumber:1,locator:'page 1',text:body}],{parserVersion:parser,extractionMethod:'fixture',
+   ...(mime==='application/pdf'?{pageStructure:'physical-pages-v1' as const}:{})});return doc;
  };
  const jobs=async(id:string)=>(await kernelPool().query('SELECT * FROM ingestion_jobs WHERE kind=$1 AND scope=$2 ORDER BY id',[DOCUMENT_COURSE_FACT_JOB_KIND,id])).rows;
  try{

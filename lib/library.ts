@@ -150,7 +150,7 @@ export async function indexDocument(owner:string,id:string,forcePdfFormulaRepars
         layout:{status:'unavailable',regions:[],pageSizes:[],reason:'Native/legacy PDF parser has no Docling layout result'}});
       await kernel.ingestParsedDocument({id:d.id,ownerId:owner,createdAt:d.created_at,courseId:d.course_id,
         name:d.name,originalName:d.original_name,hash:d.hash,mime:d.mime,origin:d.origin,originKey:d.origin_key},pages,
-        {parserVersion:PDF_PARSER_VERSION,expectedPages:pages.length,pdfVisuals,expectedCurrentVersion});
+        {parserVersion:PDF_PARSER_VERSION,expectedPages:pages.length,pdfVisuals,expectedCurrentVersion,pageStructure:'physical-pages-v1'});
     }
     const warning=pages.some(p=>p.text.startsWith('[本页自动识别不完整')||p.text.startsWith('[自动识别不完整'))?'部分内容无法可靠识别；搜索结果会提示核对原文件。':pages.some(p=>p.text.startsWith('[本地 OCR'))?'本地 OCR 已完成；公式、表格与图形可能不完整，请核对 PDF 原页。':pages.some(p=>p.text.includes('[本页公式识别不完整')||p.text.includes('[部分公式无法可靠识别'))?'部分公式无法可靠识别，请核对 PDF 原页。':/word|officedocument/.test(d.mime)?'Word 文本已解析；内嵌图片和图表请另存 PDF 后导入。':null;
     await db.batch([db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),...chunks.map((c,i)=>db.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(`${id}:${i}`,id,i,c.locator,c.body,digest('parser1:split1:'+c.body))),db.prepare("UPDATE library_documents SET status='ready',error=? WHERE id=? AND deleted=0").bind(warning,id)]);
