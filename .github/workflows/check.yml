@@ -39,6 +39,7 @@ jobs:
       - name: Install native PDF text tools for ingestion checks
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: python3 -m unittest discover -s scripts/course-video -p 'test_*.py'
+      - run: python3 scripts/test_qualify_pdf_evidence.py
       - run: npm test
       - run: npm run kernel:test
       - run: npx tsc --noEmit
