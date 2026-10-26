@@ -68,9 +68,12 @@ test('global default includes recent overdue and next sixteen days, independent 
   row({fact_id:'old',entity_id:'task-3',value:{date:'2026-09-01',precision:'date'}})],'What deadlines are due?',{},now);
  assert.equal(facts(result).length,2);assert.match(result.answer,/overdue/);assert.match(result.answer,/16 days/);
 });
-test('unfinished old overdue tasks remain visible beyond sixteen days, while named cancelled deadlines are excluded',()=>{
+test('default reminders retain only the past week, while explicit historical items remain queryable and cancelled deadlines are excluded',()=>{
  const old=row({value:{date:'2026-09-01',precision:'date',timezone:'America/Toronto'}});
- assert.equal(facts(renderCourseFacts([old],'deadlines',{},now)).length,1);
+ assert.equal(facts(renderCourseFacts([old],'deadlines',{},now)).length,0);
+ assert.equal(facts(renderCourseFacts([old],'CS101 deadlines',{},now)).length,1);
+ const recent=row({value:{date:'2026-10-18',precision:'date',timezone:'America/Toronto'}});
+ assert.equal(facts(renderCourseFacts([recent],'deadlines',{},now)).length,1);
  const cancelled=row({fact_id:'explicit-cancellation',attribute:'cancelled',value:true});
  assert.equal(facts(renderCourseFacts([task(),cancelled,row({course_ends_at:null,term_ends_on:null})],'Assignment 1 deadline',{},now)).length,0);
 });

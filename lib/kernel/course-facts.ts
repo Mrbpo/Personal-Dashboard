@@ -1,6 +1,7 @@
 import type {Pool} from 'pg';
 import {createHash} from 'node:crypto';
 import {evaluateFactValidity,factCalendarDate,factInstant,factLocalDate,type FactValidity,type FactValidityBasis} from './fact-validity.ts';
+import {deadlineWindowBounds} from '../due-window.ts';
 
 type QueryDb=Pick<Pool,'query'>;
 type Json=Record<string,unknown>;
@@ -200,16 +201,13 @@ export function renderCourseFacts(input:CourseFactRow[],question:string,options:
   rows=rows.filter(row=>{
    const state=validity.get(row.fact_id)!;
    if(['completed','cancelled','ignored'].includes(state.action))return false;
-   if(row.attribute==='due'&&state.action==='overdue')return true;
    if(row.attribute==='due'||record(row.value).kind==='due'||row.attribute==='exam'){
     const due=comparisonDeadline(row,applicableRows),instant=factInstant(due.at);
-    if(instant!==null)return instant>=rangeStart&&instant<=rangeEnd;
-    if(factCalendarDate(due.date)){
-     const startDate=factLocalDate(clock,due.timezone);
-     const endDate=startDate?new Date(Date.parse(startDate+'T00:00:00Z')+16*86400000).toISOString().slice(0,10):null;
-     return startDate!==null&&endDate!==null&&due.date>=startDate&&due.date<=endDate;
-    }
-    return false;
+    const zone=due.timezone||courseTimezone(row,applicableRows)||(instant!==null?'UTC':null);
+    const day=instant!==null?factLocalDate(new Date(instant),zone):factCalendarDate(due.date)?due.date:null;
+    if(!zone||!day||factLocalDate(clock,zone)===null)return false;
+    const bounds=deadlineWindowBounds(zone,parsed);
+    return day>=bounds.start&&day<bounds.end;
    }
    if(row.attribute==='event_payload'){const at=factInstant(record(row.value).startAt);return at!==null&&at>=rangeStart&&at<=rangeEnd;}
    return false;
@@ -236,7 +234,7 @@ export function renderCourseFacts(input:CourseFactRow[],question:string,options:
   const title=row.attribute==='due'?titles.get(row.entity_id)||'Task':row.attribute==='event_payload'?'Event':rowTitle(row);
   return `- ${row.course_code||row.course_name||'Calendar'} · ${title}: ${displayValue(row)}${labels.length?` [${labels.join('; ')}]`:''} [${citations[index].id}]`;
  });
- return {answer:`${historical?`Stored facts applicable at ${clock.toISOString()}`:target.targeted||policy?'Confirmed course facts':'Unfinished overdue tasks and upcoming course facts (next 16 days)'}:\n${lines.join('\n')}${historical&&meta.historicalCoverage==='partial'?'\nSome facts have no supported historical validity and are omitted.':''}`,
+ return {answer:`${historical?`Stored facts applicable at ${clock.toISOString()}`:target.targeted||policy?'Confirmed course facts':'Unfinished overdue tasks (past 7 calendar days) and upcoming course facts (next 16 days)'}:\n${lines.join('\n')}${historical&&meta.historicalCoverage==='partial'?'\nSome facts have no supported historical validity and are omitted.':''}`,
   meta:{...meta,status:'answered',facts,citations:[...citations,...identityCitations]}};
 }
 export async function answerCourseFacts(db:QueryDb,owner:string,question:string,options:CourseFactOptions={}){
