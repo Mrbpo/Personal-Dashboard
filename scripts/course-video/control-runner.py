@@ -21,11 +21,16 @@ def now():
 
 
 def validated_request(value, clock=None):
-    if not isinstance(value, dict) or set(value) != {'id', 'action', 'requestedAt'}:
+    if not isinstance(value, dict):
+        raise ValueError('INVALID_CONTROL_REQUEST')
+    subtitle = value.get('action') == 'subtitle'
+    if set(value) != ({'id', 'action', 'requestedAt', 'videoSha256'} if subtitle else {'id', 'action', 'requestedAt'}):
         raise ValueError('INVALID_CONTROL_REQUEST')
     if not isinstance(value['id'], str) or str(uuid.UUID(value['id'])) != value['id']:
         raise ValueError('INVALID_CONTROL_REQUEST')
-    if value['action'] not in {'sync', 'reauthorize'}:
+    if value['action'] not in {'sync', 'reauthorize', 'subtitle'}:
+        raise ValueError('INVALID_CONTROL_REQUEST')
+    if subtitle and not re.fullmatch(r'[a-f0-9]{64}', str(value['videoSha256'])):
         raise ValueError('INVALID_CONTROL_REQUEST')
     stamp = datetime.fromisoformat(value['requestedAt'].replace('Z', '+00:00'))
     clock = clock or datetime.now(timezone.utc)
@@ -64,13 +69,13 @@ def publish(path, value, group):
             temporary.unlink()
 
 
-def claimed_request(root):
+def claimed_request(root, name='request.json'):
     """Claim first into a root-only parent, then inspect a bounded regular file."""
     private = root / 'private'
     private.mkdir(mode=0o700, exist_ok=True)
     claimed = private / ('request-' + str(uuid.uuid4()) + '.json')
     try:
-        (root / 'requests' / 'request.json').replace(claimed)
+        (root / 'requests' / name).replace(claimed)
     except FileNotFoundError:
         return None
     descriptor = os.open(claimed, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
@@ -134,18 +139,80 @@ def read_json(path, default):
         return default
 
 
+def request_subtitle(root, manifest, subtitles, request, group, clock=None):
+    """Short queue transaction, independent of the long-running discovery/auth lock."""
+    import fcntl
+    clock = clock or datetime.now(timezone.utc)
+    request = validated_request(request, clock)
+    if request['action'] != 'subtitle':
+        raise ValueError('INVALID_CONTROL_REQUEST')
+    digest = request['videoSha256']
+    # Rebuild only from current verified originals; the web cannot choose paths or entry metadata.
+    eligible = subtitle_jobs(manifest, {}, subtitles, clock)['jobs']
+    selected = next((job for job in eligible if job['videoSha256'] == digest), None)
+    result = {'requestId': request['id'], 'videoSha256': digest, 'updatedAt': now()}
+    if selected is None:
+        result.update(state='failed', reasonCode='SUBTITLE_SOURCE_UNAVAILABLE')
+    else:
+        with (root / 'subtitle-queue.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            queue = read_json(root / 'subtitle-queue.json', {'schemaVersion': 1, 'jobs': []})
+            # Resolve interrupted leases using the same identity-preserving rules as daily discovery.
+            queue = subtitle_jobs({'entries': {}}, queue, clock=clock)
+            job = next((row for row in queue['jobs'] if row['videoSha256'] == digest), None)
+            if selected['state'] == 'completed':
+                result.update(state='completed', reasonCode='SUBTITLES_COMPLETED')
+            elif job is not None and job.get('state') == 'failed':
+                result.update(state='failed', reasonCode='SUBTITLE_REVIEW_REQUIRED')
+            elif job is not None and job.get('state') == 'running':
+                result.update(state='running', reasonCode=None)
+            else:
+                job = selected if job is None else job
+                # Do not erase checkpoints, attempts, deferred budget times or failure ledgers.
+                job.update(state='pending', courseId=selected['courseId'], entryId=selected['entryId'], requestedAt=request['requestedAt'])
+                queue['jobs'] = [job] + [row for row in queue['jobs'] if row['videoSha256'] != digest]
+                publish(root / 'subtitle-queue.json', queue, group)
+                try:
+                    deferred = datetime.fromisoformat(job['notBefore'].replace('Z', '+00:00')) > clock if job.get('notBefore') else False
+                except (AttributeError, TypeError, ValueError):
+                    deferred = True
+                if not deferred:
+                    (root / 'subtitle-pending').touch(mode=0o600)
+                result.update(state='deferred' if deferred else 'queued', reasonCode=None)
+    # Each result has a fixed hash filename; no raw error/provider data leaves this boundary.
+    results = root / 'subtitle-results'
+    results.mkdir(mode=0o750, exist_ok=True)
+    if os.name == 'posix' and os.geteuid() == 0:
+        os.chown(results, 0, group)
+    publish(results / (digest + '.json'), result, group)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--action', choices=('sync', 'reauthorize'))
     parser.add_argument('--request', action='store_true')
+    parser.add_argument('--subtitle-request', action='store_true')
     args = parser.parse_args()
-    if bool(args.action) == args.request:
+    if sum((bool(args.action), args.request, args.subtitle_request)) != 1:
         parser.error('Choose one fixed action or --request')
     root = Path(os.environ.get('COURSE_VIDEO_CONTROL_DIR', '/srv/study-course-video-control'))
     tool = Path('/srv/study-course-video-tool')
     archive = Path('/srv/study-course-recordings')
     group = int(os.environ.get('COURSE_VIDEO_WEB_GID', '1000'))
     root.mkdir(mode=0o750, parents=True, exist_ok=True)
+    if args.subtitle_request:
+        try:
+            request = claimed_request(root, 'subtitle-request.json')
+            if request is None:
+                return 0
+            if request['action'] != 'subtitle':
+                return 2
+            result = request_subtitle(root, read_json(archive / 'manifest.json', {}),
+                Path(os.environ.get('COURSE_VIDEO_SUBTITLE_DIR', '/srv/study/data/recording-subtitles')), request, group)
+            return 0 if result['state'] != 'failed' else 2
+        except (Exception, KeyboardInterrupt):
+            return 2
     request = None
     if args.request:
         try:
@@ -157,6 +224,8 @@ def main():
         if request is None:
             return 0
     action = request['action'] if request else args.action
+    if action == 'subtitle':
+        return 2
     run_id = request['id'] if request else str(uuid.uuid4())
     import fcntl
     with (root / 'runner.lock').open('a') as lock:

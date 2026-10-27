@@ -5,12 +5,14 @@ import type Artplayer from 'artplayer';
 import {Play, RefreshCw, Video} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 import type {Recording, RecordingCatalog} from '@/lib/recording-catalog';
+import {attachSecondaryLayout,defaultSecondaryLayout,secondaryLayout,type SecondaryLayout} from '@/lib/recording-secondary-layout';
 import './recording-player-layout.css';
 
 type Playback = {time:number; rate:number; playing:boolean};
 type SubtitleMode = 'bilingual'|'en'|'zh'|'off';
+type SubtitleGeneration={configured:boolean;state:'idle'|'queued'|'running'|'deferred'|'failed'|'completed';requested:boolean;canRequest:boolean;retryAt:string|null;reasonCode:string|null};
 type SubtitleInfo = {available:boolean;modes:Exclude<SubtitleMode,'off'>[];partial?:boolean;clipStartMs?:number;clipEndMs?:number;
-  sourceMethod?:'local-asr'|'platform-caption';translated?:boolean};
+  sourceMethod?:'local-asr'|'platform-caption';translated?:boolean;generation?:SubtitleGeneration};
 const initialPlayback = ():Playback => ({time:0, rate:1, playing:false});
 const fieldClass = 'w-full rounded-md border border-input bg-background px-3 py-2 text-sm';
 
@@ -44,16 +46,24 @@ export function RecordingPlayer() {
   const [subtitleMode,setSubtitleMode]=useState<SubtitleMode>('bilingual');
   const [subtitleMetadata,setSubtitleMetadata]=useState<{viewId:string;info:SubtitleInfo|null;status:'loading'|'ready'|'error'}|null>(null);
   const [subtitleError,setSubtitleError]=useState(false);
+  const [subtitleRefresh,setSubtitleRefresh]=useState(0);
+  const [subtitleSubmit,setSubtitleSubmit]=useState({viewId:'',busy:false,error:''});
+  const submittingSubtitle=useRef(false);
   const [playerRevision,setPlayerRevision]=useState(0);
   const [captionSize,setCaptionSize]=useState(20);
   const [showSecondary,setShowSecondary]=useState(true);
   const [secondaryViewId,setSecondaryViewId]=useState('');
+  const secondaryPlacement=useRef<SecondaryLayout>({...defaultSecondaryLayout});
+  const secondaryReset=useRef<(()=>void)|null>(null);
   const container=useRef<HTMLDivElement>(null);
   const player=useRef<Artplayer|null>(null);
   const playback=useRef<Playback>(initialPlayback());
   const pending=useRef<Playback|null>(null);
   const subtitleRequest=useRef(0);
   const subtitleQueue=useRef<Promise<void>>(Promise.resolve());
+  useEffect(()=>{
+    try{const saved=localStorage.getItem('recording-secondary-layout-v1');if(saved&&saved.length<512)secondaryPlacement.current=secondaryLayout(JSON.parse(saved));}catch{/* Storage may be unavailable. */}
+  },[]);
   useEffect(()=>{
     if(player.current)player.current.template.$player.dataset.captionSize=String(captionSize);
   },[captionSize,playerRevision]);
@@ -100,6 +110,8 @@ export function RecordingPlayer() {
   const subtitleBase=viewId?`/api/recordings/${encodeURIComponent(viewId)}/subtitles`:'';
   const subtitleState=subtitleMetadata?.viewId===viewId?subtitleMetadata:null;
   const subtitleInfo=subtitleState?.info;
+  const subtitleComplete=!!subtitleInfo?.available&&!subtitleInfo.partial&&!!subtitleInfo.translated;
+  const generation=subtitleInfo?.generation;
   const secondaryViews=recording?.views.filter(item=>item.id!==viewId)??[];
   const secondaryView=secondaryViews.find(item=>item.id===secondaryViewId)??secondaryViews[0];
   const secondaryLabel=secondaryView?.label??'';
@@ -181,7 +193,14 @@ export function RecordingPlayer() {
     close.addEventListener('click',closeSecondary);bar.append(label,close);
     const unavailable=document.createElement('p');unavailable.className='recording-secondary-error';unavailable.hidden=true;
     unavailable.textContent='副画面暂不可用，主画面仍可播放。';
-    overlay.append(secondary,bar,unavailable);root.append(overlay);
+    const resize=document.createElement('button');resize.type='button';resize.className='recording-secondary-resize';
+    resize.textContent='↘';resize.setAttribute('aria-label','调整副画面大小');
+    overlay.append(secondary,bar,unavailable,resize);root.append(overlay);
+    const placement=attachSecondaryLayout(root,main,overlay,bar,resize,()=>secondaryPlacement.current,(next,persist)=>{
+      secondaryPlacement.current=next;
+      if(persist)try{localStorage.setItem('recording-secondary-layout-v1',JSON.stringify(next));}catch{/* Keep the in-memory layout. */}
+    });
+    secondaryReset.current=placement.reset;
     let disposed=false,playBlocked=false;
     function synchronize(forceSeek=false) {
       if(disposed)return;
@@ -213,6 +232,7 @@ export function RecordingPlayer() {
       main.removeEventListener('ratechange',onProgress);main.removeEventListener('timeupdate',onProgress);
       secondary.removeEventListener('loadedmetadata',onSeek);secondary.removeEventListener('error',onError);
       close.removeEventListener('click',closeSecondary);
+      placement.dispose();if(secondaryReset.current===placement.reset)secondaryReset.current=null;
       secondary.pause();secondary.removeAttribute('src');secondary.load();overlay.remove();
     };
   },[secondaryUrl,secondaryLabel,showSecondary,playerRevision]);
@@ -220,18 +240,37 @@ export function RecordingPlayer() {
   useEffect(()=>{
     if(!viewId || !subtitleBase)return;
     const controller=new AbortController();
-    setSubtitleMetadata({viewId,info:null,status:'loading'});
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    const stopAt=Date.now()+15*60*1000;
+    setSubtitleMetadata(current=>current?.viewId===viewId?current:{viewId,info:null,status:'loading'});
     async function loadMetadata() {
       try {
         const response=await fetch(subtitleBase,{cache:'no-store',signal:controller.signal});
         if(!response.ok)throw new Error('字幕信息暂不可用');
         const info=await response.json() as SubtitleInfo;
-        if(!controller.signal.aborted)setSubtitleMetadata({viewId,info,status:'ready'});
+        if(!controller.signal.aborted){
+          setSubtitleMetadata(current=>current?.viewId===viewId&&JSON.stringify(current.info)===JSON.stringify(info)&&current.status==='ready'?current:{viewId,info,status:'ready'});
+          if(Date.now()<stopAt&&(info.generation?.state==='running'||info.generation?.state==='queued'&&info.generation.requested))timer=setTimeout(()=>void loadMetadata(),5000);
+        }
       } catch {if(!controller.signal.aborted)setSubtitleMetadata({viewId,info:null,status:'error'});}
     }
     void loadMetadata();
-    return ()=>controller.abort();
-  },[viewId,subtitleBase,reload]);
+    return ()=>{controller.abort();if(timer)clearTimeout(timer);};
+  },[viewId,subtitleBase,reload,subtitleRefresh]);
+
+  async function generateSubtitles(){
+    if(!viewId||submittingSubtitle.current||!generation?.canRequest)return;
+    const requestedView=viewId;
+    submittingSubtitle.current=true;setSubtitleSubmit({viewId:requestedView,busy:true,error:''});
+    try{
+      const response=await fetch(subtitleBase,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      const result=await response.json();
+      if(!response.ok)throw new Error(typeof result.error==='string'?result.error:'字幕请求未能提交');
+      setSubtitleMetadata(current=>current?.viewId===requestedView&&current.info?{...current,info:{...current.info,generation:result.generation}}:current);
+      setSubtitleRefresh(value=>value+1);
+    }catch(reason){setSubtitleSubmit({viewId:requestedView,busy:false,error:reason instanceof Error?reason.message:'字幕请求未能提交'});}
+    finally{submittingSubtitle.current=false;setSubtitleSubmit(current=>current.viewId===requestedView?{...current,busy:false}:current);}
+  }
 
   useEffect(()=>{
     const instance=player.current;
@@ -334,6 +373,11 @@ export function RecordingPlayer() {
             <option value="zh" disabled={!subtitleInfo?.modes.includes('zh')}>中文</option>
             <option value="off">关闭</option>
           </select></label>
+          {subtitleState?.status==='ready'&&!subtitleComplete&&<Button type="button" variant="outline" size="sm"
+            disabled={!generation?.canRequest||subtitleSubmit.viewId===viewId&&subtitleSubmit.busy} onClick={()=>void generateSubtitles()}
+            title={generation?.state==='queued'&&generation.canRequest?'已在自动队列，点击优先处理这段录像':undefined}>
+            {subtitleSubmit.viewId===viewId&&subtitleSubmit.busy?'正在提交…':generation?.state==='running'?'字幕生成中…':generation?.state==='queued'&&generation.requested?'字幕已排队':generation?.state==='deferred'?'字幕等待资源／额度':generation?.state==='failed'?'字幕待检查':!generation?.configured?'字幕后台未启用':subtitleInfo?.available?'补全字幕':'生成字幕'}
+          </Button>}
           <label className="flex items-center gap-2 text-sm">全屏字幕区<select aria-label="全屏字幕区比例" value={captionSize} onChange={event=>setCaptionSize(Number(event.target.value))} className="rounded-md border bg-background px-2 py-1.5">
             {[20,25,30].map(value=><option key={value} value={value}>{value}%</option>)}
           </select></label>
@@ -344,6 +388,7 @@ export function RecordingPlayer() {
                 {secondaryViews.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}
               </select></label>
               <Button type="button" variant="outline" size="sm" onClick={()=>{setSecondaryViewId(view.id);changeView(secondaryView.id);}}>交换主副画面</Button>
+              <Button type="button" variant="ghost" size="sm" onClick={()=>secondaryReset.current?.()}>重置小窗位置</Button>
             </>}
           </>}
           <Button type="button" variant="ghost" size="sm" onClick={retryPlayback}><RefreshCw/>重新加载</Button>
@@ -351,6 +396,11 @@ export function RecordingPlayer() {
         <div ref={container} aria-label={`${recording.title}播放器`} className="aspect-video w-full overflow-hidden rounded-md bg-black"/>
         {mediaError && <p role="alert" className="mt-3 text-sm text-destructive">无法播放：链接可能已过期、网络暂时不可用，或浏览器不支持原片格式。请点击“重新加载”重试。</p>}
         <div className="mt-3 text-xs leading-5 text-muted-foreground" aria-live="polite">
+          {subtitleSubmit.viewId===viewId&&subtitleSubmit.error&&<p role="alert">{subtitleSubmit.error}</p>}
+          {generation?.state==='failed'&&<p>字幕任务需检查上次失败记录，暂不自动重试；已有字幕和视频保留。</p>}
+          {generation?.state==='deferred'&&<p>字幕任务等待资源或运行额度恢复，进度已保存。</p>}
+          {generation?.state==='queued'&&generation.requested&&<p>已优先排队，将在当前转写任务完成后处理。</p>}
+          {subtitleState?.status==='ready'&&!subtitleComplete&&<button type="button" className="underline" onClick={()=>setSubtitleRefresh(value=>value+1)}>刷新字幕状态</button>}
           {(!subtitleState || subtitleState.status==='loading') && <p>正在查找字幕…</p>}
           {(subtitleState?.status==='error' || subtitleError) && <p>字幕暂时无法读取，可重新加载重试；视频仍可播放。</p>}
           {subtitleState?.status==='ready' && !subtitleInfo?.available && <p>这段录像暂未生成字幕。</p>}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Prioritize one authenticated subtitle request
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/srv/study/course-video-control.env
+ExecStart=/usr/bin/python3 /srv/study-course-video-tool/control-runner.py --subtitle-request
+TimeoutStartSec=30
+NoNewPrivileges=yes
+UMask=0077

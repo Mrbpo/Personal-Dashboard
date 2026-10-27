@@ -67,6 +67,23 @@
   background: #000b;
   color: #fff;
   font-size: 11px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.recording-player-root .recording-secondary-bar:active { cursor: grabbing; }
+.recording-player-root .recording-secondary-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+  touch-action: none;
+  color: #fff;
+  background: #000b;
+  font-size: 18px;
+  line-height: 24px;
 }
 .recording-player-root .recording-secondary-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recording-player-root .recording-secondary-bar button { cursor: pointer; }
