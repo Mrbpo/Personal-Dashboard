@@ -18,6 +18,7 @@ import {
   MessageSquareText,
   RefreshCw,
   Settings,
+  Video,
 } from "lucide-react";
 import { CourseAssistant } from "@/components/course-assistant";
 import { AiUsagePanel } from "@/components/ai-usage-panel";
@@ -51,6 +52,7 @@ const nav = [
   { href: "/study", label: "学习对话与档案", icon: GraduationCap },
   { href: "/sketch", label: "绘画问 AI", icon: PenLine },
   { href: "/library", label: "本地资料库", icon: Grid2X2 },
+  { href: "/recordings", label: "课程录像", icon: Video },
   { href: "/piazza", label: "Piazza 摘要与问答", icon: MessageSquareText },
   { href: "/vocabulary", label: "生词本", icon: Languages },
   { href: "/mail", label: "邮件中心", icon: Search },

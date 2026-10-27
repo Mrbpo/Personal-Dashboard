@@ -1,0 +1,11 @@
+# Opt-in at release time: docker compose -f compose.yml -f compose.recordings.yml ...
+# Supply a dedicated read-only R2 token. Never inject the backup uploader's credentials.
+services:
+  web:
+    env_file:
+      - /srv/study/recordings-readonly.env
+    environment:
+      RECORDINGS_MANIFEST_PATH: /app/course-recordings/manifest.json
+      RECORDINGS_OWNER_ID: local-owner
+    volumes:
+      - /srv/study/recording-player:/app/course-recordings:ro

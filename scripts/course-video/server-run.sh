@@ -155,4 +155,8 @@ if (( archive_r2 )); then
   python3 "$tool_root/verify-archive.py" --course-id "$course_id"
   bash "$tool_root/r2-archive.sh" --course-id "$course_id" --upload --release-cache --lock-fd 9 \
     --lifecycle-evidence "$state_root/recordings-lifecycle-evidence.json"
+  if [[ -n ${COURSE_VIDEO_PLAYER_CATALOG:-} ]]; then
+    python3 "$tool_root/export-player-catalog.py" --source "$archive_root/manifest.json" \
+      --destination "$COURSE_VIDEO_PLAYER_CATALOG" --group "${COURSE_VIDEO_PLAYER_GID:-1000}"
+  fi
 fi
