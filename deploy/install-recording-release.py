@@ -33,6 +33,23 @@ def main():
     control = Path('/srv/study-course-video-control')
     snapshot = host / 'data/private/recordings-release' / args.sha
     snapshot.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tools = ('archive.py', 'interactive-entrypoint.sh', 'server-run.sh', 'server-catalog.py',
+             'control-runner.py', 'subtitle-worker.py', 'export-player-catalog.py',
+             'refresh-playback-credentials.py')
+    units = ('course-video-control.service', 'course-video-control.path', 'course-video-daily.service',
+             'course-video-daily.timer', 'course-subtitle-worker.service', 'course-subtitle-worker.path',
+             'course-recording-credentials.service', 'course-recording-credentials.timer')
+    inventory = snapshot / 'host-files.json'
+    if not inventory.exists():
+        records = []
+        for source in [tool / name for name in tools] + [Path('/etc/systemd/system') / name for name in units]:
+            record = {'path': str(source), 'existed': source.exists()}
+            if source.exists():
+                target = snapshot / 'host-files' / str(source).lstrip('/')
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copy2(source, target)
+            records.append(record)
+        write(inventory, json.dumps(records, indent=2) + '\n')
     for name in ('compose.yml', 'Caddyfile', 'course-video-control.env', 'recordings-readonly.env'):
         source = host / name
         if source.exists() and not (snapshot / name).exists():
@@ -45,9 +62,7 @@ def main():
         path.mkdir(parents=True, exist_ok=True)
         os.chown(path, 0, group)
         os.chmod(path, mode)
-    for name in ('archive.py', 'interactive-entrypoint.sh', 'server-run.sh', 'server-catalog.py',
-                 'control-runner.py', 'subtitle-worker.py', 'export-player-catalog.py',
-                 'refresh-playback-credentials.py'):
+    for name in tools:
         shutil.copyfile(code / 'scripts/course-video' / name, tool / name)
         os.chmod(tool / name, 0o755)
     subprocess.run(['python3', str(tool / 'export-player-catalog.py'), '--destination',
@@ -89,9 +104,6 @@ def main():
     write(host / 'compose.yml', yaml.safe_dump(base, sort_keys=False))
     shutil.copyfile(code / 'deploy/Caddyfile', host / 'Caddyfile')
     os.chmod(host / 'Caddyfile', 0o644)
-    units = ('course-video-control.service', 'course-video-control.path', 'course-video-daily.service',
-             'course-video-daily.timer', 'course-subtitle-worker.service', 'course-subtitle-worker.path',
-             'course-recording-credentials.service', 'course-recording-credentials.timer')
     for name in units:
         shutil.copyfile(code / 'deploy' / name, Path('/etc/systemd/system') / name)
         os.chmod(Path('/etc/systemd/system') / name, 0o644)
