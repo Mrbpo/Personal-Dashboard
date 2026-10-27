@@ -7,6 +7,11 @@ export const STUDY_QUERY_MODES=['auto','document','facts','combined'] as const;
 export type StudyQueryMode=(typeof STUDY_QUERY_MODES)[number];
 export type StudySession={queryMode:StudyQueryMode;documentIds:string[];revision:number};
 export type StudySessionRow={query_mode:string;document_ids_json:string;revision:number};
+export function studyFactsOnly(){return process.env.STUDY_FACTS_ONLY==='true';}
+export function assertStudyModeAvailable(value:unknown){
+ if(studyFactsOnly()&&(value==='document'||value==='combined'))
+  throw new StudyAnswerError('configuration','document-qa-paused','PDF 问答已暂停，请先查询课程事实');
+}
 export function studyQueryMode(value:unknown):StudyQueryMode {
  if(typeof value!=='string'||!STUDY_QUERY_MODES.includes(value as StudyQueryMode))
   throw new StudyAnswerError('configuration','invalid-query-mode','问答模式无效');
@@ -42,7 +47,8 @@ export async function validateStudyDocuments(owner:string,documentIds:string[]){
  }
 }
 export async function updateStudySession(owner:string,threadId:string,input:{documentIds:unknown;queryMode:unknown;scopeRevision:unknown}){
- const documentIds=studyDocumentIds(input.documentIds),queryMode=studyQueryMode(input.queryMode);
+ assertStudyModeAvailable(input.queryMode);
+ const documentIds=studyDocumentIds(input.documentIds),requestedMode=studyQueryMode(input.queryMode),queryMode=studyFactsOnly()?'facts':requestedMode;
  if(!Number.isSafeInteger(input.scopeRevision)||Number(input.scopeRevision)<0)
   throw new StudyAnswerError('configuration','scope-revision-required','请刷新后使用当前资料范围版本');
  if(queryMode!=='facts')await validateStudyDocuments(owner,documentIds);
@@ -68,6 +74,7 @@ export async function findDocumentStudyThread(owner:string,documentId:string){
  return rows.find(row=>{const ids=JSON.parse(row.document_ids_json);return ids.length===1&&ids[0]===documentId;})?.thread_id;
 }
 export function resolveStudyQueryMode(question:string,session:StudySession):Exclude<StudyQueryMode,'auto'>{
+ if(studyFactsOnly())return 'facts';
  if(session.queryMode!=='auto')return session.queryMode;
  const original=/(?:这份|该份|这篇|本文|原文|文档中|PDF\s*(?:里|中|写))|\b(?:this (?:pdf|paper|document)|according to (?:this|the) (?:pdf|paper|document))\b/i.test(question);
  const facts=/(?:截止|什么时候交|何时交|近期.*(?:考试|作业)|考试.*(?:时间|安排)|评分规则|提交要求|课程政策)|\b(?:deadline|due date|when.*(?:due|exam)|upcoming (?:exam|assignment)|grading (?:policy|scheme)|submission requirements)\b/i.test(question);

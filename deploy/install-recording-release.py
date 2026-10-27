@@ -100,7 +100,9 @@ def main():
                         existing.append(item)
                 target[field] = existing
     for service in ('web', 'worker'):
-        base['services'][service].setdefault('environment', {})['STUDY_ANSWER_BACKEND'] = 'legacy'
+        environment = base['services'][service].setdefault('environment', {})
+        environment.update(STUDY_ANSWER_BACKEND='kernel', STUDY_FACTS_ONLY='true',
+                           KERNEL_COURSE_FACTS_ENABLED='true', KERNEL_DOCUMENT_FACTS='false')
     write(host / 'compose.yml', yaml.safe_dump(base, sort_keys=False))
     write(host / 'Caddyfile', (code / 'deploy/Caddyfile').read_text(), 0o644)
     for name in units:
@@ -108,7 +110,7 @@ def main():
     # A separate activation step follows actual release and HTTP checks.
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     write(snapshot / 'preparation.json', json.dumps({'sha': args.sha, 'unitsInstalled': list(units),
-          'servicesStarted': False, 'answerBackend': 'legacy'}, indent=2) + '\n')
+          'servicesStarted': False, 'answerBackend': 'kernel', 'factsOnly': True}, indent=2) + '\n')
     print(json.dumps({'prepared': True, 'sha': args.sha, 'servicesStarted': False}))
 
 

@@ -25,7 +25,7 @@ export default async function Page({params,searchParams}:{params:Promise<{id:str
     <div className="mb-4 flex flex-wrap gap-2"><Button asChild variant="outline"><Link href="/library">返回资料目录</Link></Button><Button asChild variant="outline"><a href={`/api/library/${encodeURIComponent(id)}`}>下载原件</a></Button></div>
     {document.mime==='application/pdf'?<>
       <PdfReaderShell source={source} name={document.name} documentId={document.id} initialPage={initialPage}/>
-      {studyAnswerBackend()==='kernel'&&<div className="mt-6"><LibraryStudyPanel initialDocumentIds={[document.id]} embedded/></div>}
+      {process.env.STUDY_FACTS_ONLY!=='true'&&studyAnswerBackend()==='kernel'&&<div className="mt-6"><LibraryStudyPanel initialDocumentIds={[document.id]} embedded/></div>}
       <section className="mt-8 overflow-hidden rounded-2xl border bg-card" id="text-version">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b px-5 py-4"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-muted-foreground">TEXT VERSION</p><h2 className="mt-1 text-xl font-semibold">PDF 文字版本</h2></div><span className="text-sm text-muted-foreground">{pages.length?`${pages.length} 页已转换`:document.status==='error'?'正在重新尝试转换':'正在转换'}</span></div>
         {formulaStatus&&<PdfFormulaReparse documentId={id} initialStatus={formulaStatus}/>}

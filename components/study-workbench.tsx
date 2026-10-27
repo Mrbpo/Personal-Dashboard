@@ -7,8 +7,8 @@ import {MiniAiFeedback} from './mini-ai-feedback';
 import {LibraryStudyPanel} from './library-study-panel';
 type State={threads:any[];messages:any[];archive:any[];vocabulary:any[];questionCount:number};
 const empty:State={threads:[],messages:[],archive:[],vocabulary:[],questionCount:0};
-export function StudyWorkbench({courses,kernelEnabled=false}:{courses:{id:string;code:string}[];kernelEnabled?:boolean}){
- return kernelEnabled?<LibraryStudyPanel/>:<LegacyStudyWorkbench courses={courses}/>;
+export function StudyWorkbench({courses,kernelEnabled=false,factsOnly=false}:{courses:{id:string;code:string}[];kernelEnabled?:boolean;factsOnly?:boolean}){
+ return kernelEnabled||factsOnly?<LibraryStudyPanel factsOnly={factsOnly}/>:<LegacyStudyWorkbench courses={courses}/>;
 }
 function LegacyStudyWorkbench({courses}:{courses:{id:string;code:string}[]}){
  const [data,setData]=useState<State>(empty),[thread,setThread]=useState(''),[course,setCourse]=useState(''),[tab,setTab]=useState('对话'),[question,setQuestion]=useState(''),[files,setFiles]=useState<File[]>([]),[online,setOnline]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState('');const [publicQuery,setPublicQuery]=useState('');const fileRef=useRef<HTMLInputElement>(null);const current=useRef('');
