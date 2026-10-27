@@ -72,7 +72,7 @@ def claim_job(queue, now=None):
         if job.get('state') == 'running':
             try:
                 expired = datetime.fromisoformat(job['leaseExpiresAt']) < now
-            except (KeyError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 expired = True
             if expired:
                 job['state'] = 'pending'

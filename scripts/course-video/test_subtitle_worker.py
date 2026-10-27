@@ -36,6 +36,16 @@ class SubtitleWorkerTests(unittest.TestCase):
         self.assertEqual(failed['state'], 'failed')
         self.assertEqual(delayed['state'], 'pending')
 
+    def test_claim_recovers_null_and_timezone_missing_leases(self):
+        now = datetime.now(timezone.utc)
+        for lease in (None, now.replace(tzinfo=None).isoformat()):
+            job = {'videoSha256': 'a' * 64, 'courseId': '123', 'entryId': '0_test',
+                   'state': 'running', 'leaseExpiresAt': lease}
+            selected = worker.claim_job({'jobs': [job]}, now)
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected['state'], 'running')
+            self.assertGreater(datetime.fromisoformat(selected['leaseExpiresAt']), now)
+
     def test_cached_chunk_requires_exact_version_window_model_and_real_vtt_hash(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'sample.vtt'
