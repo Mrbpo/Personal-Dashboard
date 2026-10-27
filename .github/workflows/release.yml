@@ -57,6 +57,8 @@ jobs:
           POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: bash deploy/prepare-vector-ci.sh "$POSTGRES_CONTAINER"
       - run: npm ci
+      - name: Install native PDF text tools for ingestion checks
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - name: Verify release tag matches package version
         env:
           TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
