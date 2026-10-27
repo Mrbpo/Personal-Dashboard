@@ -63,8 +63,8 @@ def main():
         os.chown(path, 0, group)
         os.chmod(path, mode)
     for name in tools:
-        shutil.copyfile(code / 'scripts/course-video' / name, tool / name)
-        os.chmod(tool / name, 0o755)
+        # Some historical Git blobs use Windows newlines; executable host scripts need LF.
+        write(tool / name, (code / 'scripts/course-video' / name).read_text(), 0o755)
     subprocess.run(['python3', str(tool / 'export-player-catalog.py'), '--destination',
                     str(host / 'recording-player/manifest.json'), '--group', '1000'], check=True)
     # Endpoint/bucket are public routing metadata; the parent key stays in its existing root-only file.
@@ -102,11 +102,9 @@ def main():
     for service in ('web', 'worker'):
         base['services'][service].setdefault('environment', {})['STUDY_ANSWER_BACKEND'] = 'legacy'
     write(host / 'compose.yml', yaml.safe_dump(base, sort_keys=False))
-    shutil.copyfile(code / 'deploy/Caddyfile', host / 'Caddyfile')
-    os.chmod(host / 'Caddyfile', 0o644)
+    write(host / 'Caddyfile', (code / 'deploy/Caddyfile').read_text(), 0o644)
     for name in units:
-        shutil.copyfile(code / 'deploy' / name, Path('/etc/systemd/system') / name)
-        os.chmod(Path('/etc/systemd/system') / name, 0o644)
+        write(Path('/etc/systemd/system') / name, (code / 'deploy' / name).read_text(), 0o644)
     # A separate activation step follows actual release and HTTP checks.
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     write(snapshot / 'preparation.json', json.dumps({'sha': args.sha, 'unitsInstalled': list(units),
