@@ -1,6 +1,6 @@
 # Website recording player
 
-`/recordings` uses ArtPlayer 5.4.0 and the existing owner login. The dashboard links to it. Videos remain private, original bytes in R2; no transcoding, background downloads or new archive jobs. This change does not deploy itself.
+`/recordings` uses ArtPlayer 5.4.0 and the existing owner login. The dashboard links to it. Playback streams the private original bytes from R2 without transcoding or whole-video buffering. Background discovery and subtitle jobs are separate opt-in host services described below. This change does not deploy itself.
 
 ## Data and playback
 
@@ -9,6 +9,9 @@
 - `GET /api/recordings/:viewId/play`: authenticates the owner, resolves a version-bound opaque ID from the manifest, HEAD-checks ETag/length, and redirects with 307 to an expiring signed GET URL. Invalid/missing IDs return 404. Missing configuration/unavailable storage returns 503. Provider messages/keys are not returned.
 - Browser Range requests and video data go directly to R2. The server does not buffer a whole lecture. Basic playback does not require cross-origin JS access or changing the bucket's CORS rules. Screenshot/cross-origin canvas features are disabled.
 - URL lifetime is lecture duration +30 minutes, minimum 1 hour, maximum 6 hours. R2 session credentials may expire earlier. Explicit reload remints a URL while preserving position/rate; automatic reconnect loops are disabled. First play is not autoplayed. View switching preserves position/rate/play state; it does not assert frame-level synchronization.
+- In-player dual view uses one main/PPT role plus a muted camera/secondary role. The secondary follows main play/pause, seek and speed; an unavailable secondary does not stall the main. Hide/swap and view selection remain explicit; unknown archive labels are not relabelled as visually verified. There is no OS floating window, Document PiP or native PiP feature.
+- Fullscreen/web-fullscreen reserves 80% for video and 20% for subtitles (25/30% selectable). The corner video and controls stay in the video region. Original aspect ratio is retained; long captions wrap and may scroll. Browser-native video-only fullscreen on some mobile systems cannot guarantee this DOM layout.
+- Owner-protected `GET /api/recordings/:viewId/subtitles` reports available languages and partial coverage; `?mode=en|zh|bilingual` returns a verified WebVTT bound to the current original SHA. Missing subtitle assets never trigger a model call during playback.
 
 ## Release configuration (not performed by adding these files)
 
@@ -32,12 +35,12 @@ python3 /srv/study-course-video-tool/export-player-catalog.py \
   --destination /srv/study/recording-player/manifest.json --group 1000
 ```
 
-For future normal manual `--archive-r2` runs, set `COURSE_VIDEO_PLAYER_CATALOG=/srv/study/recording-player/manifest.json` in the archive runner's environment. The opt-in hook refreshes that small catalog after successful archiving, using atomic replacement, directory 750/file 640 and the configured web group. No timer or extra download is added. The dedicated read credential, initial export and hook activation remain release prerequisites and have not been applied to production. Mount the directory, not the file, so replacements are observed.
+For future normal manual `--archive-r2` runs, set `COURSE_VIDEO_PLAYER_CATALOG=/srv/study/recording-player/manifest.json` in the archive runner's environment. The opt-in hook refreshes that small catalog after successful archiving, using atomic replacement, directory 750/file 640 and the configured web group. This catalog hook itself adds no timer or download; the separately opt-in daily controller can schedule archive runs. The dedicated read credential, initial export and hook activation remain release prerequisites and have not been applied to production. Mount the directory, not the file, so replacements are observed.
 
 The normal Compose configuration is unchanged. Without the opt-in file/credentials, existing website functions run normally and the recording endpoint reports its missing configuration. Do not make the bucket public. Signed video URLs are temporary bearer grants and must not be committed or logged in reports. Credentials never enter the client bundle.
 
 ## Limits and evidence
 
-This player does not generate subtitles or import transcripts; existing subtitle/search work is retained. Browser codec support still determines whether an original can play. Native full screen/PiP availability depends on the browser/device. Real playback, seeking and view switching must be tested against R2 separately from catalog/unit/build checks; see the delivery report for what actually ran.
+Optional [background subtitles](background-subtitles.md) generate English with the existing CPU ASR, then Chinese through the normal AI budget. Partial coverage and machine-generated text are labelled; original English, timing and provenance remain preserved. [Daily discovery](course-video-automation.md) and reauthorization are separate from playback. This implementation does not claim whole-course subtitles or transcript-search ingestion merely because the controls exist. Browser codec/fullscreen support still matters; see the delivery report for actual tests.
 
 References: [ArtPlayer](https://github.com/zhw2590582/ArtPlayer), [R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/).

@@ -1,0 +1,9 @@
+[Unit]
+Description=Wake the recording controller for a website request
+
+[Path]
+PathExists=/srv/study-course-video-control/requests/request.json
+Unit=course-video-control.service
+
+[Install]
+WantedBy=multi-user.target

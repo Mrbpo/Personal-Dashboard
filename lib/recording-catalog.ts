@@ -14,7 +14,7 @@ const manifestSchema=z.object({entries:z.record(z.unknown())});
 export type RecordingView={id:string;label:string;mime:string;bytes:number};
 export type Recording={id:string;courseId:string;title:string;durationSeconds:number|null;publishedAt:number|null;views:RecordingView[]};
 export type RecordingCatalog={courses:{id:string;name:string}[];recordings:Recording[];unavailableEntries:number};
-export type RecordingObject={id:string;key:string;etag:string;bytes:number;mime:string;durationSeconds:number|null};
+export type RecordingObject={id:string;key:string;etag:string;sha256:string;bytes:number;mime:string;durationSeconds:number|null};
 export type RecordingTarget={bucket:string;endpointHost:string};
 const identity=(value:string)=>createHash('sha256').update(value).digest('hex');
 
@@ -39,7 +39,7 @@ export function buildRecordingCatalog(manifest:unknown,target:RecordingTarget,co
    // Only explicit track metadata names a screen/camera. Parent position is not visual evidence.
    const label=entry.track==='screen'?'屏幕':entry.track==='camera'?'摄像头':parent?'主视角':'其他视角';
    list.push({entry,parent,view:{id,label,mime,bytes:file.bytes}});groups.set(group,list);
-   objects.set(id,{id,key:remote.key,etag:remote.etag,bytes:file.bytes,mime,durationSeconds:entry.durationSeconds??null});found=true;
+   objects.set(id,{id,key:remote.key,etag:remote.etag,sha256:file.sha256,bytes:file.bytes,mime,durationSeconds:entry.durationSeconds??null});found=true;
    break;
   }
   if(!found)unavailableEntries++;

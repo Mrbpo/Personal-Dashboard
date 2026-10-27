@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import {PageFrame} from '@/components/page-frame';
 import {RecordingPlayer} from '@/components/recording-player';
+import {RecordingSyncControl} from '@/components/recording-sync-control';
 import {requireOwnerPage} from '@/lib/authz';
 
 export const dynamic='force-dynamic';
@@ -8,6 +9,6 @@ export const dynamic='force-dynamic';
 export default async function Page() {
   const {authorized}=await requireOwnerPage('/recordings');
   return <PageFrame eyebrow="COURSE RECORDINGS" title="课程录像" description="按课程浏览已归档录像，选择视角并继续学习。">
-    {authorized?<RecordingPlayer/>:<Link href="/login">请先登录</Link>}
+    {authorized?<><RecordingSyncControl/><RecordingPlayer/></>:<Link href="/login">请先登录</Link>}
   </PageFrame>;
 }

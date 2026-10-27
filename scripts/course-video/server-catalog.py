@@ -36,6 +36,24 @@ def validated_catalog(path):
     return result
 
 
+def run_course(command, lock_fd):
+    child = subprocess.Popen(command, pass_fds=(lock_fd,), stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, errors='replace')
+    authorization_required = False
+    for line in child.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        try:
+            event = json.loads(line)
+            authorization_required |= event.get('state') in {'needs_reauth', 'needs_browser_verification',
+                'server_launch_rejected', 'needs_asset_browser_verification'} or (
+                event.get('state') == 'grant_failed' and event.get('code') in
+                {'CANVAS_HTTP_401', 'CANVAS_HTTP_403', 'CANVAS_TOKEN_NOT_CONFIGURED'})
+        except (ValueError, AttributeError):
+            pass
+    return child.wait(), authorization_required
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", type=Path, required=True)
@@ -43,9 +61,13 @@ def main():
     parser.add_argument("--archive-r2", action="store_true", help="Download, decode new originals, verify private R2 and release only verified caches")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--video-policy", choices=("auto", "original", "hd"), default="original")
+    parser.add_argument("--unattended", action="store_true")
+    parser.add_argument("--website-authorization", action="store_true")
     args = parser.parse_args()
     if args.archive_r2:
         args.download = True
+    if args.unattended and args.website_authorization:
+        parser.error('Choose unattended sync or website authorization')
     try:
         records = validated_catalog(args.catalog)
     except Exception as error:
@@ -68,6 +90,10 @@ def main():
                        "--course-id", record["courseId"], "--tool-id", record["toolId"],
                        "--channel-id", record["channelId"], "--observed-gallery-url", record["galleryUrl"], "--video-policy", args.video_policy]
             command += ["--lock-fd", str(run_lock.fileno())]
+            if args.unattended:
+                command.append('--unattended')
+            if args.website_authorization:
+                command.append('--website-authorization')
             if args.archive_r2:
                 command.append("--archive-r2")
             elif args.download:
@@ -75,7 +101,7 @@ def main():
             print(json.dumps({"state": "catalog_course_started", "courseId": record["courseId"],
                               "channelId": record["channelId"], "downloadRequested": args.download}), flush=True)
             # argv only; a failed course does not block the remaining explicit list.
-            code = subprocess.run(command, pass_fds=(run_lock.fileno(),), check=False).returncode
+            code, authorization_required = run_course(command, run_lock.fileno())
             summary = {"courseId": record["courseId"], "channelId": record["channelId"], "exitCode": code}
             try:
                 manifest = json.loads((archive_root / "manifest.json").read_text())
@@ -112,6 +138,10 @@ def main():
                     summary["exitCode"] = 2
                     summary["snapshotState"] = "failed"
                     atomic_json(archive_root / "reports" / ("catalog-" + run_id + ".json"), {"runId": run_id, "results": results})
+            # An authorization failure needs one human action, not one new
+            # launch for every remaining course in the daily catalog.
+            if args.unattended and authorization_required:
+                break
     print(json.dumps({"state": "catalog_complete", "results": results,
                       "allSucceeded": all(item["exitCode"] == 0 for item in results)}), flush=True)
     return 0 if all(item["exitCode"] == 0 for item in results) else 2

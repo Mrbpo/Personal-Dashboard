@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Administrator-triggered run only. No scheduler or secret-bearing arguments.
+# Shared administrator/daily runner. Authentication grants still flow only on stdin.
 set -euo pipefail
 umask 077
 tool_root=/srv/study-course-video-tool
@@ -26,6 +26,8 @@ archive_r2=0
 lock_fd=
 gallery_probe=0
 resume_report=
+unattended=0
+website_authorization=0
 usage() {
   echo 'Usage: server-run.sh [--catalog FILE [--dry-run]] [--discover-channels | --download | --archive-r2 | --subtitles-only] [--entry-id ID] [--limit N] [--course-id N --tool-id N --channel-id N] [--kaf-host HOST] [--observed-gallery-url URL] [--observed-asset-url URL]'
   echo 'Default is metadata only. Use --download for missing/updated verified recordings.'
@@ -35,6 +37,8 @@ while (( $# )); do
     --download) download=1; shift ;;
     --subtitles-only) download=1; subtitles_only=1; shift ;;
     --archive-r2) download=1; archive_r2=1; shift ;;
+    --unattended) unattended=1; shift ;;
+    --website-authorization) website_authorization=1; shift ;;
     --lock-fd) lock_fd=${2:?}; shift 2 ;;
     --probe-gallery) gallery_probe=1; shift ;;
     --resume-evidence-report) resume_report=${2:?}; shift 2 ;;
@@ -54,6 +58,7 @@ while (( $# )); do
     *) echo 'Unknown option.' >&2; usage >&2; exit 2 ;;
   esac
 done
+(( unattended == 0 || website_authorization == 0 )) || { echo 'Choose unattended sync or website authorization.' >&2; exit 2; }
 [[ $video_policy == auto || $video_policy == original || $video_policy == hd ]] ||
   { echo 'Video policy must be auto, original, or hd.' >&2; exit 2; }
 [[ $archive_r2 == 0 || -z $entry_id && $limit == 0 && $subtitles_only == 0 && $discover == 0 && $video_policy == original ]] ||
@@ -69,6 +74,8 @@ if [[ -n $catalog ]]; then
   (( dry_run == 0 )) || catalog_args+=(--dry-run)
   catalog_args+=(--video-policy "$video_policy")
   (( archive_r2 == 0 )) || catalog_args+=(--archive-r2)
+  (( unattended == 0 )) || catalog_args+=(--unattended)
+  (( website_authorization == 0 )) || catalog_args+=(--website-authorization)
   exec python3 "$tool_root/server-catalog.py" "${catalog_args[@]}"
 fi
 (( dry_run == 0 )) || { echo 'Dry-run requires a catalog.' >&2; exit 2; }
@@ -114,6 +121,17 @@ PY
 args=(--course-url "https://q.utoronto.ca/courses/$course_id/external_tools/$tool_id"
       --output /archive --media-host "$kaf_host" --profile /state/browser
       --interactive-server --launch-url-stdin --login-timeout 900 --target-only)
+docker_access=(-p 127.0.0.1:6080:6080)
+container_name="study-course-video-manual-$$"
+if (( unattended )); then
+  args+=(--unattended --login-timeout 30)
+  asset_url=
+  docker_access=()
+  container_name=study-course-video-daily
+elif (( website_authorization )); then
+  docker_access=(--network "${COURSE_VIDEO_NETWORK:-study_default}")
+  container_name=study-course-video-auth
+fi
 if [[ -n $resume_report ]]; then
   [[ $resume_report == "$archive_root"/reports/*.json && -f $resume_report && $discover == 0 && $gallery_probe == 0 ]] ||
     { echo 'Historical recovery requires a saved archive course report.' >&2; exit 2; }
@@ -139,10 +157,11 @@ docker exec -i -e COURSE_VIDEO_COURSE_ID="$course_id" -e COURSE_VIDEO_TOOL_ID="$
   -e COURSE_VIDEO_CANVAS_ORIGIN=https://q.utoronto.ca \
   study-worker-1 node --experimental-strip-types --input-type=module \
   < "$tool_root/course-video-grant.mjs" |
-  docker run --rm -i --init --name "study-course-video-manual-$$" \
+  docker run --rm -i --init --name "$container_name" \
+    --label "study.course-video.run=${COURSE_VIDEO_CONTROL_RUN_ID:-manual}" \
     --read-only --memory=1g --cpus=2 --shm-size=256m \
-    --tmpfs /tmp:rw,nosuid,size=256m -e HOME=/tmp \
-    -p 127.0.0.1:6080:6080 \
+    --tmpfs /tmp:rw,nosuid,size=256m -e HOME=/tmp -e COURSE_VIDEO_UNATTENDED="$unattended" \
+    "${docker_access[@]}" \
     -v "$archive_root:/archive" -v "$state_root:/state" \
     -v "$tool_root/archive.py:/tool/archive.py:ro" \
     -v "$tool_root/interactive-entrypoint.sh:/tool/interactive-entrypoint.sh:ro" \

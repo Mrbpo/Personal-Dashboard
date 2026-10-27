@@ -1,0 +1,88 @@
+.recording-player-root { --recording-caption-height: 20%; }
+.recording-player-root[data-caption-size="25"] { --recording-caption-height: 25%; }
+.recording-player-root[data-caption-size="30"] { --recording-caption-height: 30%; }
+
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .art-video,
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .art-poster {
+  top: 0;
+  bottom: auto;
+  height: calc(100% - var(--recording-caption-height));
+  object-fit: contain;
+  background-color: #000;
+}
+
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .art-subtitle {
+  top: auto;
+  bottom: 0 !important;
+  height: var(--recording-caption-height);
+  padding: 5px 4%;
+  justify-content: safe center;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+  font-size: clamp(12px, min(2.3vw, 2.8vh), 30px);
+  background: #000;
+}
+
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .art-subtitle-line {
+  max-width: 100%;
+  flex: 0 0 auto;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .art-bottom {
+  top: auto;
+  height: auto;
+  bottom: var(--recording-caption-height);
+}
+
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .art-settings {
+  bottom: calc(var(--recording-caption-height) + var(--art-control-height));
+}
+
+.recording-player-root .recording-secondary {
+  position: absolute;
+  z-index: 25;
+  right: 12px;
+  bottom: calc(var(--art-control-height) + 40px);
+  width: clamp(120px, 25%, 280px);
+  max-height: 35%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid #aaa;
+  border-radius: 4px;
+  background: #000;
+}
+.recording-player-root .recording-secondary-video { width: 100%; height: 100%; object-fit: contain; }
+.recording-player-root .recording-secondary-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 5px;
+  background: #000b;
+  color: #fff;
+  font-size: 11px;
+}
+.recording-player-root .recording-secondary-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recording-player-root .recording-secondary-bar button { cursor: pointer; }
+.recording-player-root .recording-secondary-error:not([hidden]) {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px 8px 8px;
+  background: #000d;
+  color: #fff;
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+.art-video-player.recording-player-root:is(.art-fullscreen,.art-fullscreen-web,:fullscreen) .recording-secondary {
+  bottom: calc(var(--recording-caption-height) + var(--art-control-height) + 40px);
+  max-height: 28%;
+}

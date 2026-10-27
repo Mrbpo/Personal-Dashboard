@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily course-recording discovery (Toronto)
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 America/Toronto
+Persistent=true
+Unit=course-video-daily.service
+
+[Install]
+WantedBy=timers.target

@@ -12,7 +12,7 @@ test('private playback HEAD-checks identity, signs GET only, and preserves sessi
  process.env.RECORDINGS_S3_SECRET_ACCESS_KEY='test-only-not-a-real-credential';process.env.RECORDINGS_S3_SESSION_TOKEN='test-session';
  let calls=0;
  const head=t.mock.method(S3Client.prototype,'send',async()=>{calls++;return {ContentLength:100,ETag:'"matching"'};});
- const object={id:'b'.repeat(64),key:'course-recordings/123/0_test/version-1/'+ 'b'.repeat(64)+'.mp4',etag:'"matching"',bytes:100,mime:'video/mp4',durationSeconds:7200};
+ const object={id:'b'.repeat(64),sha256:'b'.repeat(64),key:'course-recordings/123/0_test/version-1/'+ 'b'.repeat(64)+'.mp4',etag:'"matching"',bytes:100,mime:'video/mp4',durationSeconds:7200};
  const url=new URL(await recordingPlaybackUrl(object));
  assert.equal(calls,1);assert.equal(url.hostname,recordingTargetConfig().endpointHost);
  assert.equal(url.searchParams.get('X-Amz-Security-Token'),'test-session');assert.equal(url.searchParams.get('X-Amz-Expires'),'9000');

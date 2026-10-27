@@ -23,6 +23,7 @@ import {
 import { CourseAssistant } from "@/components/course-assistant";
 import { AiUsagePanel } from "@/components/ai-usage-panel";
 import { ShortcutPanel } from "@/components/shortcut-panel";
+import { RecordingSyncBanner } from "@/components/recording-sync-control";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { addCalendarDays, calendarDay, dueWindow, formatTaskDeadline, taskDeadline } from '@/lib/due-window';
@@ -214,6 +215,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
             </div>
           </section>
 
+          <RecordingSyncBanner />
           {loadError && <section className="mb-5 border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{loadError}</section>}
           {loaded && !loadError && visibleCourses.length === 0 && <section className="parchment-panel mb-5 p-5"><p className="section-kicker">FIRST SYNC</p><h2 className="text-xl font-semibold">把 Quercus 课程读进本地数据库</h2><p className="mt-2 text-sm text-muted-foreground">读取课程、公告、Modules、作业、截止日期和提交状态；Token 仅留在服务器。</p><Button onClick={previewSync} disabled={syncing} className="mt-4"><RefreshCw className={syncing ? "animate-spin" : ""} />开始同步</Button></section>}
           {loaded && !loadError && visibleCourses.length > 0 && <div id="global-search" className="scroll-mt-20"><CourseAssistant courses={visibleCourses.map((course: {id:string;code:string})=>({id:course.id,code:course.code}))} /></div>}

@@ -1,0 +1,8 @@
+# Apply only after the host control units/directories have been installed.
+services:
+  web:
+    environment:
+      COURSE_VIDEO_CONTROL_DIR: /app/course-video-control
+    volumes:
+      - /srv/study-course-video-control:/app/course-video-control:ro
+      - /srv/study-course-video-control/requests:/app/course-video-control/requests:rw

@@ -1,0 +1,13 @@
+[Unit]
+Description=Process an authenticated website recording-control request
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/srv/study/course-video-control.env
+ExecStart=/usr/bin/python3 /srv/study-course-video-tool/control-runner.py --request
+TimeoutStartSec=7200
+KillMode=control-group
+NoNewPrivileges=yes
+UMask=0077
