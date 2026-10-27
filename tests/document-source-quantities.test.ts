@@ -1,0 +1,143 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {readFile} from 'node:fs/promises';
+import {prepareSourceValueCatalog,type SourceValueImage} from '../lib/kernel/document-source-values.ts';
+import {prepareSourceQuantityCatalog,deriveSourceQuantityAnswer,sourceQuantityQuestionFamily,sourceQuantityAnswerSchema,SourceQuantityOperationError} from '../lib/kernel/document-source-quantities.ts';
+import {prepareDocumentAnswerForPolicy,prepareSelectedSourceQuantityGeneration,buildSelectedDocumentAnswerRequest,
+ synthesizeDocumentAnswer,documentAnswerSettings,documentSourceGenerationRoute,type DocumentAnswerContext,type DocumentSourceQuantityDerivation,type DocumentSourceQuantityRawResponse} from '../lib/kernel/document-answer.ts';
+process.env.DATABASE_URL=':memory:';process.env.AI_BUDGET_TEST_BYPASS='true';process.env.OPENAI_API_KEY='fixture-never-sent';
+const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
+const unit=(text:string)=>({id:'q:synthetic',supportId:'e0',text,quoteSha256:sha(text)});
+const check={mode:'selected-once' as const,beforeAttempt:async()=>{},recordResponse:async()=>{}};
+const settings={model:'gpt-5.4-mini' as const,reasoningEffort:'low' as const,maxOutputTokens:3000};
+const raw:DocumentSourceQuantityRawResponse[]=[],derivations:DocumentSourceQuantityDerivation[]=[];
+const policy={scope:'application' as const,...settings,evidenceSelection:'select-then-answer' as const,citationCheck:check,sourceQuantityContract:'bound-value-v1' as const,
+ recordSourceQuantityRawResponse:async(r:Readonly<DocumentSourceQuantityRawResponse>)=>{raw.push(r);},
+ recordSourceQuantityDerivation:async(r:Readonly<DocumentSourceQuantityDerivation>)=>{derivations.push(r);}};
+function context():DocumentAnswerContext{return {sourceContentIsUntrusted:true,images:[],parents:[],anchors:[{id:'pg:source-v:1',document_id:'source',
+ source_version_id:'source-sv',source_hash:sha('source-pdf'),evidence_id:'page-1',course_id:'',name:'Synthetic training note',origin:'fixture',origin_key:'one',
+ page_number:1,locator:'p1',body:'Each model is trained for 100 epochs for each dataset.',parser_version:'fixture',score:1,evidence_body:'full-page'}]};}
+
+test('source quantities bind literal spans and reject metric renaming, changed source values or unselected references',()=>{
+ const u=unit('Each model is trained for 100 epochs for each dataset.'),catalog=prepareSourceQuantityCatalog(undefined,[u]),o=catalog.observations.find(o=>o.kind==='text')!,
+  value={status:'answered',message:'',values:[{valueId:o.id}]},before=JSON.stringify(catalog);
+ const positive=deriveSourceQuantityAnswer('How many epochs is each model trained for?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
+ assert.equal(positive.normalizedSelections.claims[0].text,u.text);assert.equal(positive.operations[0].kind,'text');
+ const negative=deriveSourceQuantityAnswer('How quickly is the model trained?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
+ assert.equal(negative.outcome,'source-metric-not-established');assert.equal(negative.normalizedSelections.status,'insufficient-evidence');
+ for(const invalid of [{...value,values:[{valueId:o.id,metricLabel:'hours'}]},{...value,values:[{valueId:'fabricated'}]}])
+  assert.throws(()=>deriveSourceQuantityAnswer('How many epochs?',invalid,JSON.stringify(invalid),catalog,undefined,[u],[u.id]),SourceQuantityOperationError);
+ assert.throws(()=>deriveSourceQuantityAnswer('How many epochs?',value,JSON.stringify(value),catalog,undefined,[u],[]),SourceQuantityOperationError);
+ const changed=structuredClone(catalog);const changedValue=changed.observations.find(candidate=>candidate.id===o.id&&candidate.kind==='text')!;
+ if(changedValue.kind==='text')changedValue.value='101';
+ assert.throws(()=>deriveSourceQuantityAnswer('How many epochs?',value,JSON.stringify(value),changed,undefined,[u],[u.id]),SourceQuantityOperationError);
+ assert.equal(JSON.stringify(catalog),before);assert.equal(negative.semanticVerified,false);assert.equal(negative.scopeVerified,false);
+});
+
+test('authentic agreement wording preserves qualifiers and percentages do not borrow a metric from another sentence',()=>{
+ const u=unit('Perfect agreement (0 or 3 doubts) occur in 48 percent of cases. AUC was measured separately.'),
+  catalog=prepareSourceQuantityCatalog(undefined,[u]),o=catalog.observations.find(o=>o.kind==='text'&&o.value==='48')!;
+ assert.equal(o.family,'agreement');assert.equal(o.kind,'text');
+ if(o.kind==='text'){assert.equal(u.text.slice(o.numberStartUtf16,o.numberEndUtf16),'48');assert.equal(u.text.slice(o.metricStartUtf16,o.metricEndUtf16),'agreement');}
+ const value={status:'answered',message:'',values:[{valueId:o.id}]},r=deriveSourceQuantityAnswer('What percentage of inter-annotator agreement is reported?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
+ assert.equal(r.normalizedSelections.claims[0].text,'Perfect agreement (0 or 3 doubts) occur in 48 percent of cases.');
+ const adjacent=unit('AUC was measured. The score was 48 percent.'),adjacentCatalog=prepareSourceQuantityCatalog(undefined,[adjacent]);
+ assert.equal(adjacentCatalog.observations.filter(o=>o.kind==='text').length,0);
+ const quote=adjacentCatalog.observations.find(o=>o.kind==='source-quote')!,wrong={status:'answered',message:'',values:[{valueId:quote.id}]};
+ assert.equal(deriveSourceQuantityAnswer('What percentage of human agreement?',wrong,JSON.stringify(wrong),adjacentCatalog,undefined,[adjacent],[adjacent.id]).normalizedSelections.status,'insufficient-evidence');
+});
+
+test('an original table with an unrecognized metric remains unknown rather than borrowing the requested AUC label',async()=>{
+ const meta=JSON.parse(await readFile(new URL('./fixtures/source-values-author23/selected-image.json',import.meta.url),'utf8')),
+  image={sha256:meta.sha256,width:meta.width,height:meta.height,attachmentId:meta.attachmentId,captionEvidenceId:meta.evidenceId,
+   source:meta.tableObservations[0].candidate.source},table=prepareSourceValueCatalog([{...meta,image} as SourceValueImage]),
+  catalog=prepareSourceQuantityCatalog(table,[]),o=catalog.observations.find(o=>o.kind==='table'&&o.value==='66.31')!;
+ assert.equal(o.family,null);const value={status:'answered',message:'',values:[{valueId:o.id}]},r=deriveSourceQuantityAnswer(
+  'What mean AUC is reported?',value,JSON.stringify(value),catalog,table,[],[meta.id]);
+ assert.equal(r.outcome,'source-metric-not-established');assert.equal(r.normalizedSelections.status,'insufficient-evidence');
+ assert.equal(r.semanticVerified,false);assert.equal(o.kind,'table');if(o.kind==='table')assert.ok(o.columnLabels.includes('Accuracy/%'));
+});
+
+test('off/ordinary routes retain the original generator wire and policies stay explicit',async()=>{
+ for(const q of ['Explain the training setup.','What was the inter-annotator agreement between the expert annotators?','Compare AUC and rater agreement.',
+  'Calculate the mean AUC of the models.','By how much does the mean AUC improve?']){
+  assert.equal(sourceQuantityQuestionFamily(q),null);const p=prepareDocumentAnswerForPolicy(q,context(),policy),ids=[p.quoteUnits[0].id],
+   proposed=prepareSelectedSourceQuantityGeneration(p,ids,settings,policy);
+  assert.equal(proposed.applied,false);assert.deepEqual(proposed.request,buildSelectedDocumentAnswerRequest(p,ids,settings,policy));
+ }
+ await assert.rejects(documentAnswerSettings({...policy,sourceValueContract:'difference-v1'}),/Source values require/);
+ await assert.rejects(documentAnswerSettings({...policy,recordSourceQuantityRawResponse:undefined}),/Source quantities require/);
+});
+
+test('one combined configuration preserves scalar, exact-difference and ordinary multi-source routes',async()=>{
+ const combined={...policy,sourceValueContract:'difference-v1' as const,recordSourceValueDerivation:async()=>{},recordSourceValueRawResponse:async()=>{}};
+ await documentAnswerSettings(combined);
+ for(const question of ['What mean AUC is reported for humans?','How quickly is this model trained?','What percentage of human judgment agreement?'])
+  assert.equal(documentSourceGenerationRoute(question,combined),'source-quantities',question);
+ assert.equal(documentSourceGenerationRoute('By how much does one system outperform another?',combined),'source-values');
+ for(const question of ['Compare AUC and rater agreement.','Explain the training setup.','Calculate the mean AUC of the models.',
+  'By how much is the relative score higher?','What is the improvement from pruning on a simple EM algorithm?'])
+  assert.equal(documentSourceGenerationRoute(question,combined),'ordinary');
+ assert.equal(documentSourceGenerationRoute('Explain the training setup.',{sourceValueContract:'difference-v1'}),'source-values','retain existing value-only policy');
+ assert.equal(documentSourceGenerationRoute('How many epochs?',{}),'ordinary','opt-ins stay off by default');
+});
+
+test('combined contracts preserve ordinary multi-source generation without an extra model or scalar rewrite',async()=>{
+ const combined={...policy,sourceValueContract:'difference-v1' as const,
+  recordSourceQuantityRawResponse:async()=>{assert.fail('ordinary question must not record scalar operations');},
+  recordSourceQuantityDerivation:async()=>{assert.fail('ordinary question must not record scalar operations');},
+  recordSourceValueRawResponse:async()=>{assert.fail('ordinary question must not record arithmetic operations');},
+  recordSourceValueDerivation:async()=>{assert.fail('ordinary question must not record arithmetic operations');}};
+ const c=context();c.anchors.push({...c.anchors[0],id:'pg:other-v:1',document_id:'other',source_version_id:'other-sv',
+  source_hash:sha('other-pdf'),evidence_id:'other-page',name:'Another source',body:'A second source describes a different setup.'});
+ const question='Compare the training setups in these two documents.',p=prepareDocumentAnswerForPolicy(question,c,combined),
+  ids=p.quoteUnits.map(q=>q.id),expected=buildSelectedDocumentAnswerRequest(p,ids,settings,combined),saved=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));
+  if(calls===2)assert.deepEqual(request,expected,'the ordinary request retains both selected sources and its original schema');
+  const output=calls===1?{referenceIds:ids}:{status:'answered',message:'',claims:[{text:p.quoteUnits[0].text,citations:[{id:ids[0]}]}]};
+  return Response.json({status:'completed',model:'gpt-5.4-mini',output_text:JSON.stringify(output)});};
+ try{const result=await synthesizeDocumentAnswer(question,async()=>c,combined);assert.equal(calls,2);
+  assert.equal(result.answer.status,'answered');assert.equal('sourceValueDerivation'in result,false);assert.equal('sourceQuantityDerivation'in result,false);
+ }finally{globalThis.fetch=saved;}
+});
+
+test('original numerical prose preserves multiple entities and values without inventing a value binding',()=>{
+ const text='The mean AUC is 0.56 for the model and 0.58 for humans, compared to a chance score of 0.5.',u=unit(text),catalog=prepareSourceQuantityCatalog(undefined,[u]),
+  o=catalog.observations.find(o=>o.kind==='source-quote')!,value={status:'answered',message:'',values:[{valueId:o.id}]},
+  result=deriveSourceQuantityAnswer('What mean AUC is reported for humans?',value,JSON.stringify(value),catalog,undefined,[u],[u.id]);
+ assert.equal(result.normalizedSelections.claims[0].text,text);assert.equal(result.operations[0].relationship,'original-quote-no-inferred-value-binding');
+ assert.deepEqual(catalog.aggregationHints[o.id],['mean']);assert.equal(result.semanticVerified,false);assert.equal(result.scopeVerified,false);
+ const overall=unit('The overall AUC is 0.58.'),other=prepareSourceQuantityCatalog(undefined,[overall]),id=other.observations.find(o=>o.kind==='source-quote')!.id,
+  bad={status:'answered',message:'',values:[{valueId:id}]};
+ assert.equal(deriveSourceQuantityAnswer('What mean AUC is reported?',bad,JSON.stringify(bad),other,undefined,[overall],[overall.id]).normalizedSelections.status,'insufficient-evidence');
+ const schema=sourceQuantityAnswerSchema(catalog,'What mean AUC is reported for humans?');
+ assert.deepEqual(schema.properties.values.items.properties.valueId.enum,[o.id]);
+ const missing=sourceQuantityAnswerSchema(other,'What mean AUC is reported?');
+ assert.deepEqual(missing.properties.status.enum,['insufficient-evidence']);assert.equal(missing.properties.values.maxItems,0);
+});
+
+test('the application generator records the actual raw and compiles a mismatched source unit to neutral refusal without a third model call',async()=>{
+ const combined={...policy,sourceValueContract:'difference-v1' as const,
+  recordSourceValueDerivation:async()=>{assert.fail('scalar question must not invoke difference recording');},
+  recordSourceValueRawResponse:async()=>{assert.fail('scalar question must not invoke difference recording');}};
+ raw.length=0;derivations.length=0;const c=context(),question='How quickly is this model trained?',p=prepareDocumentAnswerForPolicy(question,c,combined),saved=globalThis.fetch;let calls=0;
+ assert.deepEqual(prepareSelectedSourceQuantityGeneration(p,[p.quoteUnits[0].id],settings,combined).request,
+  prepareSelectedSourceQuantityGeneration(p,[p.quoteUnits[0].id],settings,policy).request,'combined policy keeps the scalar model request byte-equivalent');
+ globalThis.fetch=async(_url,init)=>{calls++;const request=JSON.parse(String(init?.body));let output;
+  if(calls===1)output={referenceIds:[p.quoteUnits[0].id]};
+  else{assert.equal(request.text.format.name,'grounded_document_source_quantities_v1');const packet=JSON.parse(request.input.at(-1).content[0].text),o=packet.sourceQuantityCatalog.observations.find((o:any)=>o.family==='iteration-count');
+   output={status:'answered',message:'',values:[{valueId:o.id}]};}
+  return Response.json({status:'completed',model:'gpt-5.4-mini',output_text:JSON.stringify(output)});};
+ try{const result=await synthesizeDocumentAnswer(question,async()=>c,combined);
+  assert.equal(calls,2);assert.equal(result.answer.status,'insufficient-evidence');assert.deepEqual(result.selectedUnits,[]);
+  assert.equal(raw.length,1);assert.equal(derivations.length,1);assert.equal(derivations[0].outcome,'source-metric-not-established');
+  assert.deepEqual(JSON.parse(JSON.parse(raw[0].rawBody).output_text),derivations[0].rawProviderResult);
+  assert.equal(derivations[0].sourceInputFingerprint,result.inputFingerprint);
+  assert.equal(derivations[0].sourceBindings[0].source.sourceHash,c.anchors[0].source_hash);
+  assert.equal(derivations[0].sourceBindings[0].source.documentVersionId,'source-v');
+  assert.equal(derivations[0].sourceBindings[0].source.evidenceId,'page-1');
+  assert.equal(derivations[0].sourceBindings[0].quoteUnit?.quoteSha256,p.quoteUnits[0].quoteSha256);
+  assert.equal(derivations[0].textUnitManifestSha256.length,64);
+ }finally{globalThis.fetch=saved;}
+});

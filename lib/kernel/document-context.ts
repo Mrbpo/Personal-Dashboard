@@ -8,6 +8,10 @@ import {readPdfVisualEvidence,PdfVisualEvidenceError,type PdfVisualImageEvidence
 import {createDocumentImageBudget,type DocumentImageBudget,type DocumentImageSelection} from './document-image-budget.ts';
 import {assertDoclingMathProvenance,assertPreparedDoclingSourceMath,doclingMathForPage,
  type DoclingMathProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
+import {doclingPageResultReferences,readDoclingPageRegions,doclingPageImageTransform,type DoclingRegionResultReference} from './docling-source-regions.ts';
+import {DoclingPageRegionError,DOCLING_PAGE_REGION_LIMITS} from './docling-result.ts';
+import {observeLiteralCourseCodes} from './question-course-routing.ts';
+import{projectDoclingPageLocators,assertDoclingPageLocators,doclingPageLocatorsEnabled,type DoclingPageLocators}from'./docling-page-locators.ts';
 
 export type DocumentContextSource={documentId:string;currentVersionId:string;sourceVersionId:string;sourceHash:string;courseId?:string};
 export type DocumentNodeKind='paragraph'|'abstract'|'caption'|'page';
@@ -32,8 +36,14 @@ export type DocumentParentContext={parentId:string;kind:'section'|'single-node';
  sourceNodeCount:number;sourceBodyCodepoints:number;nodeManifest:Array<{evidenceId:string;locator:string;bodySha256:string}>;nodes:DocumentEvidenceNode[]};
 export type DocumentContextRead={anchors:DocumentEvidenceHit[];parents:DocumentParentContext[];images:Array<DocumentImageEvidence|PdfVisualImageEvidence>;
  imageSelection?:DocumentImageSelection;
+ sourceIdentityContext?:LiteralCourseIdentityContext;
  accounting:{anchorCount:number;parentCount:number;contextNodeCount:number;contextBodyCodepoints:number;imageCount:number;imageBytes:number};
  sourceContentIsUntrusted:true};
+export type LiteralCourseIdentityContext={version:'literal-course-frontpage-v1';requestedCodes:string[];
+ coverage:'first-persisted-pdf-page-only';courseOwnershipVerified:false;semanticVerified:false;
+ additions:Array<{source:DocumentContextSource;evidenceId:string;locator:string;physicalPage:1;bodySha256:string;
+  observations:ReturnType<typeof observeLiteralCourseCodes>}>;
+ omissions:Array<{source:DocumentContextSource;reason:'not-pdf-first-page'|'no-literal-match'|'already-in-context'|'addition-limit'}>};
 /** A separate whole-source reader; these limits do not change ranked readers. */
 export const COMPLETE_DOCUMENT_SOURCE_LIMITS=Object.freeze({nodes:512,bodyCodepoints:131072,bodyUtf8Bytes:262144,
  images:64,imageBytes:32*1024*1024,imageInputTokens:65536,requestInputTokens:300000,framingTokens:16384});
@@ -52,6 +62,12 @@ export type CompleteDocumentSourceManifest={method:'complete-current-source';nod
  imageInputTokenUpper:number;limits:typeof COMPLETE_DOCUMENT_SOURCE_LIMITS;manifestSha256:string};
 export type CompleteDocumentSourceRead={status:'unavailable';reason:CompleteDocumentSourceReason;manifest:CompleteDocumentSourceManifest}|
  {status:'available';context:DocumentContextRead;manifest:CompleteDocumentSourceManifest};
+export type DocumentTextSourceManifest={method:'current-persisted-text-v1';nodeOrder:'persisted-source-order';
+ textCoverage:'all-current-persisted-nodes'|'unavailable';source:DocumentContextSource;sourceNodeCount:number;returnedNodeCount:number;
+ sourceBodyCodepoints:number;sourceBodyUtf8Bytes:number;orderedTextSha256:string|null;structureManifestSha256:string|null;
+ originalFileCompletenessVerified:false;visualCompletenessVerified:false;parserWarnings:string[];manifestSha256:string};
+export type DocumentTextSourceRead={status:'unavailable';reason:'source-size-limit'|'structure-unavailable';manifest:DocumentTextSourceManifest}|
+ {status:'available';context:DocumentContextRead;manifest:DocumentTextSourceManifest};
 export type DocumentContextErrorCode='DOCUMENT_CONTEXT_INVALID'|'DOCUMENT_CONTEXT_CHANGED'|'DOCUMENT_STRUCTURE_UNAVAILABLE'|
  'DOCUMENT_STRUCTURE_CONFLICT'|'DOCUMENT_IMAGE_UNAVAILABLE'|'DOCUMENT_IMAGE_AMBIGUOUS'|'DOCUMENT_IMAGE_CHANGED';
 export class DocumentContextError extends Error{
@@ -102,11 +118,236 @@ const evidenceNode=(source:SourceRow,page:PageRow,node?:DocumentStructureInput['
  evidenceId:page.evidence_id,locator:page.locator,ordinal:page.page_number-1,kind:node?.kind||'page',parentId:node?.parentId??null,
  body:page.body,bodySha256:hash(page.body)});
 
+/** All persisted text is independent of whether every source image fits. This
+ * does not certify PDF extraction, visual coverage, or an answer's completeness. */
+export async function readCompleteDocumentText(pool:Pool,owner:string,expected:DocumentContextSource):Promise<DocumentTextSourceRead>{
+ const source={...expected},current=await currentSource(pool,owner,source),limits=COMPLETE_DOCUMENT_SOURCE_LIMITS;
+ const totals=(await pool.query<{nodes:number;points:string;bytes:string;warnings:string[]}>(`SELECT count(*)::int nodes,
+  coalesce(sum(length(p.body)),0)::text points,coalesce(sum(octet_length(p.body)),0)::text bytes,
+  (SELECT warnings FROM document_text_versions WHERE id=$1) warnings FROM document_text_pages p WHERE p.version_id=$1`,
+ [current.currentVersionId])).rows[0];
+ const manifest:Omit<DocumentTextSourceManifest,'manifestSha256'>={method:'current-persisted-text-v1',nodeOrder:'persisted-source-order',
+  textCoverage:'unavailable',source:identity(current),sourceNodeCount:totals.nodes,returnedNodeCount:0,
+  sourceBodyCodepoints:Number(totals.points),sourceBodyUtf8Bytes:Number(totals.bytes),orderedTextSha256:null,structureManifestSha256:null,
+  originalFileCompletenessVerified:false,visualCompletenessVerified:false,parserWarnings:totals.warnings};
+ const finish=()=>({...manifest,manifestSha256:hash(canonical(manifest))});
+ const unavailable=async(reason:'source-size-limit'|'structure-unavailable'):Promise<DocumentTextSourceRead>=>{
+  await currentSource(pool,owner,source);return {status:'unavailable',reason,manifest:finish()};
+ };
+ if(!manifest.sourceNodeCount||![manifest.sourceBodyCodepoints,manifest.sourceBodyUtf8Bytes].every(Number.isSafeInteger)||
+  manifest.sourceNodeCount>limits.nodes||manifest.sourceBodyCodepoints>limits.bodyCodepoints||manifest.sourceBodyUtf8Bytes>limits.bodyUtf8Bytes)
+  return unavailable('source-size-limit');
+ let data:Awaited<ReturnType<typeof structuredSource>>;
+ try{data=await structuredSource(pool,owner,source);}
+ catch(error){if(error instanceof DocumentContextError&&error.code==='DOCUMENT_STRUCTURE_UNAVAILABLE')return unavailable('structure-unavailable');throw error;}
+ if(data.nodes.length!==manifest.sourceNodeCount||data.nodes.reduce((sum,n)=>sum+Array.from(n.body).length,0)!==manifest.sourceBodyCodepoints||
+  data.nodes.reduce((sum,n)=>sum+Buffer.byteLength(n.body),0)!==manifest.sourceBodyUtf8Bytes)changed();
+ const anchors:DocumentEvidenceHit[]=[],parents=new Map<string,DocumentParentContext>();
+ for(let offset=0;offset<data.nodes.length;offset+=14){
+  const selected=await readDocumentNodes(pool,owner,source,data.nodes.slice(offset,offset+14).map(n=>n.evidenceId)),
+   packet=await readDocumentParents(pool,owner,selected);
+  anchors.push(...packet.anchors);
+  for(const parent of packet.parents)if(!parents.has(parent.parentId))parents.set(parent.parentId,parent);
+ }
+ if(anchors.length!==data.nodes.length||anchors.some((hit,index)=>hit.evidence_id!==data.nodes[index].evidenceId||hit.body!==data.nodes[index].body))changed();
+ await currentSource(pool,owner,source);
+ manifest.textCoverage='all-current-persisted-nodes';manifest.returnedNodeCount=anchors.length;
+ manifest.orderedTextSha256=hash(canonical(data.nodes.map(n=>n.body)));manifest.structureManifestSha256=data.manifestSha256;
+ manifest.parserWarnings=[...new Set(anchors.flatMap(hit=>hit.parser_warnings??[]))];
+ return {status:'available',manifest:finish(),context:{anchors,parents:[...parents.values()],images:[],sourceContentIsUntrusted:true,
+  accounting:{anchorCount:anchors.length,parentCount:parents.size,contextNodeCount:data.nodes.length,
+   contextBodyCodepoints:manifest.sourceBodyCodepoints,imageCount:0,imageBytes:0}}};
+}
+
 /** Adapter input, read through Kernel with full actual evidence identities. */
 export async function readDocumentSourcePages(db:Queryable,owner:string,source:DocumentContextSource){
  const current=await currentSource(db,owner,source),pages=await sourcePages(db,current);
  await currentSource(db,owner,identity(current));
  return {source:identity(current),nodes:pages.map(page=>evidenceNode(current,page)),sourceContentIsUntrusted:true as const};
+}
+
+/** An explicit one-page observation reader. Existing bodies, quotation IDs,
+ * ranked readers and complete-source contracts are not changed or upgraded. */
+export async function readDocumentPageRegions(db:Queryable,owner:string,source:DocumentContextSource,physicalPage:number){
+ source={...source};const current=await currentSource(db,owner,source);
+ if(!Number.isInteger(physicalPage)||physicalPage<1)invalid('One explicit physical page is required');
+ const pageCount=(await db.query<{page_count:number}>('SELECT page_count FROM document_text_versions WHERE id=$1',[current.currentVersionId])).rows[0]?.page_count??0;
+ if(!Number.isInteger(pageCount)||pageCount<1||physicalPage>pageCount)invalid('Requested page is outside the current source');
+ if(current.rawSourceHash!==current.sourceHash)changed();
+ const readProgress=async()=>(await db.query<{batch_provenance:unknown}>(
+  `SELECT raw_value->'batchProvenance' batch_provenance FROM source_item_versions WHERE id=$1`,[current.sourceVersionId])).rows[0]?.batch_provenance??null;
+ const progress=await readProgress(),progressSha256=hash(canonical(progress));
+ const finish=async()=>{await currentSource(db,owner,identity(current));if(hash(canonical(await readProgress()))!==progressSha256)changed();
+  await currentSource(db,owner,identity(current));};
+ const unavailable=async(reason:string,reference?:DoclingRegionResultReference)=>{
+  await finish();return {status:'unavailable' as const,reason,source:identity(current),physicalPage,
+   policy:'docling-source-page-regions-v1' as const,...(reference?{result:reference}:{}),sourceContentIsUntrusted:true as const};
+ };
+ if(current.mime!=='application/pdf')return unavailable('not-pdf');
+ if(pageCount>DOCLING_PAGE_REGION_LIMITS.pages)return unavailable('source-page-count-limit');
+ const page=(await db.query<PageRow>(`SELECT p.page_number,p.evidence_id,p.locator,p.body FROM document_text_pages p
+ JOIN evidence e ON e.id=p.evidence_id JOIN document_texts d ON d.current_version_id=p.version_id
+ WHERE d.id=$1 AND p.version_id=$2 AND e.source_version_id=$3 AND e.source_item_id=d.source_item_id AND p.page_number=$4`,
+ [current.documentId,current.currentVersionId,current.sourceVersionId,physicalPage])).rows;
+ if(page.length!==1||page[0].page_number!==physicalPage)changed();
+ try{
+  // Empty selection validates the saved layout/manifest without loading PNGs.
+  const metadata=await readPdfVisualEvidence(db,owner,identity(current),[]);
+  const refs=doclingPageResultReferences({owner,documentId:current.documentId,sourceHash:current.sourceHash,pageCount,physicalPage},progress,metadata.layout);
+  if(!refs.length)return unavailable('saved-docling-result-unavailable');
+  const reference=refs[0],index=await readDoclingPageRegions({owner,documentId:current.documentId,sourceHash:current.sourceHash,pageCount,physicalPage},reference);
+  if(!metadata.registered||metadata.renderStatus!=='available')return unavailable('original-page-image-unavailable',reference);
+  const visuals=await readPdfVisualEvidence(db,owner,identity(current),[page[0].evidence_id],undefined,{pageAssetsOnly:true});
+  if(visuals.manifestSha256!==metadata.manifestSha256)changed();
+  const images=visuals.images.filter(image=>image.kind==='pdf-page'&&image.physicalPage===physicalPage);
+  if(images.length!==1)return unavailable('original-page-image-unavailable-or-ambiguous',reference);
+  const {bytes:discarded,...image}=images[0];void discarded;
+  const coordinateTransform=doclingPageImageTransform(index.pageSize,image);
+  await finish();
+  return {status:'available' as const,source:identity(current),physicalPage,pageEvidenceId:page[0].evidence_id,
+   pageBodySha256:hash(page[0].body),parserVersion:current.parserVersion,progressSha256,
+   visualManifestSha256:visuals.manifestSha256,image,coordinateTransform,index};
+ }catch(error){
+  if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();
+  if(error instanceof DoclingPageRegionError){
+   if(error.code==='limit'||error.code==='unavailable')return unavailable(error.message);
+   invalid(error.message);
+  }
+  if(error instanceof PdfVisualEvidenceError&&error.code==='unavailable')return unavailable(error.message);
+  throw error;
+ }
+}
+export const STUDY_PDF_PAGE_REGION_LIMITS=Object.freeze({pageBytes:32768,contextBytes:65536});
+type PageRegionRead=Awaited<ReturnType<typeof readDocumentPageRegions>>;
+export type StudyPdfPageRegionObservation={version:'study-pdf-page-regions-v1';status:'available'|'unavailable';reason:string|null;
+ binding:{source:DocumentContextSource;physicalPage:number;anchorEvidenceId:string;attachmentId:string;imageSha256:string;
+  visualManifestSha256:string;frameSha256:string;width:number;height:number};
+ originalObservationSha256:string;originalObservationByteLength:number;result?:DoclingRegionResultReference;
+ payload?:PageRegionRead;locatorProjection?:DoclingPageLocators;observationSha256:string};
+export type StudyPdfPageRegionRead={attachmentId:string;status:'available'|'unavailable';reason:string|null;originalObservationSha256?:string;
+ metadataOmissionReason?:'context-observation-byte-limit';locatorProjection?:{status:'available'|'unavailable'|'omitted';reason:string|null;sourceNodeCount:number;returnedNodeCount:number}};
+export type StudyPdfPageImage=PdfVisualImageEvidence&{pageRegions?:StudyPdfPageRegionObservation};
+const pageRegionBinding=(image:PdfVisualImageEvidence)=>({source:{...image.source},physicalPage:image.physicalPage,
+ anchorEvidenceId:image.anchorEvidenceId,attachmentId:image.attachmentId,imageSha256:image.sha256,
+ visualManifestSha256:image.manifestSha256,frameSha256:hash(canonical(image.provenance)),width:image.width,height:image.height});
+export function unavailableStudyPdfPageRegions(observation:StudyPdfPageRegionObservation,reason:string):StudyPdfPageRegionObservation{
+ const {payload:discarded,observationSha256:previous,...rest}=observation;void discarded;void previous;
+ const value={...rest,status:'unavailable' as const,reason};return {...value,observationSha256:hash(canonical(value))};
+}
+export function withoutStudyPdfPageLocators(observation:StudyPdfPageRegionObservation):StudyPdfPageRegionObservation{
+ if(!observation.locatorProjection)return observation;
+ const{locatorProjection:discarded,observationSha256:previous,...value}=observation;void discarded;void previous;
+ return{...value,observationSha256:hash(canonical(value))};
+}
+/** Whole observations only. The digest keeps omitted source observations bound
+ * without presenting an oversized prefix as the original region index. */
+export function bindStudyPdfPageRegions(image:PdfVisualImageEvidence,result:PageRegionRead):StudyPdfPageRegionObservation{
+ if(image.kind!=='pdf-page'||canonical(result.source)!==canonical(image.source)||result.physicalPage!==image.physicalPage)changed();
+ if(result.status==='available'&&(result.pageEvidenceId!==image.anchorEvidenceId||result.image.kind!=='pdf-page'||
+  canonical(pageRegionBinding({...result.image,bytes:Buffer.alloc(0)}))!==canonical(pageRegionBinding(image))))changed();
+ const original=canonical(result),value={version:'study-pdf-page-regions-v1' as const,status:result.status,
+  reason:result.status==='available'?null:result.reason,binding:pageRegionBinding(image),originalObservationSha256:hash(original),
+  originalObservationByteLength:Buffer.byteLength(original),
+  ...('index'in result?{result:result.index.result}:'result'in result?{result:result.result}:{}),payload:structuredClone(result)};
+ const observation={...value,observationSha256:hash(canonical(value))};
+ assertStudyPdfPageRegions(observation,image);
+ return Buffer.byteLength(canonical(observation))>STUDY_PDF_PAGE_REGION_LIMITS.pageBytes?
+  unavailableStudyPdfPageRegions(observation,'page-observation-byte-limit'):observation;
+}
+export function assertStudyPdfPageRegions(observation:StudyPdfPageRegionObservation,image:PdfVisualImageEvidence,pageBodySha256?:string){
+ const {observationSha256,...value}=observation;
+ if(image.kind!=='pdf-page'||observation.version!=='study-pdf-page-regions-v1'||
+  canonical(observation.binding)!==canonical(pageRegionBinding(image))||!isSha(observation.originalObservationSha256)||
+  !Number.isSafeInteger(observation.originalObservationByteLength)||observation.originalObservationByteLength<1||
+  hash(canonical(value))!==observationSha256)changed();
+ if(observation.payload){
+  const payload=observation.payload;
+  if(hash(canonical(payload))!==observation.originalObservationSha256||Buffer.byteLength(canonical(payload))!==observation.originalObservationByteLength||
+   canonical(payload.source)!==canonical(image.source)||payload.physicalPage!==image.physicalPage)changed();
+  const result='index'in payload?payload.index.result:'result'in payload?payload.result:undefined;
+  if(canonical(result)!==canonical(observation.result))changed();
+  if(payload.status==='available'&&(payload.pageEvidenceId!==image.anchorEvidenceId||payload.visualManifestSha256!==image.manifestSha256||
+   canonical(pageRegionBinding({...payload.image,bytes:Buffer.alloc(0)}))!==canonical(pageRegionBinding(image))||
+   (pageBodySha256!==undefined&&payload.pageBodySha256!==pageBodySha256)||payload.index.sourceBindingVerified!==true||
+   payload.index.visibilityVerified!==false||payload.index.semanticRelationsVerified!==false||payload.index.textFaithfulnessVerified!==false||
+   payload.index.readingOrderVerified!==false||payload.index.inferredRelations.length!==0))changed();
+ }
+ if(observation.status==='available'?(observation.reason!==null||observation.payload?.status!=='available'):
+  (observation.status!=='unavailable'||typeof observation.reason!=='string'||!observation.reason||observation.payload?.status==='available'))changed();
+ if(observation.locatorProjection){
+  if(observation.status!=='unavailable')changed();
+  assertDoclingPageLocators(observation.locatorProjection,observation.originalObservationSha256,observation.result,image.physicalPage);
+  if(canonical(observation.locatorProjection.coordinateTransform)!==canonical(doclingPageImageTransform(observation.locatorProjection.pageSize,image)))changed();
+ }
+}
+/** Enrich only retained original PDF pages. No new image/quote/body is added.
+ * Missing raw results keep the old wire; the separate read receipt explains it. */
+export async function readDocumentPageRegionsForImages<T extends Pick<DocumentImageEvidence,'attachmentId'|'source'|'sha256'>|PdfVisualImageEvidence>(db:Queryable,owner:string,images:T[]){
+ const reads:StudyPdfPageRegionRead[]=[],enriched:Array<T&{pageRegions?:StudyPdfPageRegionObservation}>=[],
+  locators=new Map<string,DoclingPageLocators>(),locatorMode=doclingPageLocatorsEnabled();
+ for(const image of images){
+  if(!('kind'in image)||image.kind!=='pdf-page'){enriched.push(image);continue;}
+  const result=await readDocumentPageRegions(db,owner,image.source,image.physicalPage);
+  if(canonical(result.source)!==canonical(image.source)||result.physicalPage!==image.physicalPage)changed();
+  if(result.status==='unavailable'&&!('result'in result)){
+   const current=await readPdfVisualEvidence(db,owner,image.source,[]);
+   if(!current.registered||current.renderStatus!=='available'||current.manifestSha256!==image.manifestSha256)changed();
+   const clean={...image} as T&{pageRegions?:StudyPdfPageRegionObservation};delete clean.pageRegions;
+   reads.push({attachmentId:image.attachmentId,status:result.status,reason:result.reason});enriched.push(clean);continue;
+  }
+  const observation=bindStudyPdfPageRegions(image,result);
+  const read:StudyPdfPageRegionRead={attachmentId:image.attachmentId,status:observation.status,reason:observation.reason,
+   originalObservationSha256:observation.originalObservationSha256};
+  if(locatorMode&&result.status==='available'){
+   try{locators.set(image.attachmentId,projectDoclingPageLocators(result,observation.originalObservationSha256));}
+   catch(error){if(!(error instanceof RangeError&&error.message==='locator-header-byte-limit'))throw error;
+    read.locatorProjection={status:'omitted',reason:error.message,sourceNodeCount:result.index.nodes.length,returnedNodeCount:0};}
+  }
+  reads.push(read);enriched.push({...image,pageRegions:observation});
+ }
+ const added=enriched.flatMap(image=>image.pageRegions?[image.pageRegions]:[]);
+ if(Buffer.byteLength(canonical(added))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes){
+  const candidates:Array<{image:typeof enriched[number];read:StudyPdfPageRegionRead;original:StudyPdfPageRegionObservation}>=[];let readIndex=0;
+  for(const image of enriched){
+   if(!('kind'in image)||image.kind!=='pdf-page')continue;
+   const read=reads[readIndex++];if(!image.pageRegions)continue;
+   candidates.push({image,read,original:image.pageRegions});delete image.pageRegions;
+  }
+  const fits=()=>Buffer.byteLength(canonical(enriched.flatMap(image=>image.pageRegions?[image.pageRegions]:[])))<=STUDY_PDF_PAGE_REGION_LIMITS.contextBytes;
+  // Reserve whole unavailable wrappers first. Even when a later full item does
+  // not fit, subsequent smaller items can still use the remaining capacity.
+  for(const {image,read,original}of candidates){
+   const stub=original.status==='available'?unavailableStudyPdfPageRegions(original,'context-observation-byte-limit'):original;
+   image.pageRegions=stub;read.status=stub.status;read.reason=stub.reason;
+   if(!fits()){delete image.pageRegions;read.metadataOmissionReason='context-observation-byte-limit';}
+  }
+  for(const {image,read,original}of candidates){
+   if(original.status!=='available'||!image.pageRegions)continue;
+   const stub=image.pageRegions;image.pageRegions=original;
+   if(fits()){read.status=original.status;read.reason=original.reason;}
+   else image.pageRegions=stub;
+  }
+ }
+ // Existing complete observations keep priority. Locator-only metadata uses
+ // remaining capacity and never displaces an available original observation.
+ let locatorRead=0;
+ for(const image of enriched){
+  if(!('kind'in image)||image.kind!=='pdf-page')continue;
+  const read=reads[locatorRead++],p=locators.get(image.attachmentId);
+  if(!p||image.pageRegions?.status==='available')continue;
+  const original=image.pageRegions;
+  if(!original){read.locatorProjection={status:'omitted',reason:'context-observation-byte-limit',sourceNodeCount:p.sourceNodeCount,returnedNodeCount:0};continue;}
+  const{observationSha256:unused,...value}=original;void unused;
+  const projected={...value,locatorProjection:p},next={...projected,observationSha256:hash(canonical(projected))};image.pageRegions=next;
+  if(Buffer.byteLength(canonical(next))>STUDY_PDF_PAGE_REGION_LIMITS.pageBytes||
+   Buffer.byteLength(canonical(enriched.flatMap(i=>i.pageRegions?[i.pageRegions]:[])))>STUDY_PDF_PAGE_REGION_LIMITS.contextBytes){
+   image.pageRegions=original;read.locatorProjection={status:'omitted',reason:'context-locator-byte-limit',sourceNodeCount:p.sourceNodeCount,returnedNodeCount:0};
+  }else{
+   assertStudyPdfPageRegions(next,image);
+   read.locatorProjection={status:p.status,reason:p.reason,sourceNodeCount:p.sourceNodeCount,returnedNodeCount:p.nodes.length};
+  }
+ }
+ return {images:enriched,pdfPageRegionReads:reads};
 }
 function validateStructure(input:DocumentStructureInput,current:SourceRow,pages:PageRow[]):void{
  if(!input||!isSha(input.rawSourceHash)||input.rawSourceHash!==current.rawSourceHash||input.rawSourceHash!==current.sourceHash
@@ -261,10 +502,18 @@ export async function readDocumentImages(db:Queryable,owner:string,source:Docume
  }
  await currentSource(db,owner,identity(current));return images;
 }
-export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},
+export type DocumentParentReadOptions={includeImages?:boolean;identityCourseCodes?:string[];preferredPdfPageEvidenceIds?:string[]};
+export async function readDocumentParents(db:Queryable,owner:string,anchors:DocumentEvidenceHit[],options:DocumentParentReadOptions={},
  imageBudget?:DocumentImageBudget):Promise<DocumentContextRead>{
- if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>key!=='includeImages')
+ if(!Array.isArray(anchors)||anchors.length>14||Object.keys(options).some(key=>!['includeImages','identityCourseCodes','preferredPdfPageEvidenceIds'].includes(key))
   ||(options.includeImages!==undefined&&typeof options.includeImages!=='boolean'))invalid('At most 14 original ranked anchors are allowed');
+ if(options.identityCourseCodes!==undefined&&(!Array.isArray(options.identityCourseCodes)||options.identityCourseCodes.length>32||
+  options.identityCourseCodes.some(code=>typeof code!=='string'||observeLiteralCourseCodes(code).length!==1||observeLiteralCourseCodes(code)[0].code!==code)))
+  invalid('Identity context requires at most32 normalized literal course codes');
+ const preferred=options.preferredPdfPageEvidenceIds??[];
+ if(!Array.isArray(preferred)||preferred.length>1||new Set(preferred).size!==preferred.length||
+  preferred.some(id=>typeof id!=='string'||!anchors.some(anchor=>anchor.evidence_id===id))||(preferred.length&&!options.includeImages))
+  invalid('A preferred PDF page must be one of the current ranked anchors');
  const loaded=new Map<string,Awaited<ReturnType<typeof structuredSource>>>(),parents=new Map<string,DocumentParentContext>();
  for(const [anchorIndex,anchor] of anchors.entries()){
   let data=loaded.get(anchor.document_id);
@@ -295,22 +544,61 @@ export async function readDocumentParents(db:Queryable,owner:string,anchors:Docu
    status:points<=8192?'available':'unavailable-size-exceeds-8192',sourceNodeCount:nodes.length,sourceBodyCodepoints:points,
    nodeManifest:nodes.map(node=>({evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256})),nodes:points<=8192?nodes:[]});
  }
+ let sourceIdentityContext:LiteralCourseIdentityContext|undefined;
+ if(options.identityCourseCodes!==undefined){
+  const codes=[...new Set(options.identityCourseCodes)].sort();let addedPoints=0;
+  sourceIdentityContext={version:'literal-course-frontpage-v1',requestedCodes:codes,coverage:'first-persisted-pdf-page-only',
+   courseOwnershipVerified:false,semanticVerified:false,additions:[],omissions:[]};
+  for(const data of loaded.values()){
+   const node=data.nodes[0],source=identity(data.current),omit=(reason:LiteralCourseIdentityContext['omissions'][number]['reason'])=>sourceIdentityContext!.omissions.push({source,reason});
+   if(data.current.mime!=='application/pdf'||!node||node.kind!=='page'||node.ordinal!==0){omit('not-pdf-first-page');continue;}
+   const points=Array.from(node.body).length;
+   if(points>8192){omit('addition-limit');continue;}
+   const observations=observeLiteralCourseCodes(node.body).filter(observation=>codes.includes(observation.code));
+   if(!observations.length){omit('no-literal-match');continue;}
+   if([...parents.values()].some(parent=>parent.nodes.some(n=>n.evidenceId===node.evidenceId&&n.documentId===node.documentId))){omit('already-in-context');continue;}
+   if(sourceIdentityContext.additions.length>=4||addedPoints+points>16384){omit('addition-limit');continue;}
+   const parentId=canonical([node.documentId,node.documentVersionId,'single-node',node.evidenceId]);
+   // Original page as a separate node, not a fabricated cross-page section,
+   // inferred owner-course relation, rewritten identity or additional image.
+   parents.set(parentId,{parentId,kind:'single-node',source,manifestSha256:data.manifestSha256,
+    firstAnchorRank:0,anchorRanks:[],status:'available',sourceNodeCount:1,sourceBodyCodepoints:points,
+    nodeManifest:[{evidenceId:node.evidenceId,locator:node.locator,bodySha256:node.bodySha256}],nodes:[node]});
+   sourceIdentityContext.additions.push({source,evidenceId:node.evidenceId,locator:node.locator,physicalPage:1,bodySha256:node.bodySha256,observations});
+   addedPoints+=points;
+  }
+ }
  const images:Array<DocumentImageEvidence|PdfVisualImageEvidence>=[],budget=options.includeImages?(imageBudget??createDocumentImageBudget()):undefined;
- if(budget)for(const [index,anchor] of anchors.entries()){
+ // Only an existing ranked page can claim priority. Read the full original
+ // before crops/ordinary images consume the same global budget; ranks and all
+ // text/parent order remain unchanged. The ordinary pass still verifies assets.
+ if(budget)for(const id of preferred){
+  const index=anchors.findIndex(anchor=>anchor.evidence_id===id),anchor=anchors[index],data=loaded.get(anchor.document_id)!;
+  if(data.current.mime!=='application/pdf'||!data.nodes.some(node=>node.kind==='page'&&node.evidenceId===id))continue;
+  const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),[id],undefined,
+   {pageAssetsOnly:true,selection:{budget,anchorRank:index+1}});
+  if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
+  images.push(...visuals.images);
+ }
+ // Give existing original crops across all ranked pages a chance before full
+ // pages fill the shared budget. Each pass reads only its kind, including
+ // checksum checks for omissions; no new assets or text reordering.
+ if(budget)for(const assetKind of ['pdf-region','pdf-page'] as const)for(const [index,anchor] of anchors.entries()){
   const data=loaded.get(anchor.document_id)!,rank=index+1;
   const captions=[...parents.values()].filter(parent=>parent.firstAnchorRank===rank).flatMap(parent=>parent.nodes)
    .filter(node=>node.kind==='caption').map(node=>node.evidenceId);
-  for(const caption of new Set(captions))for(const image of await readDocumentImages(db,owner,identity(data.current),[caption]))
+  if(assetKind==='pdf-region')for(const caption of new Set(captions))for(const image of await readDocumentImages(db,owner,identity(data.current),[caption]))
    if(budget.include(image,rank)&&!images.some(value=>value.attachmentId===image.attachmentId))images.push(image);
   const pageAnchors=data.nodes.filter(node=>node.kind==='page'&&anchor.evidence_id===node.evidenceId).map(node=>node.evidenceId);
   if(pageAnchors.length&&data.current.mime==='application/pdf')try{const visuals=await readPdfVisualEvidence(db,owner,identity(data.current),pageAnchors,
-   undefined,{selection:{budget,anchorRank:rank}});
+   undefined,{selection:{budget,anchorRank:rank,assetKind}});
    if(visuals.registered&&visuals.renderStatus!=='available')throw new PdfVisualEvidenceError('unavailable','Current PDF page images unavailable');
    for(const image of visuals.images)if(!images.some(value=>value.attachmentId===image.attachmentId))images.push(image);
   }catch(error){if(error instanceof PdfVisualEvidenceError&&error.code==='source-changed')changed();throw error;}
  }
  for(const data of loaded.values())await currentSource(db,owner,identity(data.current));
- const packets=[...parents.values()];return {anchors,parents:packets,images,...(budget?{imageSelection:budget.snapshot()}:{}),accounting:{anchorCount:anchors.length,parentCount:packets.length,
+ const packets=[...parents.values()];return {anchors,parents:packets,images,...(budget?{imageSelection:budget.snapshot()}:{}),
+  ...(sourceIdentityContext?{sourceIdentityContext}:{}),accounting:{anchorCount:anchors.length,parentCount:packets.length,
   contextNodeCount:packets.reduce((sum,parent)=>sum+parent.nodes.length,0),contextBodyCodepoints:packets.reduce((sum,parent)=>sum+parent.nodes.reduce((n,node)=>n+Array.from(node.body).length,0),0),
   imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)},sourceContentIsUntrusted:true};
 }

@@ -3,12 +3,13 @@ import type {Pool} from 'pg';
 import {paidOpenAI} from '../ai-budget.ts';
 import {serviceValue} from '../service-vault.ts';
 import type {DocumentTextHit} from './document-search.ts';
+import{documentEmbeddingInput,documentEmbeddingInputPolicy,assertDocumentEmbeddingInput}from'./document-embedding-input.ts';
 
 export const DOCUMENT_EMBEDDING_MODEL='text-embedding-3-small';
 export const DOCUMENT_EMBEDDING_DIMENSIONS=768;
 export const DOCUMENT_EMBEDDING_BATCH_SIZE=32;
 export const DOCUMENT_SEMANTIC_CANDIDATE_LIMIT=80;
-const PAGE_INPUT_LIMIT=6000,REQUEST_TIMEOUT_MS=15000,TOTAL_REQUEST_WINDOW_MS=30000;
+const REQUEST_TIMEOUT_MS=15000,TOTAL_REQUEST_WINDOW_MS=30000;
 const hash=(input:string)=>createHash('sha256').update(input).digest('hex');
 const pageKey=(document:string,page:number)=>JSON.stringify([document,page]);
 type CurrentPage={document_id:string;version_id:string;page_number:number;source_version_id:string;body:string};
@@ -64,6 +65,8 @@ export function fuseDocumentPageRanks(hits:DocumentTextHit[],similarities:number
 }
 
 export async function embedDocumentInputs(inputs:string[],deadline:number):Promise<number[][]>{
+ if(!inputs.length||inputs.length>DOCUMENT_EMBEDDING_BATCH_SIZE)throw Error('Invalid PDF embedding input batch');
+ for(const input of inputs)assertDocumentEmbeddingInput(input);
  if(!serviceValue('OPENAI_API_KEY'))throw new Error('PDF semantic search requires an OpenAI API key');
  const remaining=deadline-Date.now();
  if(remaining<=0)throw new Error('PDF semantic search time limit reached');
@@ -152,10 +155,11 @@ export async function rerankDocumentPages(pool:Pool,owner:string,query:string,hi
  const candidates=[...unique.values()],deadline=Date.now()+TOTAL_REQUEST_WINDOW_MS;
  const input=Array.from(query.normalize('NFKC').replace(/\s+/gu,' ').trim()).slice(0,4000).join('');
  if(!input)throw new Error('PDF semantic query is empty');
+ const inputPolicy=documentEmbeddingInputPolicy();
  const pages=(await currentPages(pool,owner,candidates)).map(page=>{
-  const input=Array.from(page.body).slice(0,PAGE_INPUT_LIMIT).join('').trim();
+  const {input,inputHash}=documentEmbeddingInput(page.body,inputPolicy);
   if(!input)throw new Error('PDF semantic candidate has no readable text');
-  return {...page,input,input_hash:hash(input)};
+  return {...page,input,input_hash:inputHash};
  });
  const cached=(await pool.query<{version_id:string;page_number:number;input_hash:string;embedding:number[]}>(`/* semantic:page-cache */
   SELECT e.version_id,e.page_number,e.input_hash,e.embedding FROM document_page_embeddings e

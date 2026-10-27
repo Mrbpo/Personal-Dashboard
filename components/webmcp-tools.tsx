@@ -93,10 +93,12 @@ export function WebMcpTools() {
     register({
       name: "ask_course_tutor",
       title: "询问课程学习助手",
-      description: "基于归档课程资料提问并返回带引用的回答。首次可给 courseId；未给时会自动识别，但不会混用不同课程。threadId 用于连续追问。",
+      description: "从资料库选择 PDF 后提问，或查询有权访问的全局课程事实。threadId 用于连续追问，scopeRevision 用于更新文件范围；事实查询不受所选 PDF 限制。",
       inputSchema: {
         type: "object",
-        properties: { question: { type: "string" }, courseId: { type: "string" }, threadId: { type: "string" }, online: { type: "boolean" } },
+        properties: { question: { type: "string" }, courseId: { type: "string" }, threadId: { type: "string" }, online: { type: "boolean" },
+          documentIds:{type:"array",maxItems:8,items:{type:"string"}},queryMode:{type:"string",enum:["auto","document","facts","combined"]},
+          scopeRevision:{type:"integer",minimum:0},requestId:{type:"string"} },
         required: ["question"],
         additionalProperties: false,
       },

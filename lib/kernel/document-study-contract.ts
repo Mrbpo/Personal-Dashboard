@@ -178,8 +178,11 @@ export function prepareStudyClusterCheck(question:string,context:DocumentAnswerC
  if(!cluster||!cluster.sourceIds.length||cluster.sourceIds.length>20)throw new Error('Cluster requires 1 to 20 actual selections; no truncation');
  const local=prepareDocumentCitationAudit(question,context,{inputFingerprint:binding.inputFingerprint,quoteUnitManifestSha256:binding.quoteUnitManifestSha256,
   providerSelections:{status:'answered',message:'',claims:[{text:'Selected evidence for the candidate cluster.',citations:cluster.sourceIds.map(id=>({id}))}]},claimIndex:0});
- const references=local.packet.references.map((ref,index)=>ref.kind==='text'?{sourceId:cluster.sourceIds[index],kind:'text' as const,text:ref.quote}:
-  {sourceId:cluster.sourceIds[index],kind:'image' as const,image:ref.image});
+ const references=local.packet.references.map((ref,index)=>{
+  if(ref.kind==='source-text')throw new Error('Legacy study clusters do not support source-text references');
+  return ref.kind==='text'?{sourceId:cluster.sourceIds[index],kind:'text' as const,text:ref.quote}:
+   {sourceId:cluster.sourceIds[index],kind:'image' as const,image:ref.image};
+ });
  const selectedEvidence=local.binding.citations.map((citation,index)=>({sourceId:cluster.sourceIds[index],evidence:citation.evidence,quoteSha256:citation.quoteSha256}));
  const sourceVersions=new Set(selectedEvidence.map(s=>s.evidence.sourceVersionId)),warnings=[...new Set([...context.anchors,...context.imageAnchors??[]]
   .filter(a=>sourceVersions.has(a.source_version_id)).flatMap(a=>a.parser_warnings??[]))];

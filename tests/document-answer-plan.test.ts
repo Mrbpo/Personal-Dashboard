@@ -642,7 +642,7 @@ test('opt-in revision resumes a bound image failure with all final candidates, t
  try{await development(async()=>{
   globalThis.fetch=async(_url,init)=>{
    calls++;const body=JSON.parse(String(init?.body)),phase=j.attempts.at(-1)!.phase,input=JSON.parse(body.input[1].content[0].text);
-   assert.equal(body.max_output_tokens,1000);assert.equal(body.reasoning.effort,'low');
+   assert.equal(body.max_output_tokens,phase==='citation-proposal'?1000:2000);assert.equal(body.reasoning.effort,'low');
    if(phase==='citation-proposal'){
     assert.equal(input.claim,selections.claims[1].text);
     assert.deepEqual(input.references.map((r:{id:string})=>r.id),packet.receipt.selectedSourceIds);
@@ -703,7 +703,7 @@ test('short chain uses plan/generation/final local only, retains >6 raw claims a
    return response([rawContractPlan(p),answer,local][calls++]);};
   const result=await kernel.answerPlannedStudyContent('owner',question,c,options,j.policy);
   assert.equal(reads.length,2);assert.deepEqual(reads[1],{options:{courseId:'explicit-user-course',limit:4,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:true,includeParents:true,includeImages:true},nativeTables:false});
-  assert.equal(calls,3);assert.deepEqual(j.attempts.map(a=>a.phase),['contract-plan','generation','claim-audit']);assert.deepEqual(j.attempts.map(a=>a.maxOutputTokens),[4000,4000,1000]);
+  assert.equal(calls,3);assert.deepEqual(j.attempts.map(a=>a.phase),['contract-plan','generation','claim-audit']);assert.deepEqual(j.attempts.map(a=>a.maxOutputTokens),[4000,4000,2000]);
   assert.equal(result.status,'generated-awaiting-independent-review');assert.equal(result.wholeAnswerVerified,false);
   if(result.status!=='generated-awaiting-independent-review'||!('audits' in result))throw Error('Expected generated result');
   assert.equal(result.audits.length,1);assert.equal(result.audits[0].localSupported,true);assert.equal(j.raw.length,3);

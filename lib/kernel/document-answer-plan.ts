@@ -17,7 +17,7 @@ export type StudyAnswerPlan={requirements:{id:string;aspect:string;requestedScop
   leftSourceIds:string[];rightSourceIds:string[];reason:string}[];
  missing:{requirementId:string;reason:string;supplementQuery:string|null}[]};
 export type StudyAnswerPlanAttempt={phase:'plan'|'question-contract'|'contract-plan'|'cluster-check'|'generation'|'claim-audit'|'coverage-review'|'content-revision'|'revised-claim-audit';auditProfile?:EvidenceAuditProfile;requestIdentity:string;providerRequestSha256:string;
- inputTokenUpper:number;imageInputTokenUpper:number;nonImageBodyUtf8Bytes:number;maxOutputTokens:1000|4000;
+ inputTokenUpper:number;imageInputTokenUpper:number;nonImageBodyUtf8Bytes:number;maxOutputTokens:1000|2000|4000;
  reservationUSD:number;usageUpperUSD:number;fundingUpperUSD:number};
 export type StudyAnswerPlanPolicy={scope:'development';dailyLimit?:number;
  beforeAttempt:(attempt:Readonly<StudyAnswerPlanAttempt>)=>Promise<void>;
@@ -122,8 +122,8 @@ export function validateStudyAnswerPlan(value:unknown,allowedSourceIds:readonly 
  return result;
 }
 
-export function studyAnswerPlanRequestBudget(request:unknown,packet:{prepared:{supports:readonly {image?:DocumentAnswerContext['images'][number]}[]}},maxOutputTokens:1000|4000=4000){
- if(maxOutputTokens!==1000&&maxOutputTokens!==4000)throw new Error('Invalid planning request output bound');
+export function studyAnswerPlanRequestBudget(request:unknown,packet:{prepared:{supports:readonly {image?:DocumentAnswerContext['images'][number]}[]}},maxOutputTokens:1000|2000|4000=4000){
+ if(maxOutputTokens!==1000&&maxOutputTokens!==2000&&maxOutputTokens!==4000)throw new Error('Invalid planning request output bound');
  const images=createDocumentImageBudget();
  for(const [index,s] of packet.prepared.supports.entries())if(s.image&&!images.include(s.image,index+1))throw new Error('Plan image budget exceeded');
  const nonImageBody=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?

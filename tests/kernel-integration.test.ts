@@ -8,6 +8,198 @@ import {PDFDocument} from 'pdf-lib';
 import { kernel, parseDeadline } from '../lib/kernel/service.ts';
 import { kernelPool, kernelTransaction, migrateKernel } from '../lib/kernel/db.ts';
 import { claimIngestionJob, completeSourcePage, finishIngestionJob, queueIngestionJob } from '../lib/kernel/jobs.ts';
+import {writeFile} from 'node:fs/promises';
+import {preparePdfVisualEvidence} from '../lib/kernel/pdf-visual-evidence.ts';
+import {DocumentContextError} from '../lib/kernel/document-context.ts';
+import {safeAttachmentName} from '../lib/document-source-name.ts';
+import {sourcePageRegionsFixture,fixtureSha} from './fixtures/source-page-regions.ts';
+
+test('original upload source names bind immutable versions, survive replay/repair and retain source isolation',async()=>{
+ await migrateKernel();const uid=randomUUID(),owner='source-name:'+uid,original=`Original \\'accent scholarly title ${uid}.pdf`,storage=safeAttachmentName(original),
+  pdf=await PDFDocument.create();pdf.addPage([100,100]);const bytes=await pdf.save(),hash=fixtureSha(bytes),
+  doc={id:'source-name-doc:'+uid,ownerId:owner,courseId:'',name:storage,hash,mime:'application/pdf',origin:'upload',originKey:'source-name-key:'+uid},
+  pages=[{pageNumber:1,locator:'page 1',text:'Source identity fixture. No PDF content accuracy claim.'}],options={parserVersion:'source-name-contract-v1'};
+ await kernel.ingestParsedDocument(doc,pages,options);const first=await kernel.documentIngestionHead(owner,doc.id,hash);
+ await kernel.ingestParsedDocument({...doc,originalName:original},pages,{...options,expectedCurrentVersion:first});
+ const second=await kernel.documentIngestionHead(owner,doc.id,hash);assert.notEqual(second,first);
+ const records=async()=> (await kernelPool().query(`SELECT v.id,d.name,d.owner_id,s.raw_value FROM document_texts d
+  JOIN document_text_versions v ON v.document_id=d.id JOIN source_item_versions s ON s.id=v.source_version_id WHERE d.id=$1 ORDER BY v.id`,[doc.id])).rows;
+ let rows=await records();assert.equal(rows.length,2);assert.equal(rows[0].name,original);
+ const previous=rows.find(r=>r.id===first)!,current=rows.find(r=>r.id===second)!;
+ assert.equal(previous.raw_value.name,storage);assert.equal(previous.raw_value.sourceName,undefined);
+ assert.equal(current.raw_value.name,original);assert.equal(current.raw_value.sourceName.originalName,original);assert.equal(current.raw_value.sourceName.storageName,storage);
+ const frozen=JSON.stringify(rows);
+ await kernel.ingestParsedDocument({...doc,originalName:original},pages,options);
+ await kernel.ingestParsedDocument(doc,pages,options); // A later reader may only know the safe cache label.
+ await kernel.ingestParsedDocument({...doc,name:original},pages,options); // Kernel repair paths use the current canonical label.
+ assert.equal(await kernel.documentIngestionHead(owner,doc.id,hash),second);assert.equal(JSON.stringify(await records()),frozen);
+ await assert.rejects(()=>kernel.ingestParsedDocument({...doc,originalName:original},pages,{...options,expectedCurrentVersion:first}));
+ await assert.rejects(()=>kernel.ingestParsedDocument({...doc,ownerId:'foreign'},pages,options));
+ await assert.rejects(()=>kernel.ingestParsedDocument({...doc,originalName:'unrelated.pdf'},pages,options));
+ rows=await records();assert.equal(JSON.stringify(rows),frozen);
+ const {findMentionedDocumentSources}=await import('../lib/kernel/document-source.ts'),question='Regarding 《'+original.slice(0,-4)+'》, what does this paper report?',
+  resolution=await findMentionedDocumentSources(kernelPool(),owner,question);
+ assert.equal(resolution.status,'resolved');assert.equal(resolution.matches[0].documentId,doc.id);
+ assert.equal((await findMentionedDocumentSources(kernelPool(),'foreign',question)).status,'not-mentioned');
+ assert.equal((await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:'different-course'})).status,'not-mentioned');
+ const naturalQuestion=question.replace("\\'a",'á'),natural=await findMentionedDocumentSources(kernelPool(),owner,naturalQuestion);
+ assert.equal(natural.status,'resolved');assert.equal(natural.matches[0].documentId,doc.id);assert.equal(natural.matches[0].title,original);
+ assert.equal(natural.matches[0].currentVersionId,second);assert.equal(natural.matches[0].sourceHash,hash);
+ assert.equal((await findMentionedDocumentSources(kernelPool(),'foreign',naturalQuestion)).status,'not-mentioned');
+ assert.equal((await findMentionedDocumentSources(kernelPool(),owner,naturalQuestion,{courseId:'different-course'})).status,'not-mentioned');
+});
+
+test('registered orig recall hints update only page search, survive rebuild and reject stale/raw failure atomically',async()=>{
+  await migrateKernel();
+  const directory=mkdtempSync(join(tmpdir(),'kernel-orig-search-')),oldRoot=process.env.LIBRARY_DIR,oldHybrid=process.env.KERNEL_DOCUMENT_HYBRID,
+    oldFetch=globalThis.fetch,tag=randomUUID(),owner=`orig-search:${tag}`,id=`orig-search-doc:${tag}`,title=`Synthetic Orig ${tag}`;
+  process.env.LIBRARY_DIR=directory;process.env.KERNEL_DOCUMENT_HYBRID='false';let calls=0;
+  globalThis.fetch=async()=>{calls++;throw Error('Orig recall fixture forbids providers');};
+  try{
+    const {documentSearchText}=await import('../lib/kernel/document-search.ts');
+    const pdf=await PDFDocument.create();pdf.addPage([100,200]);const bytes=await pdf.save(),sourceHash=fixtureSha(bytes);
+    const fixture=sourcePageRegionsFixture({documentId:id,currentVersionId:'unregistered',sourceVersionId:'unregistered',sourceHash,courseId:''},owner,
+      {sourceHash,inputHash:sourceHash});
+    // Registered synthetic raw declares text intentionally absent from the
+    // stored body. This is an index engineering test, not PDF recognition.
+    const needle='unseenorigneedle'+tag.replace(/[^a-z]/g,''),result=structuredClone(fixture.result);
+    result.document.json_content.texts[1].orig=needle;
+    const raw=Buffer.from(JSON.stringify({identity:fixture.identity,result})),rawHash=fixtureSha(raw),
+      progress={...fixture.progress,batches:[{...fixture.progress.batches[0],resultHash:rawHash,taskId:'first-conversion-attempt'}]},
+      layout={...fixture.layout,resultReferences:[{...fixture.reference,resultBlobSha256:rawHash}]};
+    await writeFile(join(directory,sourceHash),bytes);await writeFile(join(directory,rawHash),raw);await writeFile(join(directory,fixture.pngSha),fixture.png);
+    const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout},async()=>fixture.png);
+    const document={id,ownerId:owner,courseId:'',name:title,hash:sourceHash,mime:'application/pdf',origin:'orig-fixture',originKey:id};
+    const pages=[{pageNumber:1,locator:'page:1',text:fixture.body}],options={parserVersion:'synthetic-orig-v1',batchProvenance:progress,pdfVisuals:visuals,
+      warnings:['Synthetic parser warning preserved'],evidenceConfidence:.5};
+    await kernel.ingestParsedDocument(document,pages,options);
+    const resolution=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});
+    assert.equal(resolution.status,'resolved');if(resolution.status!=='resolved')throw Error('Synthetic orig source unresolved');
+    const source=resolution.document,search=()=>kernel.searchDocumentText(owner,needle,{documentId:id,strict:true,semantic:false,aiRerank:false,hybrid:false,
+      relatedDocuments:false,evidenceBody:'full-page'});
+    const automatic=await search();assert.equal(automatic.length,1);assert.equal(automatic[0].body,fixture.body);
+    assert.equal(automatic[0].retrieval_hint?.authority,'unverified-retrieval-hint');
+    const immutable=async()=>(await kernelPool().query(`SELECT d.current_version_id,v.source_version_id,p.body,p.evidence_id,v.warnings,
+      e.parsed_value,e.confidence,pv.manifest,pv.manifest_sha256,s.raw_value source_raw,s.raw_sha256 source_raw_sha256,
+      (SELECT count(*)::int FROM document_page_embeddings WHERE version_id=v.id) vectors
+      FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id
+      JOIN evidence e ON e.id=p.evidence_id JOIN source_item_versions s ON s.id=v.source_version_id
+      JOIN document_pdf_visual_manifests pv ON pv.version_id=v.id WHERE d.owner_id=$1 AND d.id=$2`,[owner,id])).rows;
+    const original=await immutable(),index=async()=>(await kernelPool().query(`SELECT p.search_text,p.search_hint_provenance,
+      (SELECT jsonb_agg(jsonb_build_array(c.id,c.body,c.search_text) ORDER BY c.position) FROM document_text_chunks c WHERE c.version_id=p.version_id) chunks
+      FROM document_text_pages p WHERE p.version_id=$1 AND p.page_number=1`,[source.currentVersionId])).rows[0];
+    // Only this new fixture is reset to simulate an older body-only index.
+    await kernelPool().query('UPDATE document_text_pages SET search_text=$2,search_hint_provenance=NULL WHERE version_id=$1',
+      [source.currentVersionId,documentSearchText(fixture.body)]);
+    assert.equal((await search()).length,0);
+    assert.equal((await kernel.refreshDocumentOrigSearchHints(owner,source,1)).status,'updated');
+    const recalled=await search();assert.equal(recalled.length,1);assert.equal(recalled[0].evidence_id,automatic[0].evidence_id);
+    assert.equal(recalled[0].body.includes(needle),false);assert.equal(recalled[0].retrieval_hint?.visibilityVerified,false);
+    assert.deepEqual(recalled[0].retrieval_hint?.rawResults.map(r=>r.resultBlobSha256),[rawHash]);
+    const published=await index();assert.equal((await kernel.refreshDocumentOrigSearchHints(owner,source,1)).status,'unchanged');
+    await kernel.rebuildDocumentSearch(owner,id);assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
+    // Same immutable source replay must not append the old hint again.
+    await kernel.ingestParsedDocument(document,pages,options);assert.deepEqual(await index(),published);
+    // Only the runtime conversion ID changes. The immutable version and its
+    // original stored source raw remain exactly as first published.
+    await kernel.ingestParsedDocument(document,pages,{...options,batchProvenance:{...progress,
+      batches:[{...progress.batches[0],taskId:'second-conversion-attempt'}]}});
+    assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
+    assert.equal(original[0].source_raw.batchProvenance.batches[0].taskId,'first-conversion-attempt');
+    await assert.rejects(kernel.refreshDocumentOrigSearchHints('foreign',source,1));
+    await assert.rejects(kernel.refreshDocumentOrigSearchHints(owner,{...source,currentVersionId:'stale'},1));
+    assert.deepEqual(await index(),published);
+    await writeFile(join(directory,rawHash),'broken CAS');
+    await assert.rejects(kernel.refreshDocumentOrigSearchHints(owner,source,1),/checksum/);
+    await assert.rejects(kernel.rebuildDocumentSearch(owner,id),/checksum/);
+    assert.deepEqual(await index(),published);assert.deepEqual(await immutable(),original);
+    await writeFile(join(directory,rawHash),raw);
+    // An unavailable optional hint cannot discard normal valid PDF/body
+    // ingestion. Its reason is returned separately from immutable warnings.
+    const missingId=id+'-missing',missingIdentity={...fixture.identity,documentId:missingId},
+      missingRawHash=fixtureSha(JSON.stringify({identity:missingIdentity,result})),
+      missingProgress={...progress,identity:{...progress.identity,documentId:missingId},
+        batches:[{...progress.batches[0],resultHash:missingRawHash}]};
+    const missingVisuals=await preparePdfVisualEvidence({owner,documentId:missingId,sourceHash,pdfBytes:bytes,
+      layout:{...fixture.layout,resultReferences:[]}},async()=>fixture.png);
+    const degraded=await kernel.ingestParsedDocument({...document,id:missingId,name:title+' missing raw',originKey:missingId},pages,
+      {parserVersion:'synthetic-orig-v1',batchProvenance:missingProgress,pdfVisuals:missingVisuals,warnings:options.warnings,evidenceConfidence:.5});
+    assert.equal(degraded?.origSearchHints.pages[0].code,'unavailable');
+    const persisted=(await kernelPool().query(`SELECT p.body,p.search_text,p.search_hint_provenance,v.warnings FROM document_texts d
+      JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id WHERE d.owner_id=$1 AND d.id=$2`,
+      [owner,missingId])).rows[0];
+    assert.equal(persisted.body,fixture.body);assert.equal(persisted.search_text,documentSearchText(fixture.body));
+    assert.equal(persisted.search_hint_provenance,null);assert.deepEqual(persisted.warnings,options.warnings);assert.equal(calls,0);
+  }finally{
+    globalThis.fetch=oldFetch;if(oldRoot===undefined)delete process.env.LIBRARY_DIR;else process.env.LIBRARY_DIR=oldRoot;
+    if(oldHybrid===undefined)delete process.env.KERNEL_DOCUMENT_HYBRID;else process.env.KERNEL_DOCUMENT_HYBRID=oldHybrid;
+    rmSync(directory,{recursive:true,force:true});
+  }
+});
+
+test('author-image table registration reaches natural title FTS, real selector/generator input and rejects foreign/current/row bindings',async()=>{
+  await migrateKernel();
+  const {hash,png,syntheticRun}=await import('./fixtures/author-image-table-v1/run.ts');
+  const {nativeTableBlobHashes}=await import('../lib/kernel/document-table-candidates.ts');
+  const {documentSearchText}=await import('../lib/kernel/document-search.ts');
+  const {validateAndSerialize}=await import('../lib/kernel/visible-table-grid-v1.mjs');
+  const tag=randomUUID(),owner=`author-grid-owner-${tag}`,id=`author-grid-${tag}`,title=`Author Grid Fixture ${tag}`;
+  const doc={id,ownerId:owner,courseId:'',name:title,hash:hash(tag),mime:'application/json',origin:'author-grid-fixture',originKey:id};
+  const text='Original author caption. The numeric contents exist only in the original image.';
+  await kernel.ingestParsedDocument(doc,[{locator:'caption:0',text}],{parserVersion:'author-grid-fixture'});
+  const resolved=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});
+  assert.equal(resolved.status,'resolved');if(resolved.status!=='resolved')throw new Error('fixture source');
+  const source=resolved.document,pages=await kernel.readDocumentSourcePages(owner,source),caption=pages.nodes[0].evidenceId;
+  await kernel.registerDocumentStructure(owner,source,{rawSourceHash:doc.hash,parserVersion:'author-grid-fixture',parents:[],
+    nodes:[{evidenceId:caption,locator:'caption:0',ordinal:0,kind:'caption',bodySha256:hash(text)}]});
+  await kernel.registerDocumentImage(owner,source,{captionEvidenceId:caption,originalReference:'original.png',bytes:png,
+    provenance:{sourceUrl:'https://example.invalid/public-fixture',revision:'synthetic-not-recognition'}});
+  const [image]=await kernel.readDocumentImages(owner,source,[caption]),outline=await kernel.readDocumentOutline(owner,source);
+  const run=await syntheticRun(image,outline.manifestSha256),item=await kernel.registerAuthorImageTableCandidate(owner,source,run);
+  assert.deepEqual(await kernel.registerAuthorImageTableCandidate(owner,source,run),item,'same immutable run is idempotent');
+  const hits=await kernel.searchAuthorImageTableCandidates(owner,'NeedleMeasure',source);assert.deepEqual(hits,[item]);
+  const textOnly=await (kernel as any).studyAnswerContextReader(owner,'NeedleMeasure',{sourceHint:{selectedDocumentTitle:title},
+    limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,includeParents:false,includeImages:false});
+  assert.deepEqual((await textOnly()).images,[],'an explicit title never bypasses the existing no-image switch');
+  const noDerived=await (kernel as any).studyAnswerContextReader(owner,'NeedleMeasure',{sourceHint:{selectedDocumentTitle:title},
+    limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,includeParents:true,includeImages:true},false);
+  assert.deepEqual((await noDerived()).images,[],'the existing derived-table opt-out also disables author observations');
+  const evidence=await kernel.readAuthorImageTableCandidateEvidence(owner,hits);
+  assert.equal(evidence.images[0].tableObservations?.[0].status,'available');assert.equal(evidence.images[0].sha256,hash(png));
+  const stored=(await kernelPool().query('SELECT * FROM document_table_candidates WHERE id=$1',[item.id])).rows[0];
+  assert.equal(stored.source_kind,'author-caption-image');assert.equal(stored.page_number,null);assert.equal(stored.manifest_sha256,null);
+  assert.equal(stored.options_sha256,null);assert.equal(stored.attachment_id,image.attachmentId);
+  assert.equal(stored.search_text,documentSearchText(validateAndSerialize(stored.artifact.grid).searchText));
+  const requestBodies:any[]=[],originalFetch=globalThis.fetch,originalBypass=process.env.AI_BUDGET_TEST_BYPASS;
+  process.env.AI_BUDGET_TEST_BYPASS='true';
+  try{
+    globalThis.fetch=async(_url,init)=>{
+      const request=JSON.parse(String(init?.body));requestBodies.push(request);
+      const payload=requestBodies.length===1?{referenceIds:['i0']}:{status:'answered',message:'',claims:[{text:'Synthetic test claim.',citations:[{id:'i0'}]}]};
+      if(requestBodies.length>2)throw new Error('Unexpected synthetic provider attempt');
+      return Response.json({status:'completed',model:'gpt-5.4-mini-2026-03-17',output_text:JSON.stringify(payload),usage:{input_tokens:1,output_tokens:1}});
+    };
+    const question=`What does NeedleMeasure report in "${title}"?`;
+    await kernel.answerStudyContent(owner,question,{limit:14,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,
+      includeImages:true,includeParents:true},{scope:'application',model:'gpt-5.4-mini',maxOutputTokens:3000,evidenceSelection:'select-then-answer'});
+    assert.equal(requestBodies.length,2);
+    assert.equal(requestBodies[0].text.format.name,'document_evidence_selection');
+    for(const body of requestBodies){
+      const wire=JSON.stringify(body);assert.ok(wire.includes('author-image-table-observation-v1'));assert.ok(wire.includes('NeedleMeasure'));
+      assert.ok(wire.includes('"semanticVerified":false')||wire.includes('\\"semanticVerified\\":false'));
+      assert.equal(body.input.flatMap((x:any)=>Array.isArray(x.content)?x.content:[]).filter((x:any)=>x.type==='input_image').length,1);
+    }
+  }finally{globalThis.fetch=originalFetch;if(originalBypass===undefined)delete process.env.AI_BUDGET_TEST_BYPASS;else process.env.AI_BUDGET_TEST_BYPASS=originalBypass;}
+  await assert.rejects(kernel.readAuthorImageTableCandidateEvidence('foreign-owner',hits));
+  await assert.rejects(kernel.registerAuthorImageTableCandidate('foreign-owner',source,run));
+  await kernelPool().query('UPDATE document_table_candidates SET input_sha256=$2 WHERE id=$1',[item.id,hash('foreign request')]);
+  await assert.rejects(kernel.readAuthorImageTableCandidateEvidence(owner,hits));
+  await kernelPool().query('UPDATE document_table_candidates SET input_sha256=$2 WHERE id=$1',[item.id,stored.input_sha256]);
+  await kernel.ingestParsedDocument(doc,[{locator:'caption:0',text:'Changed current source'}],{parserVersion:'author-grid-fixture-new'});
+  await assert.rejects(kernel.readAuthorImageTableCandidateEvidence(owner,hits));
+  const refs=await nativeTableBlobHashes(kernelPool());
+  for(const ref of stored.artifact.blobReferences)assert.ok(refs.includes(ref.sha256),'historical original protocol bytes remain GC roots');
+});
 
 test('deadline precision never fabricates a time',()=>{
   assert.deepEqual(parseDeadline('2026-09-25'),{date:'2026-09-25',at:null,localTime:null,timezone:null,precision:'date',original:'2026-09-25'});
@@ -355,6 +547,40 @@ test('Docling failure keeps the original and retry commits parsed evidence',asyn
     assert.equal((await library.getDocument('owner',id)).status,'ready');
   }finally{
     globalThis.fetch=original;
+    rmSync(directory,{recursive:true,force:true});
+  }
+});
+
+test('real PG current-page regions bind registered synthetic PDF and injected PNG without rewriting evidence',async()=>{
+  await migrateKernel();
+  const directory=mkdtempSync(join(tmpdir(),'kernel-source-regions-')),previousRoot=process.env.LIBRARY_DIR,
+    previousFetch=globalThis.fetch,tag=randomUUID(),owner='regions-pg:'+tag,id='regions-pg-doc:'+tag,title='Synthetic regions '+tag;
+  process.env.LIBRARY_DIR=directory;let calls=0;
+  globalThis.fetch=async()=>{calls++;throw Error('Synthetic region integration has no external service');};
+  try{
+    const pdf=await PDFDocument.create();pdf.addPage([100,200]).drawText('Synthetic fixture',{x:5,y:100,size:6});
+    const bytes=await pdf.save(),sourceHash=fixtureSha(bytes),fixture=sourcePageRegionsFixture({documentId:id,
+      currentVersionId:'not-yet-registered',sourceVersionId:'not-yet-registered',sourceHash,courseId:''},owner,{sourceHash,inputHash:sourceHash});
+    await writeFile(join(directory,sourceHash),bytes);
+    for(const blob of fixture.casBlobs)await writeFile(join(directory,blob.sha256),blob.bytes);
+    // This is an explicitly injected 1px test renderer, not PDF text recognition.
+    const visuals=await preparePdfVisualEvidence({owner,documentId:id,sourceHash,pdfBytes:bytes,layout:fixture.layout},async()=>fixture.png);
+    await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:title,hash:sourceHash,mime:'application/pdf',origin:'regions-pg-fixture',originKey:id},
+      [{pageNumber:1,locator:'page:1',text:fixture.body}],{parserVersion:'synthetic-regions-fixture-v1',batchProvenance:fixture.progress,pdfVisuals:visuals});
+    const resolved=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});
+    assert.equal(resolved.status,'resolved');if(resolved.status!=='resolved')throw Error('Synthetic source not registered');
+    const source=resolved.document,before=await kernel.readDocumentSourcePages(owner,source),
+      result=await kernel.readDocumentPageRegions(owner,source,1);
+    assert.equal(result.status,'available');if(result.status!=='available')throw Error('Synthetic regions unavailable');
+    assert.equal(result.pageEvidenceId,before.nodes[0].evidenceId);assert.equal(result.pageBodySha256,fixtureSha(fixture.body));
+    assert.equal(result.image.sha256,fixture.pngSha);assert.equal(result.index.result.resultBlobSha256,fixture.rawHash);
+    assert.equal(result.index.nodes.length,7);assert.equal(result.index.semanticRelationsVerified,false);assert.equal(result.index.visibilityVerified,false);
+    assert.deepEqual(await kernel.readDocumentSourcePages(owner,source),before);
+    await assert.rejects(kernel.readDocumentPageRegions('foreign-owner',source,1),error=>
+      error instanceof DocumentContextError&&error.code==='DOCUMENT_CONTEXT_CHANGED');
+    assert.equal(calls,0);
+  }finally{
+    globalThis.fetch=previousFetch;if(previousRoot===undefined)delete process.env.LIBRARY_DIR;else process.env.LIBRARY_DIR=previousRoot;
     rmSync(directory,{recursive:true,force:true});
   }
 });

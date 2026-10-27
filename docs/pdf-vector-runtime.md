@@ -2,7 +2,19 @@
 
 Issue #55. PostgreSQL remains the truth layer; vectors are rebuildable page indexes.
 
+## Opt-in full-page input (Issue #193)
+
+`KERNEL_DOCUMENT_EMBEDDING_INPUT=page-full-v1` indexes the complete trimmed stored page, using its exact input SHA in the existing table. Default `page-prefix-v1` retains the original 6000-code-point prefix and cache identities. No PDF, evidence body, parser, schema or production flag changes are implied.
+
+The same input policy is used by coverage, dense recall and candidate reranking. Full-page coverage reports `inputPolicy`; it describes stored text indexing, not fidelity to the original PDF or answer correctness. The pinned `js-tiktoken` 1.0.21 cl100k encoding rejects inputs over 8192 tokens before any paid request. Literal special-looking strings remain source text. Overflow is not silently shortened and cannot make the full-page index complete; lexical fallback and original page/chunk evidence remain available. Very large pages still require a separately validated chunk representation, rather than pretending a prefix is complete.
+
+New full-page durable jobs capture `inputPolicy` and have distinct idempotency keys. A worker restart/configuration change cannot reinterpret a claimed job; old jobs with no policy continue to use the prefix. Old cache rows remain intact. Short pages may reuse identical input hashes; long prefix vectors cannot satisfy full-page coverage. Source/owner/current-version and same-document reuse checks continue to apply.
+
+Limits verified against the [official embeddings endpoint](https://developers.openai.com/api/reference/typescript/resources/embeddings/methods/create): 8192 tokens per input and 300000 per request. The existing batch size32 stays below the aggregate bound. The [encoding reference](https://developers.openai.com/cookbook/examples/how_to_count_tokens_with_tiktoken) identifies cl100k_base for the existing embedding model; the JavaScript port is a pinned third-party library, not an OpenAI endorsement. Engineering fixtures and tokenizer checks are not semantic retrieval acceptance.
+
 ## Pinned extension and CPU behavior
+
+Non-AI hybrid output preserves `ceil(limit/2)` unique lexical and `floor(limit/2)` unique dense heads before filling from the existing routed RRF order. Overlap frees slots; no scores, original text or source identities are rewritten. The internal non-AI union may contain up to160 candidates from the existing80/80 lanes so a protected head is not silently lost before the final limit. Current owner/version validation covers that union; only the original requested number of pages reaches the answer context. The AI candidate builder reuses the same head selection at its existing20/20 budget. This is not semantic certification, exhaustive recall or proof of performance reduction. Existing hybrid enable/rollback flags remain unchanged.
 
 - `pgvector` source **v0.8.7**, archive SHA-256 `cac0b10c360f05b2d521200105ba3697e773d4cd3731f5a915a7e37ebe0bea85`.
 - Both build and runtime use **postgres:18.6**, matching the existing server minor version and Debian ABI.

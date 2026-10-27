@@ -9,7 +9,9 @@
 
 ## 解析方式与额度
 
-设置应用和 worker 的 `KERNEL_DATABASE_URL`、现有 `DATABASE_URL` / `LIBRARY_DIR` 及 `DOCLING_URL` 后，先检查 PDF 原生文字层：文字覆盖足够完整时直接使用逐页原文，不再整份 OCR。`DOCLING_NATIVE_TEXT_FASTPATH=false` 可关闭此路径。稀疏页眉或图片扫描不能仅凭存在文字层跳过解析。
+设置应用和 worker 的 `KERNEL_DATABASE_URL`、现有 `DATABASE_URL` / `LIBRARY_DIR` 及 `DOCLING_URL` 后，默认使用有界 Docling 摄取，保留 producer 页码和结构观察。原生文字数量充足不能证明双栏阅读顺序或表格关系正确。只有明确设置 `DOCLING_NATIVE_TEXT_FASTPATH=true` 才允许使用原生文字快速路径；稀疏页眉或图片扫描仍不能跳过解析。开关只接受 `true` / `false`。
+
+新任务在入队时保存 `nativeTextFastpath`，worker 优先遵守持久化值，避免排队后环境变化切换解析策略。无该字段的旧任务使用当前配置；已经保存的 Docling task/batch 仍按原 identity 接续，不因允许原生快速路径而丢弃或重提交。升级本身不会重解析既有资料，默认关闭快速路径可能增加新资料的本地解析耗时；须按实际 worker 容量运行。该改动不启用新的付费模型，原有公式/扫描 backend 开关独立控制。
 
 原生文字不足时，默认由 Docling 提取正文、OCR 和表格；阅读顺序依据文档树，页码依据 PDF provenance。管理员可明确设置 `PDF_SCAN_TRANSCRIPTION_BACKEND=ai`，让扫描页使用受限视觉转写，而非默认开启额外付费识别。视觉转写上限为每文档 24 页、每 UTC 日 60 页，仍受现有 AI 预算限制；超过 24 页会在请求前拒绝，应分册。完整处理的成功页缓存用于续跑。
 

@@ -1,40 +1,137 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {documentSourceName} from '../document-source-name.ts';
 import type { PoolClient } from 'pg';
 import type { CanvasSource, ExtractedAnalysis } from '../domain.ts';
 import { kernelPool, kernelTransaction } from './db.ts';
+import {readDocumentSourceTextView} from './document-source-text-view.ts';
+import {contentTagIngestionMode,recordContentMetadataTags,readContentMetadataTags} from './content-tags.ts';
+import {recordIngestedContentClassification} from './content-classification-ingestion.ts';
+import {recordContentClassification,readContentClassifications} from './content-classifications.ts';
+import {prepareControlledTopics,importControlledTopics} from './content-topic-classification.ts';
+import {readContentTaxonomy,recordContentTaxonomy}from'./content-taxonomy-registry.ts';
+import {contentTopicJobMode,queueIngestedTopicJobs,runDocumentTopicJob} from './content-topic-jobs.ts';
+import {contentTagAnswerObservation} from './content-tag-routing.ts';
+import {classificationShadowAnswerObservation} from './classification-route-shadow.ts';
+import {classificationGuardAnswerObservation} from './classification-route-guard.ts';
+import {answerCourseFacts as readCourseFacts,refreshCourseFactValidity as refreshFactValidity} from './course-facts.ts';
+import {queueDocumentCourseFactJob,runDocumentCourseFactJob,assertDocumentCourseFactBatch,type DocumentCourseFactBatch} from './document-course-facts.ts';
+import {observeLiteralCourseCodes} from './question-course-routing.ts';
+import {normalizeDocumentRoutingScope,assertDocumentRoutingScope,documentRoutingScopeCounts,hasUnmappedCourseDocuments,type DocumentRoutingScope} from './document-routing-scope.ts';
 import { canvasTaskIdentity, canvasTaskReference } from './task-identity.ts';
-import { documentSearchText, splitDocumentText, searchDocumentText, type DocumentSearchOptions } from './document-search.ts';
-import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
+import {nativeWhitespaceFingerprint} from './native-whitespace.ts';
+import { documentSearchText, splitDocumentText, searchDocumentText,projectDocumentOrigSearch,
+ type DocumentOrigSearchProvenance,type DocumentSearchOptions } from './document-search.ts';
+import {resolveDocumentSource,requireResolvedDocumentSource,mentionedOtherDocumentSources,findMentionedDocumentSources,documentTitleMention,type DocumentSourceHint,type DocumentSourceResolution} from './document-source.ts';
+import {FOCUSED_TEXT_LIMITS,focusedDocumentTextQuery,focusedTextQueryHash,explicitDocumentPage,documentQuotedLiteral,locateDocumentQuotedText,
+ explicitDocumentFigure,locateDocumentFigureCaption,type DocumentFigureCaptionCandidate,type DocumentFigureLocation,type DocumentQuotedTextLocation,type FocusedDocumentText} from './document-focused-text.ts';
 import {readFullDocumentEvidence,DocumentEvidenceChangedError,type DocumentEvidenceHit} from './document-evidence.ts';
-import {readDocumentNodes} from './document-nodes.ts';
-import {synthesizeDocumentAnswer,prepareDocumentAnswer,buildDocumentAnswerRequest,documentAnswerSettings,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
-import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy} from './document-citation-audit.ts';
+import {readDocumentNodes,readDocumentCitationSnapshot,type DocumentCitationSource} from './document-nodes.ts';
+import {bindDocumentQuestionName} from './document-name-binding.ts';
+import {synthesizeDocumentAnswer,prepareDocumentAnswer,prepareDocumentAnswerForPolicy,buildDocumentAnswerRequest,buildDocumentAnswerRuntimeRequest,documentAnswerSettings,planDocumentQueryScope,DocumentAnswerRequestLimitError,type DocumentAnswerPolicy,type DocumentAnswerContext} from './document-answer.ts';
+import {auditDocumentCitationClaim,assertDocumentCitationAuditPolicy,checkApplicationDocumentCitations,type DocumentCitationAuditBinding,type DocumentCitationAuditPolicy,type DocumentCitationTextRecheck} from './document-citation-audit.ts';
+import {checkDocumentQuantityConsistency} from './document-quantity-consistency.ts';
 import {reviseDocumentCitationClaim,assertDocumentCitationRevisionPolicy,type DocumentCitationRevisionBinding,type DocumentCitationRevisionPolicy} from './document-citation-revision.ts';
 import {planRetrievedStudyAnswer,assertStudyAnswerPlanPolicy,studyAnswerPlanRequestBudget,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {createStudyQuestionContract,planContractStudyAnswer,verifyStudyAnswerCluster,prepareCompleteStudyEvidenceRoute,
  type StudyQuestionContract,type StudyContractPlanBinding} from './document-study-contract.ts';
 import {answerPlannedStudyQuestion,assertPlannedStudyAnswerPolicy,isStudyRequestCapacityError,preparePlannedStudyGeneration,preparePlannedStudyGenerationTransport,type PlannedStudyAnswerPolicy} from './document-planned-answer.ts';
-import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
- readCompleteDocumentSource,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
- type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest} from './document-context.ts';
+import {registerDocumentStructure,prepareDocumentImage,commitDocumentImage,readDocumentSourcePages,readDocumentPageRegions,readDocumentPageRegionsForImages,readDocumentOutline,readDocumentParents,readDocumentImages,documentImageBlobHashes,
+ readCompleteDocumentSource,readCompleteDocumentText,COMPLETE_DOCUMENT_SOURCE_LIMITS,DocumentContextError,
+ type DocumentContextSource,type DocumentStructureInput,type DocumentImageInput,type CompleteDocumentSourceManifest,type DocumentParentReadOptions,type DocumentContextRead} from './document-context.ts';
 import {prepareRecordingTranscript,type RecordingTranscript} from './recording-transcript.ts';
-import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob} from './document-vector.ts';
-import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,pdfVisualBlobHashes,
+import {queueDocumentVectorJobs,documentVectorCoverage,runDocumentVectorJob,type DocumentVectorScope} from './document-vector.ts';
+import {assertPreparedPdfVisualEvidence,commitPdfVisualEvidence,readPdfVisualEvidence,readPdfInternalLinkEvidence,pdfVisualBlobHashes,
  type PreparedPdfVisualEvidence} from './pdf-visual-evidence.ts';
 import type {IngestionJob} from './jobs.ts';
+import {readPdfNavigationTextContainers} from './pdf-navigation-text.ts';
+import {pdfNavigationProjectionEnabled,withPdfNavigationContext} from './pdf-navigation-projection.ts';
 import {createDocumentImageBudget} from './document-image-budget.ts';
 import {prepareNativeTableCandidates,assertPreparedNativeTableCandidates,commitNativeTableCandidates,
  searchNativeTableCandidates,readNativeTableCandidateEvidence,nativeTableBlobHashes,
+ prepareAuthorImageTableCandidate,commitAuthorImageTableCandidate,searchAuthorImageTableCandidates,readAuthorImageTableCandidateEvidence,
+ type CompletedAuthorImageTableRun,
  type PreparedNativeTableCandidates,type DerivedTableCandidate} from './document-table-candidates.ts';
 import {assertPreparedDoclingSourceMath,doclingMathBatchProvenance,type PreparedDoclingSourceMath} from './docling-source-math.ts';
+import {prepareDoclingOrigSearchHints,assertPreparedDoclingOrigSearchHints,doclingOrigSearchHash,
+ prepareDoclingTextContextWindows,type PreparedDoclingTextContextWindows,type OrigSearchInput,type PreparedDoclingOrigSearchHints} from './docling-source-regions.ts';
+import {DoclingPageRegionError,type DoclingVisualLayout} from './docling-result.ts';
+import type {OriginalDoclingRangeInput,CachedOriginalDoclingRenderer} from './docling-original-range.ts';
+import type {NativeRegionIngestionInput,NativeRegionRenderer} from './native-region-ingestion.ts';
+import {NATIVE_REGION_TEXT_VERSION,nativeRegionFingerprint,prepareNativeRegionWindows,readNativeRegionObservation,type PreparedNativeRegionWindows} from './native-region-text.ts';
 
 type Json = Record<string, unknown>;
+type OrigSearchPage={document_id:string;current_version_id:string;source_version_id:string;source_hash:string;course_id:string;
+ raw_sha256:string;mime:string;parser_version:string;page_count:number;page_number:number;evidence_id:string;body:string;content_kind:string;
+ search_text:string;search_hint_provenance:DocumentOrigSearchProvenance|null;progress:unknown;layout:DoclingVisualLayout|null};
+/** One bounded source, no external IO. The publication read locks the same
+ * current source and page rows after all registered CAS has been prepared. */
+async function origSearchPages(db:Pick<PoolClient,'query'>,owner:string,id:string,page?:number,lock=false){
+ const rows=(await db.query<OrigSearchPage>(`SELECT d.id document_id,d.current_version_id,v.source_version_id,d.source_hash,
+  coalesce(d.course_id,'') course_id,s.raw_sha256,s.raw_value->>'mime' mime,v.parser_version,v.page_count,
+  p.page_number,p.evidence_id,p.body,p.content_kind,p.search_text,p.search_hint_provenance,
+  CASE WHEN p.page_number=coalesce($3::integer,1) THEN s.raw_value->'batchProvenance' END progress,
+  CASE WHEN p.page_number=coalesce($3::integer,1) THEN pv.manifest->'content'->'layout' END layout
+  FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+  JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
+  JOIN document_text_pages p ON p.version_id=v.id
+  JOIN evidence e ON e.id=p.evidence_id AND e.source_version_id=v.source_version_id AND e.source_item_id=d.source_item_id
+  LEFT JOIN document_pdf_visual_manifests pv ON pv.version_id=v.id AND pv.source_version_id=v.source_version_id AND pv.source_hash=d.source_hash
+  WHERE d.owner_id=$1 AND d.id=$2 AND d.hidden=false AND ($3::integer IS NULL OR p.page_number=$3)
+  AND NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key
+   AND newer.hidden=false AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+  ORDER BY p.page_number ${lock?'FOR UPDATE OF d,p,v,s':''}`,[owner,id,page??null])).rows;
+ if(!rows.length||rows.some(r=>r.mime==='application/pdf'&&(r.raw_sha256!==r.source_hash||r.content_kind!=='page')))throw new DocumentEvidenceChangedError();
+ if(page===undefined&&(rows.length!==rows[0].page_count||rows.some((r,i)=>r.page_number!==i+1)))throw new DocumentEvidenceChangedError();
+ // Common metadata belongs to this one SQL snapshot. Transmit/decode it once,
+ // then share it across its pages; every later read still queries current data.
+ const {progress,layout}=rows[0];
+ for(const row of rows){row.progress=progress;row.layout=layout;}
+ return rows;
+}
+function origSearchInput(owner:string,row:OrigSearchPage):OrigSearchInput{
+ return {owner,documentId:row.document_id,sourceHash:row.source_hash,pageCount:row.page_count,physicalPage:row.page_number,
+  body:row.body,parserVersion:row.parser_version,progress:row.progress,layout:row.layout};
+}
+function origSearchBinding(owner:string,row:OrigSearchPage){return {owner,documentId:row.document_id,sourceHash:row.source_hash,
+ pageCount:row.page_count,physicalPage:row.page_number,currentVersionId:row.current_version_id,sourceVersionId:row.source_version_id,
+ evidenceId:row.evidence_id,parserVersion:row.parser_version};}
+function assertOrigSearchSource(row:OrigSearchPage,source:DocumentContextSource){
+ if(row.document_id!==source.documentId||row.current_version_id!==source.currentVersionId||row.source_version_id!==source.sourceVersionId||
+  row.source_hash!==source.sourceHash||(source.courseId!==undefined&&source.courseId!==row.course_id))throw new DocumentEvidenceChangedError();
+}
+/** Supplement a named source without discarding the original cross-source recall. */
+export function mergeStudyEvidence(base:DocumentAnswerContext,added:DocumentAnswerContext):DocumentAnswerContext|null{
+ const anchors=new Map(base.anchors.map(n=>[n.id,n]));
+ for(const node of added.anchors){const old=anchors.get(node.id);
+  if(old&&JSON.stringify([old.document_id,old.source_version_id,old.source_hash,old.evidence_id,old.locator,old.body])!==
+   JSON.stringify([node.document_id,node.source_version_id,node.source_hash,node.evidence_id,node.locator,node.body]))throw new DocumentEvidenceChangedError();
+  if(!old)anchors.set(node.id,node);
+ }
+ const parents=new Map(base.parents.map(p=>[p.parentId,p]));
+ for(const parent of added.parents){const old=parents.get(parent.parentId);
+  if(old&&JSON.stringify([old.status,old.nodes])!==JSON.stringify([parent.status,parent.nodes]))throw new DocumentEvidenceChangedError();
+  if(!old)parents.set(parent.parentId,parent);
+ }
+ const budget=createDocumentImageBudget(),images=new Map<string,DocumentAnswerContext['images'][number]>();
+ for(const [i,image]of [...base.images,...added.images].entries()){
+  if(!budget.include(image,i+1))return null;
+  if(!images.has(image.attachmentId))images.set(image.attachmentId,image);
+ }
+ return {...base,anchors:[...anchors.values()],parents:[...parents.values()],images:[...images.values()],
+  imageSelection:{...budget.snapshot(),omitted:[...base.imageSelection?.omitted??[],...added.imageSelection?.omitted??[]]},
+  imageAnchors:[...new Map([...base.imageAnchors??[],...added.imageAnchors??[]].map(n=>[n.evidence_id,n])).values()]};
+}
+function studyContextInputUpper(request:ReturnType<typeof buildDocumentAnswerRuntimeRequest>,context:DocumentAnswerContext){
+ const nonImageRequest=JSON.stringify(request,(key,value)=>key==='image_url'&&typeof value==='string'&&value.startsWith('data:image/png;base64,')?'data:image/png;base64,':value);
+ return Buffer.byteLength(nonImageRequest)+COMPLETE_DOCUMENT_SOURCE_LIMITS.framingTokens+(context.imageSelection?.accounting.imageInputTokens??0);
+}
 type CandidateInput = {
   entityId: string; attribute: string; value: unknown; sourceVersionId: string;
   source: string; sourceItemId: string; originalExcerpt: string;
   confidence: number; authority: string; locator: string;
   acquiredAt: string; publishedAt?: string | null; validFrom?: string | null;
   pendingReason?: string;
+  forcePending?: boolean;
 };
 
 const stableId = (...parts: string[]) => createHash('sha256').update(parts.join('\u0000')).digest('hex');
@@ -167,8 +264,15 @@ async function acceptCandidate(client: PoolClient, candidateId: string, reason: 
 async function recordCandidate(client: PoolClient, input: CandidateInput): Promise<string> {
   if(!Number.isFinite(input.confidence)||input.confidence<0||input.confidence>1)
     throw new Error('Candidate confidence must be between 0 and 1');
-  if(!['course_payload','enabled','task_payload','due','cancelled','local_status','event_payload'].includes(input.attribute))
+  if(!['course_payload','enabled','task_payload','due','cancelled','local_status','event_payload','course_policy','course_requirement','exam'].includes(input.attribute))
     throw new Error('Unsupported canonical attribute');
+  if(['course_policy','course_requirement','exam'].includes(input.attribute)){
+    const value=input.value as Record<string,unknown>;
+    if(!value||value.schemaVersion!==1||typeof value.text!=='string'||!value.text.trim()||
+      !['assignment','due','submission','grading','policy','exam'].includes(String(value.kind))||
+      (value.date!==null&&(typeof value.date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.date))))
+      throw new Error('Invalid course fact candidate');
+  }
   if(input.attribute==='due'){
     const due=input.value as Deadline;
     if(!due||typeof due.original!=='string'||
@@ -189,11 +293,12 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
   const evidenceId = stableId(input.sourceVersionId,input.locator);
   await client.query(
     `INSERT INTO evidence(id,source_version_id,source,source_item_id,acquired_at,published_at,original_excerpt,
-      parsed_value,confidence,valid_from,locator)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO NOTHING`,
+      parsed_value,confidence,valid_from,locator,validity_basis)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING`,
     [evidenceId,input.sourceVersionId,input.source,input.sourceItemId,input.acquiredAt,safeDate(input.publishedAt),
       input.originalExcerpt,JSON.stringify(input.value),input.confidence,
-      safeDate(input.validFrom)??safeDate(input.publishedAt)??input.acquiredAt,input.locator]);
+      safeDate(input.validFrom)??safeDate(input.publishedAt)??input.acquiredAt,input.locator,
+      safeDate(input.validFrom)?'explicit':safeDate(input.publishedAt)?'published':'observed']);
   const candidateId = stableId(input.entityId,input.attribute,evidenceId);
   await client.query(
     `INSERT INTO candidate_facts(id,entity_id,attribute,value,evidence_id,status,authority,reason)
@@ -205,6 +310,7 @@ async function recordCandidate(client: PoolClient, input: CandidateInput): Promi
     [input.entityId,input.attribute,JSON.stringify(input.value)])).rows[0];
   const status = (await client.query<{status:string}>('SELECT status FROM candidate_facts WHERE id=$1',[candidateId])).rows[0].status;
   if (status !== 'pending') return candidateId;
+  if(input.forcePending)return candidateId;
   if (existing?.same_value) {
     if(input.authority==='canvas' && ['task_payload','due'].includes(input.attribute)){
       const types=(await client.query<{chosen_type:string;incoming_type:string}>(
@@ -795,15 +901,40 @@ export class KernelService {
     return {documentId:prepared.document.id,cues:prepared.pages.length};
   }
 
-  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
+  async ingestCachedOriginalDoclingRange(input:OriginalDoclingRangeInput,renderer?:CachedOriginalDoclingRenderer){
+    const {ingestCachedOriginalDoclingRange}=await import('./docling-original-range.ts');
+    return ingestCachedOriginalDoclingRange(input,renderer);
+  }
+
+  async ingestNativeRegionText(input:NativeRegionIngestionInput,renderer?:NativeRegionRenderer){
+    const {ingestNativeRegionText}=await import('./native-region-ingestion.ts');
+    return ingestNativeRegionText(input,renderer);
+  }
+
+  async readDocumentNativeRegions(owner:string,source:DocumentContextSource,physicalPage:number){
+    const rows=await origSearchPages(kernelPool(),owner,source.documentId,physicalPage),row=rows[0];
+    if(rows.length!==1||row.current_version_id!==source.currentVersionId||row.source_version_id!==source.sourceVersionId||row.source_hash!==source.sourceHash)
+      throw new DocumentEvidenceChangedError();
+    const result=await readNativeRegionObservation({...origSearchInput(owner,row),currentVersionId:row.current_version_id,
+      sourceVersionId:row.source_version_id,evidenceId:row.evidence_id,bodySha256:createHash('sha256').update(row.body).digest('hex')});
+    const after=(await origSearchPages(kernelPool(),owner,source.documentId,physicalPage))[0];
+    if(after.current_version_id!==row.current_version_id||after.source_version_id!==row.source_version_id||after.body!==row.body||
+      JSON.stringify(nativeRegionFingerprint(after.progress))!==JSON.stringify(nativeRegionFingerprint(row.progress)))throw new DocumentEvidenceChangedError();
+    return result;
+  }
+
+  async ingestParsedDocument(document: {id:string;ownerId?:string;createdAt?:string;courseId:string;name:string;originalName?:string|null;hash:string;mime:string;origin:string;originKey:string;rawUri?:string},
     inputPages: Array<{locator:string;text:string;pageNumber?:number;contentKind?:'page'|'time_segment';startMs?:number;endMs?:number}>,
-    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;
+    options:{parserVersion?:string;expectedPages?:number;warnings?:string[];extractionMethod?:string;pageStructure?:'physical-pages-v1';
       expectedCurrentVersion?:string|null;pageProvenance?:Array<{pageNumber:number;extractionMethod:string;parserVersion:string;model?:string;
         basedOn:{versionId:string;sourceVersionId:string;evidenceId:string}}>;
       ingestionLease?:{id:string;token:string};batchProvenance?:unknown;recording?:Record<string,unknown>;evidenceConfidence?:number;
       nativeTables?:PreparedNativeTableCandidates;pdfVisuals?:PreparedPdfVisualEvidence;sourceMath?:PreparedDoclingSourceMath}={}) {
+    const tagMetadata=contentTagIngestionMode(),topicJobs=contentTopicJobMode();
     const pages=inputPages.map((page,index)=>({...page,pageNumber:page.pageNumber??index+1}));
     const expected=options.expectedPages??pages.length;
+    if(options.pageStructure!==undefined&&(options.pageStructure!=='physical-pages-v1'||document.mime!=='application/pdf'||
+      pages.some(page=>page.contentKind==='time_segment')))throw new Error('Physical page structure requires a PDF page adapter');
     if(!Number.isInteger(expected)||expected<1||pages.length!==expected||
       pages.some((page,index)=>page.pageNumber!==index+1||typeof page.text!=='string'||!page.locator)||
       !pages.some(page=>page.text.trim()))throw new Error('Document transcription is incomplete');
@@ -816,11 +947,20 @@ export class KernelService {
       page.pageNumber!==index+1||!page.extractionMethod||!page.parserVersion||!page.basedOn?.versionId||!page.basedOn.sourceVersionId||!page.basedOn.evidenceId)))
       throw new Error('Document page repair provenance is incomplete');
     const parser=options.parserVersion||'docling-v1',owner=document.ownerId||'local-owner';
+    const previousName=document.originalName==null&&document.origin==='upload'?(await kernelPool().query<{current_version_id:string;source_name:unknown}>(
+      `SELECT d.current_version_id,s.raw_value->'sourceName' source_name FROM document_texts d
+       JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+       JOIN source_item_versions s ON s.id=v.source_version_id AND s.source_item_id=d.source_item_id
+       WHERE d.owner_id=$1 AND d.id=$2 AND d.source_hash=$3 AND s.raw_sha256=$3 AND NOT d.hidden`,
+      [owner,document.id,document.hash])).rows[0]:undefined;
+    const sourceName=documentSourceName(document.name,document.originalName,previousName?.source_name),
+      canonicalName=sourceName?.originalName??document.name;
       if(options.pdfVisuals){
         if(document.mime!=='application/pdf')throw new Error('PDF visual evidence requires a PDF source');
         assertPreparedPdfVisualEvidence(options.pdfVisuals,owner,document.id,document.hash,expected);
       }
       const expectedCurrentVersion=options.expectedCurrentVersion!==undefined?options.expectedCurrentVersion:
+        previousName?.source_name?previousName.current_version_id:
         options.pdfVisuals?await this.documentIngestionHead(owner,document.id,document.hash):undefined;
     if(options.nativeTables)assertPreparedNativeTableCandidates(options.nativeTables,owner,document.id,document.hash);
     if(options.sourceMath){
@@ -828,6 +968,19 @@ export class KernelService {
       assertPreparedDoclingSourceMath(options.sourceMath,owner,document.id,document.hash,pages);
     }
     const batchProvenance=options.sourceMath?doclingMathBatchProvenance(options.sourceMath,options.batchProvenance):options.batchProvenance;
+    const origHints:Array<PreparedDoclingOrigSearchHints|null>=[];
+    const origUnavailable:Array<{physicalPage:number;code:'unavailable'|'limit';reason:string}>=[];
+    for(const page of pages){
+      try{origHints.push(document.mime==='application/pdf'?await prepareDoclingOrigSearchHints({owner,documentId:document.id,
+        sourceHash:document.hash,pageCount:expected,physicalPage:page.pageNumber,body:page.text,parserVersion:parser,
+        progress:batchProvenance,layout:options.pdfVisuals?.content.layout}):null);}
+      catch(error){
+        // Optional recall metadata must not discard an otherwise valid body.
+        // Corrupt/foreign bindings are invalid and remain hard failures.
+        if(!(error instanceof DoclingPageRegionError)||(error.code!=='unavailable'&&error.code!=='limit'))throw error;
+        origHints.push(null);origUnavailable.push({physicalPage:page.pageNumber,code:error.code,reason:error.message});
+      }
+    }
     if(options.warnings!==undefined&&(!Array.isArray(options.warnings)||options.warnings.some(value=>typeof value!=='string')))
       throw new Error('Document quality warnings are invalid');
     const warnings=[...new Set((options.warnings||[]).map(value=>value.trim()).filter(Boolean))].sort();
@@ -835,7 +988,13 @@ export class KernelService {
     // Quality changes are immutable source changes even when the body is the
     // same. Normalize stable metadata; acquisition times and remote task IDs
     // intentionally remain outside identity so a replay stays idempotent.
+    const nativeWhitespace=nativeWhitespaceFingerprint(batchProvenance);
+    const nativeRegionText=nativeRegionFingerprint(batchProvenance);
     const qualityHash=stableId(JSON.stringify({warnings,extractionMethod,
+      ...(options.pageStructure?{pageStructure:options.pageStructure}:{}),
+      ...(sourceName?{sourceName}:{}),
+      ...(nativeWhitespace?{nativeWhitespace}:{}),
+      ...(nativeRegionText?{nativeRegionText}:{}),
       ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
       ...(options.pdfVisuals?{pdfVisualContentSha256:options.pdfVisuals.contentSha256}:{}),
       ...(options.pageProvenance?{pageProvenance:options.pageProvenance.map(page=>({
@@ -876,7 +1035,8 @@ export class KernelService {
       }else if(options.pageProvenance)throw new Error('Document page repair requires a current-version guard');
       const version=await sourceVersion(client,{id:sourceItemId,source:`document:${document.origin}`,scope:document.courseId||'unscoped',
         externalId:document.id,courseId:document.courseId||null,
-        contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:document.name,mime:document.mime,
+        contentHash:stableId(document.hash,parser,textHash,qualityHash),raw:{id:document.id,name:canonicalName,mime:document.mime,
+          ...(sourceName?{sourceName}:{}),
           originKey:document.originKey,parser,extractionMethod,warnings,
           ...(batchProvenance?{batchProvenance}:{}),
           ...(options.sourceMath?{sourceMathSha256:options.sourceMath.sha256}:{}),
@@ -887,13 +1047,17 @@ export class KernelService {
         rawUri:document.rawUri||`library://${document.hash}`,rawSha256:document.hash,acquiredAt});
       await client.query(`INSERT INTO document_texts(id,owner_id,course_id,source_item_id,origin,origin_key,name,source_hash,created_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET name=excluded.name`,
-        [document.id,owner,document.courseId||null,sourceItemId,document.origin,document.originKey,document.name,document.hash,document.createdAt||acquiredAt]);
+        [document.id,owner,document.courseId||null,sourceItemId,document.origin,document.originKey,canonicalName,document.hash,document.createdAt||acquiredAt]);
       const existing=(await client.query<{owner_id:string;source_hash:string}>(
         'SELECT owner_id,source_hash FROM document_texts WHERE id=$1',[document.id])).rows[0];
       if(existing.owner_id!==owner||existing.source_hash!==document.hash)throw new Error('Document identity mismatch');
       await client.query(`INSERT INTO document_text_versions(id,document_id,source_version_id,parser_version,text_hash,page_count,warnings)
         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO NOTHING`,
         [parsedVersion,document.id,version,parser,textHash,expected,JSON.stringify(warnings)]);
+      // sourceVersion can reuse an immutable same-body historical row. Check
+      // that row's registered progress, not just this invocation's options.
+      const registeredProgress=origHints.some(Boolean)?(await client.query<{progress:unknown}>(
+        `SELECT raw_value->'batchProvenance' progress FROM source_item_versions WHERE id=$1 FOR UPDATE`,[version])).rows[0]?.progress:null;
       let position=0;const pageEvidenceIds:string[]=[];
       for(const [index,page] of pages.entries()){
         const evidenceId=stableId(version,`page:${index}`);
@@ -910,6 +1074,20 @@ export class KernelService {
         await client.query(`INSERT INTO document_text_pages(version_id,page_number,evidence_id,locator,body,search_text,content_kind,start_ms,end_ms)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(version_id,page_number) DO NOTHING`,
           [parsedVersion,page.pageNumber,evidenceId,page.locator,page.text,documentSearchText(page.text),page.contentKind||'page',page.startMs??null,page.endMs??null]);
+        const hint=origHints[index];
+        if(hint){
+          assertPreparedDoclingOrigSearchHints(hint,{owner,documentId:document.id,sourceHash:document.hash,pageCount:expected,
+            physicalPage:page.pageNumber,body:page.text,parserVersion:parser,progress:registeredProgress,layout:options.pdfVisuals?.content.layout});
+          const old=(await client.query<{body:string;search_text:string;search_hint_provenance:DocumentOrigSearchProvenance|null}>(
+            'SELECT body,search_text,search_hint_provenance FROM document_text_pages WHERE version_id=$1 AND page_number=$2 FOR UPDATE',
+            [parsedVersion,page.pageNumber])).rows[0];
+          if(!old||old.body!==page.text)throw new DocumentEvidenceChangedError();
+          const projected=projectDocumentOrigSearch(page.text,old.search_text,old.search_hint_provenance,hint,{owner,documentId:document.id,
+            sourceHash:document.hash,pageCount:expected,physicalPage:page.pageNumber,currentVersionId:parsedVersion,sourceVersionId:version,
+            evidenceId,parserVersion:parser});
+          await client.query('UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2',
+            [parsedVersion,page.pageNumber,projected.searchText,projected.provenance?JSON.stringify(projected.provenance):null]);
+        }
         for(const body of splitDocumentText(page.text)){
           await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
             VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`,
@@ -918,7 +1096,9 @@ export class KernelService {
         }
       }
       await client.query(`UPDATE document_texts SET current_version_id=$2,indexed_at=now() WHERE id=$1`,[document.id,parsedVersion]);
-      if(options.pdfVisuals||options.sourceMath){
+      if(tagMetadata==='metadata-v1')await recordContentMetadataTags(client,owner,document.id,parsedVersion);
+      if(tagMetadata==='metadata-classifications-v1')await recordIngestedContentClassification(client,owner,document.id,parsedVersion);
+      if(options.pdfVisuals||options.sourceMath||options.pageStructure==='physical-pages-v1'){
         const source={documentId:document.id,currentVersionId:parsedVersion,sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''};
         if(options.pdfVisuals)await commitPdfVisualEvidence(client,options.pdfVisuals,source,pageEvidenceIds);
         await registerDocumentStructure(client,owner,source,{rawSourceHash:document.hash,
@@ -931,13 +1111,23 @@ export class KernelService {
         await commitNativeTableCandidates(client,options.nativeTables,{documentId:document.id,currentVersionId:parsedVersion,
           sourceVersionId:version,sourceHash:document.hash,courseId:document.courseId||''},pageEvidenceIds);
       }
+      if(topicJobs==='controlled-v1')await queueIngestedTopicJobs(client,owner,document.id,parsedVersion);
+      await queueDocumentCourseFactJob(client,owner,document.id,parsedVersion);
       if(process.env.KERNEL_DOCUMENT_HYBRID==='true')
         await queueDocumentVectorJobs(client,owner,{documentId:document.id});
     });
+    // Availability is not immutable parser quality. Keep it out of body,
+    // warnings and parsedVersion; no-data ordinary ingestion still returns void.
+    if(origUnavailable.length)return {origSearchHints:{status:'unavailable' as const,pages:origUnavailable,
+      authority:'unverified-retrieval-hint' as const}};
   }
 
-  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string}={}){
+  resolveDocumentSource(owner:string,hint:DocumentSourceHint,options:{courseId?:string;routingScope?:DocumentRoutingScope}={}){
     return resolveDocumentSource(kernelPool(),owner,hint,options);
+  }
+
+  findMentionedDocumentSources(owner:string,question:string,options:{courseId?:string;routingScope?:DocumentRoutingScope}={}){
+    return findMentionedDocumentSources(kernelPool(),owner,question,options);
   }
 
   mentionedOtherDocumentSources(owner:string,question:string,selectedDocumentId:string){
@@ -964,11 +1154,15 @@ export class KernelService {
     return readDocumentSourcePages(kernelPool(),owner,source);
   }
 
+  readDocumentPageRegions(owner:string,source:DocumentContextSource,physicalPage:number){
+    return readDocumentPageRegions(kernelPool(),owner,source,physicalPage);
+  }
+
   readDocumentOutline(owner:string,source:DocumentContextSource){
     return readDocumentOutline(kernelPool(),owner,source);
   }
 
-  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:{includeImages?:boolean}={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
+  readDocumentParents(owner:string,anchors:DocumentEvidenceHit[],options:DocumentParentReadOptions={},imageBudget?:ReturnType<typeof createDocumentImageBudget>){
     return readDocumentParents(kernelPool(),owner,anchors,options,imageBudget);
   }
 
@@ -988,10 +1182,31 @@ export class KernelService {
   readPdfVisualEvidence(owner:string,source:DocumentContextSource,pageEvidenceIds?:string[]){
     return readPdfVisualEvidence(kernelPool(),owner,source,pageEvidenceIds);
   }
+  readPdfInternalLinks(owner:string,source:DocumentContextSource){
+    return readPdfInternalLinkEvidence(kernelPool(),owner,source);
+  }
+  readPdfNavigationTextContainers(owner:string,source:DocumentContextSource,physicalPage:number){
+    return readPdfNavigationTextContainers(kernelPool(),owner,source,physicalPage);
+  }
 
   nativeTableBlobHashes(){return nativeTableBlobHashes(kernelPool());}
 
-  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;strict?:boolean}={}){
+  /** Explicit administrator registration of one completed, source-bound run.
+   * No model, parser, embeddings, or batch import occurs here. */
+  async registerAuthorImageTableCandidate(owner:string,source:DocumentContextSource,input:CompletedAuthorImageTableRun){
+    const prepared=await prepareAuthorImageTableCandidate(kernelPool(),owner,source,input);
+    return kernelTransaction(client=>commitAuthorImageTableCandidate(client,prepared));
+  }
+
+  searchAuthorImageTableCandidates(owner:string,question:string,source:DocumentContextSource){
+    return searchAuthorImageTableCandidates(kernelPool(),owner,question,source);
+  }
+
+  readAuthorImageTableCandidateEvidence(owner:string,candidates:Parameters<typeof readAuthorImageTableCandidateEvidence>[2]){
+    return readAuthorImageTableCandidateEvidence(kernelPool(),owner,candidates);
+  }
+
+  searchNativeTableCandidates(owner:string,question:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope;strict?:boolean}={}){
     return searchNativeTableCandidates(kernelPool(),owner,question,scope);
   }
 
@@ -1023,8 +1238,48 @@ export class KernelService {
     return readDocumentNodes(kernelPool(),owner,expectedSource,evidenceIds);
   }
 
+  /** Current access/version checks stay in the existing node reader. The audit
+   * compares entire original bodies, not just the quoted substring. */
+  private citationTextRecheck(owner:string):DocumentCitationTextRecheck{
+    return async binding=>{
+      const groups=new Map<string,typeof binding.citations>();
+      for(const unit of binding.citations){
+        if(unit.kind!=='text')throw new DocumentEvidenceChangedError();
+        const e=unit.evidence,key=JSON.stringify([e.documentId,e.documentVersionId,e.sourceVersionId,e.sourceHash]);
+        const items=groups.get(key)??[];items.push(unit);groups.set(key,items);
+      }
+      for(const units of groups.values()){
+        const e=units[0].evidence,ids=[...new Set(units.flatMap(u=>u.kind==='text'?[u.evidence.evidenceId]:[]))],nodes=[];
+        for(let offset=0;offset<ids.length;offset+=14)nodes.push(...await this.readDocumentNodes(owner,
+          {documentId:e.documentId,currentVersionId:e.documentVersionId,sourceVersionId:e.sourceVersionId,sourceHash:e.sourceHash},ids.slice(offset,offset+14)));
+        for(const unit of units){
+          if(unit.kind!=='text')throw new DocumentEvidenceChangedError();
+          const evidence=unit.evidence,node=nodes.find(n=>n.evidence_id===evidence.evidenceId),
+            source=binding.sources.find(s=>s.documentId===evidence.documentId&&s.sourceHash===evidence.sourceHash);
+          if(!node||!source||node.name!==source.name||node.origin!==source.origin||node.origin_key!==source.originKey||
+            node.locator!==evidence.locator||createHash('sha256').update(node.body).digest('hex')!==evidence.sha256)
+            throw new DocumentEvidenceChangedError();
+        }
+      }
+    };
+  }
+
+  readDocumentCitationSnapshot(owner:string,source:DocumentCitationSource,evidenceIds:string[]){
+    return readDocumentCitationSnapshot(kernelPool(),owner,source,evidenceIds);
+  }
+
+  bindDocumentQuestionName(owner:string,source:DocumentContextSource,question:string,input:unknown){
+    return bindDocumentQuestionName(kernelPool(),owner,source,question,input);
+  }
+
   readCompleteDocumentSource(owner:string,expectedSource:DocumentContextSource){
     return readCompleteDocumentSource(kernelPool(),owner,expectedSource);
+  }
+  readCompleteDocumentText(owner:string,expectedSource:DocumentContextSource){
+    return readCompleteDocumentText(kernelPool(),owner,expectedSource);
+  }
+  readDocumentSourceTextView(owner:string,expectedSource:DocumentContextSource,manifestSha256?:string){
+    return readDocumentSourceTextView(kernelPool(),owner,expectedSource,manifestSha256);
   }
 
   /** Explicit selected-source route. Complete refers to source coverage, never
@@ -1116,8 +1371,11 @@ export class KernelService {
   /** Shared existing retrieval/current-source callback; the default answering
    * path keeps the same options, reads, order and provider payload. */
   private async studyAnswerContextReader(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true){
-    const {includeParents=false,includeImages=false,...searchOptions}=options;
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},nativeTables=true,identityCourseCodes?:string[],
+    imagePageFocus?:{source:DocumentContextSource;physicalPage?:number;quotedLiteral?:string;figureNumber?:number;
+      onLocation?:(value:DocumentQuotedTextLocation)=>void;onFigureLocation?:(value:DocumentFigureLocation)=>void}){
+    const {includeParents=false,includeImages=false,...searchOptions}={...options,
+      ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
     const limit=searchOptions.limit??14;
     if(typeof includeParents!=='boolean'||typeof includeImages!=='boolean'||(includeImages&&!includeParents)||
       !Number.isInteger(limit)||limit<1||limit>14)throw new Error('Invalid study answer evidence options');
@@ -1125,14 +1383,16 @@ export class KernelService {
     if(anchors.some(hit=>hit.retrieval_mode==='keyword-fallback'||hit.degraded_reason))
       throw new Error('Study answer retrieval was degraded; no answer was generated');
     const selected=searchOptions.sourceHint?requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
-      {courseId:searchOptions.courseId})):undefined;
+      {courseId:searchOptions.courseId,routingScope:searchOptions.routingScope})):undefined;
+    // A resolved document already fixes the source; requiring every question
+    // word in a table caption/cell would discard its complementary original page.
     const tableCandidates=includeImages&&nativeTables?await this.searchNativeTableCandidates(owner,question,{courseId:searchOptions.courseId,
-      documentId:selected?.documentId??searchOptions.documentId,strict:searchOptions.strict}):[];
+      documentId:selected?.documentId??searchOptions.documentId,routingScope:searchOptions.routingScope,strict:selected?false:searchOptions.strict}):[];
     return async()=>{
       const current=await readFullDocumentEvidence(kernelPool(),owner,anchors);
       if(searchOptions.sourceHint){
         const selected=requireResolvedDocumentSource(await this.resolveDocumentSource(owner,searchOptions.sourceHint,
-          {courseId:searchOptions.courseId}));
+          {courseId:searchOptions.courseId,routingScope:searchOptions.routingScope}));
         if(current.some(hit=>hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||
           hit.source_version_id!==selected.sourceVersionId||hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`)||
           tableCandidates.some(item=>item.source.documentId!==selected.documentId||item.source.currentVersionId!==selected.currentVersionId||
@@ -1140,25 +1400,348 @@ export class KernelService {
           throw new DocumentEvidenceChangedError();
       }
       const imageBudget=includeImages?createDocumentImageBudget():undefined;
-      const context=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages},imageBudget):
+      const requestedPages:DocumentEvidenceHit[]=[];
+      let figureCaptionCandidate:DocumentFigureCaptionCandidate|undefined;
+      const requestedImages:DocumentAnswerContext['images']=[];
+      if(imageBudget&&imagePageFocus){
+        const source=imagePageFocus.source;
+        if(imagePageFocus.physicalPage!==undefined){
+          const existing=current.find(hit=>hit.document_id===source.documentId&&hit.source_hash===source.sourceHash&&
+            hit.source_version_id===source.sourceVersionId&&hit.id===`pg:${source.currentVersionId}:${imagePageFocus.physicalPage}`);
+          if(existing)requestedPages.push(existing);
+          else{const pages=await readDocumentSourcePages(kernelPool(),owner,source),page=pages.nodes.find(node=>node.kind==='page'&&node.ordinal+1===imagePageFocus.physicalPage);
+            if(page)requestedPages.push(...await readDocumentNodes(kernelPool(),owner,source,[page.evidenceId]));}
+        }else if(imagePageFocus.quotedLiteral||imagePageFocus.figureNumber!==undefined){
+          const text=await this.readCompleteDocumentText(owner,source),pages=text.status==='available'?
+            text.context.anchors.filter(hit=>hit.content_kind==='page').map(hit=>({physicalPage:hit.page_number,evidenceId:hit.evidence_id,body:hit.body})):[],
+            location=imagePageFocus.quotedLiteral?locateDocumentQuotedText(imagePageFocus.quotedLiteral,pages):locateDocumentFigureCaption(imagePageFocus.figureNumber!,pages);
+          const observation=text.status==='unavailable'?{...location,reason:'source-text:'+text.reason}:location;
+          if(observation.policy==='literal-quoted-text-candidates-v1')imagePageFocus.onLocation?.(observation);
+          else{
+            imagePageFocus.onFigureLocation?.(observation);
+            if(observation.status==='available'){
+              const page=observation.pages[0];figureCaptionCandidate={policy:'explicit-current-figure-page-v1',source,
+                figureNumber:observation.figureNumber,physicalPage:page.physicalPage,evidenceId:page.evidenceId,bodySha256:page.bodySha256,
+                semanticsVerified:false,figureRegionRelationship:'unknown'};
+            }
+          }
+          if(location.status==='available'){
+            const nodes=await readDocumentNodes(kernelPool(),owner,source,location.pages.map(page=>page.evidenceId));
+            if(nodes.some((node,index)=>node.page_number!==location.pages[index].physicalPage||focusedTextQueryHash(node.body)!==location.pages[index].bodySha256))throw new DocumentEvidenceChangedError();
+            requestedPages.push(...nodes);
+          }
+        }
+        let extraRank=current.length;
+        for(const page of requestedPages){
+          const rank=current.findIndex(hit=>hit.evidence_id===page.evidence_id),visual=await readPdfVisualEvidence(kernelPool(),owner,source,[page.evidence_id],undefined,
+            {pageAssetsOnly:true,selection:{budget:imageBudget,anchorRank:rank>=0?rank+1:++extraRank}});
+          if(visual.registered&&visual.renderStatus!=='available')throw new DocumentContextError('DOCUMENT_IMAGE_UNAVAILABLE','Requested current PDF page image unavailable');
+          requestedImages.push(...visual.images);
+        }
+      }
+      // Reserve the existing bounded table candidates' original pages before
+      // ordinary images fill the same budget. Explicit requested pages above
+      // still win; an incomplete parser grid remains an unavailable observation.
+      const supplemental=tableCandidates.length?await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
+        imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined):null;
+      let context:DocumentAnswerContext&{accounting?:DocumentContextRead['accounting']}=includeParents?await readDocumentParents(kernelPool(),owner,current,{includeImages,
+        ...(identityCourseCodes?{identityCourseCodes}:{})},imageBudget):
         {anchors:current,parents:[],images:[],sourceContentIsUntrusted:true as const};
-      if(!tableCandidates.length)return context;
-      const supplemental=await readNativeTableCandidateEvidence(kernelPool(),owner,tableCandidates,
-        imageBudget?{budget:imageBudget,firstAnchorRank:current.length+1}:undefined);
+      if(requestedPages.length){
+        const extras=requestedPages.filter(page=>!context.anchors.some(hit=>hit.evidence_id===page.evidence_id));
+        const images=[...new Map([...requestedImages,...context.images].map(image=>[image.attachmentId,image])).values()];
+        context={...context,anchors:[...context.anchors,...extras],images,imageSelection:imageBudget!.snapshot(),
+          ...(figureCaptionCandidate&&requestedImages.some(image=>'kind'in image&&image.kind==='pdf-page'&&
+            image.anchorEvidenceId===figureCaptionCandidate!.evidenceId&&image.physicalPage===figureCaptionCandidate!.physicalPage)?{figureCaptionCandidate}:{}),
+          ...(context.accounting?{accounting:{...context.accounting,anchorCount:context.anchors.length+extras.length,
+            imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
+      }
+      if(!supplemental)return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,context,selected):context;
       const supported=new Set([...context.anchors.map(hit=>hit.evidence_id),...context.parents.flatMap(parent=>parent.nodes.map(node=>node.evidenceId))]);
       const images=[...new Map([...context.images,...supplemental.images].map(image=>[image.attachmentId,image])).values()];
-      return {...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
+      const enriched={...context,imageAnchors:supplemental.imageAnchors.filter(node=>!supported.has(node.evidence_id)),
         images,...(imageBudget?{imageSelection:imageBudget.snapshot()}:{}),
         ...('accounting' in context?{accounting:{...context.accounting,imageCount:images.length,imageBytes:images.reduce((sum,image)=>sum+image.byteLength,0)}}:{})};
+      return includeImages&&nativeTables&&selected?this.authorImageTableContext(owner,question,enriched,selected):enriched;
     };
+  }
+
+  /** One explicit title/source only. Original ranked anchors and other sources
+   * stay intact; the existing PNG is still the sole selectable image evidence. */
+  private async authorImageTableContext(owner:string,question:string,context:DocumentAnswerContext,source:DocumentContextSource):Promise<DocumentAnswerContext>{
+    const nativeImages=context.images.filter(image=>image.tableObservations?.some(o=>o.version==='docling-native-observation-v1'));
+    const candidates=(await this.searchAuthorImageTableCandidates(owner,question,source)).slice(0,Math.max(0,2-nativeImages.length));
+    if(!candidates.length)return context;
+    const budget=createDocumentImageBudget();
+    for(const [index,image]of context.images.entries())if(!budget.include(image,index+1))throw new Error('Existing image budget changed');
+    const extra=await readAuthorImageTableCandidateEvidence(kernelPool(),owner,candidates,{budget,firstAnchorRank:context.anchors.length+1});
+    const images=[...new Map([...context.images,...extra.images].map(image=>[image.attachmentId,image])).values()];
+    const supported=new Set([...context.anchors.map(n=>n.evidence_id),...context.parents.flatMap(p=>p.nodes.map(n=>n.evidenceId))]);
+    const imageAnchors=[...new Map([...context.imageAnchors??[],...extra.imageAnchors].filter(n=>!supported.has(n.evidence_id)).map(n=>[n.evidence_id,n])).values()];
+    if(imageAnchors.length>2)throw new Error('Shared supplemental image limit');
+    return {...context,images,imageAnchors,imageSelection:{...budget.snapshot(),omitted:[...context.imageSelection?.omitted??[],...budget.snapshot().omitted]},
+      ...('accounting' in context?{accounting:{...(context as {accounting:Record<string,unknown>}).accounting,
+        imageCount:images.length,imageBytes:images.reduce((sum,i)=>sum+i.byteLength,0)}}:{})};
   }
 
   /** Non-structured study content only; canonical business facts use their own
    * Kernel queries. Retrieval and every source recheck remain inside Kernel. */
   async answerStudyContent(owner:string,question:string,
-    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean}={},policy:DocumentAnswerPolicy={}){
+    options:DocumentSearchOptions&{includeParents?:boolean;includeImages?:boolean;retrievalQuestion?:string}={},policy:DocumentAnswerPolicy={}){
     await documentAnswerSettings(policy);
-    return synthesizeDocumentAnswer(question,await this.studyAnswerContextReader(owner,question,options),policy);
+    const navigationEnabled=pdfNavigationProjectionEnabled();
+    const {retrievalQuestion,...searchOptions}={...options,
+      ...(options.routingScope===undefined?{}:{routingScope:normalizeDocumentRoutingScope(options.routingScope)})};
+    if(retrievalQuestion!==undefined&&(typeof retrievalQuestion!=='string'||!retrievalQuestion.trim()||retrievalQuestion.length>12000))
+      throw new Error('Invalid study retrieval question');
+    let routedOptions=searchOptions,sourceRouting:Awaited<ReturnType<typeof planDocumentQueryScope>>|undefined;
+    const explicitSourceSelection=searchOptions.routingScope?.documentIds!==undefined||(searchOptions.routingScope?.courseIds?.length??0)>1;
+    if(policy.sourceRouting&&!searchOptions.sourceHint&&!searchOptions.documentId&&!explicitSourceSelection){
+      const mentioned=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
+      if(mentioned.status==='resolved'){
+        sourceRouting=await planDocumentQueryScope(question,mentioned.matches[0],policy,async()=>{
+          const current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
+          if(JSON.stringify(current)!==JSON.stringify(mentioned))throw new DocumentEvidenceChangedError();
+        });
+        if(sourceRouting.decision.scope==='named-document')routedOptions={...searchOptions,
+          sourceHint:{selectedDocumentTitle:mentioned.matches[0].title},relatedDocuments:false};
+      }
+    }
+    if(sourceRouting)policy.onStage?.('retrieval');
+    if(policy.sourceIdentityContext&&!searchOptions.includeParents)throw new Error('Source identity context requires the original parent reader');
+    const identityCourseCodes=policy.sourceIdentityContext?[...new Set(observeLiteralCourseCodes(question).map(observation=>observation.code))]:undefined;
+    const mentionedForImages=policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages?
+      await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope}):undefined;
+    const pageSource=mentionedForImages?.status==='resolved'?mentionedForImages.matches[0]:undefined;
+    const requestedPage=pageSource?explicitDocumentPage(question,pageSource.title):null;
+    const quotedLiteral=pageSource&&!requestedPage?documentQuotedLiteral(question,pageSource.title):null;
+    const requestedFigure=pageSource&&!requestedPage&&!quotedLiteral?explicitDocumentFigure(question,pageSource.title):null;
+    let quotedTextLocation:DocumentQuotedTextLocation|undefined;
+    let figureCaptionLocation:DocumentFigureLocation|undefined;
+    const imagePageFocus=pageSource&&(requestedPage||quotedLiteral||requestedFigure)&&(!routedOptions.documentId||routedOptions.documentId===pageSource.documentId)&&
+      (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===pageSource.title)?{source:pageSource,
+        ...(requestedPage?{physicalPage:requestedPage}:quotedLiteral?{quotedLiteral,onLocation:(value:DocumentQuotedTextLocation)=>{quotedTextLocation=value;}}:
+          {figureNumber:requestedFigure!,onFigureLocation:(value:DocumentFigureLocation)=>{figureCaptionLocation=value;}})}:undefined;
+    // Source identity is a filter, not a keyword or an implicit all-term match.
+    // Cross-source/unknown decisions retain their original relevance query.
+    const rankedQuestion=sourceRouting?.decision.scope==='named-document'?
+      focusedDocumentTextQuery(retrievalQuestion??question,sourceRouting.source.title)??(retrievalQuestion??question):retrievalQuestion??question;
+    const originalRankedRead=await this.studyAnswerContextReader(owner,rankedQuestion,routedOptions,true,identityCourseCodes,imagePageFocus);
+    let contentTagRouting:ReturnType<typeof contentTagAnswerObservation>;
+    let classificationRouting:ReturnType<typeof classificationShadowAnswerObservation>|ReturnType<typeof classificationGuardAnswerObservation>;
+    let sourceIdentityContext:DocumentAnswerContext['sourceIdentityContext'];
+    const rankedRead=async()=>{
+      const context=await originalRankedRead();
+      contentTagRouting=contentTagAnswerObservation(context.anchors);
+      classificationRouting=classificationGuardAnswerObservation(context.anchors)??classificationShadowAnswerObservation(context.anchors);
+      sourceIdentityContext='sourceIdentityContext' in context?context.sourceIdentityContext:undefined;
+      return context;
+    };
+    let contextExpansion:Record<string,unknown>={strategy:'ranked-evidence',coverage:'unassessed'};
+    let read:()=>Promise<DocumentAnswerContext>=rankedRead;
+    if(policy.scope==='application'&&searchOptions.includeParents&&searchOptions.includeImages){
+      const mentioned=mentionedForImages!;
+      if(mentioned.status==='resolved'){
+        const selected=mentioned.matches[0];
+        const focusQuery=focusedDocumentTextQuery(question,selected.title),focusAllowed=focusQuery&&
+          (!routedOptions.documentId||routedOptions.documentId===selected.documentId)&&
+          (!routedOptions.sourceHint||routedOptions.sourceHint.selectedDocumentTitle===selected.title);
+        let focusReader:ReturnType<KernelService['studyAnswerContextReader']>|undefined;
+        read=async()=>{
+          const ranked=await rankedRead(),current=await findMentionedDocumentSources(kernelPool(),owner,question,{courseId:searchOptions.courseId,routingScope:searchOptions.routingScope});
+          if(current.status!=='resolved'||JSON.stringify(current.matches)!==JSON.stringify(mentioned.matches))throw new DocumentEvidenceChangedError();
+          const base=await this.authorImageTableContext(owner,rankedQuestion,ranked,selected);
+          const complete=await this.readCompleteDocumentSource(owner,selected);
+          const retainFocusedText=async(seed:DocumentAnswerContext=base):Promise<DocumentAnswerContext>=>{
+            if(!focusAllowed)return seed;
+            // Search once; every subsequent answer-stage read still verifies
+            // current owner, source and page bodies through the Kernel reader.
+            focusReader??=this.studyAnswerContextReader(owner,focusQuery!,{...routedOptions,documentId:selected.documentId,
+              sourceHint:{selectedDocumentTitle:selected.title},limit:FOCUSED_TEXT_LIMITS.pages,strict:false,
+              includeParents:false,includeImages:false,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false},false);
+            const focused=await (await focusReader)(),settings=await documentAnswerSettings(policy);
+            let expanded=seed,bytes=0,inputUpper:number|undefined;
+            const pages:FocusedDocumentText['pages']=[],omitted:Array<{evidenceId:string;reason:string}>=[];
+            for(const hit of focused.anchors){
+              if(hit.document_id!==selected.documentId||hit.source_hash!==selected.sourceHash||hit.source_version_id!==selected.sourceVersionId||
+                hit.id!==`pg:${selected.currentVersionId}:${hit.page_number}`)throw new DocumentEvidenceChangedError();
+              const size=Buffer.byteLength(hit.body),page={evidenceId:hit.evidence_id,bodySha256:createHash('sha256').update(hit.body).digest('hex')};
+              if(bytes+size>FOCUSED_TEXT_LIMITS.bodyUtf8Bytes){omitted.push({evidenceId:hit.evidence_id,reason:'focused-text-byte-limit'});continue;}
+              const merged=mergeStudyEvidence(expanded,{anchors:[hit],parents:[],images:[],sourceContentIsUntrusted:true});
+              if(!merged){omitted.push({evidenceId:hit.evidence_id,reason:'existing-image-budget'});continue;}
+              const candidate={...merged,focusedText:{policy:'bounded-mentioned-source-relevance-v1' as const,source:selected,
+                querySha256:focusedTextQueryHash(focusQuery!),pages:[...pages,page],coverage:'unassessed' as const,structureRelationsVerified:false as const}};
+              try{
+                const request=buildDocumentAnswerRuntimeRequest(prepareDocumentAnswerForPolicy(question,candidate,policy),
+                  {model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);
+                const upper=studyContextInputUpper(request,candidate);
+                if(upper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){omitted.push({evidenceId:hit.evidence_id,reason:'combined-request-budget'});continue;}
+                expanded=candidate;bytes+=size;pages.push(page);inputUpper=upper;
+              }catch(error){if(!(error instanceof DocumentAnswerRequestLimitError))throw error;omitted.push({evidenceId:hit.evidence_id,reason:error.code});}
+            }
+            contextExpansion={...contextExpansion,...(pages.length&&seed===base?{strategy:'ranked-plus-focused-mentioned-text'}:{}),
+              focusedText:{policy:'bounded-mentioned-source-relevance-v1',querySha256:focusedTextQueryHash(focusQuery!),
+                admitted:pages,omitted,bodyUtf8Bytes:bytes,inputTokenUpper:inputUpper,otherSourcesRetained:true,coverage:'unassessed',structureRelationsVerified:false}};
+            return expanded;
+          };
+          const retainText=async(visualReason:string):Promise<DocumentAnswerContext>=>{
+            const text=await this.readCompleteDocumentText(owner,selected);
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,
+              expansionUnavailable:visualReason,...(text.status==='unavailable'?{textExpansionUnavailable:text.reason}:{})};
+            if(text.status==='unavailable')return retainFocusedText();
+            const merged=mergeStudyEvidence(base,text.context);
+            if(!merged)return retainFocusedText();
+            const expanded={...merged,persistedTextProof:text.manifest};
+            const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),settings=await documentAnswerSettings(policy);
+            let request;
+            try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
+              if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
+              contextExpansion={...contextExpansion,textExpansionUnavailable:error.code};return retainFocusedText();
+            }
+            const inputUpper=studyContextInputUpper(request,expanded);
+            if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
+              contextExpansion={...contextExpansion,textExpansionUnavailable:'combined-request-budget'};return retainFocusedText();
+            }
+            contextExpansion={strategy:'ranked-plus-persisted-text-mentioned-source',coverage:'unassessed',selectedSource:selected,
+              textScope:text.manifest.textCoverage,textNodes:text.manifest.returnedNodeCount,
+              textSourceManifestSha256:text.manifest.manifestSha256,orderedTextSha256:text.manifest.orderedTextSha256,
+              visualScope:'ranked-selected-only',exhaustiveVisualUnavailable:visualReason,
+              originalFileCompletenessVerified:false,otherSourcesRetained:true,inputTokenUpper:inputUpper};
+            return retainFocusedText(expanded);
+          };
+          if(complete.status==='unavailable'){
+            if(complete.reason.startsWith('image-'))return retainText(complete.reason);
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:complete.reason};return retainFocusedText();
+          }
+          // Validate the existing complete-source proof before merging; it does
+          // not certify completeness of a multi-source question or the answer.
+          prepareDocumentAnswer(question,{...complete.context,completeSourceProof:{policy:'selected-complete-initial-v1',selectedDocumentTitle:selected.title,manifest:complete.manifest}});
+          const expanded=mergeStudyEvidence(base,complete.context);
+          if(!expanded)return retainText('combined-image-budget');
+          const prepared=prepareDocumentAnswerForPolicy(question,expanded,policy),settings=await documentAnswerSettings(policy);
+          let request;
+          try{request=buildDocumentAnswerRuntimeRequest(prepared,{model:settings.model,reasoningEffort:settings.effort,maxOutputTokens:settings.maxOutput},policy);}catch(error){
+            if(!(error instanceof DocumentAnswerRequestLimitError))throw error;
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:error.code};return retainText(error.code);
+          }
+          const inputUpper=studyContextInputUpper(request,expanded);
+          if(inputUpper>COMPLETE_DOCUMENT_SOURCE_LIMITS.requestInputTokens){
+            contextExpansion={strategy:'ranked-evidence',coverage:'unassessed',selectedSource:selected,expansionUnavailable:'combined-request-budget'};return retainText('combined-request-budget');
+          }
+          contextExpansion={strategy:'ranked-plus-complete-mentioned-source',coverage:'unassessed',selectedSource:selected,
+            sourceManifestSha256:complete.manifest.manifestSha256,sourceNodes:complete.manifest.returnedNodeCount,
+            sourceImages:complete.manifest.images.length,otherSourcesRetained:true,inputTokenUpper:inputUpper};
+          // Complete input can still exceed selection's bounded text retention.
+          // Carry the same validated focus through successful expansion too.
+          return retainFocusedText(expanded);
+        };
+      }
+    }
+    if(policy.scope==='application'&&searchOptions.includeImages){
+      const readOriginal=read;
+      read=async()=>{const context=await readOriginal();return {...context,
+        ...await readDocumentPageRegionsForImages(kernelPool(),owner,context.images)};};
+    }
+    if(policy.textContextWindows==='stored-page-v1'){
+      const readOriginal=read;
+      read=async()=>({...await readOriginal(),textQuotePolicy:'stored-page-v1' as const});
+    }
+    if(policy.textContextWindows==='producer-neighbors-v1'){
+      const readOriginal=read,cache=new Map<string,Promise<PreparedDoclingTextContextWindows|null>>();
+      read=async()=>{
+        const context=await readOriginal(),textContextWindows:PreparedDoclingTextContextWindows[]=[];
+        // Bound auxiliary CAS reads. The original context stays complete and
+        // unchanged when a page has no usable producer observations.
+        const anchors=context.anchors.slice(0,64),documents=new Map<string,OrigSearchPage[]>();
+        for(const anchor of anchors){
+          if(!anchor.parser_version.startsWith('docling-'))continue;
+          if(!documents.has(anchor.document_id))documents.set(anchor.document_id,await origSearchPages(kernelPool(),owner,anchor.document_id));
+          const row=documents.get(anchor.document_id)!.find(page=>page.page_number===anchor.page_number),
+            version=/^pg:(.+):([0-9]+)$/.exec(anchor.id);
+          if(!row||!version||row.current_version_id!==version[1]||row.source_version_id!==anchor.source_version_id||
+            row.source_hash!==anchor.source_hash||row.evidence_id!==anchor.evidence_id||row.body!==anchor.body||
+            row.parser_version!==anchor.parser_version)throw new DocumentEvidenceChangedError();
+          const key=createHash('sha256').update(JSON.stringify([row.current_version_id,row.source_version_id,row.source_hash,
+            row.evidence_id,row.body,row.parser_version,row.progress,row.layout?.resultReferences])).digest('hex');
+          let pending=cache.get(key);
+          if(!pending){
+            pending=prepareDoclingTextContextWindows({...origSearchInput(owner,row),currentVersionId:row.current_version_id,
+              sourceVersionId:row.source_version_id,evidenceId:row.evidence_id}).catch(error=>{
+                if(error instanceof DoclingPageRegionError&&['unavailable','limit'].includes(error.code))return null;
+                throw error;
+              });
+            cache.set(key,pending);
+          }
+          const hint=await pending;if(hint?.windows.length)textContextWindows.push(hint);
+        }
+        return {...context,...(textContextWindows.length?{textContextWindows}:{})};
+      };
+    }
+    if(policy.textContextWindows==='producer-neighbors-v1'){
+      const readOriginal=read,cache=new Map<string,Promise<PreparedNativeRegionWindows|null>>();
+      read=async()=>{
+        const context=await readOriginal(),nativeRegionWindows:PreparedNativeRegionWindows[]=[],documents=new Map<string,OrigSearchPage[]>();
+        for(const anchor of context.anchors.slice(0,64)){
+          if(anchor.parser_version!==NATIVE_REGION_TEXT_VERSION)continue;
+          if(!documents.has(anchor.document_id))documents.set(anchor.document_id,await origSearchPages(kernelPool(),owner,anchor.document_id));
+          const row=documents.get(anchor.document_id)!.find(p=>p.page_number===anchor.page_number),version=/^pg:(.+):([0-9]+)$/.exec(anchor.id);
+          if(!row||!version||row.current_version_id!==version[1]||row.source_version_id!==anchor.source_version_id||row.source_hash!==anchor.source_hash||
+            row.evidence_id!==anchor.evidence_id||row.body!==anchor.body||row.parser_version!==anchor.parser_version)throw new DocumentEvidenceChangedError();
+          const key=createHash('sha256').update(JSON.stringify([row.current_version_id,row.evidence_id,row.body,nativeRegionFingerprint(row.progress)])).digest('hex');
+          let pending=cache.get(key);
+          if(!pending){pending=prepareNativeRegionWindows({...origSearchInput(owner,row),currentVersionId:row.current_version_id,
+            sourceVersionId:row.source_version_id,evidenceId:row.evidence_id,bodySha256:createHash('sha256').update(row.body).digest('hex')});cache.set(key,pending);}
+          const hint=await pending;if(hint)nativeRegionWindows.push(hint);
+        }
+        return {...context,...(nativeRegionWindows.length?{nativeRegionWindows}:{})};
+      };
+    }
+    if(navigationEnabled&&policy.scope==='application'&&policy.evidenceSelection==='select-then-answer')
+      read=withPdfNavigationContext(read,(source,page)=>this.readPdfNavigationTextContainers(owner,source,page));
+    if(searchOptions.routingScope){
+      const readOriginal=read;
+      read=async()=>{
+        const context=await readOriginal();
+        await assertDocumentRoutingScope(kernelPool(),owner,[...context.anchors.map(hit=>hit.document_id),
+          ...context.imageAnchors?.map(hit=>hit.document_id)??[],...context.parents.flatMap(parent=>parent.nodes.map(node=>node.documentId)),
+          ...context.images.map(image=>image.source.documentId)],searchOptions);
+        return context;
+      };
+    }
+    if(policy.sourceTextCitations){const previousRead=read;read=async()=>({...await previousRead(),sourceTextCitationPolicy:policy.sourceTextCitations});}
+    const generated=await synthesizeDocumentAnswer(question,read,policy);
+    const quantityCheck=policy.quantityConsistency?checkDocumentQuantityConsistency(question,generated.answer):undefined;
+    const blocked=quantityCheck?.status==='explicit-incompatible-quantity';
+    const result=quantityCheck?{...generated,answer:quantityCheck.answer,
+      ...(blocked?{selectedUnits:[]}:{}),quantityConsistency:{...quantityCheck,
+        ...(blocked?{originalSelectedUnits:generated.selectedUnits}:{}),inputFingerprint:generated.inputFingerprint}}:generated;
+    if('pdfPageRegionTransport'in result&&result.pdfPageRegionTransport)
+      contextExpansion={...contextExpansion,pdfPageRegions:result.pdfPageRegionTransport};
+    let citationCheck:Omit<Awaited<ReturnType<typeof checkApplicationDocumentCitations>>,'released'>|undefined,
+      releasedAnswer:Awaited<ReturnType<typeof checkApplicationDocumentCitations>>['released'];
+    const auditSelections='scopeAnnotatedSelections' in result&&result.scopeAnnotatedSelections?result.scopeAnnotatedSelections:
+      'sourceQuantityDerivation' in result&&result.sourceQuantityDerivation?result.sourceQuantityDerivation.normalizedSelections:
+      'sourceValueDerivation' in result?result.sourceValueDerivation?.normalizedSelections??result.providerSelections:result.providerSelections;
+    if(result.answer.claims.length&&policy.citationCheck&&auditSelections?.claims.length){
+      policy.onStage?.('citation-validation');
+      const {released,...checked}=await checkApplicationDocumentCitations(question,read,{inputFingerprint:result.inputFingerprint,
+        quoteUnitManifestSha256:result.quoteUnitManifestSha256,providerSelections:auditSelections,
+        ...('evidenceSelection' in result&&result.evidenceSelection?.unitPolicy?{unitPolicy:result.evidenceSelection.unitPolicy}:{})},policy,this.citationTextRecheck(owner));
+      citationCheck=checked;
+      if(released){
+        if(JSON.stringify(result.answer.claims.map(c=>c.text))!==JSON.stringify(released.answer.claims.map(c=>c.text)))
+          throw new Error('Citation release changed answer text');
+        // Provider selections/raw responses remain the original generation;
+        // only the restored displayed citations and their unit indices change.
+        releasedAnswer=released;
+      }
+    }
+    if(quotedTextLocation)contextExpansion={...contextExpansion,quotedTextLocation:{source:pageSource,...quotedTextLocation}};
+    if(figureCaptionLocation)contextExpansion={...contextExpansion,figureCaptionLocation:{source:pageSource,...figureCaptionLocation}};
+    return {...result,...(releasedAnswer?{answer:releasedAnswer.answer,selectedUnits:releasedAnswer.selectedUnits}:{}),
+      contextExpansion,...(sourceRouting?{sourceRouting:{...sourceRouting,retrieval:{policy:'resolved-title-relevance-query-v1' as const,
+        querySha256:focusedTextQueryHash(rankedQuestion),titleSpanRemoved:rankedQuestion!==(retrievalQuestion??question),strict:routedOptions.strict??false}}}:{}),...(citationCheck?{citationCheck}:{}),
+      ...(contentTagRouting?{contentTagRouting}:{}),...(classificationRouting?{classificationRouting}:{}),...(sourceIdentityContext?{sourceIdentityContext}:{})};
   }
 
   /** Explicit administrator development lane. A title may occur in query text;
@@ -1206,7 +1789,7 @@ export class KernelService {
       throw new Error('Planned answers allow user course/title context, not document filters');
     const {sourceHint}=scope;
     if(sourceHint!==undefined&&(!sourceHint||Object.keys(sourceHint).length!==1||typeof sourceHint.selectedDocumentTitle!=='string'||
-      !sourceHint.selectedDocumentTitle.trim()||sourceHint.selectedDocumentTitle.length>4000||!question.normalize('NFKC').includes(sourceHint.selectedDocumentTitle.normalize('NFKC'))))
+      !sourceHint.selectedDocumentTitle.trim()||sourceHint.selectedDocumentTitle.length>4000||!documentTitleMention(question,sourceHint.selectedDocumentTitle)))
       throw new Error('A supplemental source hint must be a complete user title present in the original question');
     return scope;
   }
@@ -1329,11 +1912,47 @@ export class KernelService {
     return searchDocumentText(kernelPool(),owner,query,options);
   }
 
-  queueDocumentVectorJobs(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+  documentMetadataTags(owner:string,documentId:string){
+    return readContentMetadataTags(kernelPool(),owner,documentId);
+  }
+
+  recordDocumentClassification(owner:string,input:unknown,actor:string,reason:string){
+    return kernelTransaction(client=>recordContentClassification(client,owner,input,actor,reason));
+  }
+
+  documentClassifications(owner:string,documentId:string){
+    return readContentClassifications(kernelPool(),owner,documentId);
+  }
+
+  prepareDocumentTopics(owner:string,documentId:string,pages?:number[]){
+    return prepareControlledTopics(kernelPool(),owner,documentId,pages);
+  }
+
+  contentTaxonomy(owner:string){return readContentTaxonomy(kernelPool(),owner);}
+
+  recordContentTaxonomy(owner:string,input:unknown,actor:string,reason:string){
+    return kernelTransaction(client=>recordContentTaxonomy(client,owner,input,actor,reason));
+  }
+
+  importDocumentTopics(owner:string,packet:unknown,rawResponse:string,actor:string,reason:string){
+    return kernelTransaction(client=>importControlledTopics(client,owner,packet,rawResponse,actor,reason));
+  }
+
+  runDocumentTopicJob(job:IngestionJob){return runDocumentTopicJob(job);}
+
+  documentRoutingCounts(owner:string,scope:{courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope}={}){
+    return documentRoutingScopeCounts(kernelPool(),owner,scope);
+  }
+
+  hasUnmappedCourseDocuments(owner:string,courseIds:readonly string[]){
+    return hasUnmappedCourseDocuments(kernelPool(),owner,courseIds);
+  }
+
+  queueDocumentVectorJobs(owner:string,scope:DocumentVectorScope={}) {
     return queueDocumentVectorJobs(kernelPool(),owner,scope);
   }
 
-  documentVectorCoverage(owner:string,scope:{courseId?:string;documentId?:string}={}) {
+  documentVectorCoverage(owner:string,scope:DocumentVectorScope={}) {
     return documentVectorCoverage(kernelPool(),owner,scope);
   }
 
@@ -1344,6 +1963,66 @@ export class KernelService {
   async documentTextHeads(owner:string){
     return (await kernelPool().query<{id:string;source_hash:string}>(
       'SELECT id,source_hash FROM document_texts WHERE owner_id=$1 AND hidden=false AND current_version_id IS NOT NULL',[owner])).rows;
+  }
+
+  answerCourseFacts(owner:string,question:string,options:{asOf?:string;history?:boolean}={}){
+    return readCourseFacts(kernelPool(),owner,question,options);
+  }
+
+  refreshCourseFactValidity(kind:'hourly'|'daily',now=new Date()){
+    return refreshFactValidity(kernelPool(),kind,now);
+  }
+
+  runDocumentCourseFactJob(job:IngestionJob){
+    return runDocumentCourseFactJob(job,(batch,claimed)=>this.registerDocumentFactCandidates(batch,claimed));
+  }
+
+  async queueDocumentCourseFacts(owner:string,documentId:string){
+    return kernelTransaction(async client=>{
+      const row=(await client.query<{id:string}>(`SELECT v.id FROM document_texts d JOIN document_text_versions v
+       ON v.id=d.current_version_id AND v.document_id=d.id WHERE d.id=$1 AND d.owner_id=$2 AND NOT d.hidden`,
+       [documentId,owner])).rows[0];
+      if(!row)throw new Error('Document unavailable');
+      return queueDocumentCourseFactJob(client,owner,documentId,row.id);
+    });
+  }
+
+  async registerDocumentFactCandidates(batch:DocumentCourseFactBatch,job:IngestionJob){
+    return kernelTransaction(async client=>{
+      await assertDocumentCourseFactBatch(client,batch,job);
+      const ids:string[]=[];
+      for(const candidate of batch.candidates){
+        const entityId=stableId(batch.owner,'course_fact',batch.documentId,candidate.identityKey);
+        await client.query(`INSERT INTO entities(id,owner_id,kind,course_id,term_id,identity_key)
+          VALUES ($1,$2,'course_fact',$3,(SELECT term_id FROM courses WHERE id=$3),$4)
+          ON CONFLICT(id) DO NOTHING`,[entityId,batch.owner,batch.courseId,`${batch.documentId}:${candidate.identityKey}`]);
+        const id=await recordCandidate(client,{entityId,attribute:candidate.attribute,value:candidate.value,
+          sourceVersionId:batch.sourceVersionId,source:`document:course-fact`,sourceItemId:batch.sourceItemId,
+          originalExcerpt:candidate.originalExcerpt,confidence:candidate.confidence,authority:'document-candidate',
+          locator:candidate.locator,acquiredAt:batch.acquiredAt,forcePending:true,
+          pendingReason:'PDF parser candidate; verify applicability and identity before acceptance'});
+        await client.query(`INSERT INTO document_course_fact_candidates(candidate_id,owner_id,document_id,version_id,
+          source_version_id,source_hash,page_number,page_evidence_id,body_sha256,start_utf16,end_utf16,parser_version,extractor_version)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(candidate_id) DO NOTHING`,
+          [id,batch.owner,batch.documentId,batch.versionId,batch.sourceVersionId,batch.sourceHash,candidate.pageNumber,
+            candidate.evidenceId,candidate.pageBodySha256,candidate.startUtf16,candidate.endUtf16,batch.parserVersion,candidate.extractorVersion]);
+        ids.push(id);
+      }
+      return {candidateIds:ids,status:'pending-review' as const};
+    });
+  }
+
+  async selectedStudyDocuments(owner:string,ids:string[]){
+    if(!ids.length)return [];
+    return (await kernelPool().query<{id:string;name:string;versionId:string;sourceVersionId:string;sourceHash:string}>(`
+      SELECT d.id,d.name,v.id "versionId",v.source_version_id "sourceVersionId",d.source_hash "sourceHash"
+      FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+      JOIN source_item_versions s ON s.id=v.source_version_id
+      WHERE d.owner_id=$1 AND d.id=ANY($2::text[]) AND NOT d.hidden
+      AND s.raw_value->>'mime'='application/pdf' AND v.page_count>0
+      AND NOT EXISTS(SELECT 1 FROM document_texts n WHERE n.owner_id=d.owner_id AND n.origin=d.origin
+        AND n.origin_key=d.origin_key AND NOT n.hidden AND(n.created_at>d.created_at OR(n.created_at=d.created_at AND n.id>d.id)))
+      ORDER BY d.id`,[owner,ids])).rows;
   }
 
   async parsedDocument(owner:string,id:string) {
@@ -1361,17 +2040,22 @@ export class KernelService {
   }
 
   async rebuildDocumentSearch(owner:string,id:string) {
+    const snapshot=await origSearchPages(kernelPool(),owner,id);
+    const staged:Array<PreparedDoclingOrigSearchHints|null>=[];
+    for(const page of snapshot)staged.push(page.mime==='application/pdf'?await prepareDoclingOrigSearchHints(origSearchInput(owner,page)):null);
+    const projections=snapshot.map((page,index)=>{
+      if(staged[index])assertPreparedDoclingOrigSearchHints(staged[index]!,origSearchInput(owner,page));
+      return projectDocumentOrigSearch(page.body,page.search_text,page.search_hint_provenance,staged[index],origSearchBinding(owner,page));
+    });
     return kernelTransaction(async client=>{
-      const version=(await client.query<{current_version_id:string}>(
-        'SELECT current_version_id FROM document_texts WHERE owner_id=$1 AND id=$2 FOR UPDATE',[owner,id])).rows[0]?.current_version_id;
-      if(!version)throw new Error('Document transcription not found');
-      const pages=(await client.query<{page_number:number;body:string}>(
-        'SELECT page_number,body FROM document_text_pages WHERE version_id=$1 ORDER BY page_number',[version])).rows;
+      const pages=await origSearchPages(client,owner,id,undefined,true),version=pages[0].current_version_id;
+      if(doclingOrigSearchHash(pages)!==doclingOrigSearchHash(snapshot))throw new DocumentEvidenceChangedError();
       await client.query('DELETE FROM document_text_chunks WHERE version_id=$1',[version]);
       let position=0;
-      for(const page of pages){
-       await client.query('UPDATE document_text_pages SET search_text=$3 WHERE version_id=$1 AND page_number=$2',
-        [version,page.page_number,documentSearchText(page.body)]);
+      for(const [index,page] of pages.entries()){
+       const projected=projections[index];
+       await client.query('UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2',
+        [version,page.page_number,projected.searchText,projected.provenance?JSON.stringify(projected.provenance):null]);
        for(const body of splitDocumentText(page.body)){
         await client.query(`INSERT INTO document_text_chunks(id,version_id,page_number,position,body,search_text)
           VALUES ($1,$2,$3,$4,$5,$6)`,[stableId(version,String(position)),version,page.page_number,position,body,documentSearchText(body)]);
@@ -1379,6 +2063,25 @@ export class KernelService {
        }
       }
       return {documentId:id,chunks:position};
+    });
+  }
+
+  async refreshDocumentOrigSearchHints(owner:string,source:DocumentContextSource,physicalPage:number){
+    if(!Number.isInteger(physicalPage)||physicalPage<1)throw Error('One explicit physical page is required');
+    const snapshot=(await origSearchPages(kernelPool(),owner,source.documentId,physicalPage))[0];assertOrigSearchSource(snapshot,source);
+    if(snapshot.mime!=='application/pdf')throw Error('Orig search hints require a current PDF source');
+    const input=origSearchInput(owner,snapshot),prepared=await prepareDoclingOrigSearchHints(input);
+    if(!prepared)throw Error('Registered orig result unavailable; index preserved');
+    assertPreparedDoclingOrigSearchHints(prepared,input);
+    const projection=projectDocumentOrigSearch(snapshot.body,snapshot.search_text,snapshot.search_hint_provenance,prepared,origSearchBinding(owner,snapshot));
+    return kernelTransaction(async client=>{
+      const current=(await origSearchPages(client,owner,source.documentId,physicalPage,true))[0];assertOrigSearchSource(current,source);
+      if(doclingOrigSearchHash(current)!==doclingOrigSearchHash(snapshot))throw new DocumentEvidenceChangedError();
+      const unchanged=current.search_text===projection.searchText&&doclingOrigSearchHash(current.search_hint_provenance)===doclingOrigSearchHash(projection.provenance);
+      if(!unchanged)await client.query('UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2',
+        [current.current_version_id,physicalPage,projection.searchText,projection.provenance?JSON.stringify(projection.provenance):null]);
+      return {status:unchanged?'unchanged' as const:'updated' as const,source:{...source},physicalPage,
+        provenanceSha256:projection.provenance?.provenanceSha256??null,authority:'unverified-retrieval-hint' as const};
     });
   }
 

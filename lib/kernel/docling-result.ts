@@ -1,10 +1,21 @@
 import {assessPdfFormulaPreservation} from '../pdf-formulas.ts';
 import {DOCLING_SOURCE_MATH_VERSION,doclingMathRaw,type DoclingMathNode,type DoclingSourceMath} from './docling-source-math.ts';
 /** Decode Docling's document tree, whose references carry reading order and PDF provenance. */
-export const DOCLING_PARSER_VERSION = 'docling-v3-source-preserved-search';
-export const DOCLING_TEXT_PARSER_VERSION = 'docling-v3-source-preserved-text-search';
+export const DOCLING_PARSER_VERSION = 'docling-v4-list-markers-search';
+export const DOCLING_TEXT_PARSER_VERSION = 'docling-v4-list-markers-text-search';
+export const DOCLING_NUL_PROJECTION_VERSION = 'nul-unknown-v1';
+export const DOCLING_EMPTY_TABLE_OBSERVATION_VERSION = 'empty-native-table-unknown-v1';
+// Apply the native-artifact bounds before allocating a search-text grid too.
+export const DOCLING_TABLE_GRID_LIMITS=Object.freeze({cells:10000,rows:1000,columns:200});
 export function configuredDoclingParser(): string {
   return process.env.DOCLING_FORMULA_ENRICHMENT === 'false' ? DOCLING_TEXT_PARSER_VERSION : DOCLING_PARSER_VERSION;
+}
+/** Text coverage cannot certify column order or retain producer structures.
+ * Native-only ingestion is an explicit optimization, never a quality proof. */
+export function configuredDoclingNativeTextFastpath(): boolean {
+  const value=process.env.DOCLING_NATIVE_TEXT_FASTPATH??'false';
+  if(value!=='true'&&value!=='false')throw new Error('Invalid DOCLING_NATIVE_TEXT_FASTPATH');
+  return value==='true';
 }
 export type DoclingPage = { locator: string; text: string; pageNumber: number };
 export type DoclingRegion={pictureRef:string;pageNumber:number;derivedPageNumber:number;
@@ -14,7 +25,19 @@ export type DoclingRegion={pictureRef:string;pageNumber:number;derivedPageNumber
 export type DoclingVisualLayout={status:'available'|'unavailable';regions:DoclingRegion[];
  pageSizes:Array<{pageNumber:number;width:number;height:number}>;reason?:string;
  unavailablePictures?:Array<{pictureRef:string;provenance:unknown[]}>;
- resultReferences?:Array<{resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[]}>};
+ resultReferences?:Array<{resultBlobSha256:string;derivedInputSha256:string;copyIndices:number[];resultPageRange?:[number,number]}>};
+
+/** A partial result for an unmodified full original input is distinct from a
+ * copied/renumbered batch. Never infer this mapping from observed page numbers. */
+export function validateOriginalDoclingPageRange(value:unknown,binding:{sourceHash:string;inputHash:string;pageCount:number;copyIndices:number[]}):[number,number]|undefined{
+ if(value===undefined)return;
+ if(!Array.isArray(value)||value.length!==2||!value.every(Number.isInteger)||!Number.isInteger(binding.pageCount)||
+  binding.pageCount<1||binding.pageCount>500||value[0]<1||value[1]<value[0]||value[1]>binding.pageCount||
+  !/^[a-f0-9]{64}$/.test(binding.sourceHash)||binding.inputHash!==binding.sourceHash||
+  binding.copyIndices.length!==binding.pageCount||binding.copyIndices.some((n,i)=>n!==i))
+  throw new Error('Original Docling page range/input mapping differs');
+ return [value[0],value[1]];
+}
 /** Native parser output only. Raw fields and strings remain unchanged; this is
  * not original quotation evidence or a canonical fact. */
 export type DoclingNativeTable = {reference:string;pageNumbers:number[];raw:Record<string,unknown>;
@@ -31,6 +54,26 @@ function text(value: unknown): string { return typeof value === 'string' ? value
 // normalized text is empty; otherwise valid source content would disappear.
 function nodeContent(node: Json): string {
   return text(node.text) ? node.text as string : text(node.orig) ? node.orig as string : '';
+}
+
+// A native marker is an observation, not inferred numbering or a verified
+// bibliography relationship. Apply only after slicing native character spans.
+function withListMarker(node: Json, value: string): string {
+  const marker = node.label === 'list_item' ? text(node.marker) : '';
+  if (!marker || !value.trim()) return value;
+  const start = value.trimStart();
+  if (start.startsWith(marker) && (start.length === marker.length ||
+    !/[\p{L}\p{N}]/u.test(marker.at(-1)!) || !/^[\p{L}\p{N}]/u.test(start.slice(marker.length)))) return value;
+  return `${marker} ${value}`;
+}
+
+const nodeReference=/^#\/(texts|tables|pictures|groups|key_value_items|form_items|field_regions|field_items)\/\d+$/;
+function resolveNode(document:Json,reference:unknown):{ref:string;node:Json}{
+  const ref=object(reference)?.$ref;
+  if(typeof ref!=='string'||!nodeReference.test(ref))throw new Error('Docling contains an invalid document reference');
+  const [,collection,index]=ref.split('/'),node=object(list(document[collection])[Number(index)]);
+  if(!node)throw new Error(`Docling reference does not exist: ${ref}`);
+  return {ref,node};
 }
 
 export function decodeDoclingResult(result: unknown, expectedPages?: number, options: {verifiedBlankPages?: number[];formulaEnriched?:boolean;pageRange?:readonly [number,number]} = {}): {pages: DoclingPage[]; totalPages: number; warnings: string[];formulaPageNumbers:number[];visualLayout:DoclingVisualLayout;nativeTables:DoclingNativeTable[];sourceMath?:DoclingSourceMath[]} {
@@ -83,14 +126,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const unavailablePictures:NonNullable<DoclingVisualLayout['unavailablePictures']>=[];
 
   function resolve(reference: unknown): {ref: string; node: Json} {
-    const ref = object(reference)?.$ref;
-    if (typeof ref !== 'string' || !/^#\/(texts|tables|pictures|groups|key_value_items|form_items|field_regions|field_items)\/\d+$/.test(ref)) {
-      throw new Error('Docling contains an invalid document reference');
-    }
-    const [, collection, index] = ref.split('/');
-    const node = object(list(document![collection])[Number(index)]);
-    if (!node) throw new Error(`Docling reference does not exist: ${ref}`);
-    return {ref, node};
+    return resolveNode(document!,reference);
   }
 
   function provenance(node: Json): Json[] {
@@ -107,18 +143,20 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (!content) return;
     const numbers = new Set(locations.map(location => location.page_no));
     if (numbers.size === 1) {
-      parts.get(locations[0].page_no as number)!.push(content);
+      parts.get(locations[0].page_no as number)!.push(withListMarker(node,content));
       return;
     }
     // Spanning text must have valid, complete character ranges; do not guess a page.
     let consumed = 0;
+    const projected=withListMarker(node,content),prefix=projected.slice(0,projected.length-content.length);
     for (const location of locations) {
       const span = list(location.charspan);
       const [start, end] = span;
       if (!Number.isInteger(start) || !Number.isInteger(end) || start !== consumed || (end as number) <= (start as number) || (end as number) > content.length) {
         throw new Error('Docling spanning item has ambiguous page character ranges');
       }
-      parts.get(location.page_no as number)!.push(content.slice(start as number, end as number));
+      const slice=content.slice(start as number,end as number);
+      parts.get(location.page_no as number)!.push((consumed===0?prefix:'')+slice);
       consumed = end as number;
     }
     if (consumed !== content.length) throw new Error('Docling spanning item loses text between pages');
@@ -196,7 +234,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
         if(node.label==='formula'||script(node)==='sub'||script(node)==='super')noteMath(ref,node,stack,
           node.label==='formula'?'unscoped-formula':'script',provenance(node).map(p=>p.page_no as number));
       }
-      return [content(node), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
+      return [withListMarker(node,content(node)), ...list(node.children).map(child => collect(child, next))].filter(Boolean).join(' ');
     };
     return collect(cell.ref, ancestors) || content(cell);
   }
@@ -204,17 +242,39 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   function tableText(node: Json, ancestors: Set<string>,reference:string): string {
     const data = object(node.data);
     if (!data) throw new Error('Docling table has no structured data');
-    const cells = list(data.table_cells).map(value => {
+    // An explicit empty detection asserts no cells or relationships. Archive it
+    // as unavailable native structure without inventing search-text table rows.
+    if(data.num_rows===0&&data.num_cols===0&&Array.isArray(data.table_cells)&&!data.table_cells.length&&
+      (data.grid===undefined||(Array.isArray(data.grid)&&!data.grid.length))&&!nodeContent(node)){
+      const pageNumbers=[...new Set(provenance(node).map(location=>location.page_no as number))];
+      nativeTables.push({reference,pageNumbers,raw:structuredClone(node),cellTexts:[],
+        captions:list(node.captions).map(value=>{const caption=resolve(value);return {reference:caption.ref,raw:structuredClone(caption.node)};})});
+      for(const page of pageNumbers)warnings.push(`第 ${page} 页 [${DOCLING_EMPTY_TABLE_OBSERVATION_VERSION}] Docling 声明空表格；保留原始区域，单元格与结构关系未知，请核对原 PDF`);
+      return '';
+    }
+    for(const [key,limit] of [['num_rows',DOCLING_TABLE_GRID_LIMITS.rows],['num_cols',DOCLING_TABLE_GRID_LIMITS.columns]] as const){
+      const declared=data[key];
+      if(declared!==undefined&&(!Number.isSafeInteger(declared)||(declared as number)<1||(declared as number)>limit))
+        throw new Error('Docling table has invalid or oversized declared grid');
+    }
+    const rawCells=list(data.table_cells),starts=new Set<string>();
+    if(rawCells.length>DOCLING_TABLE_GRID_LIMITS.cells)throw new Error('Docling table exceeds cell limit');
+    const cells = rawCells.map(value => {
       const cell = object(value);
-      if (!cell || !Number.isInteger(cell.start_row_offset_idx) || !Number.isInteger(cell.start_col_offset_idx) ||
-          (cell.start_row_offset_idx as number) < 0 || (cell.start_col_offset_idx as number) < 0) {
+      if (!cell || !Number.isSafeInteger(cell.start_row_offset_idx) || !Number.isSafeInteger(cell.start_col_offset_idx) ||
+          (cell.start_row_offset_idx as number) < 0 || (cell.start_col_offset_idx as number) < 0 ||
+          (cell.start_row_offset_idx as number)>=((data.num_rows as number|undefined)??DOCLING_TABLE_GRID_LIMITS.rows) ||
+          (cell.start_col_offset_idx as number)>=((data.num_cols as number|undefined)??DOCLING_TABLE_GRID_LIMITS.columns)) {
         throw new Error('Docling table has invalid cell coordinates');
       }
+      const key=`${cell.start_row_offset_idx}:${cell.start_col_offset_idx}`;
+      if(starts.has(key))throw new Error('Docling table has overlapping cell coordinates');
+      starts.add(key);
       return cell;
     }).sort((a, b) => (a.start_row_offset_idx as number) - (b.start_row_offset_idx as number) || (a.start_col_offset_idx as number) - (b.start_col_offset_idx as number));
     const rows = new Map<number, string[]>();
     const tablePages = new Set(provenance(node).map(location => location.page_no));
-    const cellIndices=new Map(list(data.table_cells).map((cell,index)=>[cell,index]));
+    const cellIndices=new Map(rawCells.map((cell,index)=>[cell,index]));
     const cellTexts:DoclingNativeTable['cellTexts']=[];
     for (const cell of cells) {
       const row = cell.start_row_offset_idx as number;
@@ -224,7 +284,6 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
       const original=cellText(cell, ancestors, tablePages);
       cellTexts.push({cellIndex:cellIndices.get(cell)!,text:original});
       const content = original.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
-      if (values[column] && content) throw new Error('Docling table has overlapping cell coordinates');
       values[column] = content;
       rows.set(row, values);
     }
@@ -271,7 +330,7 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
         regions.push({pictureRef:ref,pageNumber,derivedPageNumber:pageNumber,pageSize:{width,height},
           bbox:{l,t,r,b,coord_origin:box.coord_origin as 'BOTTOMLEFT'|'TOPLEFT'},
           textReferences:list(document!.texts).flatMap((value,index)=>{const child=object(value);
-            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:content(child),provenance:list(child.prov)}]:[];})});
+            return child&&object(child.parent)?.$ref===ref?[{ref:`#/texts/${index}`,parentRef:ref,text:withListMarker(child,content(child)),provenance:list(child.prov)}]:[];})});
       }
     } else if (!ref.startsWith('#/groups/') && !ref.startsWith('#/field_regions/') && !ref.startsWith('#/field_items/')) {
       const value = content(node);
@@ -307,7 +366,11 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
     if (!content && occupied.has(pageNumber)) throw new Error(`Docling page ${pageNumber} has content but no readable transcription`);
     if (!content && !verifiedBlankPages.has(pageNumber)) throw new Error(`Docling page ${pageNumber} is blank_or_unreadable; original blank page was not verified`);
     if (!content) warnings.push(`第 ${pageNumber} 页已核验原始 PDF 无页面内容，保留为空白页`);
-    return {pageNumber, locator: `第 ${pageNumber} 页`, text: content};
+    const nulCount=content.split('\0').length-1;
+    if(nulCount)warnings.push(`第 ${pageNumber} 页 [${DOCLING_NUL_PROJECTION_VERSION}] 解析文本含 ${nulCount} 个 NUL(U+0000)；检索投影以 � 标记未知字符，原始值保留在解析结果中，请核对原 PDF`);
+    // PostgreSQL text cannot contain NUL. Keep the immutable raw result and
+    // preserve UTF-16 offsets; a replacement is unknown, never a guessed glyph.
+    return {pageNumber, locator: `第 ${pageNumber} 页`, text: content.replaceAll('\0','\uFFFD')};
   });
   if (!pages.some(page => page.text)&&!options.pageRange) throw new Error('Docling returned no readable text');
   const pageSizes=pageNumbers.flatMap(pageNumber=>{const size=object(object(manifest?.[String(pageNumber)])?.size);
@@ -316,7 +379,90 @@ export function decodeDoclingResult(result: unknown, expectedPages?: number, opt
   const sourceMath=mathNodes.size?[{policy:DOCLING_SOURCE_MATH_VERSION,nodes:[...mathNodes.values()]}]:undefined;
   if(sourceMath&&Buffer.byteLength(JSON.stringify(sourceMath))>8*1024*1024)throw Error('Docling source math exceeds byte limit');
   return {pages, totalPages, warnings: [...new Set(warnings)],formulaPageNumbers:[...formulaPageNumbers],nativeTables,...(sourceMath?{sourceMath}:{}),
-    visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',regions,pageSizes,
+    visualLayout:{status:pageSizes.length===pageNumbers.length&&!unavailablePictures.length?'available':'unavailable',
+      regions:regions.map(region=>({...region,textReferences:region.textReferences.map(ref=>({...ref,text:ref.text.replaceAll('\0','\uFFFD')}))})),pageSizes,
       ...(unavailablePictures.length?{unavailablePictures,reason:'Docling picture geometry unavailable; original text retained'}:
         pageSizes.length===pageNumbers.length?{}:{reason:'Docling page sizes unavailable'})}};
+}
+
+export const DOCLING_PAGE_REGION_LIMITS=Object.freeze({rawBytes:16*1024*1024,nodes:10000,edges:20000,depth:128,pageBytes:1024*1024,pages:500});
+export class DoclingPageRegionError extends Error{
+  readonly code:'invalid'|'limit'|'unavailable';
+  constructor(code:DoclingPageRegionError['code'],message:string){super(message);this.code=code;this.name='DoclingPageRegionError';}
+}
+export type DoclingPageRegionNode={reference:string;ordinal:number;path:Array<{reference:string;via:string}>;
+ membership:'declared-provenance'|'ancestor-reference';declaredPageNumbers:number[];raw:Record<string,unknown>;
+ geometry:{status:'observed';bbox:DoclingRegion['bbox']}|{status:'unknown';reason:string};
+ textScope:'single-page'|'multi-page'|'unknown'};
+/** Index producer declarations only. No page-body serialization, PDF parsing,
+ * semantic roles, visual reading order, clipping or visibility inference. */
+export function indexDoclingPageRegions(result:unknown,derivedPage:number,expectedPages:number,resultPageRange?:readonly [number,number]){
+  const fail=(code:DoclingPageRegionError['code'],message:string):never=>{throw new DoclingPageRegionError(code,message);};
+  if(!Number.isInteger(expectedPages)||expectedPages<1||expectedPages>DOCLING_PAGE_REGION_LIMITS.pages||
+    !Number.isInteger(derivedPage)||derivedPage<1||derivedPage>expectedPages)fail('invalid','Invalid explicit Docling page');
+  if(Buffer.byteLength(JSON.stringify(result)??'')>DOCLING_PAGE_REGION_LIMITS.rawBytes)fail('limit','Docling raw exceeds byte limit');
+  const response=object(result),document=object(object(response?.document)?.json_content),manifest=object(document?.pages),body=object(document?.body);
+  if(response?.status!=='success'||list(response.errors).length||!document||!manifest||!Array.isArray(body?.children))
+    fail('invalid','Saved Docling document is incomplete');
+  const numbers=Object.entries(manifest!).map(([key,value])=>{const page=object(value),n=Number(key);
+    if(!Number.isInteger(n)||page?.page_no!==n)fail('invalid','Invalid Docling page manifest');return n;}).sort((a,b)=>a-b);
+  const [first,last]=resultPageRange??[1,expectedPages];
+  if(!Number.isInteger(first)||!Number.isInteger(last)||first<1||last<first||last>expectedPages||derivedPage<first||derivedPage>last||
+    numbers.length!==last-first+1||numbers.some((n,i)=>n!==i+first))fail('invalid','Saved Docling page coverage differs');
+  const size=object(object(manifest![String(derivedPage)])?.size),pageSize=size&&
+    [size.width,size.height].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)?{width:size.width as number,height:size.height as number}:null;
+  const indexed=new Map<string,DoclingPageRegionNode>(),selected=new Set<string>();let edges=0;
+  const geometry=(prov:Json[]):DoclingPageRegionNode['geometry']=>{
+    const locations=prov.filter(p=>p.page_no===derivedPage);
+    if(locations.length!==1)return {status:'unknown',reason:locations.length?'multiple-page-boxes':'no-page-box'};
+    const box=object(locations[0].bbox);
+    if(!box||!pageSize)return {status:'unknown',reason:box?'page-size-unavailable':'bbox-unavailable'};
+    if(![box.l,box.t,box.r,box.b].every(n=>typeof n==='number'&&Number.isFinite(n))||
+      !['BOTTOMLEFT','TOPLEFT'].includes(String(box.coord_origin)))return {status:'unknown',reason:'unsupported-bbox'};
+    const {l,t,r,b}=box as {l:number;t:number;r:number;b:number},top=box.coord_origin==='BOTTOMLEFT'?pageSize.height-t:t,
+      bottom=box.coord_origin==='BOTTOMLEFT'?pageSize.height-b:b;
+    if(l<0||r>pageSize.width||l>=r||top<0||bottom>pageSize.height||top>=bottom)return {status:'unknown',reason:'bbox-outside-page'};
+    return {status:'observed',bbox:{l,t,r,b,coord_origin:box.coord_origin as 'BOTTOMLEFT'|'TOPLEFT'}};
+  };
+  const visit=(reference:unknown,path:DoclingPageRegionNode['path'],via:string)=>{
+    if(++edges>DOCLING_PAGE_REGION_LIMITS.edges||path.length>=DOCLING_PAGE_REGION_LIMITS.depth)fail('limit','Docling reference graph exceeds limit');
+    const {ref,node}=resolveNode(document!,reference);
+    if(path.some(p=>p.reference===ref))fail('invalid','Docling region graph contains a cycle');
+    if(indexed.has(ref)){if(selected.has(ref))for(const p of path)selected.add(p.reference);return;}
+    if(indexed.size>=DOCLING_PAGE_REGION_LIMITS.nodes)fail('limit','Docling node count exceeds limit');
+    if(node.self_ref!==undefined&&node.self_ref!==ref)fail('invalid','Docling node self reference differs');
+    if(node.parent!==undefined&&node.parent!==null){const parent=object(node.parent)?.$ref;
+      if(parent!=='#/body'&&parent!=='#/furniture')resolveNode(document!,node.parent);}
+    const prov=list(node.prov).map(p=>object(p));
+    if(prov.some(p=>!p||!Number.isInteger(p.page_no)||!numbers.includes(p.page_no as number)))fail('invalid','Docling node page provenance differs');
+    if(!prov.length&&!ref.startsWith('#/groups/')&&!ref.startsWith('#/field_regions/')&&!ref.startsWith('#/field_items/'))
+      fail('unavailable','Docling node has no declared page provenance');
+    const next=[...path,{reference:ref,via}],pages=[...new Set(prov.map(p=>p!.page_no as number))];
+    const fields=['self_ref','label','parent','children','captions','footnotes','references','orig','text','formatting','prov',...(ref.startsWith('#/tables/')?['data']:[])];
+    indexed.set(ref,{reference:ref,ordinal:indexed.size,path:next,membership:'ancestor-reference',declaredPageNumbers:pages,
+      raw:structuredClone(Object.fromEntries(fields.filter(k=>Object.hasOwn(node,k)).map(k=>[k,node[k]]))),
+      geometry:geometry(prov as Json[]),textScope:pages.length===1?'single-page':pages.length>1?'multi-page':'unknown'});
+    if(pages.includes(derivedPage)){selected.add(ref);for(const p of path)selected.add(p.reference);}
+    for(const key of ['children','captions','footnotes','references']){
+      if(node[key]!==undefined&&!Array.isArray(node[key]))fail('invalid','Invalid declared Docling reference array');
+      list(node[key]).forEach((child,index)=>visit(child,next,`${key}[${index}]`));
+    }
+    if(ref.startsWith('#/tables/'))list(object(node.data)?.table_cells).forEach((cell,index)=>{
+      if(object(cell)?.ref!==undefined)visit(object(cell)!.ref,next,`data.table_cells[${index}].ref`);
+    });
+  };
+  for(const [root,node]of [['furniture',object(document!.furniture)],['body',body]]as const){
+    if(node?.children!==undefined&&!Array.isArray(node.children))fail('invalid','Invalid Docling root children');
+    list(node?.children).forEach((ref,index)=>visit(ref,[],`${root}.children[${index}]`));
+  }
+  for(const collection of ['texts','tables','pictures'])list(document![collection]).forEach((value,index)=>{
+    const node=object(value);if(!indexed.has(`#/${collection}/${index}`)&&((node&&nodeContent(node))||collection!=='texts'))
+      fail('invalid','Saved Docling document has unreferenced content');
+  });
+  const nodes=[...indexed.values()].filter(n=>selected.has(n.reference)).map(n=>({...n,
+    membership:n.declaredPageNumbers.includes(derivedPage)?'declared-provenance' as const:'ancestor-reference' as const}));
+  const output={derivedPage,pageSize,producerDocument:{schemaName:typeof document!.schema_name==='string'?document!.schema_name:null,
+    version:typeof document!.version==='string'?document!.version:null},nodes};
+  if(Buffer.byteLength(JSON.stringify(output))>DOCLING_PAGE_REGION_LIMITS.pageBytes)fail('limit','Docling page index exceeds byte limit');
+  return output;
 }

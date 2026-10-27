@@ -131,13 +131,14 @@ test('legacy PDF preview limits distinct pages, recognizes current Docling cache
  let preview=await previewDocument(owner,id);
  assert.equal(preview.pages.length,500);assert.equal(preview.pages[499].page,500);
  assert.equal(preview.pages[499].text,`${DOCLING_PARSER_VERSION}: 500`);
- for(const parser of [DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,'docling-v2-text-search']){
+ for(const parser of [DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,'docling-v3-source-preserved-search','docling-v3-source-preserved-text-search','docling-v2-text-search']){
   const currentId=await saveDocument(owner,'','upload',parser,`${parser}.pdf`,'application/pdf',bytes);
   await db.prepare('INSERT INTO library_parse_pages VALUES (?,?,0,?)').bind(currentId,parser,'Only cached page').run();
   await db.prepare("UPDATE library_documents SET status='ready' WHERE id=?").bind(currentId).run();
-  await previewDocument(owner,currentId);await previewDocument(owner,currentId);
+  const cached=await previewDocument(owner,currentId);await previewDocument(owner,currentId);
+  assert.equal(cached.pages[0]?.text,'Only cached page');
   const job=await db.prepare('SELECT 1 ok FROM background_jobs WHERE id=?').bind(`index:${currentId}`).first();
-  assert.equal(Boolean(job),parser==='docling-v2-text-search','Historical v2 is not current; either current v3 avoids requeue');
+  assert.equal(Boolean(job),parser==='docling-v2-text-search','Ready v3/v4 caches remain readable without automatic migration; historical v2 is not current');
  }
  await db.prepare("UPDATE library_documents SET status='pending' WHERE id=?").bind(id).run();
  preview=await previewDocument(owner,id);

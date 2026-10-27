@@ -4,7 +4,7 @@ export async function acquireLease(id:string,token:string,now=Date.now(),ttl=180
  return Boolean(await db.prepare(`INSERT INTO service_leases VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET token=excluded.token,expires_at=excluded.expires_at WHERE service_leases.expires_at<? OR service_leases.token=? RETURNING id`).bind(id,token,now+ttl,now,token).first());
 }
 export async function releaseLease(id:string,token:string){await db.prepare('DELETE FROM service_leases WHERE id=? AND token=?').bind(id,token).run();}
-export async function enqueue(kind:string,payload:Record<string,unknown>={},id=crypto.randomUUID(),reviveTerminal=false) {
+export async function enqueue(kind:string,payload:Record<string,unknown>={},id:string=crypto.randomUUID(),reviveTerminal=false) {
  if(['canvas','canvas-course','gmail','piazza'].includes(kind)){
   const source=kind==='canvas-course'?'canvas':kind;
   const scope=kind==='canvas-course'?String(payload.course||''):String(payload.owner||'local-owner');

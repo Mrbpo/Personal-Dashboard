@@ -1,5 +1,6 @@
 import {database as db} from '../lib/database.ts';
 import {claimJob,enqueue,finishJob,nightKey,acquireLease,releaseLease} from '../lib/jobs.ts';
+import{contentTopicJobMode,CONTENT_TOPIC_JOB_KIND}from'../lib/kernel/content-topic-jobs.ts';
 import {indexDocument,embedMissing,saveDocument,collectUnusedBlobs} from '../lib/library.ts';
 import {PDF_PARSER_VERSION} from '../lib/document-parser.ts';
 import {syncPiazza} from '../lib/piazza-sync.ts';
@@ -13,7 +14,8 @@ import {serviceValue} from '../lib/service-vault.ts';
 import {indexMemories} from '../lib/tutor-memory.ts';
 import {recoverSketchArchiveClaims} from '../lib/sketchbooks.ts';
 import {enqueueCodexMaintenance} from '../lib/codex-maintenance.ts';
-import {claimIngestionJob,finishIngestionJob,renewIngestionJob,deferIngestionJob,hasRunningIngestionJob,type IngestionJob} from '../lib/kernel/jobs.ts';
+import {claimIngestionJob,finishIngestionJob,renewIngestionJob,deferIngestionJob,hasRunningIngestionJob,queueIngestionJob,type IngestionJob} from '../lib/kernel/jobs.ts';
+import {documentCourseFactsEnabled,DOCUMENT_COURSE_FACT_JOB_KIND} from '../lib/kernel/document-course-facts.ts';
 import {AiBudgetDeferredError} from '../lib/ai-budget.ts';
 import {SingleJobSlot,dispatchWorkerTurn} from '../lib/kernel/worker-slot.ts';
 import {convertDocumentWithDocling} from '../lib/kernel/docling.ts';
@@ -23,6 +25,8 @@ import {kernel} from '../lib/kernel/service.ts';
 import {setCanvasPlannerComplete} from '../lib/canvas.ts';
 const owner='local-owner';let stopping=false,cleanedLegacyQueue=false,queuedDocumentBackfill=false,queuedDocumentVectors=false,lastSketchClaimRecovery=0;const reparseOldPdf=process.env.PDF_FORMULA_BACKFILL==='true';process.on('SIGTERM',requestStop);process.on('SIGINT',requestStop);
 const doclingSlot=new SingleJobSlot();let shutdownAt=0;
+let lastFactValidityHour='',lastFactValidityDay='';
+const courseFactMaintenanceEnabled=()=>process.env.STUDY_ANSWER_BACKEND==='kernel'&&process.env.KERNEL_COURSE_FACTS_ENABLED==='true';
 function requestStop(){
  stopping=true;if(shutdownAt)return;shutdownAt=Date.now();
  // Leave persistent job/task/checkpoints intact; Docker's existing grace is 180s.
@@ -37,12 +41,16 @@ async function runKernelJob(kernelJob:IngestionJob){
    db.prepare("UPDATE worker_state SET heartbeat=? WHERE id='primary'").bind(Date.now()).run(),
   ]).catch(()=>console.error('[worker] job renewal failed'));},30000);
   try{
-   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string};
+   const payload=kernelJob.payload as {owner:string;id?:string;course?:string;doclingTaskId?:string;doclingProgress?:unknown;sourceHash?:string;formulaEnriched?:boolean;formulaBackend?:string;scanBackend?:string;nativeTextFastpath?:boolean};
    switch(kernelJob.kind){
     case 'document_vectors': await kernel.runDocumentVectorJob(kernelJob);break;
+    case 'document_topics': await kernel.runDocumentTopicJob(kernelJob);break;
+    case 'document_course_facts': await kernel.runDocumentCourseFactJob(kernelJob);break;
+    case 'fact_validity_hourly': await kernel.refreshCourseFactValidity('hourly');break;
+    case 'fact_validity_daily': await kernel.refreshCourseFactValidity('daily');break;
     case 'docling_document': await convertDocumentWithDocling(payload.owner,String(payload.id),{
      id:kernelJob.id,leaseToken:kernelJob.lease_token,taskId:payload.doclingTaskId,
-     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,
+     formulaEnriched:payload.formulaEnriched,formulaBackend:payload.formulaBackend,scanBackend:payload.scanBackend,nativeTextFastpath:payload.nativeTextFastpath,
      progress:payload.doclingProgress,sourceHash:payload.sourceHash});break;
     case 'canvas': await archiveCanvas(payload.owner);break;
     case 'canvas-course': await archiveCanvasCourse(payload.owner,String(payload.course));break;
@@ -93,6 +101,11 @@ async function runOneOutbox(){
 }
 async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_state VALUES ('primary',?,0) ON CONFLICT(id) DO UPDATE SET heartbeat=excluded.heartbeat").bind(now).run();if(now-lastSketchClaimRecovery>=60000){lastSketchClaimRecovery=now;await recoverSketchArchiveClaims();}const state=await db.prepare("SELECT paused FROM worker_state WHERE id='primary'").first<{paused:number}>();if(state?.paused)return;
  if(!cleanedLegacyQueue){await db.prepare("DELETE FROM background_jobs WHERE kind='index' AND status='queued' AND id NOT LIKE 'index:%'").run();cleanedLegacyQueue=true;}
+ if(courseFactMaintenanceEnabled()){
+  const hour=new Date(now).toISOString().slice(0,13),day=new Date(now).toISOString().slice(0,10);
+  if(lastFactValidityHour!==hour){await queueIngestionJob('fact_validity_hourly','course-facts','all',{kind:'hourly'},`fact-validity:hourly:${hour}`);lastFactValidityHour=hour;}
+  if(lastFactValidityDay!==day){await queueIngestionJob('fact_validity_daily','course-facts','all',{kind:'daily'},`fact-validity:daily:${day}`);lastFactValidityDay=day;}
+ }
  if(!queuedDocumentVectors&&process.env.KERNEL_DOCUMENT_HYBRID==='true'){
   await kernel.queueDocumentVectorJobs(owner);queuedDocumentVectors=true;
  }
@@ -106,7 +119,8 @@ async function tick(){const now=Date.now();await db.prepare("INSERT INTO worker_
  if(stopping||!primary)return;
  const handled=await dispatchWorkerTurn(doclingSlot,{
   canClaim:()=>primary&&!stopping,runOneOutbox,hasActiveDocling:()=>hasRunningIngestionJob('docling_document'),
-  claim:excluded=>claimIngestionJob(undefined,excluded),run:runKernelJob,
+  claim:excluded=>claimIngestionJob(undefined,[...excluded,...(contentTopicJobMode()==='off'?[CONTENT_TOPIC_JOB_KIND]:[]),
+   ...(!documentCourseFactsEnabled()?[DOCUMENT_COURSE_FACT_JOB_KIND]:[]),...(!courseFactMaintenanceEnabled()?['fact_validity_hourly','fact_validity_daily']:[])]),run:runKernelJob,
   onUnexpectedError:()=>console.warn('[worker] Docling slot execution failed; persisted lease retained'),
  });
  if(handled)return;
