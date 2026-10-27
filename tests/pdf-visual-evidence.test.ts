@@ -141,4 +141,20 @@ test('one PG scenario: atomic publication/replay, real multi-region page anchors
  assert.equal(stored.body,decoded.pages[0].text);assert.equal(stored.parser_version,'docling-v2-text-search');assert.equal(stored.method,'docling-text');assert.deepEqual(stored.warnings,audit.warnings);
  const again=await auditCachedDoclingReplay(item.owner,cachedId);assert.equal(again.visualEvidence.status,'matching');assert.equal(again.decision,'unchanged');
  assert.equal((await applyCachedDoclingReplay(again,again.expectedCurrentVersion,async()=>{throw new Error('unchanged replay must not render');})).action,'unchanged');
+ const oldLinkPolicy=process.env.PDF_INTERNAL_LINK_OBSERVATIONS;process.env.PDF_INTERNAL_LINK_OBSERVATIONS='goto-v1';
+ try{
+  const links=await auditCachedDoclingReplay(item.owner,cachedId);
+  assert.equal(links.decision,'eligible');assert.equal(links.visualOnly,true);assert.deepEqual(links.changedPages,[]);
+  assert.equal(links.visualEvidence.status,'matching');assert.equal(links.visualEvidence.internalLinks,'not-recorded');
+  const linked=await applyCachedDoclingReplay(links,links.expectedCurrentVersion,async()=>{throw Error('existing original pixels must be reused');});
+  assert.equal(linked.action,'published');assert.notEqual(linked.currentVersion,links.expectedCurrentVersion);
+  const resolved=await kernel.resolveDocumentSource(item.owner,{selectedDocumentTitle:cachedId});if(resolved.status!=='resolved')throw Error('linked source missing');
+  const read=await kernel.readPdfInternalLinks(item.owner,resolved.document);
+  assert.equal(read.status,'available');assert.equal(read.observations?.semanticVerified,false);
+  const unchanged=await auditCachedDoclingReplay(item.owner,cachedId);assert.equal(unchanged.decision,'unchanged');
+  assert.equal(unchanged.visualEvidence.internalLinks,'recorded');
+  const preserved=(await pool.query<{body:string;warnings:string[];parser_version:string}>(`SELECT p.body,v.warnings,v.parser_version FROM document_texts d
+   JOIN document_text_versions v ON v.id=d.current_version_id JOIN document_text_pages p ON p.version_id=v.id WHERE d.id=$1`,[cachedId])).rows[0];
+  assert.equal(preserved.body,stored.body);assert.deepEqual(preserved.warnings,stored.warnings);assert.equal(preserved.parser_version,stored.parser_version);
+ }finally{if(oldLinkPolicy===undefined)delete process.env.PDF_INTERNAL_LINK_OBSERVATIONS;else process.env.PDF_INTERNAL_LINK_OBSERVATIONS=oldLinkPolicy;}
 });

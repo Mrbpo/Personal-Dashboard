@@ -1,0 +1,340 @@
+# Shared study API stage 1
+
+`STUDY_ANSWER_BACKEND=legacy` is the default. Set the server environment to `kernel` to opt in; invalid values fail closed. Neither API accepts a client backend or owner override. Switching the environment back to `legacy` restores the retained tutor implementation. Do not enable in production before isolated HTTP and content validation.
+
+## Optional literal source identity context
+
+`STUDY_SOURCE_IDENTITY_CONTEXT=literal-course-frontpage-v1` is a default-off original-text supplement for the Kernel selector/selected-once lane. Within already retrieved current owned sources, the validated parent reader may retain an existing PDF's complete first page when it contains an exact literal code from the current question. At most32 normalized query codes, four additional nodes and16384 codepoints are allowed; each page retains the8192-node limit. Non-PDF/non-page structures, no literal match, existing context and capacity omissions are recorded. No source outside the existing scope, extra image, inferred section, rewritten identity or canonical course relationship is introduced. The page is ordinary original evidence with its existing ID/locator/body hash, available to selection/citation. `meta.study.sourceIdentityContext` records additions/omissions with `courseOwnershipVerified=false` and `semanticVerified=false`. A mentioned prerequisite never becomes the document's course, and first-page-only coverage is explicit. Availability does not certify that the eventual answer selects/cites it correctly.
+
+Original identity text has one common retention step after ordinary or source-value evidence selection. It retains only already available identity quote units of a source actually selected by the provider, with the same document/version/source/hash and validated original first-page body/spans. Empty or foreign-source selections cannot acquire it. Additions are atomic per source within64 references and32KiB of identity text; omissions are explicit. `sourceIdentityRetention` records the actual generator reference IDs separately from the reader's available-page receipt. Typed/table retention remains unchanged; its receipt cannot overwrite the combined reference list. Validated identity bindings participate in the prepared fingerprint and all rechecks; they do not certify course ownership, completeness, answer correctness or that generation actually cites the retained evidence. No new model phase or rewrite is introduced.
+
+## Optional generation verbosity
+
+`STUDY_GENERATION_VERBOSITY=medium` changes only the application's generation `text.verbosity`. Unset/`low` preserves the existing wire. It requires the Kernel selector and selected-once citation check; both the application and Kernel reject other settings or chains before paid work. Selection remains `low`; prompts, evidence, schema, model, reasoning, output limits and timeouts are unchanged. The shared request builder applies it to ordinary and source-value/quantity generation, including capacity preflight and request fingerprints. Assistant `meta.study.settings` records the explicit generation value and selector value. This adds no retry, model review, coverage certificate or production switch. A saved-request calibration is not actual website or independent content acceptance.
+
+## Optional explicit retrieval scope
+
+In the kernel lane, `/api/v1/study` accepts an optional JSON `routingScope` on a question request. `/api/tutor` accepts the same object encoded as a JSON-text multipart field when sending a question; its JSON action still only creates a thread and rejects a scope on that action. Both enter the same `sendTutor → answerKernelStudy → KernelService` path. No UI setting or production switch is added.
+
+Allowed scope fields are `courseIds`, `documentIds`, `origins` and `termIds`, each a list. IDs are canonical identifiers; origins are literal stored source keys. List values form a union; dimensions and a retained thread course constraint intersect. An empty list means no candidates. Values are deduplicated, deterministically sorted and frozen. The scope DTO is bounded to16000 serialized characters. Unknown/inferred topic/type fields are rejected. Legacy requests with a scope return `configuration/routing-requires-kernel`; the restriction is never silently ignored.
+
+An explicit course/document list allows a multi-source question without guessing or writing a single course to the thread. A scope with only origins/terms does not establish a course. An explicit document list already defines the source set and skips the redundant named-document planner; multiple course IDs also prevent that planner from collapsing the requested search space to one source. Complementary retrieval and full-source supplements remain available.
+
+User-message metadata retains the versioned normalized scope and fingerprint. A completed requestId may only be reused with the same question and scope; reordered equivalent sets are accepted, changed question/scope is `idempotency-scope-conflict`. Old requests with no scope keep their original deduplication behavior. Assistant `meta.study.explicitRouting` contains that witness and before-retrieval current candidate file/page counts with an observation time. Counts are not actual scoring work, relevance or answer correctness. Owner/source/version and the final combined-context scope are rechecked by Kernel.
+
+These are explicit caller restrictions, not automatic topic classification or an accuracy certificate. Actual HTTP and independent content acceptance must be reported separately from mocked sender/DTO tests and PostgreSQL scope tests.
+
+Optional `STUDY_COURSE_ROUTING=explicit-codes-v1` derives an auditable scope from literal course-code observations against canonical Kernel courses. It keeps every matching course/term and does not match code prefixes; explicit caller scope takes precedence. Unassigned/unmapped content triggers broad retrieval, preserving caller restrictions. See `docs/content-tags-and-routing.md` for boundaries. Default `off` keeps the previous path. It is not semantic topic tagging or a content-accuracy certificate.
+
+Both `/api/v1/study` and `/api/tutor` use `sendTutor` for ownership, leases, idempotency and message persistence. The opt-in route calls the existing `KernelService.answerStudyContent`, current PostgreSQL document retrieval, full evidence/parent expansion and original-image reading. It uses the configured `OPENAI_MODEL` (bounded mini models), low reasoning, 3000 output tokens and 55-second timeout, matching the retained tutor's generation settings. It does not run the development question-contract/planning/coverage/revision pipeline.
+
+Incomplete model responses remain non-answers, including ones containing parseable partial JSON. The shared decoder reports `model-output-limit` for `status=incomplete` with `incomplete_details.reason=max_output_tokens`, and `model-response-incomplete` for other unfinished responses. The application preserves its current pipeline stage in `failure.stage`; it does not classify these as source absence, parsing failure or correct refusal. This adds no retry, fallback generation, prompt/profile change or output-limit increase. Reasoning tokens share the output-token budget and may exhaust it before visible answer text ([OpenAI Docs](https://developers.openai.com/api/docs/guides/reasoning#allocating-space-for-reasoning)). Error attribution does not certify answer accuracy.
+
+`STUDY_GENERATION_OUTPUT_TOKENS` is an explicit server-only output envelope: unset/`3000` keeps existing requests, and `6000` is accepted only with the Kernel application selector and selected-once citation check. The Kernel independently validates `generationOutputTokens:6000`; it changes only generation, including typed-cell/quantity generation. Selection stays3000, question-scope600, local checks1000, model/effort and55-second request timeout stay unchanged. Invalid or wrong-chain settings fail before paid work. `meta.study.settings` records actual generation and selection bounds. Ordinary `paidOpenAI` reservations use the actual6000 request; ambiguous outcomes retain that larger reservation. Isolated controllers must likewise reserve at leastUSD0.327 at the existing mini rates for a400k-input/6000-output upper bound. This is not an automatic retry/escalation and has no effect on production unless explicitly configured. More output space does not certify answer correctness.
+
+The opt-in `cell-bindings-v2` index now carries `parser-declared-cell-paths-v1` hints derived by the same cell-binding validator used to render answers. Every original cell stays in the index; `valuePath` distinguishes parser-derived complete label paths, known headers (`not-value`), and unknown paths with a reason. The hints remain `parser-derived-unverified`; grid status, missing positions, original artifacts and semantic/relationship/visibility flags are unchanged. Schema operands include only selected cells with a usable path and renderable single-value claim; arbitrary operand pairs still require the existing axis/metric/decimal checks. No usable values records `no-bindable-cell-values` and retains the original generation/evidence path rather than sending an empty enum. The whole index remains subject to256-cell/32KiB limits; exceeding them retains the existing documented fallback. This changes neither ordinary statement/multi-source availability nor the old/default-off contracts. Hints are not canonical facts, repaired grids or a claim of improved answer accuracy.
+
+The original question is retained; recent conversation is untrusted follow-up context, never citation evidence. Explicit course choices remain scoped. Source/version/hash and quote/image selection receipts are persisted in the assistant message's `meta.study`, with `semanticVerified=false`. Request/model usage metadata supports attribution; it is not an accuracy certificate. Errors report their actual processing stage and never silently retry through legacy.
+
+Kernel citations use the existing library GET endpoint's opt-in `evidence=1` response, with the exact document/source version, source hash and evidence ID. It returns current owner-validated evidence JSON, including for PostgreSQL-only sources, rather than inventing a legacy file-download link. A stale or foreign source is rejected. The original file download route remains unchanged when `evidence` is absent.
+
+Stage 1 only answers from the current indexed document corpus. Sources which have not entered that corpus are not secretly supplied as legacy snippets. Current session file attachments return `attachment-not-indexed` before any model call: import them to the existing library first. This is an explicit opt-in limitation and must be reported in stage delivery; the legacy path retains its attachment and other existing behavior. Canonical dates/tasks still require their Kernel fact queries and cannot be established from document synthesis.
+
+Compare both server modes using the same isolated owner/source snapshot, model, parameters and questions. Record actual HTTP requests, source identities, model wire/response and latency. A provider replay tests wiring only; paid original-source content checks must be labelled separately. No production deployment, parser changes or historic score edits belong to this stage.
+
+The application path can supplement ranked evidence with the existing bounded complete-source reader when the original question names exactly one current full document title. Matching is owner/course scoped and conservative; short names, aliases, missing and multiple matches keep ordinary retrieval. This supplements the original cross-source evidence rather than filtering it. Original file versions and the shared image/request limits remain enforced; an unavailable expansion keeps ranked evidence and records the reason in `meta.study.contextExpansion`. Complete input for one named source does not certify question coverage, semantic support or answer correctness. The generation prompt and model-review policy are unchanged.
+
+`STUDY_EVIDENCE_SELECTION=single-pass` retains that path by default. The experimental `select-then-answer` option first selects at most 64 original quote/image IDs from the same current, potentially multi-source context. It then supplies only those original units and images to the unchanged answer generator. IDs, images and source versions are restored by the existing Kernel; invented/duplicate IDs, stale context or later citations outside the actual selected input fail. An empty selection stops before generation and is recorded as `no-evidence-selected`, not a certified correct refusal. There is at most one selection and one generation, each using the existing bounded mini settings and ordinary budget ledger; no audit, revision, hidden fallback or retry is added. Each stage can take up to the configured timeout. `meta.study.evidenceSelection` preserves the selector request SHA, model, usage and exact IDs; answer generation keeps its separate receipts. Coverage and semantic correctness remain unverified. Set `single-pass` to return to the retained implementation; invalid values fail before any model call. This option is not approved for production and requires actual HTTP content validation.
+
+That opt-in lane uses the existing `author-image-caption-v1` policy consistently in capacity preflight and all source rechecks. An original author image and its explicitly registered, uniquely matching current-source caption become one citation unit: the original caption IDs/text/offsets remain recorded as members, but the caption cannot be cited alone in that lane. The selected original PNG and its caption members enter the same generation input and receipt. Missing or ambiguous associations and generic PDF page anchors are not guessed into caption relationships. This binds source identity and access; it does not certify that a claim correctly reads an image. The retained single-pass lane and historical records keep their original policy.
+
+`STUDY_CITATION_CHECK=off` retains existing behavior. Opt-in `selected-once` checks each actual claim against only its selected current references, using the existing mini54/low/1000 local checker. The original administrator development entry retains its guard. No full-source coverage review, automatic answer rewrite, reference swap or retry runs. The existing maximum of30 claims applies; no new check is started after the55-second audit window and each check has at most30 seconds. Incomplete checks and unsupported/uncertain judgments stop publication of the entire answer with a distinct citation-validation error; they are not correct evidence refusals or partial passing answers. Model-supported is not independent semantic acceptance.
+
+These application checks also restore all displayed claim texts as bound, untrusted discourse context for pronouns and contrasts, regardless of `STUDY_SCOPE_ANNOTATIONS`. Only the target claim's actual references are evidence; other claims add no quotations, source IDs or images. This is the existing local check, not another model stage or generated quote requirement. The context hash and original target index bind each request. The optional literal-scope generation experiment remains default-off and is not required for this behavior.
+
+Enabling this option requires an absolute private `STUDY_CITATION_TRACE_DIR`. The application persists an attempt before each check and the raw response plus source/claim binding before decoding, including failures. These are technical trace files, not canonical facts. Existing AI ledger accounting remains enabled outside explicit isolated transport replays. The production defaults and UI are unchanged. Exact saved-response HTTP replay demonstrates wiring only; it does not establish fresh answer accuracy or permission to deploy.
+
+Already persisted, current Docling native table candidates can carry `tableObservations` on their exact supplemental original-page image. Each declaration preserves the native AST, refs, cells, spans, header flags and cell text without correction; source/version/page/anchor, visual manifest/PNG, artifact and raw-result/input/options identities are checked. The actual input and fingerprint include this metadata, with semantic, relationship and visibility verification all false. Native `raw.prov` remains in its derived-input-local frame: `result.copyIndices` records the saved page mapping, while coordinate mapping is explicitly unverified and no boxes are transformed. Each image has at most two distinct candidate artifacts and each observation is bounded to32 KiB including its exact UTF-8 transport envelope. Oversized native content stays archived in the existing artifact; the input records unavailable/reason/identities while retaining the original PNG. No new q unit, citation ID, author-image producer, parsing request or inferred table relation is created. The selected-reference checker continues to inspect the actual original PNG rather than treating parser-declared cells as canonical truth. Without observations, the prior wire is unchanged.
+
+## Optional bounded native cell declarations
+
+`KERNEL_NATIVE_CELL_OBSERVATIONS=declared-v1` (default `off`) adds a separate `native-cell-declarations-v1` projection when an otherwise valid native artifact cannot enter the existing observation because of byte size or an incomplete grid. Original observation status/reason and arithmetic eligibility remain unchanged. An incomplete grid is still unavailable; a complete transport of declared fields does not verify structure, visibility or semantics.
+
+The projection includes every declared cell in original array order, raw row/column start/end/span tuples (missing values remain null), original header flags, mapped and raw text variants, each original bbox and raw-cell hash, complete unknown positions, captions and raw table/data metadata. It keeps the original coordinate frame unverified. `raw.data.grid` stays accessible in the unchanged immutable artifact through the native/artifact hashes and explicit JSON reference; it is not expanded or repaired. A source-bound raw artifact witness is retained internally for deterministic revalidation and is excluded at the shared provider/citation metadata outlet.
+
+The original256-cell bound and exact32 KiB whole-observation allowance apply; complete declared fields are either retained together or represented as unavailable with a byte/cell limit. No prefix clipping, raised budget, new text citation, parser invocation or model stage. The configured mode is recorded in successful application settings. Local citation checking still sees the selected original PNG, never parser declarations as self-verification. This representation alone does not repair model entity/value interpretation or provide final answer acceptance; same-row cross-column arithmetic is not added here.
+
+## Optional cell-bound results
+
+`STUDY_SOURCE_VALUES=cell-bindings-v2` requires native declarations, the application selector and the existing selected-once citation check. `off` and `difference-v1` retain their implementations. The new variant reuses the same generation call and raw-response/derivation recorder. Existing supported prose mean/agreement/time quantity questions keep precedence when that quantity contract is also enabled.
+
+The cell-binding wire can additionally carry `declaredTableContexts` from the
+same revalidated native artifact: original caption records/references, table
+metadata/provenance and non-cell data metadata. They are parser declarations,
+with the original physical page and immutable result/copy-index mapping retained
+beside raw provenance's derived-input page numbers,
+with semantic/relationship/visibility verification false and coordinate mapping
+unverified; they do not create quotation IDs, canonical facts, repaired grids or
+verified caption-to-image relationships. Missing metadata is not invented.
+
+Optional context shares the existing 32KiB catalog limit. If it does not fit,
+the original cells, value paths and unknown positions remain available and the
+catalog's `contextTransport` records omission. The omission does not evict cells
+or increase a limit. Both the private context and actual wire are checked against
+the rebuilt current artifact. This reuses the generation call, not an additional
+model stage; it is not full-page structure coverage or proof of answer accuracy.
+
+## Read-only question/source name observations
+
+`KernelService.bindDocumentQuestionName(owner, source, question, input)` keeps
+the question's role/name span separate from a proposed stored-source label.
+It reuses evidence-ID/current-version reads and rechecks the source before
+returning a hashed observation; it does not accept caller-supplied source bodies.
+Exact UTF-16 ranges, body hashes, source/version/evidence IDs, locator and parser
+warnings remain attached. Surrogate splits, forged spans and extra authority
+fields reject. Case and meaningful name modifiers are never discarded;
+normalization only trims/collapses whitespace.
+
+The initial observations are a literal requested/source span match or a strict local
+`Long Form (LF)` initialism declaration. The proposed candidate must be one of
+the defining occurrences; this does not license applying a definition to later
+ambiguous mentions or merging similarly named objects. Other synonyms,
+definitions, paraphrases and name variants remain unresolved, not proven
+different. This is a deliberately bounded naming-form verifier, not a general
+abbreviation extractor or semantic identity resolver.
+
+Connected identifier prefixes are unresolved (for example a short name cut out
+of a longer name joined by a plus sign). These checks do not establish that a
+caller selected every noun-phrase qualifier or all question requirements; that
+requires the later query-first contract. A matching span is not a complete
+semantic object description.
+
+Both defining spans must also have independent boundaries. Text extraction can
+fuse adjoining words (for example `inMethod Name`); cutting out `Method Name`
+does not establish a complete name, even if an adjacent short form exists.
+Keep such observations unresolved and retain the parser warnings. Do not repair
+the source or widen an identity claim to make the naming check pass.
+
+Observations keep `semanticIdentityVerified=false` and
+`globalEntityMergeAuthorized=false`. Unresolved does not prove whole-document
+unanswerability. This primitive does not yet change retrieval, answer release or
+refusal policy; a query-first requirement contract and evidence relationship
+checks still need integration and independent validation. It does not add a
+table, model request, canonical fact, UI or new service.
+
+The generation input has a bounded `sourceCellBindings` navigation index over the actual selected native table images (maximum256cells/32KiB). Full raw witnesses stay private. An available index means observed cells are addressable; the original grid status and unknown positions stay unchanged. Local row/column label paths must be complete, unambiguous parser declarations. Unknown/missing paths, repeated blocks, foreign cells and incompatible axes/printed metric labels reject rather than infer missing structure.
+
+`table-value` returns only a cell reference; `table-difference` returns only two cell references. The program restores all original row/column headings and values and, for supported one-axis plain-decimal subtraction, uses the existing exact decimal helper. These operations cannot accept arbitrary model labels, values, units, results or text. Same-row model columns and same-column data rows are supported. The resulting source bindings and arithmetic verification are separate from semantic/relationship/visibility verification, which remain false. No canonical data is written or whole grid promoted to truth.
+
+Ordinary statements and multi-source synthesis remain available through selected references outside the indexed table images. They are explicitly marked `provider-statement`; they do not gain a cell-binding guarantee. Text quotes on a table-containing page can still be used for prose, so semantic correctness of such statements remains an independent acceptance requirement. A model that bypasses typed bindings must not be counted as a successful binding experiment. No new judge, rewrite/retry loop or pure-subtraction intent forcing is added. If the index/input budget is unavailable, original generation remains with a recorded `newContractApplied=false` reason; this is not a verified result.
+
+For this explicit v2 route, original images whose validated native
+`cellDeclarations.status` is `available` are retained even if the selector
+omits them and the full grid remains `incomplete-grid`. These images and private
+source witnesses were already read by Kernel; no extra page or model is fetched.
+`declaredCellRetainedReferenceIds` distinguishes these system additions. Default
+and legacy contracts keep their complete-grid retention behavior.
+
+This preserves only declared cells and original PNG evidence, with the existing
+reference/image/byte limits. It never fills grid gaps or changes unavailable,
+unknown, source identity or semantic-verification flags. Invalid declarations
+still reject. A typed-route or budget fallback remains explicit; retaining cells
+does not prove the requested comparison, role or isolated effect is answerable.
+
+## Individually unestablished citations
+
+The existing `selected-once` check still audits every original claim with all of
+its original evidence. If the collective judgment supports the claim, references
+explicitly marked `does-not-establish` are withheld from that claim's displayed
+citations. Unclear/complementary evidence remains; unsupported claims and
+contradictions fail as before. No new source, model call, claim deletion or text
+revision is introduced. If withholding leaves no citation, the answer is not
+released.
+
+The current source/context is checked again and retained IDs pass through the
+normal resolver. Public selected-unit indices match the released citations.
+Original provider selections, raw responses and full audit bindings remain
+unchanged. `citationCheck.citationRelease` records original/derived digests and
+every withheld reference with its audit identity. It is an attributed model
+finding, not an independent semantic truth certificate. Off/legacy paths retain
+their previous behavior; production deployment is a separate step.
+## Original upload source names
+
+Upload source storage can retain `original_name` separately from the existing safe attachment name. This field is raw source input, not an independent canonical truth store. Normal index and Docling tasks read it durably by owner/document identity. Kernel validates the exact filename transformation, records the source-name observation in PostgreSQL raw provenance and immutable version identity, and projects the original spelling as the document name. Later uploads/repairs cannot guess an original title from underscores; registered observations are inherited under the current-head guard.
+
+Safe download names, blob paths, ownership/course checks and literal title matching are retained. Existing records without the original metadata remain unchanged; this does not automatically repair legacy documents or rewrite old parsed versions. A legacy backfill needs the original source name and matching file hash, and must retain historical evidence. No fuzzy aliases or UI changes are introduced.
+
+## Focus retention after complete expansion
+
+Successful complete-source and persisted-text expansion carry the existing bounded, query-relevant source-page observation into selection retention too. A complete selector input alone does not ensure the model selected every necessary passage. Focused pages remain limited to four pages / 32 KiB and the existing 64-reference and request-capacity guards. Existing selected references, other sources, images and full expansion metadata are retained; an empty selector response is still insufficient. Focus is neither an answer nor a completeness or semantic verification claim. No new model review, source rewrite or production switch is introduced.
+
+## Literal decimal conditions in shared retrieval
+
+The shared document search preserves up to eight explicit decimal/percentage
+literals (at most 40 characters each) alongside the unchanged lexical query.
+Parameterized original-text matching preserves signs, precision and percent
+symbols, with NFKC compatibility normalization. It does not infer numerical
+equivalence, units, rounding, table roles or canonical facts. Unsupported
+composite formats retain lexical fallback; strict over-capacity/composite
+conditions return no results rather than silently checking only some literals.
+
+Broad retrieval retains lexical fallback and adds original-text numeric matches.
+Literal match counts rank pages before the existing lexical score; snippet
+selection uses the same conditions. Strict retrieval also requires the existing
+lexical match and all accepted literals. Owner, course, document, current-version
+and routing predicates remain in scope. Numeric observations are materialized
+once per visible page inside the read statement; no original body, evidence,
+stored search copy or index is rewritten. Queries without numeric conditions
+retain the existing scoring path. Original occurrence is a retrieval hint,
+not proof that a passage answers the question or supports a relationship.
+
+Already-NFKC bodies are reused after PostgreSQL's `IS NFKC NORMALIZED`
+check; other bodies still use the exact same normalization. This changes
+computation cost, not the comparison string or stored source. See the
+[PostgreSQL string functions](https://www.postgresql.org/docs/18/functions-string.html).
+
+This path still scans visible original page bodies for numeric conditions.
+Its corpus latency must be reported separately from relevance improvements;
+a small SQL/unit test is not a throughput or final answer acceptance result.
+No provider request or parser is needed for this retrieval step.
+
+## Citation snapshots after reparsing
+
+New Kernel study citation URLs add `snapshot=1` to the existing evidence route.
+KernelService reads the exact document version/source version/original hash and
+evidence IDs from PostgreSQL. A single read checks current ownership and
+visibility, all version/evidence joins and the registered original-file hash.
+Missing, hidden, foreign or mixed identities fail; there is no latest-version
+fallback. Registered source name, parser warnings, page locator, full stored
+body and its SHA256 remain attached to that version. Reparse does not rewrite
+the snapshot. Status and current document version are observation metadata,
+not a new canonical fact store or proof of source interpretation.
+
+The response is `{snapshot, sourceContentIsUntrusted:true}`. Snapshot status is
+`historical` if the parse version changed or its document origin was superseded.
+Its distinct DTO declares `usableForCurrentGeneration:false`; current selection,
+generation and default evidence reads retain their current-version checks.
+Existing saved URLs without the new flag are not rewritten and retain their
+previous behavior. Explicit snapshot mode does not accept `nativeRegions=1`;
+native-region reading remains current-only. Snapshot text is stored parser
+output, not a guarantee of whole-PDF fidelity, table semantics or answer accuracy.
+
+### Isolated generator candidate (Issue #212)
+
+`STUDY_GENERATION_MODEL=gpt-6.1-sol` is a server-only, default-off development
+option. It requires the existing isolated process/database guard, Kernel backend,
+`select-then-answer` and `selected-once`. `OPENAI_MODEL` remains a mini model:
+selection, question routing and local citation auditing keep their existing
+models. Only answer generation changes. Actual requested generation and selection
+models are recorded separately; changing a global or client-supplied model does
+not enable this path. No automatic escalation, fallback, retry or production
+default change is introduced.
+
+The candidate uses Standard service and explicit implicit/30m prompt caching.
+Its budget envelope has no tools, at most 6000 output tokens and a USD0.40
+conservative reservation per request. Text uses a UTF-8 upper bound. Original PNG
+image requests require a fresh server-side `/v1/responses/input_tokens` count
+including all input, reasoning and schema fields. The complete generation JSON
+is sealed before counting and that identical wire is sent after reservation;
+client counts, old measurements, external image URLs and unmeasured request
+fields cannot authorize generation. Failed/malformed/over-limit counts stop
+without generation or retry. Counts and both request hashes are logged without
+source contents or credentials. The counter is a separate request, not a model
+generation; this implementation does not assert that counter requests are free.
+Unverified inputs and altered transport settings are refused, never removed
+from source evidence to make a request fit. The usual mini path remains available
+with this option absent. The monthly ledger is not lifted or reset.
+
+Sol's reservation uses a UTF-8/request framing upper bound and the higher of its
+two documented cache-write rates. Settlement requires the exact returned model,
+Standard tier, valid disjoint cache-read/write counts and the actual 30m/12h write
+split. Missing or malformed usage retains the reservation for reconciliation.
+Old raw responses with unverified TTL accounting are not retroactively settled.
+See the official [model](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+and [cache usage](https://developers.openai.com/api/docs/guides/prompt-caching)
+documentation. This configuration and fixture verification do not establish
+answer accuracy, full website API acceptance or independent blind performance.
+
+### Current text-node citation rechecks (Issue #213)
+
+The application validates the complete answer context before and after local
+citation checking. Between these reads, KernelService uses its existing current
+node reader to verify the cited text's owner, visibility, source/version, full
+body hash, locator and source name/origin before and after each audit call.
+Unrelated retrieval expansion is not repeated for every text citation. Image
+references retain full-context rechecks. The original audit packet, selected
+quotes, model, response persistence, number of audits and 55-second deadline are
+unchanged. There is no cross-request source cache, new model review or repair.
+
+### Original page images accompanying selected text (Issue #214)
+
+In the Kernel selected-answer path, an explicitly provider-selected text node
+retains its already-retrieved registered original PDF page image even when no
+table or formula structure was recognized. Pairing requires the exact document,
+parse version, source version, source hash and stored page evidence ID. It adds
+no retrieval, parser run or model phase. Text retained solely by system context
+expansion does not trigger this broader image retention. Existing native-table
+pairing stays available, including its unverified structure declarations.
+
+`originalPageImageRetention` records these automatic image additions separately
+from provider-selected IDs and table observations. The 64-reference limit and
+generation request budget gates still apply; skipped images are recorded rather
+than evicting selected references. This association means only “same registered
+PDF page”; it does not validate mathematical notation or certify a relationship.
+Original pixels and extracted text remain unchanged. Input-retention tests alone
+do not demonstrate formula fidelity or answer correctness.
+
+For a validated query-focused page whose text has no selectable quote units,
+the same pass can retain its registered original page image after the provider
+has selected evidence from that exact current source (Issue #215). This also
+covers text deliberately bound to an indivisible native visual unit. Focused
+source versions, page evidence and full body hash must match. The v2 retention
+receipt marks `focused-nonquotable-page`; the text's original eligibility and
+all unverified structural relationships stay unchanged. Missing focus, mismatched
+identity or a foreign-only/empty selection cannot activate this fallback.
+
+For the isolated Sol candidate, a text-only request whose conservative UTF-8
+estimate exceeds the existing reservation limit now uses the same fresh sealed
+input-count protocol as image requests (Issue #216). The complete text and
+USD0.40 ceiling remain unchanged; unsupported projection fields, failed counts
+or a truly over-limit count still stop before generation. Small text requests
+continue using their byte bound without a counter. See the official
+[token counting guide](https://developers.openai.com/api/docs/guides/token-counting).
+
+### Source-reported event status (Issue #217)
+
+Generation prompt v8 makes the existing qualification rule explicit for event
+status: invitations, plans and proposals must not become completed actions just
+because the question assumes completion. It preserves source qualifications and
+ordinary grounded synthesis. The selector replaces the generation developer
+message with its own instruction, so this change does not alter the selector
+wire. Citation validation and the original source remain unchanged; there is no
+post-generation verb replacement or automatic answer repair.
+
+### Citation-first generation schema (Issue #219; withdrawn)
+
+Generation receipt v9 experimented with ordering the existing claim properties
+as `citations`, then `text`, without changing fields or developer instructions.
+[Structured Outputs preserves schema key order](https://developers.openai.com/api/docs/guides/structured-outputs#key-ordering).
+The experiment showed no observed semantic improvement and repeated an earlier
+withdrawn direction. The existing v8 `text`, then `citations` generation schema
+is restored. Historical commits, raw responses and receipts remain valid and
+preserved; validators accept either JSON key order. Source support and citation
+completeness remain independent of formatting and model-audit results. No new
+reviewer or automatic repair replaces the withdrawn behavior.
+
+### Selected source-version context (Issue #220)
+
+The existing selection-retention step also preserves available text of an
+explicitly provider-selected text-source version, after its existing named and
+focused retention. Filename attribution can identify a different revision.
+Only already-offered selectable original units with the exact document,
+document-version, source-version and original hash can be added. Each version's
+text addition is atomic, with a shared 32 KiB allowance and the existing 64-ID
+limit. Existing selections are never evicted; oversized additions are skipped
+with a receipt. Image-only selections cannot trigger this text expansion.
+
+This adds no reader, source, image, model stage, post-generation citation
+expansion or automatic repair. The receipt keeps coverage and semantic
+relations unassessed. Retaining a definition in generation is independently
+testable and does not prove the answer will cite it correctly.

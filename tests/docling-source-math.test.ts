@@ -120,7 +120,17 @@ test('real Kernel ingestion stores source math in existing structure/evidence; c
   if(sql.includes('INSERT INTO source_item_versions')){state.sourceVersion=args[0];state.raw=JSON.parse(args[3]);}
   else if(sql.includes('INSERT INTO document_text_versions')){state.version=args[0];state.parser=args[3];}
   else if(sql.includes('INSERT INTO evidence('))state.evidence.push(JSON.parse(args[6]));
-  else if(sql.includes('INSERT INTO document_text_pages'))state.pages.push({page_number:args[1],evidence_id:args[2],locator:args[3],body:args[4]});
+  else if(sql.includes('INSERT INTO document_text_pages'))state.pages.push({page_number:args[1],evidence_id:args[2],locator:args[3],body:args[4],search_text:args[5],search_hint_provenance:null});
+  else if(sql==="SELECT raw_value->'batchProvenance' progress FROM source_item_versions WHERE id=$1 FOR UPDATE"){
+   assert.deepEqual(args,[state.sourceVersion]);return {rows:[{progress:state.raw.batchProvenance}]};
+  }
+  else if(sql==='SELECT body,search_text,search_hint_provenance FROM document_text_pages WHERE version_id=$1 AND page_number=$2 FOR UPDATE'){
+   assert.equal(args[0],state.version);const page=state.pages.find(p=>p.page_number===args[1]);assert.ok(page);return {rows:[page]};
+  }
+  else if(sql==='UPDATE document_text_pages SET search_text=$3,search_hint_provenance=$4::jsonb WHERE version_id=$1 AND page_number=$2'){
+   assert.equal(args[0],state.version);const page=state.pages.find(p=>p.page_number===args[1]);assert.ok(page);
+   page.search_text=args[2];page.search_hint_provenance=args[3]===null?null:JSON.parse(args[3]);
+  }
   else if(sql.includes('SELECT owner_id,source_hash FROM document_texts'))return {rows:[{owner_id:identity.owner,source_hash:identity.sourceHash}]};
   else if(sql.includes('SELECT d.id "documentId"'))return {rows:[{documentId:identity.documentId,currentVersionId:state.version,sourceVersionId:state.sourceVersion,sourceHash:identity.sourceHash,
    courseId:'',rawSourceHash:identity.sourceHash,name:'Fixture.pdf',origin:'test',originKey:'fixture',parserVersion:state.parser,mime:'application/pdf',extractionMethod:'docling-text'}]};
@@ -136,6 +146,7 @@ test('real Kernel ingestion stores source math in existing structure/evidence; c
  await kernel.ingestParsedDocument({id:identity.documentId,ownerId:identity.owner,courseId:'',name:'Fixture.pdf',hash:identity.sourceHash,mime:'application/pdf',origin:'test',originKey:'fixture'},
   decoded.pages,{parserVersion:'docling-source-math-fixture',warnings:decoded.warnings,batchProvenance:progress,sourceMath});
  assert.equal(state.raw.sourceMathSha256,sourceMath.sha256);assert.deepEqual(state.manifest.sourceMath,sourceMath.provenance);
+ assert.ok(state.pages.every(p=>typeof p.search_text==='string'&&p.search_hint_provenance?.binding.sourceVersionId===state.sourceVersion));
  assert.ok(state.evidence.every(e=>e.sourceMath.provenanceSha256===sourceMath.sha256&&e.sourceMath.formulaRelationsVerified===false));
  const source={documentId:identity.documentId,currentVersionId:state.version!,sourceVersionId:state.sourceVersion!,sourceHash:identity.sourceHash,courseId:''};
  const outline=await kernel.readDocumentOutline(identity.owner,source);

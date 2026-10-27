@@ -1,0 +1,97 @@
+import {createHash}from'node:crypto';import type{Pool}from'pg';
+import{planClassificationBranch}from'./classification-route-shadow.ts';
+import{documentRoutingScopeSql,type DocumentRoutingScope}from'./document-routing-scope.ts';
+import{emptyClassificationWitnessReceipt,type ClassificationWitnessReceipt}from'./classification-witness-recall.ts';
+type Scope={courseId?:string;documentId?:string;routingScope?:DocumentRoutingScope};
+type Hit={document_id:string;page_number:number;source_version_id:string;evidence_id:string;source_hash:string};
+const key=(h:Hit)=>JSON.stringify([h.document_id,h.page_number,h.source_version_id,h.evidence_id,h.source_hash]);
+export type ClassificationQueryPreparation={query:string;broadQuery:string;terms?:string[];expansion?:{
+ policy:'registered-alias-lexical-v1';taxonomyRevisionId:string;aliasSetSha256:string;status:'expanded'|'unchanged'|'unavailable';reason:string;
+ originalQuerySha256:string;effectiveQuerySha256:string;originalTermCount:number;expandedTermCount:number;addedTerms:string[]}};
+export type ClassificationGuardReceipt={version:'classification-guarded-lexical-v1';effect:'broad-fallback'|'lexical-narrowing'|'expanded-lexical-narrowing'|'source-witness-augmented';reason:string;
+ plan:Awaited<ReturnType<typeof planClassificationBranch>>;outsideMatch:boolean|null;indexedMatchPages:number|null;baselineExecuted:boolean;branchExecuted:boolean;
+ snapshot:'repeatable-read';semanticCoverage:'unassessed';filterAuthorization:false;scoredDocuments:null;scores:'original'|'branch-scope-bm25'|'reference-merge-rank'|'expanded-query-bm25'|'rrf-source-hints';
+ queryExpansion?:ClassificationQueryPreparation['expansion'];classificationRecall?:ClassificationWitnessReceipt;baseEffect?:ClassificationGuardReceipt['effect']};
+
+/** Classification alone cannot exclude evidence. Independent index membership
+ * must establish every lexical match fits in the proposed result set. No model,
+ * body read or BM25 scoring occurs in this guard. It does not prove semantics. */
+export async function runGuardedClassification<T extends Hit,O extends Scope>(pool:Pool,owner:string,query:string,options:O,
+ spec:{broadQuery:string;limit:number;prepareQuery?:(plan:Awaited<ReturnType<typeof planClassificationBranch>>)=>ClassificationQueryPreparation;
+ recall?:(db:Pool,plan:Awaited<ReturnType<typeof planClassificationBranch>>,ordinary:T[])=>Promise<{hits:T[];receipt:ClassificationWitnessReceipt}>;
+ expand?:(db:Pool,base:T[])=>Promise<T[]>},search:(db:Pool,o:O,phase:'baseline'|'branch',query:ClassificationQueryPreparation)=>Promise<T[]>){
+ const client=await pool.connect(),db={query:client.query.bind(client)} as unknown as Pool;
+ try{
+  await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  // Optional taxonomy discovery may return an unavailable plan after catching
+  // a SQL error. Restore the snapshot before its ordinary-search fallback.
+  await client.query('SAVEPOINT classification_plan');
+  const plan=await planClassificationBranch(db,owner,query,options);
+  if(plan.status==='broad'&&plan.reason==='invalid-taxonomy')await client.query('ROLLBACK TO SAVEPOINT classification_plan');
+  await client.query('RELEASE SAVEPOINT classification_plan');
+  const prepared=spec.prepareQuery?.(plan)??{query,broadQuery:spec.broadQuery};
+  let outsideMatch:boolean|null=null,indexedMatchPages:number|null=null,branchExecuted=false;
+  let lastReceipt:ClassificationGuardReceipt|undefined;
+  const finish=(hits:T[],effect:ClassificationGuardReceipt['effect'],reason:string)=>{
+   const receipt:ClassificationGuardReceipt={version:'classification-guarded-lexical-v1',effect,reason,plan,outsideMatch,indexedMatchPages,
+    baselineExecuted:effect==='broad-fallback',branchExecuted,snapshot:'repeatable-read',semanticCoverage:'unassessed',filterAuthorization:false,scoredDocuments:null,
+    scores:prepared.expansion?.status==='expanded'?'expanded-query-bm25':effect==='broad-fallback'?'original':effect==='expanded-lexical-narrowing'?'reference-merge-rank':'branch-scope-bm25',
+    ...(prepared.expansion?{queryExpansion:prepared.expansion}:{})};
+   lastReceipt=receipt;return hits.map(h=>({...h,classification_route_guard:receipt}));
+  };
+  const broad=async(reason:string)=>finish(await search(db,options,'baseline',prepared),'broad-fallback',reason);
+  let result;
+  if(plan.status!=='candidate'||!prepared.broadQuery)result=await broad(plan.reason);
+  else{
+   const args:unknown[]=[owner,prepared.broadQuery,options.courseId||null,options.documentId||null,plan.documentIds],where=documentRoutingScopeSql(options.routingScope,args),
+    from=`FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id AND v.document_id=d.id
+     JOIN document_text_pages p ON p.version_id=v.id WHERE d.owner_id=$1 AND NOT d.hidden
+     AND ($3::text IS NULL OR d.course_id=$3) AND ($4::text IS NULL OR d.id=$4) ${where}
+     AND NOT EXISTS(SELECT 1 FROM document_texts newer WHERE newer.owner_id=d.owner_id AND newer.origin=d.origin AND newer.origin_key=d.origin_key
+      AND NOT newer.hidden AND (newer.created_at>d.created_at OR (newer.created_at=d.created_at AND newer.id>d.id)))
+     AND p.search_vector @@ (websearch_to_tsquery('english',$2)||websearch_to_tsquery('simple',$2))`;
+   outsideMatch=Boolean((await client.query(`/* classifications:outside-index-guard */ SELECT EXISTS(SELECT 1 ${from} AND NOT(d.id=ANY($5::text[]))) outside`,args)).rows[0].outside);
+   if(outsideMatch)result=await broad('outside-index-match');
+   else{
+    const bounded=[...args,spec.limit+1],proof=(await client.query<Hit>(`/* classifications:bounded-index-proof */
+     SELECT d.id document_id,p.page_number,v.source_version_id,p.evidence_id,d.source_hash ${from} AND d.id=ANY($5::text[]) LIMIT $${bounded.length}`,bounded)).rows;
+    indexedMatchPages=proof.length;
+    if(proof.length>spec.limit)result=await broad('indexed-result-capacity');
+    else if(spec.expand&&(proof.length!==1||spec.limit<5))result=await broad('reference-seed-order-unproven');
+    else{
+     const prior=options.routingScope?.documentIds,ids=prior?plan.documentIds.filter(id=>prior.includes(id)):plan.documentIds;
+     await client.query('SAVEPOINT classification_branch');let output:T[]|null=null,reason='branch-search-failed';
+     try{
+      branchExecuted=true;const branch=await search(db,{...options,routingScope:{...options.routingScope,documentIds:ids}},'branch',prepared),expected=new Set(proof.map(key));
+      if(branch.length!==expected.size||new Set(branch.map(key)).size!==expected.size||!branch.every(h=>expected.has(key(h))))reason='indexed-evidence-mismatch';
+      else{
+       reason=spec.expand?'expansion-search-failed':'all-index-matches-returned';output=spec.expand?await spec.expand(db,branch):branch;
+       if(spec.expand&&!proof.every(p=>output!.some(h=>key(h)===key(p)))){output=null;reason='expanded-evidence-mismatch';}
+       else if(spec.expand)reason='all-index-matches-expanded';
+      }
+      await client.query('RELEASE SAVEPOINT classification_branch');
+     }
+     catch{output=null;await client.query('ROLLBACK TO SAVEPOINT classification_branch');await client.query('RELEASE SAVEPOINT classification_branch');}
+     result=output?finish(output,spec.expand?'expanded-lexical-narrowing':'lexical-narrowing',reason):await broad(reason);
+    }
+   }
+  }
+  if(spec.recall&&plan.aliasExpansion){
+   await client.query('SAVEPOINT classification_recall');
+   try{
+    const recalled=await spec.recall(db,plan,result),receipt={...lastReceipt!,classificationRecall:recalled.receipt,
+     ...(recalled.receipt.candidatePages?{baseEffect:lastReceipt!.effect,effect:'source-witness-augmented' as const,scores:'rrf-source-hints' as const}:{})};
+    result=recalled.hits.map(h=>({...h,classification_route_guard:receipt}));await client.query('RELEASE SAVEPOINT classification_recall');
+   }catch{
+    await client.query('ROLLBACK TO SAVEPOINT classification_recall');await client.query('RELEASE SAVEPOINT classification_recall');
+    result=result.map(h=>({...h,classification_route_guard:{...lastReceipt!,classificationRecall:{...emptyClassificationWitnessReceipt('witness-read-failed'),status:'unavailable' as const}}}));
+   }
+  }
+  await client.query('COMMIT');return result;
+ }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
+}
+export function classificationGuardAnswerObservation(hits:Array<Hit&{classification_route_guard?:ClassificationGuardReceipt}>){
+ const receipts=new Map<string,ClassificationGuardReceipt>();
+ for(const hit of hits)if(hit.classification_route_guard){const r=hit.classification_route_guard;receipts.set(createHash('sha256').update(JSON.stringify(r)).digest('hex'),r);}
+ return receipts.size?{version:'classification-guarded-lexical-v1' as const,scope:'ranked-reader-returned-anchors-only' as const,receipts:[...receipts.values()]}:undefined;
+}

@@ -161,7 +161,7 @@ test('one content proposal retains original/raw/all evidence and audits only rev
   globalThis.fetch=async(_url,init)=>{const body=JSON.parse(String(init?.body));wires.push(body);return response([diagnostic(),proposal,local,local][wires.length-1]);};
   const result=await reviewCompletePlannedStudyAnswer(f.question,async()=>f.packet,f.artifact,j.policy);
   assert.deepEqual(j.attempts.map(a=>a.phase),['coverage-review','content-revision','revised-claim-audit','revised-claim-audit']);
-  assert.deepEqual(j.attempts.map(a=>a.maxOutputTokens),[4000,4000,1000,1000]);assert.equal(j.raw.length,4);assert.equal(JSON.stringify(f.artifact),before);
+  assert.deepEqual(j.attempts.map(a=>a.maxOutputTokens),[4000,4000,2000,2000]);assert.equal(j.raw.length,4);assert.equal(JSON.stringify(f.artifact),before);
   const candidate=result.revisionCandidate;if(!candidate||!('audits'in candidate))throw Error('Missing content proposal');
   assert.equal(candidate.status,'revised-awaiting-independent-review');assert.equal(candidate.answer.claims[0].text,proposal.claims[0].text);
   assert.equal(candidate.answer.claims[1].text,f.alias.claims[1].text);assert.equal(candidate.audits.length,2);assert.equal(candidate.wholeAnswerVerified,false);

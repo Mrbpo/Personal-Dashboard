@@ -69,13 +69,15 @@ function shortTrail(points:{x:number;y:number;at:number}[],maxPixels=80){
   return result;
 }
 
-export function PdfReader({source,name,documentId}:{source:string;name:string;documentId:string}){
+export function PdfReader({source,name,documentId,initialPage=1}:{source:string;name:string;documentId:string;initialPage?:number}){
   const container=useRef<HTMLDivElement>(null),pageWrap=useRef<HTMLDivElement>(null),readerRoot=useRef<HTMLElement>(null),keyboardActive=useRef(false),keyboardHandler=useRef<(event:KeyboardEvent)=>void>(()=>{});
   const entries=useRef<Record<number,PageInk>>({}),saveTimers=useRef<Record<number,ReturnType<typeof setTimeout>>>({}),saving=useRef(new Set<number>()),active=useRef<ActiveStroke|null>(null);
-  const [,render]=useState(0),[pages,setPages]=useState(0),[page,setPage]=useState(1),[zoom,setZoom]=useState(1),[rotation,setRotation]=useState(0),[width,setWidth]=useState(900);
+  const requestedPage=Number.isSafeInteger(initialPage)&&initialPage>0?initialPage:1;
+  const [,render]=useState(0),[pages,setPages]=useState(0),[page,setPage]=useState(requestedPage),[zoom,setZoom]=useState(1),[rotation,setRotation]=useState(0),[width,setWidth]=useState(900);
   const [tool,setTool]=useState<Tool>('view'),[color,setColor]=useState('#e63946'),[thickness,setThickness]=useState(4),[overlaySize,setOverlaySize]=useState({width:0,height:0}),[loadNonce,setLoadNonce]=useState(0),[notice,setNotice]=useState(''),[eraserPreview,setEraserPreview]=useState<EraserPreview|null>(null),[penOver,setPenOver]=useState(false);
   const [scene,setScene]=useState<AnnotationScene|null>(null),[sceneError,setSceneError]=useState(false);
   const redraw=()=>render(value=>value+1);
+  useEffect(()=>setPage(Math.min(requestedPage,pages||requestedPage)),[requestedPage,pages]);
   const url=useCallback((p:number)=>`/api/library/${encodeURIComponent(documentId)}/annotations?page=${p}`,[documentId]);
   const draftKey=useCallback((p:number)=>`pdf-ink:${documentId}:${p}`,[documentId]);
   const writeDraft=useCallback((p:number,entry:PageInk)=>{

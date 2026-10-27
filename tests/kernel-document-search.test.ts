@@ -12,6 +12,37 @@ test('PDF search copy normalizes ligatures, line-wrap hyphens, Unicode math and 
   assert.match(documentSearchText('线性代数特征值'),/特征 征值/);
 });
 
+test('literal decimals rank current owned pages and their matching excerpts without rebuilding stored search copies',async()=>{
+ await migrateKernel();const tag=randomUUID(),owner=`decimal-${tag}`,course=`decimal-course-${tag}`,id=`decimal-document-${tag}`;
+ await kernel.upsertCourse({id:course,name:'Decimal scope',course_code:'DEC-'+tag});
+ const texts=[
+  'target domain '.repeat(70)+'reports 2.3% and 3.7%.',
+  'target domain '.repeat(120)+'Target domain improvements are 2.2% on laptops and 3.6% on restaurants.',
+  'target domain changes are -2.2% and -3.6%.',
+  'target domain reports 2.20% and 3.60%.',
+  'target domain reports 12.2% and 13.6%.',
+  'target domain reports ２．２ ％ and ３．６％.',
+ ];
+ const doc={id,ownerId:owner,courseId:course,name:'Domain.pdf',hash:tag,mime:'application/pdf',origin:'upload',originKey:id};
+ await kernel.ingestParsedDocument(doc,texts.map((text,i)=>({pageNumber:i+1,locator:`Page ${i+1}`,text})),{parserVersion:'decimal-fixture',expectedPages:texts.length});
+ await kernel.ingestParsedDocument({...doc,id:id+'-foreign',ownerId:'foreign-'+owner,originKey:id+'-foreign'},[{pageNumber:1,locator:'Page 1',text:'target domain 2.2% 3.6%'}],{parserVersion:'decimal-fixture',expectedPages:1});
+ const stale={...doc,id:id+'-stale',originKey:id+'-stale'};
+ await kernel.ingestParsedDocument(stale,[{pageNumber:1,locator:'Page 1',text:'target domain 2.2% 3.6%'}],{parserVersion:'decimal-old',expectedPages:1});
+ await kernel.ingestParsedDocument(stale,[{pageNumber:1,locator:'Page 1',text:'unrelated current information'}],{parserVersion:'decimal-current',expectedPages:1});
+ const options={courseId:course,semantic:false,hybrid:false,aiRerank:false,relatedDocuments:false,limit:10};
+ const broad=await kernel.searchDocumentText(owner,'target domain 2.2% 3.6%',options);
+ assert.equal(broad[0].document_id,id);assert.ok([2,6].includes(broad[0].page_number));
+ const p2=broad.find(h=>h.document_id===id&&h.page_number===2)!;assert.ok(p2.body.includes('2.2%')&&p2.body.includes('3.6%'),'snippet follows the same numeric conditions as page ranking');
+ assert.ok(broad.every(h=>h.document_id!==id+'-foreign'&&h.document_id!==stale.id));
+ const exact=await kernel.searchDocumentText(owner,'target domain 2.2% 3.6%',{...options,strict:true});
+ assert.deepEqual(exact.map(h=>h.page_number).sort(),[2,6]);
+ assert.deepEqual((await kernel.searchDocumentText(owner,'target domain -2.2% -3.6%',{...options,strict:true})).map(h=>h.page_number),[3]);
+ assert.deepEqual((await kernel.searchDocumentText(owner,'target domain 2.20% 3.60%',{...options,strict:true})).map(h=>h.page_number),[4]);
+ assert.deepEqual(await kernel.searchDocumentText('unknown-'+owner,'target domain 2.2% 3.6%',{...options,strict:true}),[]);
+ const stored=(await kernelPool().query<{search_text:string}>('SELECT search_text FROM document_text_pages WHERE version_id=(SELECT current_version_id FROM document_texts WHERE id=$1) ORDER BY page_number',[id])).rows;
+ assert.deepEqual(stored.map(r=>r.search_text),texts.map(documentSearchText));
+});
+
 test('strict short formula and numeric queries find current indexed pages without an index rebuild',async()=>{
   await migrateKernel();
   const tag=randomUUID(),owner=`short-query-${tag}`,id=`short-query-document-${tag}`;

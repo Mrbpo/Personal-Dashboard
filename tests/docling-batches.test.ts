@@ -273,3 +273,52 @@ test('PG job stages, exact claims, remote resume, lease-guarded publication, rev
   assert.equal((await kernel.parsedDocument(owner,id))[0].body,pages[0].body);
  }finally{globalThis.fetch=previous;await kernelPool().query('DELETE FROM ingestion_jobs WHERE id=$1',[jobId]);}
 });
+
+test('PG queued PDF snapshots structured default across environment drift and retains remote checkpoints on opt-in',
+ {skip:!process.env.KERNEL_DATABASE_URL},async()=>{
+ const {kernelPool,migrateKernel}=await import('../lib/kernel/db.ts');await migrateKernel();
+ const {saveDocument,getDocument,indexDocument}=await import('../lib/library.ts');
+ const {queueIngestionJob,claimIngestionJob,doclingJobPayload,finishIngestionJob}=await import('../lib/kernel/jobs.ts');
+ const {convertDocumentWithDocling,nativePdfTextIsComplete}=await import('../lib/kernel/docling.ts');
+ const {localPdfTextPages}=await import('../lib/local-ocr.ts');
+ const priorFetch=globalThis.fetch,settings={LOCAL_OCR:process.env.LOCAL_OCR,DOCLING_NATIVE_TEXT_FASTPATH:process.env.DOCLING_NATIVE_TEXT_FASTPATH};
+ process.env.LOCAL_OCR='true';delete process.env.DOCLING_NATIVE_TEXT_FASTPATH;
+ const owner=randomUUID(),pdf=await PDFDocument.create(),page=pdf.addPage();
+ for(let i=0;i<7;i++)page.drawText(`Original independent prose line ${i}: usable embedded text for native coverage.`,{x:40,y:760-i*24,size:10});
+ const bytes=await pdf.save();assert.equal(nativePdfTextIsComplete(await localPdfTextPages(bytes),1),true,
+  'The fixture must really qualify for the native shortcut; a missing extractor cannot prove routing');
+ const id=await saveDocument(owner,'','upload',owner,'routing.pdf','application/pdf',bytes),doc=await getDocument(owner,id);
+ let submissions=0;
+ globalThis.fetch=async(input,init)=>{
+  assert.ok(String(input).startsWith('http://docling.mock/'));
+  if(String(input).endsWith('/async')){submissions++;assert.equal((init?.body as FormData).getAll('files').length,1);
+   return Response.json({task_id:'snapshot-page',task_status:'success'});}
+  if(String(input).includes('/result/'))return Response.json(result(1));
+  throw new Error('Unexpected test request');
+ };
+ try{
+  await indexDocument(owner,id);
+  const jobId=(await kernelPool().query<{id:string}>("SELECT id FROM ingestion_jobs WHERE kind='docling_document' AND payload->>'owner'=$1 AND payload->>'id'=$2",[owner,id])).rows[0].id;
+  const first=(await claimIngestionJob(jobId))!;assert.ok(first);
+  const queued=await doclingJobPayload(jobId,first.lease_token);assert.equal(queued.nativeTextFastpath,false);
+  process.env.DOCLING_NATIVE_TEXT_FASTPATH='true';
+  await convertDocumentWithDocling(owner,id,{id:jobId,leaseToken:first.lease_token,nativeTextFastpath:true});
+  assert.equal(submissions,1,'Persisted false must override changed worker env and optional caller true');
+  const staged=await doclingJobPayload(jobId,first.lease_token),progress=staged.doclingProgress as {batches:{resultHash?:string}[]};
+  assert.ok(progress.batches[0].resultHash);await finishIngestionJob(jobId,first.lease_token);
+  const saved=(await kernelPool().query<{method:string}>(`SELECT s.raw_value->>'extractionMethod' method FROM document_texts d JOIN document_text_versions v ON v.id=d.current_version_id JOIN source_item_versions s ON s.id=v.source_version_id WHERE d.id=$1`,[id])).rows[0];
+  assert.equal(saved.method,'docling-text');
+  await indexDocument(owner,id,true);const next=(await claimIngestionJob(jobId))!;assert.ok(next);
+  const revived=await doclingJobPayload(jobId,next.lease_token);assert.equal(revived.nativeTextFastpath,true,'Explicit opt-in is persisted too');
+  assert.deepEqual(revived.doclingProgress,staged.doclingProgress,'Native shortcut permission cannot invalidate saved Docling input/results');
+  await convertDocumentWithDocling(owner,id,{id:jobId,leaseToken:next.lease_token});
+  assert.equal(submissions,1,'A completed remote page is never resubmitted on revive');await finishIngestionJob(jobId,next.lease_token);
+  process.env.DOCLING_NATIVE_TEXT_FASTPATH='invalid';await assert.rejects(indexDocument(owner,id,true),/Invalid DOCLING_NATIVE_TEXT_FASTPATH/);
+  const invalidId=await queueIngestionJob('docling_document','upload','test',{owner,id,sourceHash:doc.hash,nativeTextFastpath:'false'},randomUUID());
+  const invalid=(await claimIngestionJob(invalidId))!;
+  await assert.rejects(convertDocumentWithDocling(owner,id,{id:invalidId,leaseToken:invalid.lease_token}),/Invalid PDF native text fastpath/);
+  assert.equal(submissions,1);await finishIngestionJob(invalidId,invalid.lease_token);
+ }finally{
+  globalThis.fetch=priorFetch;for(const [key,value]of Object.entries(settings))if(value===undefined)delete process.env[key];else process.env[key]=value;
+ }
+});

@@ -17,11 +17,11 @@ const keyword={limit:14,semantic:false,aiRerank:false,hybrid:false,relatedDocume
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aQWQAAAAASUVORK5CYII=','base64');
 const provenance={sourceUrl:'https://example.edu/official-assets.tgz',revision:'author-release-v1',archiveSha256:digest('archive'),
  archiveMember:'paper/figure.png',license:'CC-BY-4.0',attribution:'Fixture author'};
-async function fixture(options:{bodies?:string[];course?:string;key?:string;createdAt?:string}={}){
+async function fixture(options:{bodies?:string[];course?:string;key?:string;createdAt?:string;mime?:string}={}){
  await migrateKernel();const tag=randomUUID(),owner='context-owner-'+tag,id='context-doc-'+tag,title='Current source '+tag,
  bodies=options.bodies||['Quartz phase first original paragraph.','Quartz phase second original paragraph.','Figure 1: Quartz phase comparison.'];
  if(options.course)await kernel.upsertCourse({id:options.course,name:'Context fixture',course_code:'CONTEXT'});
- const document={id,ownerId:owner,courseId:options.course||'',name:title,hash:digest(JSON.stringify(bodies)),mime:'text/plain',origin:'context-fixture',originKey:options.key||id,createdAt:options.createdAt};
+ const document={id,ownerId:owner,courseId:options.course||'',name:title,hash:digest(JSON.stringify(bodies)),mime:options.mime??'text/plain',origin:'context-fixture',originKey:options.key||id,createdAt:options.createdAt};
  const pages=bodies.map((body,index)=>({pageNumber:index+1,locator:'original-node:'+index,text:body}));
  await kernel.ingestParsedDocument(document,pages,{parserVersion:'context-fixture-v1'});
  const resolution=await kernel.resolveDocumentSource(owner,{selectedDocumentTitle:title});assert.equal(resolution.status,'resolved');
@@ -34,6 +34,32 @@ async function fixture(options:{bodies?:string[];course?:string;key?:string;crea
    kind:index===bodies.length-1?'caption':'paragraph',parentId:index===bodies.length-1?null:'section',bodySha256:node.bodySha256}))};
  return {owner,id,title,document,pages,source,read,structure};
 }
+
+test('literal identity context retains the exact current PDF front page without claiming course ownership',pg,async()=>{
+ const item=await fixture({mime:'application/pdf',bodies:['CS229 — Machine Learning. Course information.',
+  'Course materials: optional textbooks include the named original books.',
+  'Prerequisites mention STAT116 and MATH51; they do not identify the source course.']});
+ item.structure.parents=[];item.structure.nodes=item.structure.nodes.map(node=>({...node,kind:'page',parentId:null}));
+ await kernel.registerDocumentStructure(item.owner,item.source,item.structure);
+ const hits=await kernel.searchDocumentText(item.owner,'optional textbooks',{...keyword,sourceHint:{selectedDocumentTitle:item.title}});
+ assert.equal(hits.length,1);assert.equal(hits[0].page_number,2);
+ const before=await kernel.readDocumentParents(item.owner,hits),after=await kernel.readDocumentParents(item.owner,hits,{identityCourseCodes:['CS229']});
+ assert.equal(Object.hasOwn(before,'sourceIdentityContext'),false);assert.equal(before.parents.length,1);
+ assert.deepEqual(after.anchors,hits);assert.deepEqual(after.images,[]);assert.equal(after.parents.length,2);
+ const receipt=after.sourceIdentityContext!;assert.equal(receipt.additions.length,1);
+ assert.equal(receipt.courseOwnershipVerified,false);assert.equal(receipt.semanticVerified,false);
+ const addition=receipt.additions[0],node=after.parents.flatMap(p=>p.nodes).find(n=>n.evidenceId===addition.evidenceId)!;
+ assert.equal(node.body,item.pages[0].text);assert.equal(addition.bodySha256,digest(node.body));
+ assert.equal(addition.physicalPage,1);assert.deepEqual(addition.observations.map(o=>o.code),['CS229']);
+ assert.equal(node.sourceVersionId,item.source.sourceVersionId);assert.equal(node.documentVersionId,item.source.currentVersionId);
+ const prerequisite=await kernel.readDocumentParents(item.owner,hits,{identityCourseCodes:['STAT116']});
+ assert.equal(prerequisite.sourceIdentityContext!.additions.length,0,'do not search other pages or turn prerequisite mentions into source ownership');
+ const frontHits=await kernel.searchDocumentText(item.owner,'Machine Learning',{...keyword,sourceHint:{selectedDocumentTitle:item.title}});
+ const duplicate=await kernel.readDocumentParents(item.owner,frontHits,{identityCourseCodes:['CS229']});
+ assert.equal(duplicate.sourceIdentityContext!.additions.length,0,'a page already in current context is not duplicated');
+ await kernelPool().query('UPDATE document_text_pages SET body=$3 WHERE version_id=$1 AND page_number=$2',[item.source.currentVersionId,1,'Changed CS229 source']);
+ await assert.rejects(kernel.readDocumentParents(item.owner,hits,{identityCourseCodes:['CS229']}),code('DOCUMENT_CONTEXT_CHANGED'));
+});
 
 test('actual ranked anchors keep their bodies/order; exact original parent and caption context are separate',pg,async()=>{
  const item=await fixture(),collisionId=item.read.nodes[2].evidenceId;

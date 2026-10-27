@@ -3,6 +3,7 @@ import {promisify} from 'node:util';
 import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash}from'node:crypto';
 const execute=promisify(execFile);
 export const PDF_PAGE_IMAGE_MAX_EDGE=2500;
 export async function localPdfPageImage(bytes:Uint8Array):Promise<Buffer|null>{
@@ -22,6 +23,21 @@ export async function localPdfTextPages(bytes:Uint8Array):Promise<string[]|null>
   const {stdout}=await execute('pdftotext',['-layout','-enc','UTF-8',input,'-'],{timeout:30000,maxBuffer:32*1024*1024});
   const pages=stdout.split('\f');if(!pages.at(-1)?.trim())pages.pop();
   return pages.map(page=>page.trim());
+ }catch{return null;}finally{await rm(directory,{recursive:true,force:true});}
+}
+export type NativePdfReadingObservation={sourceHash:string;engine:'poppler-pdftotext';engineVersion:string;
+ options:readonly ['-enc','UTF-8'];rawOutput:string;rawOutputSha256:string};
+/** Independent original-PDF observation. No patched parser input, OCR, model,
+ * whitespace repair or inferred geometry enters this reading-order output. */
+export async function localPdfReadingObservation(bytes:Uint8Array):Promise<NativePdfReadingObservation|null>{
+ if(process.env.LOCAL_OCR!=='true')return null;
+ const directory=await mkdtemp(join(tmpdir(),'study-pdf-reading-')),hash=(v:string|Uint8Array)=>createHash('sha256').update(v).digest('hex');
+ try{
+  const input=join(directory,'original.pdf');await writeFile(input,bytes,{mode:0o600});
+  const {stdout}=await execute('pdftotext',['-enc','UTF-8',input,'-'],{timeout:30000,maxBuffer:8*1024*1024});
+  const version=await execute('pdftotext',['-v'],{timeout:5000,maxBuffer:16384}),engineVersion=(version.stderr||version.stdout).split(/\r?\n/)[0];
+  if(!/^pdftotext version [0-9][\w. -]{0,100}$/.test(engineVersion))return null;
+  return{sourceHash:hash(bytes),engine:'poppler-pdftotext',engineVersion,options:['-enc','UTF-8'],rawOutput:stdout,rawOutputSha256:hash(stdout)};
  }catch{return null;}finally{await rm(directory,{recursive:true,force:true});}
 }
 // Prefer the embedded PDF text layer. It is faster, cheaper and usually more

@@ -10,7 +10,7 @@ import {createDocumentImageBudget} from './document-image-budget.ts';
 import {assertStudyAnswerPlanPolicy,executeStudyPlanningRequest,studyAnswerPlanRequestBudget,studyPlanningRequestIdentity,studyAnswerModelInput,type StudyAnswerPlanAttempt,type StudyAnswerPlanPolicy} from './document-answer-plan.ts';
 import {planContractStudyAnswer,restoreContractStudyPlan,restoreCompleteStudyEvidenceRoute,isCompleteStudyEvidenceRoute,validateStudyQuestionContract,
  type StudyQuestionContract,type StudyContractPlanBinding,type CompleteStudyEvidenceRouteBinding} from './document-study-contract.ts';
-import type {DocumentSourceResolution} from './document-source.ts';
+import {documentTitleMention,type DocumentSourceResolution} from './document-source.ts';
 
 export const PLANNED_STUDY_ANSWER_VERSION='contract-supplement-answer-v9';
 export const COMPLETE_SOURCE_STUDY_ANSWER_VERSION='complete-source-evidence-answer-v1';
@@ -51,11 +51,14 @@ export async function assertPlannedStudyAnswerPolicy(policy:PlannedStudyAnswerPo
 export function studySupplementQueries(question:string,contract:StudyQuestionContract,binding:StudyContractPlanBinding,resolvedSource?:SupplementalSource):StudySupplementQuery[]{
  validateStudyQuestionContract(question,contract);const out:StudySupplementQuery[]=[],used=new Set([question.normalize('NFKC').replace(/\s+/gu,' ').trim().toLowerCase()]);
  const title=resolvedSource?.selectedDocumentTitle.normalize('NFKC');
- if(title&&!question.normalize('NFKC').includes(title))throw Error('Resolved supplemental title must occur in the complete question');
+ if(title&&!documentTitleMention(question,title))throw Error('Resolved supplemental title must occur in the complete question');
  const focus=(values:(string|null)[])=>values.filter((v):v is string=>v!==null&&(!resolvedSource||
-  v.normalize('NFKC')!==resolvedSource.selectedDocumentTitle.normalize('NFKC')));
+  documentTitleMention(v,title!)?.text!==v.normalize('NFKC')));
  const add=(requirementId:string,origin:StudySupplementQuery['origin'],query:string,focused=query,sourceSubscopeIndex?:number)=>{
-  const normalized=(title?focused.normalize('NFKC').split(title).join(' '):focused.normalize('NFKC')).replace(/\s+/gu,' ').trim();
+  let normalized=(title?focused.normalize('NFKC').split(title).join(' '):focused.normalize('NFKC'));
+  if(title&&/\.pdf$/i.test(title)){let mention;while((mention=documentTitleMention(normalized,title)))
+   normalized=normalized.slice(0,mention.start)+' '+normalized.slice(mention.end);}
+  normalized=normalized.replace(/\s+/gu,' ').trim();
   if(out.length<2&&normalized&&!used.has(normalized.toLowerCase())){if(Array.from(normalized).length>4000)throw Error('Complete supplemental query exceeds limit');
    used.add(normalized.toLowerCase());out.push({requirementId,origin,query:normalized,
     ...(resolvedSource||sourceSubscopeIndex!==undefined?{originalQuery:query}:{}),

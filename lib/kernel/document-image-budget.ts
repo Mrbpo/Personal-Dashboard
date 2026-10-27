@@ -31,7 +31,7 @@ export function createDocumentImageBudget(limits:typeof DOCUMENT_IMAGE_LIMITS=DO
     ...(image.manifestSha256?{manifestSha256:image.manifestSha256}:{}),...(image.originalReference?{originalReference:image.originalReference}:{}),
     imageInputTokenUpper:2*Math.ceil(image.width/32)*Math.ceil(image.height/32)+1};
    if(!item.anchorEvidenceId)throw new Error('Image selection has no source anchor');
-   const identity=JSON.stringify({...image,bytes:undefined,source:{...image.source,courseId:image.source.courseId??''}},(_key,value)=>
+   const identity=JSON.stringify({...image,bytes:undefined,tableObservations:undefined,source:{...image.source,courseId:image.source.courseId??''}},(_key,value)=>
     value&&typeof value==='object'&&!Array.isArray(value)?Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]])):value),
     previous=seen.get(image.attachmentId);
    if(previous){if(previous.identity!==identity)throw new Error('Conflicting duplicate image identity');return previous.included;}

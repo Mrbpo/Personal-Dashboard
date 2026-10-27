@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import {documentSourceName} from './document-source-name.ts';
 import { mkdir, readFile, writeFile, readdir, lstat, unlink, utimes } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { database as db, searchIndexAvailable } from './database.ts';
@@ -9,14 +10,14 @@ import {extractDocxText,parsePdfPages,PDF_PARSER_VERSION} from './document-parse
 import {activitySearchAliases,ftsMatchTerms} from './search-vocabulary.ts';
 import {queueIngestionJob,doclingStageBlobHashes} from './kernel/jobs.ts';
 import {kernel} from './kernel/service.ts';
-import {documentSearchText,splitDocumentText} from './kernel/document-search.ts';
-import {DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,configuredDoclingParser} from './kernel/docling-result.ts';
+import {documentSearchText,splitDocumentText,type DocumentTextHit} from './kernel/document-search.ts';
+import {DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,configuredDoclingParser,configuredDoclingNativeTextFastpath} from './kernel/docling-result.ts';
 import {EMBED_MODEL,MAIL_EMBED_VERSION,storeMailEmbeddings,type MailEmbeddingInput} from './mail-embedding.ts';
 export {EMBED_MODEL};
 export const MAX_LIBRARY_BYTES=50*1024*1024;
 const root=()=>resolve(/* turbopackIgnore: true */ process.env.LIBRARY_DIR || './data/library');
 export const digest=(s:string|Uint8Array)=>createHash('sha256').update(s).digest('hex');
-export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;folder_path:string;name:string;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
+export type DocumentRow={id:string;owner_id:string;course_id:string;origin:string;origin_key:string;folder_path:string;name:string;original_name?:string|null;mime:string;hash:string;size:number;status:string;error:string|null;created_at:string;deleted:number};
 export function normalizeFolderPath(value:string){return value.replaceAll('\\','/').split('/').map(part=>part.trim()).filter(part=>part&&part!=='.'&&part!=='..').slice(0,20).map(part=>part.slice(0,100)).join('/');}
 function inferredFolder(document:Pick<DocumentRow,'origin'|'origin_key'|'folder_path'>){
   if(document.folder_path)return normalizeFolderPath(document.folder_path);
@@ -31,18 +32,29 @@ export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
   if(mime&&mime!=='application/octet-stream')return mime;
   return ({txt:'text/plain',md:'text/markdown',csv:'text/csv',tsv:'text/tab-separated-values',meg:'text/plain',fa:'text/plain',fas:'text/plain',fasta:'text/plain',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
 }
-export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='') {
+export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='',originalName?:string) {
   if(!bytes.length||bytes.length>MAX_LIBRARY_BYTES)throw new Error('资料须非空且单份不超过 50 MB');
+  const sourceName=documentSourceName(name,originalName);
   // Same filenames in different courses are distinct sources.
   key=JSON.stringify([course,key]);
   mime=canonicalDocumentMime(name,mime,bytes);
   const hash=await saveBlob(bytes),id=digest([owner,origin,key,hash].join('\0'));
   folderPath=normalizeFolderPath(folderPath||({canvas:'Canvas',piazza:'Piazza',mail:'邮件',gmail:'邮件',upload:'上传'} as Record<string,string>)[origin]||'其他来源');
-  await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,folderPath,name.slice(0,200),mime,hash,bytes.length,new Date().toISOString()).run();
+  await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,original_name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,folderPath,name.slice(0,200),sourceName?.originalName??null,mime,hash,bytes.length,new Date().toISOString()).run();
   await db.prepare('UPDATE library_documents SET folder_path=? WHERE id=? AND owner_id=?').bind(folderPath,id,owner).run();
   return id;
 }
-export async function listDocuments(owner:string) {return (await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results.map(document=>({...document,folder_path:inferredFolder(document)}));}
+export async function listDocuments(owner:string) {
+ const documents=(await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results;
+ if(process.env.STUDY_ANSWER_BACKEND!=='kernel')return documents.map(document=>({...document,folder_path:inferredFolder(document)}));
+ const pdfIds=documents.filter(document=>document.mime==='application/pdf').map(document=>document.id);
+ const heads=new Map((await kernel.selectedStudyDocuments(owner,pdfIds)).map(source=>[source.id,source]));
+ return documents.map(document=>{
+  const pdf=document.mime==='application/pdf',ready=heads.get(document.id)?.sourceHash===document.hash;
+  return {...document,folder_path:inferredFolder(document),...(pdf?{kernelStatus:ready?'ready':'not-indexed',
+   status:ready?'ready':document.status==='ready'?'pending':document.status}:{})};
+ });
+}
 export async function listSourceFailures(owner:string){return (await db.prepare('SELECT origin,origin_key,course_id,name,error,updated_at FROM library_source_failures WHERE owner_id=? ORDER BY updated_at DESC').bind(owner).all()).results;}
 export async function recordSourceFailure(owner:string,origin:string,key:string,course:string,name:string,error:string){await db.prepare('INSERT INTO library_source_failures VALUES (?,?,?,?,?,?,?) ON CONFLICT(owner_id,origin,origin_key) DO UPDATE SET course_id=excluded.course_id,name=excluded.name,error=excluded.error,updated_at=excluded.updated_at').bind(owner,origin,key,course,name.slice(0,200),error,new Date().toISOString()).run();}
 export async function clearSourceFailure(owner:string,origin:string,key:string){await db.prepare('DELETE FROM library_source_failures WHERE owner_id=? AND origin=? AND origin_key=?').bind(owner,origin,key).run();}
@@ -63,11 +75,12 @@ export async function previewDocument(owner:string,id:string) {
     const parsed=(await db.prepare(`WITH ranked AS (
       SELECT page,body,parser,ROW_NUMBER() OVER (PARTITION BY page ORDER BY CASE
         WHEN ?=1 AND parser='pdf-page-v2' THEN -1 WHEN parser=? THEN 0 WHEN parser=? THEN 1
-        WHEN parser='docling-v2-search' THEN 2 WHEN parser='docling-v2-text-search' THEN 3
-        WHEN parser='docling-v1' THEN 4 WHEN parser=? THEN 5 ELSE 6 END) preference,
+        WHEN parser='docling-v3-source-preserved-search' THEN 2 WHEN parser='docling-v3-source-preserved-text-search' THEN 3
+        WHEN parser='docling-v2-search' THEN 4 WHEN parser='docling-v2-text-search' THEN 5
+        WHEN parser='docling-v1' THEN 6 WHEN parser=? THEN 7 ELSE 8 END) preference,
         MAX(CASE WHEN parser='pdf-page-v2' THEN 1 ELSE 0 END) OVER () hasOld,
-        MAX(CASE WHEN parser IN (?,?,?,'docling-v1') THEN 1 ELSE 0 END) OVER () hasCurrent
-      FROM library_parse_pages WHERE document_id=? AND parser IN (?,?, 'docling-v2-search', 'docling-v2-text-search', 'docling-v1',?,'pdf-page-v2')
+        MAX(CASE WHEN parser IN (?,?,?,'docling-v1','docling-v3-source-preserved-search','docling-v3-source-preserved-text-search') THEN 1 ELSE 0 END) OVER () hasCurrent
+      FROM library_parse_pages WHERE document_id=? AND parser IN (?,?, 'docling-v3-source-preserved-search', 'docling-v3-source-preserved-text-search', 'docling-v2-search', 'docling-v2-text-search', 'docling-v1',?,'pdf-page-v2')
     ) SELECT page,body,parser,hasOld,hasCurrent FROM ranked WHERE preference=1 ORDER BY page LIMIT 1000`)
       .bind(preserveOld?1:0,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,
         DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION,id,DOCLING_PARSER_VERSION,DOCLING_TEXT_PARSER_VERSION,PDF_PARSER_VERSION)
@@ -94,9 +107,9 @@ export const splitText=splitDocumentText;
 export async function indexDocument(owner:string,id:string,forcePdfFormulaReparse=false) {
   const d=await getDocument(owner,id);
   if(d.mime==='application/pdf' && process.env.DOCLING_URL){
-    const parser=configuredDoclingParser();
+    const parser=configuredDoclingParser(),nativeTextFastpath=configuredDoclingNativeTextFastpath();
     await queueIngestionJob('docling_document',d.origin,d.course_id||'unscoped',{owner,id,sourceHash:d.hash,formulaEnriched:parser===DOCLING_PARSER_VERSION,
-      formulaBackend:process.env.DOCLING_FORMULA_BACKEND||'ai',scanBackend:process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling'},`docling:${id}:${d.hash}:${parser}`,forcePdfFormulaReparse);
+      nativeTextFastpath,formulaBackend:process.env.DOCLING_FORMULA_BACKEND||'ai',scanBackend:process.env.PDF_SCAN_TRANSCRIPTION_BACKEND||'docling'},`docling:${id}:${d.hash}:${parser}`,forcePdfFormulaReparse);
     return;
   }
   if(d.mime==='application/pdf'&&d.status==='ready'&&!forcePdfFormulaReparse&&process.env.PDF_FORMULA_BACKFILL!=='true'){
@@ -136,8 +149,8 @@ export async function indexDocument(owner:string,id:string,forcePdfFormulaRepars
       const pdfVisuals=await preparePdfVisualEvidence({owner,documentId:d.id,sourceHash:d.hash,pdfBytes:bytes,
         layout:{status:'unavailable',regions:[],pageSizes:[],reason:'Native/legacy PDF parser has no Docling layout result'}});
       await kernel.ingestParsedDocument({id:d.id,ownerId:owner,createdAt:d.created_at,courseId:d.course_id,
-        name:d.name,hash:d.hash,mime:d.mime,origin:d.origin,originKey:d.origin_key},pages,
-        {parserVersion:PDF_PARSER_VERSION,expectedPages:pages.length,pdfVisuals,expectedCurrentVersion});
+        name:d.name,originalName:d.original_name,hash:d.hash,mime:d.mime,origin:d.origin,originKey:d.origin_key},pages,
+        {parserVersion:PDF_PARSER_VERSION,expectedPages:pages.length,pdfVisuals,expectedCurrentVersion,pageStructure:'physical-pages-v1'});
     }
     const warning=pages.some(p=>p.text.startsWith('[本页自动识别不完整')||p.text.startsWith('[自动识别不完整'))?'部分内容无法可靠识别；搜索结果会提示核对原文件。':pages.some(p=>p.text.startsWith('[本地 OCR'))?'本地 OCR 已完成；公式、表格与图形可能不完整，请核对 PDF 原页。':pages.some(p=>p.text.includes('[本页公式识别不完整')||p.text.includes('[部分公式无法可靠识别'))?'部分公式无法可靠识别，请核对 PDF 原页。':/word|officedocument/.test(d.mime)?'Word 文本已解析；内嵌图片和图表请另存 PDF 后导入。':null;
     await db.batch([db.prepare('DELETE FROM library_vectors WHERE chunk_id IN (SELECT id FROM library_chunks WHERE document_id=?)').bind(id),db.prepare('DELETE FROM library_chunks WHERE document_id=?').bind(id),...chunks.map((c,i)=>db.prepare('INSERT INTO library_chunks VALUES (?,?,?,?,?,?)').bind(`${id}:${i}`,id,i,c.locator,c.body,digest('parser1:split1:'+c.body))),db.prepare("UPDATE library_documents SET status='ready',error=? WHERE id=? AND deleted=0").bind(warning,id)]);
@@ -197,8 +210,8 @@ function isArchivedMailBody(key:string){try{const parts=JSON.parse(key);return A
 function containsEvery(haystack:string,tokens:string[]){const normalized=lexicalText(haystack).split(' ');return tokens.every(token=>normalized.some(word=>word===token||(token.length>=3&&word.includes(token))));}
 type SearchTiming={candidateMs:number;candidateCount:number;embeddingMs:number;vectorRows:number;vectorBytes:number};
 type SearchOptions={strict?:boolean;path?:string;limit?:number;documentId?:string;metadataFirst?:boolean;embeddingTimeoutMs?:number;kernelSemantic?:boolean;aiRerank?:boolean;hybrid?:boolean;onTiming?:(detail:SearchTiming)=>void};
-export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
-type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;parser_version?:string;parser_warnings?:string[];retrieval_mode?:'keyword'|'semantic'|'ai-rerank'|'keyword-fallback';degraded_reason?:string};
+export type LibrarySearchHit={id:string;document_id:string;body:string;locator:string;name:string;course_id:string;folder_path?:string;origin?:string;origin_key?:string;score:number;match_reason?:string;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;source_hash?:string;source_version_id?:string;parser_version?:string;parser_warnings?:string[];retrieval_mode?:DocumentTextHit['retrieval_mode'];degraded_reason?:string};
+type CandidateRow={id:string|null;document_id:string;body:string|null;locator:string|null;name:string;course_id:string;folder_path:string;origin:string;origin_key:string;contentScore?:number;evidence_id?:string;page_number?:number;content_kind?:'page'|'time_segment';start_ms?:number|null;end_ms?:number|null;parser_version?:string;parser_warnings?:string[];retrieval_mode?:DocumentTextHit['retrieval_mode'];degraded_reason?:string};
 export async function searchLibrary(owner:string,query:string,course='',semantic=true,options:SearchOptions={}):Promise<LibrarySearchHit[]> {
   let contentIdentifiers:string[]=[];
   if(!course){
@@ -240,6 +253,14 @@ export async function searchLibrary(owner:string,query:string,course='',semantic
   const persistedRows:CandidateRow[]=persisted.filter(row=>compatibilityIds.has(row.document_id)
       ? allowed.get(row.document_id)?.hash===row.source_hash : !path)
     .map(row=>({...row,parser_warnings:row.parser_warnings||[],folder_path:allowed.get(row.document_id)?.folder_path||'',contentScore:row.score}));
+  if(process.env.STUDY_ANSWER_BACKEND==='kernel'){
+    // Legacy rows remain available for migration but cannot become a second
+    // content authority or silently fill gaps in the Kernel result.
+    return persistedRows.slice(0,Math.min(options.limit??20,240)).map(row=>{
+      if(!row.id||typeof row.body!=='string'||typeof row.locator!=='string')throw new Error('Kernel evidence is incomplete');
+      return {...row,id:row.id,body:row.body,locator:row.locator,score:row.contentScore??0};
+    });
+  }
   let raw:CandidateRow[]=[];
   if(strict){
     raw=(await db.prepare(`SELECT ${fields} FROM library_documents d LEFT JOIN library_chunks c ON c.document_id=d.id WHERE ${scopeSql} LIMIT 20000`).bind(...scopeArgs).all<CandidateRow>()).results;

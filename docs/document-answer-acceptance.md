@@ -1,10 +1,49 @@
 # 学习内容回答的验收入口
 
+## 最终验收前的来源版本预检（Issue #218）
+
+`node scripts/study-source-preflight.mjs --manifest <source-manifest.json> --metadata <cached-pdf-metadata.json> --output <new-report.json> --final`
+
+该只读命令复用现有 `documents` 来源清单和原生 PDF 元数据缓存，绑定实际 PDF SHA，分别报告论文编号、观测版本、标题提示及作者来源对齐状态。编号匹配不能掩盖标题提示缺失；标题匹配、观测到 v1、下载成功或自声明 `officialAnnotationPdfVersionMatch` 均不能证明作者标注对应版本。仅支持来自独立作者来源的显式 `authorSourcePdfSha256` 或 `authorSourcePdfRevision` 作为正向绑定，不能将刚下载的 SHA/观测版本复制到这两个字段来制造通过。
+
+当前工具针对现有 arXiv 题集的缓存格式，不是其他课程来源的通用解析器。它只检查来源前提，原准确率阈值、冻结样本分母及混合课程资料验收要求均保持不变。
+
+未知或不一致时，`--final` 写出诊断后以退出码 2 拒绝最终验收；不能随后继续付费运行并宣称已满足此前提。省略 `--final` 仅用于保留未知状态的校准调查。输出使用新文件，拒绝覆盖。来源绑定通过仍不代表 PDF 忠实度、结构、检索、答案、引用或拒答通过；这些成绩独立统计。
+
+不删除或替换不匹配样本，不改原始题目、Gold 或旧分数。应保留原件及获取版本，补充正确版本时使用新的来源/解析记录和新的冻结配置；历史结果继续按原资料解释。标题提示缺失也可能源于 TeX 或排版，不能自动判为错误文件。
+
+### 作者随基准发布 PDF 的来源适配（Issue #221）
+
+`node scripts/study-source-preflight.mjs --publisher-bundle <bundle.json> --bundle-root <local-release-directory> --output <new-report.json> --final`
+
+这是同一来源门禁的离线输入适配；原 arXiv 模式不变，两种输入不能混用。清单示意如下，blob与commit值必须来自预先冻结的独立作者发布目录，不能用本地任意文件反填：
+
+```json
+{
+  "protocol": "publisher-git-pdf-bundle-v1",
+  "repository": "https://github.com/publisher/benchmark",
+  "commit": "<40 hex commit>",
+  "annotations": {"path": "data/samples.json", "gitBlobSha1": "<published annotation blob>"},
+  "documents": [{
+    "documentId": "paper.pdf",
+    "path": "data/documents/paper.pdf",
+    "gitBlobSha1": "<published PDF blob>",
+    "bytes": 12345
+  }]
+}
+```
+
+适配器读取原始发布字节并核对 Git blob SHA1（含 Git blob framing），另记录实际 PDF/标注文件 SHA256；拒绝指针、非PDF替代、大小/哈希不符、重复ID、文件名别名及根目录外路径。标注必须是非空JSON数组，使用其中原始 `doc_id` 与PDF文件名精确关联；不推断标题或历史版本。仅检查关联字段，不向报告或日志输出问题、答案，也不修改标注。自动程序仍需读取标注原始字节；这不代表盲测问题可以提前展示给开发者。
+
+结果仅覆盖清单中列出的文档ID，`fullPublisherDatasetValidated=false`；后续执行器必须确认每一道所选题的 `doc_id` 都在 `validatedDocumentIds`，且使用同一固定标注SHA和原件SHA。发布者来源目录本身仍须独立核实，工具不能从自填repository/commit证明作者身份。该检查既不证明原始Gold正确，也不证明解析或问答正确。来源检查不匹配/未知时 `--final` 仍退出2，历史arXiv未知状态不能借新模式改为通过。报告拒绝覆盖，工具不下载文件、不连接数据库、不调用模型、不改变生产。
+
 关联 Issue #68。`lib/kernel/document-answer.ts` 提供应用内、只读的内容回答模块，不新增页面、UI、服务或事实写入。
 
 ## 输入与输出
 
 统一入口为 `KernelService.answerStudyContent(owner, question, options, policy)`。它最多检索 14 个完整正文节点，保留调用者的语义、混合与重排选择；检索发生降级时不继续生成回答。可显式选择 `includeParents` 和 `includeImages`，默认仅用完整正文。图片模式须同时使用父上下文模式。当前标题选择及所有来源在生成前后重新验证；用户提交的 JSON、文件名、截图说明或旧搜索片段不能替代该读取。父章节最大 8192 个 Unicode codepoints，计数为原节点正文之和；超限内容明确标记不可用。
+
+完整来源名称的字面提及支持NFKC、可省略的终端PDF扩展名，以及闭集TeX重音符号（acute、grave、diaeresis、circumflex、tilde、macron、dot）的Unicode等价拼写。只转换单个Latin字母的已知重音，不执行或展开其它TeX命令、不去重音、不折叠大小写或模糊匹配。返回位置始终指向原NFKC问题片段，focus仅移除该片段。发现结果仍保留原始存储名称、ID及版本；多个文档等价时保持ambiguous，显式selectedDocumentTitle仍严格匹配存储名称。跨来源提及也使用同一规则。此为来源标签的排版等价，不证明PDF版本或作者标注材料相同，也不证明答案正确；候选查询只读受owner、可见性、课程及显式范围约束的元数据。
 
 回答只能返回以下状态：
 - `answered`：每个陈述都要引用本次实际输入的证据。

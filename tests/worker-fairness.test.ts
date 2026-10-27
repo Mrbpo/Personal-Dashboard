@@ -1,6 +1,6 @@
 import {after,test} from 'node:test';
 import assert from 'node:assert/strict';
-import {randomUUID} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {SingleJobSlot,dispatchWorkerTurn} from '../lib/kernel/worker-slot.ts';
 import {AiBudgetDeferredError,nextBudgetMonth,reserveBudget} from '../lib/ai-budget.ts';
 import {database} from '../lib/database.ts';
@@ -66,7 +66,7 @@ test('durable slot exclusion and budget deferral preserve checkpoints, attempts 
  await finishIngestionJob(resumed.id,resumed.lease_token);
  assert.equal((await claimIngestionJob(other))!.id,other);
  const owner=`failed-vector-${tag}`,id=`document-${tag}`;
- await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:'Fixture.pdf',hash:tag,mime:'application/pdf',origin:'upload',originKey:id},
+ await kernel.ingestParsedDocument({id,ownerId:owner,courseId:'',name:'Fixture.pdf',hash:createHash('sha256').update(tag).digest('hex'),mime:'application/pdf',origin:'upload',originKey:id},
   [{locator:'Page 1',text:'An unchanged example lesson.'}],{parserVersion:'test'});
  const [failed]=await kernel.queueDocumentVectorJobs(owner);
  await pool.query("UPDATE ingestion_jobs SET state='failed',attempts=5,last_error='old failure' WHERE id=$1",[failed]);

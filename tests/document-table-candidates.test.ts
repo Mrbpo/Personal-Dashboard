@@ -6,7 +6,9 @@ import {resolve} from 'node:path';
 import {PDFDocument} from 'pdf-lib';
 import {digest,saveBlob} from '../lib/library.ts';
 import {decodeDerivedDoclingResult} from '../lib/kernel/docling-batches.ts';
-import {prepareNativeTableArtifact,nativeTableSearchStrings,prepareNativeTableCandidates,commitNativeTableCandidates} from '../lib/kernel/document-table-candidates.ts';
+import {prepareNativeTableArtifact,nativeTableSearchStrings,prepareNativeTableCandidates,commitNativeTableCandidates,
+ prepareNativeTableObservation} from '../lib/kernel/document-table-candidates.ts';
+import {prepareSourceValueCatalog} from '../lib/kernel/document-source-values.ts';
 import {kernel} from '../lib/kernel/service.ts';
 import {kernelPool,migrateKernel,kernelTransaction} from '../lib/kernel/db.ts';
 import {prepareDocumentAnswer} from '../lib/kernel/document-answer.ts';
@@ -103,6 +105,29 @@ test('supplemental current page anchors bind real PNGs without creating text sup
  const protectedContext={...context,anchors:[node]},protectedResult=prepareDocumentAnswer('Which?',protectedContext);
  assert.deepEqual(protectedResult.supports.map(s=>s.kind),['text','image']);
  assert.ok(protectedResult.quoteUnits.length>0);assert.equal(protectedResult.supports[0].text,node.body);
+ // Controlled parser omission on the saved original page: not a new parsing
+ // fidelity result. The missing cell stays missing and no grid becomes usable.
+ const partial=structuredClone(decoded.nativeTables[0]);
+ (partial.raw.data as {table_cells:unknown[]}).table_cells.shift();
+ partial.cellTexts=partial.cellTexts.slice(1).map((cell,index)=>({...cell,cellIndex:index}));
+ partial.result={resultBlobSha256:digest('controlled-partial-result'),derivedInputSha256:source.sourceHash,
+  optionsHash:digest('fixture-options'),copyIndices:[0]};
+ const artifact=prepareNativeTableArtifact(partial);assert.deepEqual(artifact.reasons,['incomplete-grid']);
+ const canonical=(value:unknown)=>JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?
+  Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item);
+ const binding={namespace:artifact.namespace,producer:artifact.producer,source,artifactSha256:artifact.artifactSha256,
+  manifestSha256:image.manifestSha256,assetSha256:image.sha256,anchor:image.anchorEvidenceId};
+ const candidate={kind:'derived-native-table' as const,id:digest(canonical(binding)),source,pageNumber:1,anchorEvidenceId:image.anchorEvidenceId,
+  manifestSha256:image.manifestSha256,assetSha256:image.sha256,artifactSha256:artifact.artifactSha256};
+ const observation=prepareNativeTableObservation(candidate,artifact,image);
+ assert.equal(observation.status,'unavailable');assert.equal(observation.reason,'incomplete-grid');assert.equal(observation.native,undefined);
+ assert.equal(observation.relationshipVerified,false);assert.equal(observation.nativeSha256,digest(canonical(partial)));
+ const observed=prepareDocumentAnswer('Which?',{...context,images:[{...image,tableObservations:[observation]}]});
+ assert.equal(JSON.stringify(observed.input).includes("Gaussian 'Pillbox'"),false,'search hints never become textual evidence');
+ const catalog=prepareSourceValueCatalog(observed.supports);assert.equal(catalog.status,'unavailable');assert.deepEqual(catalog.cells,[]);
+ assert.throws(()=>prepareNativeTableObservation(candidate,artifact,{...image,physicalPage:2}));
+ const invalid=structuredClone(partial);(invalid.raw.data as {table_cells:Record<string,unknown>[]}).table_cells[0].row_span=999;
+ assert.throws(()=>prepareNativeTableObservation(candidate,prepareNativeTableArtifact(invalid),image),'other structure failures remain rejected');
 });
 
 test('isolated saved-real native projection recalls true page PNG only; foreign/stale sources and invalid assets cannot support an answer',
@@ -126,6 +151,9 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  const pages=decoded.pages;
  await kernel.ingestParsedDocument(doc,pages,{parserVersion:'saved-real-native',pdfVisuals:visuals,nativeTables});
  const hits=await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox');assert.equal(hits.length,1);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{origins:['public-fixture']}}),hits);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{origins:['gmail']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[]}}),[]);
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'what is the of'),[]);
  const {courseId:_course,...omittedCourse}=hits[0].source;
  await kernelTransaction(client=>commitNativeTableCandidates(client,nativeTables,omittedCourse,[hits[0].anchorEvidenceId]));
@@ -140,9 +168,12 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  assert.equal((await pool.query('SELECT count(*) n FROM evidence WHERE source_version_id=$1',[hits[0].source.sourceVersionId])).rows[0].n,'1');
  const evidence=await kernel.readNativeTableCandidateEvidence(owner,hits);
  assert.equal(evidence.imageAnchors[0].evidence_id,hits[0].anchorEvidenceId);assert.equal(evidence.images[0].kind,'pdf-page');
+ assert.equal(evidence.images[0].tableObservations?.[0].status,'available');
+ assert.deepEqual(evidence.images[0].tableObservations?.[0].native,row.artifact.native);
  const prepared=prepareDocumentAnswer('What does the table report?',{anchors:[],parents:[],...evidence,sourceContentIsUntrusted:true});
  assert.deepEqual(prepared.quoteUnits,[]);assert.equal(prepared.supports.length,1);assert.equal(prepared.supports[0].kind,'image');
- assert.equal(JSON.stringify(prepared.input).includes("Gaussian 'Pillbox'"),false);
+ assert.equal(JSON.stringify(prepared.input).includes("Gaussian 'Pillbox'"),true,'current native declaration enters image metadata only');
+ assert.equal(prepared.input.evidence[0].tableObservations?.[0].semanticVerified,false);
  assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox'),[]);
  await assert.rejects(kernel.readNativeTableCandidateEvidence('foreign-owner',hits));
  await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,[{...hits[0],source:{...hits[0].source,courseId:'foreign-course'}}]));
@@ -162,5 +193,40 @@ test('isolated saved-real native projection recalls true page PNG only; foreign/
  await kernel.ingestParsedDocument(doc,[{...pages[0],text:'New current version.'}],{parserVersion:'saved-real-native-v2',pdfVisuals:visuals});
  assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),[]);
  await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,hits));
+ // A controlled incomplete-grid result cannot enter ordinary/global search.
+ // Either explicit scope contract can recover the original page within the
+ // same supplement bound, with the grid unavailable to structured operators.
+ const partialRaw=structuredClone(inputRaw);partialRaw.document.json_content.tables[0].data.table_cells.shift();
+ const partialDecoded=decodeDerivedDoclingResult(partialRaw,{start:1,end:1,totalPages:1,copyIndices:[0]},
+  {verifiedBlankPages:[],formulaEnriched:false});
+ const partialSha=await saveBlob(Buffer.from(JSON.stringify({identity:wrapper.identity,result:partialRaw}))),partialTable=partialDecoded.nativeTables[0];
+ partialTable.result={resultBlobSha256:partialSha,derivedInputSha256:sourceHash,optionsHash,copyIndices:[0]};
+ const partialTables=await prepareNativeTableCandidates({owner,documentId:id,sourceHash,tables:[partialTable]});
+ assert.deepEqual(partialTables.artifacts[0].reasons,['incomplete-grid']);
+ await kernel.ingestParsedDocument(doc,partialDecoded.pages,{parserVersion:'controlled-incomplete-grid',pdfVisuals:visuals,nativeTables:partialTables});
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox'),[]);
+ const fallback=await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id});assert.equal(fallback.length,1);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id]}}),fallback,
+  'The real API documentIds scope must retain the same original-page fallback');
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id,'unowned-document']}}),fallback);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[]}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:['unowned-document']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id],origins:['gmail']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox',{routingScope:{documentIds:[id]}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id,routingScope:{origins:['public-fixture']}}),fallback);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id,routingScope:{origins:['gmail']}}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates('foreign-owner','Gaussian Pillbox',{documentId:id}),[]);
+ const fallbackEvidence=await kernel.readNativeTableCandidateEvidence(owner,fallback),observation=fallbackEvidence.images[0].tableObservations![0];
+ assert.equal(fallbackEvidence.images[0].sha256,digest(png));assert.equal(observation.status,'unavailable');assert.equal(observation.reason,'incomplete-grid');
+ assert.equal(observation.native,undefined);assert.equal(observation.relationshipVerified,false);
+ const bound=prepareDocumentAnswer('What is printed?',{anchors:[],parents:[],...fallbackEvidence,sourceContentIsUntrusted:true});
+ assert.deepEqual(bound.quoteUnits,[]);assert.deepEqual(prepareSourceValueCatalog(bound.supports).cells,[]);
+ const unchanged=(await pool.query('SELECT status,search_text,artifact FROM document_table_candidates WHERE id=$1',[fallback[0].id])).rows[0];
+ assert.equal(unchanged.status,'unavailable');assert.equal(unchanged.search_text,'');assert.deepEqual(unchanged.artifact.reasons,['incomplete-grid']);
+ await assert.rejects(kernel.readNativeTableCandidateEvidence('foreign-owner',fallback));
+ await pool.query('UPDATE document_texts SET hidden=true WHERE id=$1',[id]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{documentId:id}),[]);
+ assert.deepEqual(await kernel.searchNativeTableCandidates(owner,'Gaussian Pillbox',{routingScope:{documentIds:[id]}}),[]);
+ await assert.rejects(kernel.readNativeTableCandidateEvidence(owner,fallback));
  assert.ok((await kernel.nativeTableBlobHashes()).includes(rawSha));
 });
