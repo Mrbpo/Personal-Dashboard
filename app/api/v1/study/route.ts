@@ -1,7 +1,7 @@
 import {apiOwner,apiError} from '@/lib/api-guard';
 import {createTutorThread,sendTutor,tutorState} from '@/lib/tutor';
 import {studyAnswerBackend,studyFailure,studyRoutingScope,StudyAnswerError} from '@/lib/study-answer';
-import {readStudySession,updateStudySession,findDocumentStudyThread,studyDocumentIds,resolveStudyQueryMode} from '@/lib/study-session';
+import {readStudySession,updateStudySession,findDocumentStudyThread,studyDocumentIds,resolveStudyQueryMode,studyFactsOnly,assertStudyModeAvailable} from '@/lib/study-session';
 import {factInstant} from '@/lib/kernel/fact-validity';
 import {createHash} from 'node:crypto';
 
@@ -13,7 +13,7 @@ function failure(error:unknown){
 }
 async function state(owner:string,threadId?:string){
  return {...await tutorState(owner,threadId),threadId:threadId??'',
-  session:threadId?await readStudySession(owner,threadId):{queryMode:'auto',documentIds:[],revision:0}};
+  session:threadId?await readStudySession(owner,threadId):{queryMode:studyFactsOnly()?'facts':'auto',documentIds:[],revision:0}};
 }
 export async function GET(request:Request){
  try{
@@ -30,6 +30,8 @@ export async function POST(request:Request){
   const owner=await apiOwner(request);
   if(Number(request.headers.get('content-length')||0)>20000)throw new Error('请求过大');
   const body=await request.json(),question=String(body.question||'').trim();
+  assertStudyModeAvailable(body.queryMode);
+  if(studyFactsOnly())body.queryMode='facts';
   if(body.asOf!==undefined&&factInstant(body.asOf)===null)throw new Error('历史查询须提供带时区偏移的 ISO 时间');
   if(body.history!==undefined&&typeof body.history!=='boolean')throw new Error('历史查询选项无效');
   const factQuery={...(body.asOf!==undefined?{asOf:body.asOf as string}:{}),...(body.history!==undefined?{history:body.history as boolean}:{})};

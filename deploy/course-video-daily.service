@@ -1,0 +1,13 @@
+[Unit]
+Description=Discover and privately archive new course recordings
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/srv/study/course-video-control.env
+ExecStart=/usr/bin/python3 /srv/study-course-video-tool/control-runner.py --action sync
+TimeoutStartSec=7200
+KillMode=control-group
+NoNewPrivileges=yes
+UMask=0077

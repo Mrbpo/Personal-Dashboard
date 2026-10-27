@@ -1,0 +1,9 @@
+[Unit]
+Description=Start one queued course subtitle job
+
+[Path]
+PathExists=/srv/study-course-video-control/subtitle-pending
+Unit=course-subtitle-worker.service
+
+[Install]
+WantedBy=multi-user.target

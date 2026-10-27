@@ -1,0 +1,21 @@
+[Unit]
+Description=Generate one bounded course subtitle job
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/srv/study/backup-s3.env
+EnvironmentFile=/srv/study/course-video-control.env
+ExecStart=/usr/bin/python3 /srv/study-course-video-tool/subtitle-worker.py --max-seconds 1800
+CPUQuota=200%
+MemoryMax=2500M
+MemorySwapMax=0
+OOMScoreAdjust=500
+RuntimeMaxSec=1900
+TimeoutStartSec=1900
+KillMode=control-group
+UMask=0077
+Nice=10
+IOSchedulingClass=idle

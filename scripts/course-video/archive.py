@@ -844,6 +844,7 @@ def main():
     parser.add_argument("--hold-browser", type=int, default=0, help="After a read-only probe, hold the same browser for visual diagnosis for up to 900 seconds")
     parser.add_argument("--headless", action="store_true", help="Official Chromium headless shell on the server")
     parser.add_argument("--interactive-server", action="store_true", help="Normal headed Chromium in a temporary server display, with manual verification")
+    parser.add_argument("--unattended", action="store_true", help="Reuse the dedicated server profile; stop rather than wait for human verification")
     parser.add_argument("--launch-url-stdin", action="store_true", help="Read a Canvas-authorized sessionless launch JSON from stdin; never log or persist the URL")
     parser.add_argument("--login-timeout", type=int, default=900, help="Seconds allowed for interactive school login and Duo")
     args = parser.parse_args()
@@ -889,6 +890,8 @@ def main():
             parser.error("Recovery entry must be a parent in the verified historical report")
     if args.headless and args.interactive_server:
         parser.error("Choose headless or interactive server mode")
+    if args.unattended and (not args.interactive_server or args.login_timeout > 60):
+        parser.error("Unattended mode requires the dedicated server display and a login timeout no greater than 60 seconds")
     if args.launch_url_stdin and (not (args.headless or args.interactive_server) or not args.target_only or args.all_courses or len(urls) != 1 or args.pause_after_inventory):
         parser.error("Server launch requires a server browser mode, --target-only and one course")
     if (args.headless or args.interactive_server) and not args.launch_url_stdin:
@@ -1002,7 +1005,7 @@ def main():
                 last_document = document_responses[-1] if document_responses else None
                 rejected = last_document if last_document and last_document["httpStatus"] in (401, 403) else None
                 if rejected:
-                    if args.interactive_server:
+                    if args.interactive_server and not args.unattended:
                         markers = rejected.get("markers", {})
                         state = "waiting_browser_verification" if markers.get("cloudflare") else "waiting_server_authorization"
                         if status != state:
@@ -1028,7 +1031,7 @@ def main():
                     print(json.dumps({"state": "tool_launched", "documentResponses": document_responses}), flush=True)
                     page.wait_for_timeout(args.settle_ms)
                     break
-                if any("duo" in frame.url.lower() or "login" in urlparse(frame.url).path.lower() for frame in page.frames) and not args.interactive_server:
+                if any("duo" in frame.url.lower() or "login" in urlparse(frame.url).path.lower() for frame in page.frames) and (not args.interactive_server or args.unattended):
                     print(json.dumps({"state": "needs_reauth", "interactiveAuthorizationRequired": True}), flush=True)
                     context.close()
                     return 2

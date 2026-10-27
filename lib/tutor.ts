@@ -12,7 +12,7 @@ import {answerKernelStudy,studyAnswerBackend,studyRoutingScope,studyRoutingScope
 import type {DocumentRoutingScope} from './kernel/document-routing-scope.ts';
 import {routeQuestionCourseCodes,QUESTION_COURSE_ROUTING_VERSION,type QuestionCourseRoute} from './kernel/question-course-routing.ts';
 import {kernel} from './kernel/service.ts';
-import {readStudySession,validateStudyDocuments,studySessionWitness,type StudySession} from './study-session.ts';
+import {readStudySession,validateStudyDocuments,studySessionWitness,studyFactsOnly,type StudySession} from './study-session.ts';
 import type {ResolvedDocumentSource} from './kernel/document-source.ts';
 
 export type Attachment = { name: string; mime: string; data: string; size: number; hash?: string };
@@ -149,6 +149,11 @@ export function dominantCourse(evidence:string[]){
 function needsCourseScope(question:string){return /(?:本课|课程|作业|实验|截止|提交|老师|教授)|\b(?:lecture|lab|assignment|quiz|exam|syllabus|due|piazza|canvas)\b/i.test(question);}
 export async function sendTutor(owner: string, threadId: string, requestId: string, question: string, attachments: Attachment[], online=true,publicQuery='',requestedScope?:DocumentRoutingScope,studySession?:StudySession,factQuery:{asOf?:string;history?:boolean}={}) {
   const thread = await owned(owner, threadId);
+  if(studyFactsOnly()){
+    if(attachments.length||requestedScope?.documentIds?.length)
+      throw new StudyAnswerError('configuration','document-qa-paused','PDF 问答已暂停，请先查询课程事实');
+    studySession??=await readStudySession(owner,threadId);
+  }
   const sessionWitness=studySession?studySessionWitness(studySession,question,factQuery):undefined;
   const routingScope=studyRoutingScope(requestedScope),routingWitness=studyRoutingScopeWitness(routingScope);
   if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestId)) throw new Error('请求标识无效');

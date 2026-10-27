@@ -13,5 +13,13 @@ www.{$SITE_DOMAIN} {
     X-Frame-Options SAMEORIGIN
     Strict-Transport-Security "max-age=31536000"
   }
-  reverse_proxy web:3000
+  handle_path /recordings/authorize/* {
+    forward_auth web:3000 {
+      uri /api/recordings/authorization-check
+    }
+    reverse_proxy study-course-video-auth:6080
+  }
+  handle {
+    reverse_proxy web:3000
+  }
 }

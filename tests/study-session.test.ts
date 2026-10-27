@@ -19,6 +19,29 @@ test('auto keeps document statements separate from global facts and mixed questi
  assert.equal(session.resolveStudyQueryMode('解释公式，并告诉我作业截止时间',selected),'combined');
  assert.equal(session.resolveStudyQueryMode('解释这个概念',selected),'document');
 });
+
+test('facts-only release blocks PDF modes and routes compatibility requests without document or model calls',async()=>{
+ const previous=process.env.STUDY_FACTS_ONLY;
+ const saved={selected:kernel.selectedStudyDocuments,facts:kernel.answerCourseFacts,answer:kernel.answerStudyContent,fetch:globalThis.fetch};
+ let factCalls=0;
+ process.env.STUDY_FACTS_ONLY='true';
+ kernel.selectedStudyDocuments=async()=>{throw Error('PDF must stay paused');};
+ kernel.answerStudyContent=async()=>{throw Error('PDF generation must stay paused');};
+ kernel.answerCourseFacts=async()=>{factCalls++;return {answer:'Only confirmed course facts [F1]',meta:{citations:[{ref:'F1',title:'Confirmed fact'}]}};};
+ globalThis.fetch=async()=>{throw Error('No model or network request permitted');};
+ try{
+  assert.equal(session.resolveStudyQueryMode('解释这份 PDF',{queryMode:'document',documentIds:['old-pdf'],revision:1}),'facts');
+  const thread=await tutor.createTutorThread('facts-only-owner','');
+  await assert.rejects(session.updateStudySession('facts-only-owner',thread,{queryMode:'document',documentIds:[],scopeRevision:0}),/PDF 问答已暂停/);
+  await tutor.sendTutor('facts-only-owner',thread,'facts-only-00000001','最近有哪些截止时间？',[],false);
+  const state=await tutor.tutorState('facts-only-owner',thread);
+  assert.equal(state.messages[1].meta.studySession.effectiveMode,'facts');
+  assert.equal(factCalls,1);
+ }finally{
+  if(previous===undefined)delete process.env.STUDY_FACTS_ONLY;else process.env.STUDY_FACTS_ONLY=previous;
+  kernel.selectedStudyDocuments=saved.selected;kernel.answerCourseFacts=saved.facts;kernel.answerStudyContent=saved.answer;globalThis.fetch=saved.fetch;
+ }
+});
 test('lost first response reuses the owner/request thread binding and rejects changed payloads',async()=>{
  const request={id:'lost-response-0001',payloadHash:'same-question-and-scope'};
  const [first,retry]=await Promise.all([
