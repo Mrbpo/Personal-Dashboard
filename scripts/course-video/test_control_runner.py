@@ -2,6 +2,11 @@ import importlib.util
 import unittest
 import json
 import tempfile
+import os
+import sys
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -11,6 +16,41 @@ spec.loader.exec_module(runner)
 
 
 class ControlRunnerTest(unittest.TestCase):
+    def test_manual_subtitle_prioritizes_current_source_without_resetting_running_failed_or_budget_state(self):
+        clock = datetime.now(timezone.utc)
+        sha = 'a' * 64
+        request = {'id': 'c552462f-78e5-4dcf-986e-46bef448bd52', 'action': 'subtitle',
+                   'videoSha256': sha, 'requestedAt': clock.isoformat()}
+        runner.validated_request(request, clock)
+        with self.assertRaises(ValueError):
+            runner.validated_request({**request, 'videoSha256': '../file'}, clock)
+        manifest = {'entries': {'a': {'state': 'archived', 'courseId': '123', 'entryId': '0_a',
+            'files': [{'kind': 'video', 'sha256': sha, 'bytes': 10, 'remote': {'state': 'verified',
+                'method': 'full_get_sha256', 'sha256': sha, 'bytes': 10}}]}}}
+        # Windows has no fcntl; exercise the queue transaction logic there while Linux CI uses the real lock.
+        lock_module = patch.dict(sys.modules, {'fcntl': SimpleNamespace(flock=lambda *_: None, LOCK_EX=2)}) if os.name == 'nt' else nullcontext()
+        with tempfile.TemporaryDirectory() as directory, lock_module:
+            root = Path(directory)
+            subtitles = root / 'subtitles'
+            subtitles.mkdir()
+            def submit(row):
+                runner.publish(root / 'subtitle-queue.json', {'schemaVersion': 1, 'jobs': [
+                    {'videoSha256': 'b' * 64, 'state': 'pending'}, {'videoSha256': sha, **row}]}, 1000)
+                return runner.request_subtitle(root, manifest, subtitles, request, 1000, clock)
+            result = submit({'state': 'pending', 'checkpoint': 'saved', 'attempts': 3})
+            queue = runner.read_json(root / 'subtitle-queue.json', {})
+            self.assertEqual(result['state'], 'queued')
+            self.assertEqual(queue['jobs'][0]['videoSha256'], sha)
+            self.assertEqual(queue['jobs'][0]['checkpoint'], 'saved')
+            self.assertEqual(queue['jobs'][0]['attempts'], 3)
+            self.assertEqual(submit({'state': 'running', 'leaseExpiresAt': (clock + timedelta(minutes=20)).isoformat()})['state'], 'running')
+            self.assertEqual(submit({'state': 'failed', 'reasonCode': 'REVIEW_LEDGER'})['reasonCode'], 'SUBTITLE_REVIEW_REQUIRED')
+            before = (clock + timedelta(hours=3)).isoformat()
+            self.assertEqual(submit({'state': 'pending', 'notBefore': before})['state'], 'deferred')
+            self.assertEqual(runner.read_json(root / 'subtitle-queue.json', {})['jobs'][0]['notBefore'], before)
+            stale = {**request, 'videoSha256': 'c' * 64}
+            self.assertEqual(runner.request_subtitle(root, manifest, subtitles, stale, 1000, clock)['reasonCode'], 'SUBTITLE_SOURCE_UNAVAILABLE')
+
     def test_control_request_is_fixed_and_bounded_not_a_shell_contract(self):
         clock = datetime(2026, 10, 26, tzinfo=timezone.utc)
         request = {'id': 'c552462f-78e5-4dcf-986e-46bef448bd52', 'action': 'reauthorize', 'requestedAt': clock.isoformat()}

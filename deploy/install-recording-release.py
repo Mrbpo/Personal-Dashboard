@@ -39,6 +39,7 @@ def main():
     units = ('course-video-control.service', 'course-video-control.path', 'course-video-daily.service',
              'course-video-daily.timer', 'course-subtitle-worker.service', 'course-subtitle-worker.path',
              'course-recording-credentials.service', 'course-recording-credentials.timer')
+    units += ('course-subtitle-request.path', 'course-subtitle-request.service')
     inventory = snapshot / 'host-files.json'
     if not inventory.exists():
         records = []

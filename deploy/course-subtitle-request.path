@@ -1,0 +1,9 @@
+[Unit]
+Description=Wake the subtitle queue bridge for an owner request
+
+[Path]
+PathExists=/srv/study-course-video-control/requests/subtitle-request.json
+Unit=course-subtitle-request.service
+
+[Install]
+WantedBy=multi-user.target
