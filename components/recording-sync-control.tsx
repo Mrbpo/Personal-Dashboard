@@ -118,7 +118,7 @@ export function RecordingSyncControl() {
         <Button type="button" variant="outline" size="sm" disabled={busy || !status?.configured || working || status?.authorizationActive || canvasAccessRequired} onClick={()=>void start('reauthorize')}>重新授权</Button>
       </div>
     </div>
-    <p className="mt-3 text-xs leading-5 text-muted-foreground">计划每天 04:00（多伦多时间）检查新录像。归档后字幕在后台生成，生成完成前可先播放原片。</p>
+    <p className="mt-3 text-xs leading-5 text-muted-foreground">每日 04:00 自动检查新录像（多伦多时间）。</p>
     {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
     {trackingEnded && <p className="mt-3 text-sm text-muted-foreground">本次页面状态跟踪已达 15 分钟。后台任务继续运行，可刷新状态查看进度。</p>}
     {status?.authorizationActive && !canvasAccessRequired && <div className="mt-4">

@@ -68,7 +68,7 @@ export function StudyDocumentSidebar({documents,selectedIds,disabled,loading,lib
     {!loading&&!libraryError&&documents.length>0&&!visible.length&&<p className="py-4 text-sm text-muted-foreground">没有符合筛选的 PDF，请调整或重置筛选。</p>}
    </fieldset>
    {missing.length>0&&<p role="status" className="mt-3 text-xs text-amber-800">已选中 {missing.length} 份已不可用的资料，可清空后重新选择。</p>}
-   <p className="mt-3 border-t pt-3 text-[11px] leading-5 text-muted-foreground">筛选只改变列表显示，回答仍使用你勾选的 PDF。</p>
+   <p className="mt-3 border-t pt-3 text-[11px] leading-5 text-muted-foreground">回答范围以勾选的 PDF 为准。</p>
   </aside>
  </div>;
 }

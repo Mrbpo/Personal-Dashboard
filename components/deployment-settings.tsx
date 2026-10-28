@@ -13,7 +13,7 @@ export function DeploymentSettings(){
   return <section className="mt-6 rounded-3xl border bg-card p-6">
     <h2 className="font-semibold">系统更新 · GitHub Release</h2>
     <p className="my-3 text-sm">当前版本：{state.releaseVersion||'读取中'} · 提交：{state.version||'未知'} · {state.deployment?.status||'尚未云端部署'}</p>
-    <p className="text-xs text-muted-foreground">仅正式 Release 部署。按版本号比较，不按发布时间判断；检查更新不会自动安装。</p>
+    <p className="text-xs text-muted-foreground">检查更新不会自动安装。</p>
     <div className="mt-4 flex flex-wrap gap-2">
       <Button variant="outline" disabled={!state.configured||busy} onClick={check}>检查更新</Button>
       <input aria-label="已发布版本标签" value={tag} onChange={e=>setTag(e.target.value)} placeholder="v1.0.0" className="rounded border bg-background p-2 text-sm"/>

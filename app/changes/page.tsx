@@ -24,7 +24,7 @@ export default async function ChangesPage() {
   const changes = await listChanges().catch(() => []);
   const { timezone } = await getSettings(user.userId);
   return (
-    <PageFrame ornament eyebrow="CHANGE LOG" title="最近变更" description="比较每次同步，优先显示截止时间、要求和课程内容的变化。">
+    <PageFrame ornament eyebrow="CHANGE LOG" title="最近变更">
       <section className="space-y-4">
         {changes.length ? changes.map((change) => (
           <article key={change.id} className="rounded-3xl border bg-card p-5 shadow-sm">
