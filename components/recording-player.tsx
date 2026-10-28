@@ -6,6 +6,7 @@ import {Play, RefreshCw, Video} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 import type {Recording, RecordingCatalog} from '@/lib/recording-catalog';
 import {attachSecondaryLayout,defaultSecondaryLayout,secondaryLayout,type SecondaryLayout} from '@/lib/recording-secondary-layout';
+import {RecordingStudyGuide} from '@/components/recording-study-guide';
 import './recording-player-layout.css';
 
 type Playback = {time:number; rate:number; playing:boolean};
@@ -411,6 +412,7 @@ export function RecordingPlayer() {
           </>}
         </div>
         <p className="mt-3 text-xs leading-5 text-muted-foreground">播放归档原片。可拖动进度、倍速或全屏；副画面始终静音并跟随主画面进度。聚焦播放器后，空格暂停，方向键快进快退。</p>
+        <RecordingStudyGuide key={view.id} viewId={view.id}/>
       </> : <div className="flex min-h-72 flex-col items-center justify-center gap-3 text-muted-foreground"><Video className="size-9"/><p>{loading?'正在读取课程录像…':'在左侧选择一场录像开始播放。'}</p></div>}
     </section>
   </div>;

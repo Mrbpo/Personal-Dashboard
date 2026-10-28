@@ -8,5 +8,6 @@ services:
       RECORDINGS_MANIFEST_PATH: /app/course-recordings/manifest.json
       RECORDINGS_OWNER_ID: local-owner
       RECORDINGS_SUBTITLE_DIR: /app/data/recording-subtitles
+      RECORDINGS_GUIDE_DIR: /app/data/recording-guides
     volumes:
       - /srv/study/recording-player:/app/course-recordings:ro
