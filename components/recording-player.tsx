@@ -377,7 +377,7 @@ export function RecordingPlayer() {
           {subtitleState?.status==='ready'&&!subtitleComplete&&<Button type="button" variant="outline" size="sm"
             disabled={!generation?.canRequest||subtitleSubmit.viewId===viewId&&subtitleSubmit.busy} onClick={()=>void generateSubtitles()}
             title={generation?.state==='queued'&&generation.canRequest?'已在自动队列，点击优先处理这段录像':undefined}>
-            {subtitleSubmit.viewId===viewId&&subtitleSubmit.busy?'正在提交…':generation?.state==='running'?'字幕生成中…':generation?.state==='queued'&&generation.requested?'字幕已排队':generation?.state==='deferred'?'字幕等待资源／额度':generation?.state==='failed'?'字幕待检查':!generation?.configured?'字幕后台未启用':subtitleInfo?.available?'补全字幕':'生成字幕'}
+            {subtitleSubmit.viewId===viewId&&subtitleSubmit.busy?'正在提交…':generation?.state==='running'?'字幕生成中…':generation?.state==='queued'&&generation.requested?'字幕已排队':generation?.state==='deferred'?(generation.canRequest?'重新尝试生成':'字幕等待资源／额度'):generation?.state==='failed'?'字幕待检查':!generation?.configured?'字幕后台未启用':subtitleInfo?.available?'补全字幕':'生成字幕'}
           </Button>}
           <label className="flex items-center gap-2 text-sm">全屏字幕区<select aria-label="全屏字幕区比例" value={captionSize} onChange={event=>setCaptionSize(Number(event.target.value))} className="rounded-md border bg-background px-2 py-1.5">
             {[20,25,30].map(value=><option key={value} value={value}>{value}%</option>)}

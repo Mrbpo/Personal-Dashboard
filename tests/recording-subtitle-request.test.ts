@@ -33,6 +33,8 @@ test('automatic backlog may be prioritized, while active, manually queued, faile
   assert.equal((await state({state:'running',leaseExpiresAt:new Date(now+100000).toISOString()})).state,'running');
   assert.equal((await state({state:'failed',reasonCode:'TRANSLATION_STOPPED_REVIEW_LEDGER'})).canRequest,false);
   assert.equal((await state({state:'pending',notBefore:new Date(now+100000).toISOString()})).state,'deferred');
+  assert.equal((await state({state:'pending',notBefore:new Date(now+100000).toISOString(),reasonCode:'SUBTITLE_RESOURCE_RESERVE'})).canRequest,true);
+  assert.equal((await state({state:'pending',notBefore:new Date(now+100000).toISOString(),reasonCode:'SUBTITLE_BUDGET_DEFERRED'})).canRequest,false);
   assert.equal((await state({state:'pending',requestedAt:new Date(now-200000).toISOString(),notBefore:new Date(now-1000).toISOString()})).canRequest,true);
   await mkdir(join(directory,'subtitle-results'));
   await writeFile(join(directory,'subtitle-results',sha+'.json'),JSON.stringify({state:'failed',reasonCode:'SUBTITLE_SOURCE_UNAVAILABLE'}));

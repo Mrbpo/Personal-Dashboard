@@ -170,6 +170,10 @@ def request_subtitle(root, manifest, subtitles, request, group, clock=None):
                 job = selected if job is None else job
                 # Do not erase checkpoints, attempts, deferred budget times or failure ledgers.
                 job.update(state='pending', courseId=selected['courseId'], entryId=selected['entryId'], requestedAt=request['requestedAt'])
+                # An explicit click rechecks current resources immediately. Budget
+                # deferrals and review-required failures remain protected above.
+                if job.get('reasonCode') == 'SUBTITLE_RESOURCE_RESERVE':
+                    job.update(notBefore=None, reasonCode=None)
                 queue['jobs'] = [job] + [row for row in queue['jobs'] if row['videoSha256'] != digest]
                 publish(root / 'subtitle-queue.json', queue, group)
                 try:

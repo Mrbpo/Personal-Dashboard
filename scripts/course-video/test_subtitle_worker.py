@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('subtitle_worker', Path(__file__).with_name('subtitle-worker.py'))
 worker = importlib.util.module_from_spec(spec)
@@ -11,6 +13,23 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleWorkerTests(unittest.TestCase):
+    def test_resource_admission_uses_bounded_audio_scratch_not_fixed_video_space(self):
+        required = worker.scratch_reserve_bytes(3600)
+        self.assertGreater(required, 3 * 1024**3)
+        self.assertLess(worker.scratch_reserve_bytes(21600), 6 * 1024**3)
+        with patch.object(worker.Path, 'read_text', return_value='MemAvailable: 4194304 kB\n'), \
+                patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=12 * 1024**3)):
+            worker.resource_reserve(Path('.'), 3600)
+            with patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=required - 1)):
+                with self.assertRaises(worker.ResourceBound):
+                    worker.resource_reserve(Path('.'), 3600)
+            with patch.object(worker.Path, 'read_text', return_value='MemAvailable: 1048576 kB\n'):
+                with self.assertRaises(worker.ResourceBound):
+                    worker.resource_reserve(Path('.'), 3600)
+        for duration in (True, 0, -1, float('nan'), 21601):
+            with self.assertRaises(ValueError):
+                worker.scratch_reserve_bytes(duration)
+
     def test_budget_deferral_requires_proven_zero_charge_and_future_aware_timestamp(self):
         now = datetime.now(timezone.utc)
         future = (now + timedelta(days=1)).isoformat()

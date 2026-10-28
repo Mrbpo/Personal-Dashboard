@@ -25,7 +25,7 @@ export async function subtitleGenerationStatus(videoSha256:string,complete=false
  const reasonCode=typeof row.reasonCode==='string'&&/^[A-Z_]{1,80}$/.test(row.reasonCode)?row.reasonCode:null;
  if(row.state==='failed')return {...base,state:'failed',canRequest:false,reasonCode};
  if(row.state==='running'&&lease&&Date.parse(lease)>now)return {...base,state:'running',canRequest:false,requested:!!instant(row.requestedAt)};
- if(retryAt&&Date.parse(retryAt)>now)return {...base,state:'deferred',canRequest:false,retryAt,reasonCode};
+ if(retryAt&&Date.parse(retryAt)>now)return {...base,state:'deferred',canRequest:reasonCode==='SUBTITLE_RESOURCE_RESERVE',retryAt,reasonCode};
  // A root preflight source rejection never started ASR/AI. A later current catalog
  // may restore the original; allow an explicit request, which root revalidates.
  const sourceRejected=result.state==='failed'&&result.reasonCode==='SUBTITLE_SOURCE_UNAVAILABLE';

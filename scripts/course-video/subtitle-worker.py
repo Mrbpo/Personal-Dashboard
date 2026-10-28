@@ -210,10 +210,18 @@ def command(args, deadline, maximum, env=None):
     return result
 
 
-def resource_reserve(path):
+def scratch_reserve_bytes(seconds):
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= 21600:
+        raise ValueError('INVALID_SOURCE_DURATION')
+    # Mono 16 kHz s16 audio, retained chunks and a replacement extraction can
+    # coexist. Originals stream from R2; no full video is copied to scratch.
+    return 3 * 1024**3 + math.ceil(seconds) * 32000 * 3 + 300 * 32000 + 512 * 1024**2
+
+
+def resource_reserve(path, seconds):
     available = next(int(row.split()[1]) * 1024 for row in Path('/proc/meminfo').read_text().splitlines()
                      if row.startswith('MemAvailable:'))
-    if available < 3 * 1024**3 or shutil.disk_usage(path).free < 15 * 1024**3:
+    if available < 3 * 1024**3 or shutil.disk_usage(path).free < scratch_reserve_bytes(seconds):
         raise ResourceBound()
 
 
@@ -225,7 +233,6 @@ def remove_derived_audio(work):
 
 
 def process_job(job, state, published, deadline):
-    resource_reserve(state)
     tool = Path('/srv/study-course-video-tool')
     asr_tool = Path('/srv/study-course-asr-tool')
     model_path = Path('/srv/study-course-asr-state/models/faster-whisper-small.en')
@@ -241,6 +248,7 @@ def process_job(job, state, published, deadline):
     seconds = entry.get('durationSeconds')
     if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= 21600:
         raise ValueError('INVALID_SOURCE_DURATION')
+    resource_reserve(state, seconds)
     receipt = read_json(model_path / 'download-manifest.json')
     model_file = next(row for row in receipt['files'] if row['name'] == 'model.bin')
     model = {'repository': receipt['repository'], 'revision': receipt['revision'], 'sha256': model_file['sha256']}
@@ -294,7 +302,7 @@ def process_job(job, state, published, deadline):
     env = {**clean_env(), 'HF_HUB_OFFLINE': '1', 'OMP_NUM_THREADS': '2'}
     chunks = []
     for start in range(0, duration_ms, 300000):
-        resource_reserve(state)
+        resource_reserve(state, seconds)
         end = min(duration_ms, start + 300000)
         vtt = work / f'chunk-{start}-{end}.vtt'
         if not cached_chunk(vtt, job['videoSha256'], start, end, model):
