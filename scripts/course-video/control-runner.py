@@ -182,6 +182,7 @@ def request_subtitle(root, manifest, subtitles, request, group, clock=None):
     # Each result has a fixed hash filename; no raw error/provider data leaves this boundary.
     results = root / 'subtitle-results'
     results.mkdir(mode=0o750, exist_ok=True)
+    results.chmod(0o750)
     if os.name == 'posix' and os.geteuid() == 0:
         os.chown(results, 0, group)
     publish(results / (digest + '.json'), result, group)
