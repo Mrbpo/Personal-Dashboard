@@ -29,7 +29,7 @@ export default async function SettingsPage() {
     { name: "私人访问", ready: hasCustomOwnerPassword() || Boolean(process.env.OWNER_ACCESS_KEY) || process.env.NODE_ENV !== "production", detail: hasCustomOwnerPassword() ? "自定义密码与恢复密钥已启用" : process.env.NODE_ENV === "production" ? "生成的访问密钥已启用" : "本地开发模式" },
   ];
   return (
-    <PageFrame eyebrow="PREFERENCES" title="个人设置" description="设置显示姓名和截止时间使用的时区。">
+    <PageFrame eyebrow="PREFERENCES" title="个人设置">
       <SettingsForm initial={settings} />
       <AccessPasswordSettings configured={hasCustomOwnerPassword()} />
       <ServiceSettings />

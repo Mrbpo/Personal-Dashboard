@@ -55,7 +55,7 @@ export function CourseAssistant({ courses }: { courses: Array<{ id: string; code
       <div className="relative p-4 md:p-5">
         <div className="flex items-start gap-2.5 border-b border-[#bca064]/30 pb-3">
           <LibraryBig className="mt-1 size-4 shrink-0 text-[#d8bc7a]" />
-          <div><p className="text-[10px] font-bold uppercase tracking-[.19em] text-[#c6aa6b]">Archive enquiry</p><h2 id="course-search-title" className="mt-0.5 text-lg font-semibold">资料检索与 AI 总结</h2><p className="mt-1 text-xs leading-5 text-white/58">查找 Canvas、Piazza 本地归档与日程，或直接要求按课程总结。</p></div>
+          <div><p className="text-[10px] font-bold uppercase tracking-[.19em] text-[#c6aa6b]">Archive enquiry</p><h2 id="course-search-title" className="mt-0.5 text-lg font-semibold">资料检索与 AI 总结</h2></div>
         </div>
 
         <label className="mt-4 flex items-center gap-2 text-xs text-white/70">课程

@@ -124,7 +124,7 @@ export function VocabularyPanel({ automatic, courses }: { automatic: AutoWord[];
 
   return <div className="space-y-5">
     <section className="rounded-2xl border bg-card p-5">
-      <div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Languages className="size-5" /></span><div><h2 className="text-lg font-semibold">加入生词</h2><p className="mt-1 text-sm text-muted-foreground">只需输入词汇和可选背景。AI 会在后台纠错、分类、生成音标并结合语境解释。</p></div></div>
+      <div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary"><Languages className="size-5" /></span><div><h2 className="text-lg font-semibold">加入生词</h2></div></div>
       <div className="mt-4 grid gap-3 md:grid-cols-[minmax(12rem,.7fr)_minmax(16rem,1.5fr)]">
         <label className="grid gap-1 text-sm font-medium">词汇框<input aria-label="生词" value={term} maxLength={100} onChange={(event) => setTerm(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); void add(); } }} placeholder="例如：inertia；按 Enter 直接保存" className="rounded-xl border bg-background p-3 font-normal" /></label>
         <label className="grid gap-1 text-sm font-medium">背景框<textarea aria-label="生词背景" value={background} maxLength={6000} rows={4} onChange={(event) => setBackground(event.target.value)} placeholder="粘贴这个词来自的句子或段落（可选）" className="rounded-xl border bg-background p-3 font-normal" /></label>

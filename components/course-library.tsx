@@ -56,7 +56,7 @@ export function CourseLibrary({ sources, timezone }: { sources: CourseSourceDeta
     <section className="archive-shelf overflow-hidden rounded-3xl border bg-card shadow-sm" aria-labelledby="course-library-title">
       <div className="archive-shelf-heading border-b p-5 md:p-6">
         <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
-          <div><p className="section-kicker">COURSE LIBRARY</p><h2 id="course-library-title" className="text-xl font-semibold md:text-2xl">课程资料与详细要求</h2><p className="mt-1 text-sm text-muted-foreground">选择一项即可阅读完整同步内容，不再把资料塞在页面侧栏。</p></div>
+          <div><p className="section-kicker">COURSE LIBRARY</p><h2 id="course-library-title" className="text-xl font-semibold md:text-2xl">课程资料与详细要求</h2></div>
           <div className="relative w-full lg:max-w-sm"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => { setQuery(event.target.value); setSelectedId(""); }} placeholder="搜索实验、notebook、作业要求…" className="h-11 rounded-xl pl-9" /></div>
         </div>
         <Tabs value={tab} onValueChange={(value) => { setTab(value); setSelectedId(""); }} className="mt-5">

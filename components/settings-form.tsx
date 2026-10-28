@@ -29,7 +29,6 @@ export function SettingsForm({ initial }: { initial: { timezone: string; display
       <div className="space-y-2">
         <Label htmlFor="display-name">显示姓名</Label>
         <Input id="display-name" autoComplete="nickname" maxLength={40} placeholder="你希望网站怎么称呼你" value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-        <p className="text-sm text-muted-foreground">用于首页简报和侧栏，可填写昵称。留空使用默认称呼。</p>
       </div>
       <div className="space-y-2">
         <Label htmlFor="timezone">时区</Label>

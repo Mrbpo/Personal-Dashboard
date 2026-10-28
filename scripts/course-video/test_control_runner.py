@@ -16,6 +16,20 @@ spec.loader.exec_module(runner)
 
 
 class ControlRunnerTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX file modes')
+    def test_status_directory_remains_readable_after_service_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = {'id': 'c552462f-78e5-4dcf-986e-46bef448bd52', 'action': 'subtitle',
+                       'videoSha256': 'a' * 64, 'requestedAt': datetime.now(timezone.utc).isoformat()}
+            previous = os.umask(0o077)
+            try:
+                runner.request_subtitle(root, {'entries': {}}, root / 'subtitles', request, 1000)
+            finally:
+                os.umask(previous)
+            self.assertEqual((root / 'subtitle-results').stat().st_mode & 0o777, 0o750)
+            self.assertEqual((root / 'subtitle-results' / ('a' * 64 + '.json')).stat().st_mode & 0o777, 0o640)
+
     def test_manual_subtitle_prioritizes_current_source_without_resetting_running_failed_or_budget_state(self):
         clock = datetime.now(timezone.utc)
         sha = 'a' * 64

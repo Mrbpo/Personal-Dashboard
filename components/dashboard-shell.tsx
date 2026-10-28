@@ -217,7 +217,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
 
           <RecordingSyncBanner />
           {loadError && <section className="mb-5 border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{loadError}</section>}
-          {loaded && !loadError && visibleCourses.length === 0 && <section className="parchment-panel mb-5 p-5"><p className="section-kicker">FIRST SYNC</p><h2 className="text-xl font-semibold">把 Quercus 课程读进本地数据库</h2><p className="mt-2 text-sm text-muted-foreground">读取课程、公告、Modules、作业、截止日期和提交状态；Token 仅留在服务器。</p><Button onClick={previewSync} disabled={syncing} className="mt-4"><RefreshCw className={syncing ? "animate-spin" : ""} />开始同步</Button></section>}
+          {loaded && !loadError && visibleCourses.length === 0 && <section className="parchment-panel mb-5 p-5"><p className="section-kicker">FIRST SYNC</p><h2 className="text-xl font-semibold">把 Quercus 课程读进本地数据库</h2><Button onClick={previewSync} disabled={syncing} className="mt-4"><RefreshCw className={syncing ? "animate-spin" : ""} />开始同步</Button></section>}
           {loaded && !loadError && visibleCourses.length > 0 && <div id="global-search" className="scroll-mt-20"><CourseAssistant courses={visibleCourses.map((course: {id:string;code:string})=>({id:course.id,code:course.code}))} /></div>}
 
           <div id="learning" className="grid scroll-mt-20 grid-cols-[minmax(0,1fr)] items-start gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(330px,24%)]">
@@ -275,7 +275,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
                       <p className="mt-1 text-sm font-medium leading-5">{change.title}</p>
                     </div>
                   ))}
-                  {recentChanges.length === 0 && <p className="text-sm leading-6 text-muted-foreground">最近没有会影响截止时间或任务有效性的变化。普通文本改动已自动隐藏。</p>}
+                  {recentChanges.length === 0 && <p className="text-sm leading-6 text-muted-foreground">暂无影响课程安排的新变更。</p>}
                 </div>
                 <Button asChild variant="outline" className="mt-5 w-full rounded-xl"><Link href="/changes">查看所有变更</Link></Button>
               </section>
