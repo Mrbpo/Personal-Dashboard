@@ -80,7 +80,7 @@ export async function backgroundStatus(owner:string){
  });
  for(const id of ['recordings','subtitles','credentials','backup','status'] as const){
   const host=snapshot?.services[id],busy=!!host?.running||(id==='recordings'&&(recordings?.state==='running'||!!recordings?.pending));
-  const lastRequest=host?.result==='exit-code'||host?.result==='timeout';
+  const lastRequest=!!host?.result&&host.result!=='success';
   tasks.push({id,label:labels[id][0],schedule:labels[id][1],configured:!!host?.configured,automatic:!!host?.enabled,
    state:!host?'unavailable':busy?'running':lastRequest?'failed':id==='recordings'?recordings?.state??'idle':host.finishedAt?'complete':'idle',
    queued:id==='subtitles'?(snapshot?.subtitles.states.pending??0):0,running:busy?1:0,failed:id==='subtitles'?(snapshot?.subtitles.states.failed??0):lastRequest?1:0,

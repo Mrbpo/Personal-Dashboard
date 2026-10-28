@@ -171,6 +171,9 @@ def snapshot(root=ROOT, state=STATE, published=PUBLISHED):
         if timer:
             scheduled = systemd(timer)
             value.update(enabled=scheduled['enabled'], nextRunAt=scheduled['nextRunAt'], lastRunAt=scheduled['lastRunAt'])
+        request = worker.read_json(root / ('task-result-' + task + '.json'), {})
+        if request.get('accepted') is False and request.get('at', '') > (value.get('startedAt') or ''):
+            value['result'] = 'start-failed'
         services[task] = value
     services['status']['running'] = False  # This snapshot is published immediately before its unit exits.
     services['subtitles']['enabled'] = systemd('course-subtitle-worker.path')['enabled']

@@ -24,7 +24,7 @@ export function BackgroundTasksSettings({timezone='America/Toronto'}:{timezone?:
   if(busy)return;setBusy(task);setMessage('');
   try{
    const response=await fetch('/api/settings/background-tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task})});const result=await response.json();
-   if(!response.ok)throw new Error(result.error||'任务未能提交');setMessage(result.existing?'已有任务或待办，未重复提交。':'已提交执行请求。');await load();
+   if(!response.ok)throw new Error(result.error||'任务未能提交');setMessage(!result.accepted?'另一项请求正在提交，本次未提交，请稍后再试。':result.existing?'已有任务或待办，未重复提交。':'已提交执行请求。');await load();
   }catch(reason){setError(reason instanceof Error?reason.message:'任务未能提交');}finally{setBusy('');}
  }
  const subtitles=data?.subtitles;

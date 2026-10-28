@@ -13,6 +13,19 @@ spec.loader.exec_module(tasks)
 
 
 class BackgroundTasksTest(unittest.TestCase):
+    def test_failed_host_start_is_visible_instead_of_previous_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'task-result-backup.json').write_text(json.dumps({'accepted': False, 'at': datetime.now(timezone.utc).isoformat()}))
+            unit = {'configured': True, 'running': False, 'result': 'success', 'enabled': True,
+                    'startedAt': None, 'finishedAt': None, 'nextRunAt': None, 'lastRunAt': None, 'workerLimit': 1}
+            original = tasks.worker.read_json
+            def read(path, default=None):
+                return {'entries': {}} if str(path) == '/srv/study-course-recordings/manifest.json' else original(path, default)
+            with patch.object(tasks, 'systemd', side_effect=lambda _: dict(unit)), patch.object(tasks.worker, 'read_json', side_effect=read):
+                result = tasks.snapshot(root, root / 'state', root / 'published')
+            self.assertEqual(result['services']['backup']['result'], 'start-failed')
+
     def test_request_accepts_only_fresh_fixed_unit_actions(self):
         clock = datetime.now(timezone.utc)
         request = {'id': 'c552462f-78e5-4dcf-986e-46bef448bd52', 'task': 'subtitles', 'requestedAt': clock.isoformat()}
