@@ -62,6 +62,15 @@ class ControlRunnerTest(unittest.TestCase):
             before = (clock + timedelta(hours=3)).isoformat()
             self.assertEqual(submit({'state': 'pending', 'notBefore': before})['state'], 'deferred')
             self.assertEqual(runner.read_json(root / 'subtitle-queue.json', {})['jobs'][0]['notBefore'], before)
+            (root / 'subtitle-pending').unlink(missing_ok=True)
+            self.assertEqual(submit({'state': 'pending', 'notBefore': before, 'reasonCode': 'SUBTITLE_RESOURCE_RESERVE',
+                                     'checkpoint': 'saved', 'attempts': 3})['state'], 'queued')
+            resumed = runner.read_json(root / 'subtitle-queue.json', {})['jobs'][0]
+            self.assertIsNone(resumed['notBefore'])
+            self.assertEqual(resumed['checkpoint'], 'saved')
+            self.assertEqual(resumed['attempts'], 3)
+            self.assertTrue((root / 'subtitle-pending').exists())
+            self.assertEqual(submit({'state': 'pending', 'notBefore': before, 'reasonCode': 'SUBTITLE_BUDGET_DEFERRED'})['state'], 'deferred')
             stale = {**request, 'videoSha256': 'c' * 64}
             self.assertEqual(runner.request_subtitle(root, manifest, subtitles, stale, 1000, clock)['reasonCode'], 'SUBTITLE_SOURCE_UNAVAILABLE')
 
