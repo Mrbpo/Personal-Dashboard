@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh website task progress each minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=study-background-status.service
+
+[Install]
+WantedBy=timers.target

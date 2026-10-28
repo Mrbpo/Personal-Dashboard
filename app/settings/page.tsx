@@ -8,6 +8,7 @@ import { DeploymentSettings } from '@/components/deployment-settings';
 import { AccessPasswordSettings } from '@/components/access-password-settings';
 import { GmailImportSettings } from '@/components/gmail-import-settings';
 import { AiFeedbackSettings } from '@/components/ai-feedback-settings';
+import { BackgroundTasksSettings } from '@/components/background-tasks-settings';
 import { requireOwnerPage } from "@/lib/authz";
 import { hasCustomOwnerPassword } from '@/lib/owner-password';
 import { getSettings, listCourseSettings } from "@/lib/repository";
@@ -31,6 +32,7 @@ export default async function SettingsPage() {
   return (
     <PageFrame eyebrow="PREFERENCES" title="个人设置">
       <SettingsForm initial={settings} />
+      <BackgroundTasksSettings timezone={settings.timezone} />
       <AccessPasswordSettings configured={hasCustomOwnerPassword()} />
       <ServiceSettings />
       <GmailImportSettings />

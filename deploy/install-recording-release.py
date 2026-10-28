@@ -35,11 +35,13 @@ def main():
     snapshot.mkdir(parents=True, exist_ok=True, mode=0o700)
     tools = ('archive.py', 'interactive-entrypoint.sh', 'server-run.sh', 'server-catalog.py',
              'control-runner.py', 'subtitle-worker.py', 'export-player-catalog.py',
-             'refresh-playback-credentials.py')
+             'refresh-playback-credentials.py', 'background-tasks.py')
     units = ('course-video-control.service', 'course-video-control.path', 'course-video-daily.service',
              'course-video-daily.timer', 'course-subtitle-worker.service', 'course-subtitle-worker.path',
              'course-recording-credentials.service', 'course-recording-credentials.timer')
     units += ('course-subtitle-request.path', 'course-subtitle-request.service')
+    units += ('study-background-status.service', 'study-background-status.timer',
+              'study-background-request.path', 'study-background-request.service')
     inventory = snapshot / 'host-files.json'
     if not inventory.exists():
         records = []

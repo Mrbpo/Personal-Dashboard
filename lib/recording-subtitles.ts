@@ -1,6 +1,7 @@
 import {readFile,realpath} from 'node:fs/promises';
 import {resolve,relative,isAbsolute} from 'node:path';
 import {z} from 'zod';
+export const SUBTITLE_TRANSLATION_DAILY_LIMIT=40;
 import type {RecordingObject} from './recording-catalog.ts';
 import {validateASRProvenance,validateASRAbsoluteCues} from './kernel/recording-asr-provenance.ts';
 

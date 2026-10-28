@@ -4,7 +4,7 @@ import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {parseSubtitles} from '../lib/kernel/recording-transcript.ts';
 import {validateASRProvenance,validateASRAbsoluteCues} from '../lib/kernel/recording-asr-provenance.ts';
-import {validateSubtitleBundle,type SubtitleBundle} from '../lib/recording-subtitles.ts';
+import {validateSubtitleBundle,type SubtitleBundle,SUBTITLE_TRANSLATION_DAILY_LIMIT} from '../lib/recording-subtitles.ts';
 
 const args=process.argv.slice(2),option=(name:string)=>{const index=args.indexOf(name);return index<0?undefined:args[index+1];};
 const input=option('--input'),output=option('--output-dir'),videoSha=option('--video-sha256');
@@ -65,7 +65,7 @@ for(let start=0;start<bundle.cues.length;start+=60){
  let response:Response;
  try{
   response=runtimeBudget?
-   await runtimeBudget.paidOpenAI('responses',body,AbortSignal.timeout(120000),{kind:'recording-subtitle-translation',dailyLimit:40}):
+   await runtimeBudget.paidOpenAI('responses',body,AbortSignal.timeout(120000),{kind:'recording-subtitle-translation',dailyLimit:SUBTITLE_TRANSLATION_DAILY_LIMIT}):
    await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},
     body:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
  }catch(error){

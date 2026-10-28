@@ -14,6 +14,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -106,6 +107,15 @@ def update_job(root, selected, state, reason, group, wake=True, not_before=None)
         atomic(root / 'subtitle-queue.json', queue, group)
         if wake and any(row.get('state') == 'pending' for row in queue['jobs']):
             (root / 'subtitle-pending').touch(mode=0o600)
+
+
+def update_progress(root, selected, **progress):
+    with queue_lock(root):
+        queue = read_json(root / 'subtitle-queue.json', {'jobs': []})
+        for row in queue['jobs']:
+            if row.get('videoSha256') == selected['videoSha256'] and row.get('state') == 'running':
+                row['progress'] = {**row.get('progress', {}), **progress, 'updatedAt': stamp()}
+        atomic(root / 'subtitle-queue.json', queue, 1000)
 
 
 def cached_chunk(vtt, video_sha, start_ms, end_ms, model):
@@ -218,9 +228,21 @@ def scratch_reserve_bytes(seconds):
     return 3 * 1024**3 + math.ceil(seconds) * 32000 * 3 + 300 * 32000 + 512 * 1024**2
 
 
+def memory_available():
+    return next(int(row.split()[1]) * 1024 for row in Path('/proc/meminfo').read_text().splitlines()
+                if row.startswith('MemAvailable:'))
+
+
+def parallel_capacity(requested, available=None, cpus=None):
+    if requested not in (1, 2):
+        raise ValueError('INVALID_SUBTITLE_CONCURRENCY')
+    available = memory_available() if available is None else available
+    cpus = (os.cpu_count() or 1) if cpus is None else cpus
+    return 2 if requested == 2 and cpus >= 4 and available >= 4 * 1024**3 else 1
+
+
 def resource_reserve(path, seconds):
-    available = next(int(row.split()[1]) * 1024 for row in Path('/proc/meminfo').read_text().splitlines()
-                     if row.startswith('MemAvailable:'))
+    available = memory_available()
     if available < 3 * 1024**3 or shutil.disk_usage(path).free < scratch_reserve_bytes(seconds):
         raise ResourceBound()
 
@@ -232,7 +254,7 @@ def remove_derived_audio(work):
             path.unlink()
 
 
-def process_job(job, state, published, deadline):
+def process_job(job, state, published, deadline, progress=lambda **_: None):
     tool = Path('/srv/study-course-video-tool')
     asr_tool = Path('/srv/study-course-asr-tool')
     model_path = Path('/srv/study-course-asr-state/models/faster-whisper-small.en')
@@ -249,6 +271,7 @@ def process_job(job, state, published, deadline):
     if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= 21600:
         raise ValueError('INVALID_SOURCE_DURATION')
     resource_reserve(state, seconds)
+    progress(stage='audio', durationMs=round(seconds * 1000))
     receipt = read_json(model_path / 'download-manifest.json')
     model_file = next(row for row in receipt['files'] if row['name'] == 'model.bin')
     model = {'repository': receipt['repository'], 'revision': receipt['revision'], 'sha256': model_file['sha256']}
@@ -260,6 +283,7 @@ def process_job(job, state, published, deadline):
         if digest(model_path / 'model.bin') != model['sha256']:
             raise ValueError('MODEL_PROOF_UNAVAILABLE')
         atomic(state / 'model-proof.json', model_identity)
+    progress(stage='audio', modelRevision=model['revision'])
     # Same verified model artifact used by the existing ASR sample; never download a model here.
     work = state / job['videoSha256'] / model['revision']
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -301,6 +325,7 @@ def process_job(job, state, published, deadline):
     duration_ms = proof['durationMs']
     env = {**clean_env(), 'HF_HUB_OFFLINE': '1', 'OMP_NUM_THREADS': '2'}
     chunks = []
+    progress(stage='transcription')
     for start in range(0, duration_ms, 300000):
         resource_reserve(state, seconds)
         end = min(duration_ms, start + 300000)
@@ -330,8 +355,8 @@ def process_job(job, state, published, deadline):
                            'subtitleSha256': digest(vtt), 'computeType': 'int8', 'language': 'en',
                            'clipStartMs': start, 'clipEndMs': end, 'timestampBasis': 'clip-relative', 'silence': True})
         chunks.append((vtt, start, end))
-    inputs = work / 'translation-input'
-    inputs.mkdir(exist_ok=True, mode=0o750)
+        progress(stage='transcription', completedChunks=len(chunks), englishCoveredMs=end)
+    inputs = translation_input_directory(work)
     english = inputs / 'source.vtt'
     count = merge_chunks(chunks, english, duration_ms)
     provenance = {'schemaVersion': 1, 'method': 'local-asr', 'model': model['repository'],
@@ -360,6 +385,7 @@ def process_job(job, state, published, deadline):
             '--provenance', '/input/source.vtt.provenance.json', '--output-dir', '/output', '--video-sha256', job['videoSha256'],
             '--source-method', 'local-asr', '--duration-seconds', str(seconds), '--budget-mode', 'runtime']
     for calls, usd in [('0', '0'), ('30', '1')]:
+        progress(stage='publish_english' if calls == '0' else 'translation')
         container = 'study-subtitle-' + uuid.uuid4().hex
         command_args = base[:3] + ['--name', container] + base[3:] + ['--max-calls', calls, '--max-usd', usd]
         try:
@@ -377,6 +403,8 @@ def process_job(job, state, published, deadline):
             # are rebuildable and would otherwise exhaust the small server disk.
             remove_derived_audio(work)
         if result.returncode:
+            if calls == '0' and b'EACCES' in result.stderr:
+                raise ValueError('SUBTITLE_INPUT_UNREADABLE')
             if b'SUBTITLE_RUNTIME_BUDGET_DEFERRED' in result.stderr:
                 ledger = read_json(output / (job['videoSha256'] + '.translation-ledger.json'), {})
                 retry_at = budget_retry_at(ledger, digest(english))
@@ -404,9 +432,40 @@ def publish_bundle(candidate, published, video_sha):
         os.chown(published, 0, 1000)
 
 
+def translation_input_directory(work):
+    inputs = work / 'translation-input'
+    inputs.mkdir(exist_ok=True, mode=0o750)
+    inputs.chmod(0o750)  # The root service's umask must not remove the container's group access.
+    return inputs
+
+
+def run_batch(root, jobs, state, published, max_seconds, slots):
+    with ThreadPoolExecutor(max_workers=slots) as executor:
+        futures = [executor.submit(run_job, root, job, state, published, max_seconds) for job in jobs]
+        return [future.result() for future in futures]
+
+
+def wake_after_budget(root, outcomes):
+    if 'budget' not in outcomes or 'resource' in outcomes:
+        return
+    with queue_lock(root):
+        queue = read_json(root / 'subtitle-queue.json', {'jobs': []})
+        for row in queue['jobs']:
+            if row.get('state') != 'pending':
+                continue
+            try:
+                eligible = not row.get('notBefore') or datetime.fromisoformat(row['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
+            except (ValueError, TypeError, AttributeError):
+                eligible = False
+            if eligible:
+                (root / 'subtitle-pending').touch(mode=0o600)
+                break
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--max-seconds', type=int, default=1800)
+    parser.add_argument('--workers', type=int, choices=(1, 2), default=1)
     args = parser.parse_args()
     if not 60 <= args.max_seconds <= 1800:
         parser.error('max-seconds must be 60..1800')
@@ -424,26 +483,45 @@ def main():
             return
         with queue_lock(root):
             queue = read_json(root / 'subtitle-queue.json', {'schemaVersion': 1, 'jobs': []})
-            job = claim_job(queue)
+            slots = parallel_capacity(args.workers)
+            jobs = []
+            for _ in range(slots):
+                job = claim_job(queue)
+                if job is not None:
+                    jobs.append(job)
             atomic(root / 'subtitle-queue.json', queue, 1000)
+            atomic(root / 'subtitle-capacity.json', {'configured': args.workers, 'admitted': slots,
+                                                   'startedAt': stamp()}, 1000)
             (root / 'subtitle-pending').unlink(missing_ok=True)
-        if job is None:
+        if not jobs:
             return
-        try:
-            process_job(job, state, published, time.monotonic() + args.max_seconds)
-            update_job(root, job, 'completed', 'SUBTITLES_COMPLETED', 1000)
-        except TimeBound:
-            update_job(root, job, 'pending', 'SUBTITLE_RESOURCE_BOUND', 1000)
-        except ResourceBound:
-            # Do not create a PathExists spin while memory/disk reserve remains low.
-            # The next daily/manual sync wakes the queue after its notBefore time.
-            update_job(root, job, 'pending', 'SUBTITLE_RESOURCE_RESERVE', 1000, wake=False)
-        except BudgetDeferred as error:
-            update_job(root, job, 'pending', 'SUBTITLE_BUDGET_DEFERRED', 1000,
-                       wake=False, not_before=error.retry_at)
-        except Exception as error:
-            code = str(error) if re.fullmatch('[A-Z_]{3,80}', str(error)) else 'SUBTITLE_JOB_FAILED'
-            update_job(root, job, 'failed', code, 1000)
+        outcomes = run_batch(root, jobs, state, published, args.max_seconds, slots)
+        # A translation deferral must not stop unrelated English transcriptions.
+        wake_after_budget(root, outcomes)
+
+
+def run_job(root, job, state, published, max_seconds):
+    try:
+        process_job(job, state, published, time.monotonic() + max_seconds,
+                    lambda **values: update_progress(root, job, **values))
+        update_job(root, job, 'completed', 'SUBTITLES_COMPLETED', 1000)
+        return 'complete'
+    except TimeBound:
+        update_job(root, job, 'pending', 'SUBTITLE_RESOURCE_BOUND', 1000)
+        return 'time'
+    except ResourceBound:
+        # Do not create a PathExists spin while memory/disk reserve remains low.
+        # The next daily/manual sync wakes the queue after its notBefore time.
+        update_job(root, job, 'pending', 'SUBTITLE_RESOURCE_RESERVE', 1000, wake=False)
+        return 'resource'
+    except BudgetDeferred as error:
+        update_job(root, job, 'pending', 'SUBTITLE_BUDGET_DEFERRED', 1000,
+                   wake=False, not_before=error.retry_at)
+        return 'budget'
+    except Exception as error:
+        code = str(error) if re.fullmatch('[A-Z_]{3,80}', str(error)) else 'SUBTITLE_JOB_FAILED'
+        update_job(root, job, 'failed', code, 1000)
+        return 'failed'
 
 
 if __name__ == '__main__':
