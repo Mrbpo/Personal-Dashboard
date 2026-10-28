@@ -2,10 +2,13 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import os
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from contextlib import nullcontext
 
 spec = importlib.util.spec_from_file_location('subtitle_worker', Path(__file__).with_name('subtitle-worker.py'))
 worker = importlib.util.module_from_spec(spec)
@@ -13,6 +16,63 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleWorkerTests(unittest.TestCase):
+    def test_budget_wait_does_not_stall_other_ready_english_jobs_or_spin_on_global_resource_shortage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            delayed = {'state': 'pending', 'notBefore': future}
+            ready = {'state': 'pending'}
+            with patch.object(worker, 'queue_lock', side_effect=lambda *_: nullcontext()):
+                (root / 'subtitle-queue.json').write_text(json.dumps({'jobs': [delayed, ready]}))
+                worker.wake_after_budget(root, ['budget'])
+                self.assertTrue((root / 'subtitle-pending').exists())
+                (root / 'subtitle-pending').unlink()
+                worker.wake_after_budget(root, ['budget', 'resource'])
+                self.assertFalse((root / 'subtitle-pending').exists())
+                (root / 'subtitle-queue.json').write_text(json.dumps({'jobs': [delayed]}))
+                worker.wake_after_budget(root, ['budget'])
+                self.assertFalse((root / 'subtitle-pending').exists())
+
+    def test_parallel_capacity_reserves_headroom_and_caps_at_two(self):
+        self.assertEqual(worker.parallel_capacity(2, 4 * 1024**3, 4), 2)
+        self.assertEqual(worker.parallel_capacity(2, 4 * 1024**3 - 1, 4), 1)
+        self.assertEqual(worker.parallel_capacity(2, 8 * 1024**3, 2), 1)
+        self.assertEqual(worker.parallel_capacity(1, 8 * 1024**3, 8), 1)
+        with self.assertRaises(ValueError):
+            worker.parallel_capacity(3, 8 * 1024**3, 8)
+
+    def test_two_jobs_overlap_and_one_failure_does_not_cancel_the_other(self):
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        counts = {'active': 0, 'maximum': 0}
+        def process(job, *_):
+            with lock:
+                counts['active'] += 1
+                counts['maximum'] = max(counts['maximum'], counts['active'])
+            try:
+                barrier.wait(timeout=3)
+                if job['videoSha256'] == 'a' * 64:
+                    raise ValueError('SAMPLE_FAILURE')
+            finally:
+                with lock:
+                    counts['active'] -= 1
+        jobs = [{'videoSha256': value * 64} for value in 'ab']
+        with patch.object(worker, 'process_job', side_effect=process), patch.object(worker, 'update_job') as update:
+            worker.run_batch(Path('.'), jobs, Path('.'), Path('.'), 60, 2)
+        self.assertEqual(counts['maximum'], 2)
+        outcomes = {call.args[1]['videoSha256']: call.args[2] for call in update.call_args_list}
+        self.assertEqual(outcomes, {'a' * 64: 'failed', 'b' * 64: 'completed'})
+
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX umask')
+    def test_translation_input_is_group_readable_under_root_service_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = os.umask(0o077)
+            try:
+                path = worker.translation_input_directory(Path(directory))
+            finally:
+                os.umask(previous)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o750)
+
     def test_resource_admission_uses_bounded_audio_scratch_not_fixed_video_space(self):
         required = worker.scratch_reserve_bytes(3600)
         self.assertGreater(required, 3 * 1024**3)

@@ -1,0 +1,10 @@
+[Unit]
+Description=Publish website background task progress
+
+[Service]
+Type=oneshot
+User=root
+NoNewPrivileges=yes
+ExecStart=/usr/bin/python3 /srv/study-course-video-tool/background-tasks.py
+UMask=0077
+TimeoutStartSec=50
