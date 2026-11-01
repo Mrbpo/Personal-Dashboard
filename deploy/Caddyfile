@@ -13,6 +13,35 @@ www.{$SITE_DOMAIN} {
     X-Frame-Options SAMEORIGIN
     Strict-Transport-Security "max-age=31536000"
   }
+  redir /hermes /hermes/ 308
+  handle_path /hermes/* {
+    @unsafe_origin {
+      not method GET HEAD OPTIONS
+      not header Origin https://{$SITE_DOMAIN}
+    }
+    @unsafe_socket {
+      header Upgrade websocket
+      not header Origin https://{$SITE_DOMAIN}
+    }
+    respond @unsafe_origin 403
+    respond @unsafe_socket 403
+    # This read-only endpoint uses the same apiOwner login check as the website.
+    forward_auth web:3000 {
+      uri /api/codex-maintenance
+      @denied status 401 403
+      handle_response @denied {
+        @page header Accept *text/html*
+        redir @page /login 303
+        respond 401
+      }
+    }
+    reverse_proxy host.docker.internal:9119 {
+      header_up Authorization "Bearer {$HERMES_UPSTREAM_AUTH}"
+      header_up X-Forwarded-Prefix /hermes
+      header_up X-Forwarded-Host {host}
+      header_up X-Forwarded-Proto https
+    }
+  }
   handle_path /recordings/authorize/* {
     forward_auth web:3000 {
       uri /api/recordings/authorization-check
