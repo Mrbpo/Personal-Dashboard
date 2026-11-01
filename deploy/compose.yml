@@ -73,7 +73,11 @@ services:
   proxy:
     image: caddy:2
     restart: unless-stopped
-    env_file: /srv/study/runtime.env
+    env_file:
+      - /srv/study/runtime.env
+      - path: /srv/study/hermes-proxy.env
+        required: false
+    extra_hosts: ['host.docker.internal:host-gateway']
     ports: ['80:80','443:443']
     volumes:
       - /srv/study/Caddyfile:/etc/caddy/Caddyfile:ro
