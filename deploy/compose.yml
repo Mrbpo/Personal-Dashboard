@@ -81,6 +81,7 @@ services:
     ports: ['80:80','443:443']
     volumes:
       - /srv/study/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /run/study-terminal:/run/study-terminal:ro
       - caddy_data:/data
       - caddy_config:/config
 volumes:

@@ -13,6 +13,34 @@ www.{$SITE_DOMAIN} {
     X-Frame-Options SAMEORIGIN
     Strict-Transport-Security "max-age=31536000"
   }
+  redir /terminal /terminal/ 308
+  handle /terminal/* {
+    @terminal_unsafe_origin {
+      not method GET HEAD OPTIONS
+      not header Origin https://{$SITE_DOMAIN}
+    }
+    @terminal_unsafe_socket {
+      header Upgrade websocket
+      not header Origin https://{$SITE_DOMAIN}
+    }
+    respond @terminal_unsafe_origin 403
+    respond @terminal_unsafe_socket 403
+    forward_auth web:3000 {
+      uri /api/codex-maintenance
+      header_up -Upgrade
+      header_up -Connection
+      @denied status 401 403
+      handle_response @denied {
+        @page header Accept *text/html*
+        redir @page /login 303
+        respond 401
+      }
+    }
+    reverse_proxy unix//run/study-terminal/ttyd.sock {
+      header_up X-WEBAUTH-USER website-owner
+      header_up -Authorization
+    }
+  }
   redir /hermes /hermes/ 308
   handle_path /hermes/* {
     @unsafe_origin {

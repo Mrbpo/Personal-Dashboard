@@ -1,0 +1,19 @@
+[Unit]
+Description=Website administrator terminal using ttyd
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+RuntimeDirectory=study-terminal
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+Environment=PATH=/root/.local/bin:/opt/node22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/ttyd -W -O -H X-WEBAUTH-USER -b /terminal -i /run/study-terminal/ttyd.sock /bin/bash -l
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
