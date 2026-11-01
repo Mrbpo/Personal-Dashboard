@@ -19,6 +19,7 @@ import {
   MessageSquareText,
   RefreshCw,
   Settings,
+  Terminal,
   Video,
 } from "lucide-react";
 import { CourseAssistant } from "@/components/course-assistant";
@@ -63,6 +64,7 @@ const nav = [
   { href: "/#shortcuts", label: "快捷入口", icon: Grid2X2 },
   { href: "/changes", label: "最近变更", icon: RefreshCw },
   { href: "/hermes/", label: "Hermes", icon: Bot },
+  { href: "/terminal/", label: "SSH 终端", icon: Terminal },
   { href: "/settings", label: "设置", icon: Settings },
 ];
 
@@ -200,7 +202,7 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
         <SidebarHeader className="px-3 pb-2 pt-3"><div className="sidebar-brand-plaque"><Landmark className="absolute left-[1.08rem] top-1/2 z-10 size-3.5 -translate-y-1/2 text-[#d8bd7d]" /><div><p className="font-serif font-semibold tracking-wide">Study Cabinet</p><p className="text-[10px] uppercase tracking-[.14em] text-sidebar-foreground/50">Personal observatory</p></div></div></SidebarHeader>
         <SidebarContent>
           <SidebarGroup className="py-2"><SidebarGroupLabel>总控台</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{nav.map((item, index) => {
-            const NavigationLink = item.href === "/hermes/" ? "a" : Link;
+            const NavigationLink = item.href === "/hermes/" || item.href === "/terminal/" ? "a" : Link;
             return <SidebarMenuItem key={item.href}><SidebarMenuButton asChild isActive={index === 0} tooltip={item.label}><NavigationLink href={item.href}><item.icon /><span>{item.label}</span></NavigationLink></SidebarMenuButton></SidebarMenuItem>;
           })}</SidebarMenu></SidebarGroupContent></SidebarGroup>
           <SidebarGroup className="py-2"><SidebarGroupLabel>本学期课程</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{visibleCourses.map((course: any) => <SidebarMenuItem key={course.code}><SidebarMenuButton asChild tooltip={course.name}><Link href={"/courses/" + course.id}><span className="course-tile" style={{ backgroundColor: course.color }} /><span>{course.displayCode}</span></Link></SidebarMenuButton><SidebarMenuBadge>{course.count}</SidebarMenuBadge></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup>
