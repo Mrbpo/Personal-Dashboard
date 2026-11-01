@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
+  Bot,
   CalendarDays,
   Check,
   LayoutDashboard,
@@ -61,6 +62,7 @@ const nav = [
   { href: "/#ai-usage", label: "AI 用量", icon: Cpu },
   { href: "/#shortcuts", label: "快捷入口", icon: Grid2X2 },
   { href: "/changes", label: "最近变更", icon: RefreshCw },
+  { href: "/hermes/", label: "Hermes", icon: Bot },
   { href: "/settings", label: "设置", icon: Settings },
 ];
 
@@ -197,7 +199,10 @@ export function DashboardShell({ displayName, timezone }: { displayName: string;
       <Sidebar className="border-r-0 bg-[linear-gradient(90deg,rgba(31,47,43,.98),rgba(48,70,61,.90)),url('/assets/vic3-theme/header-pattern.png'),url('/assets/vic3-theme/sidebar-bg.png')] bg-[position:center,right_center,center_top] bg-[size:100%_100%,auto_100%,100%_auto] bg-no-repeat [background-blend-mode:normal,soft-light,normal]" variant="sidebar">
         <SidebarHeader className="px-3 pb-2 pt-3"><div className="sidebar-brand-plaque"><Landmark className="absolute left-[1.08rem] top-1/2 z-10 size-3.5 -translate-y-1/2 text-[#d8bd7d]" /><div><p className="font-serif font-semibold tracking-wide">Study Cabinet</p><p className="text-[10px] uppercase tracking-[.14em] text-sidebar-foreground/50">Personal observatory</p></div></div></SidebarHeader>
         <SidebarContent>
-          <SidebarGroup className="py-2"><SidebarGroupLabel>总控台</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{nav.map((item, index) => <SidebarMenuItem key={item.href}><SidebarMenuButton asChild isActive={index === 0} tooltip={item.label}><Link href={item.href}><item.icon /><span>{item.label}</span></Link></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup>
+          <SidebarGroup className="py-2"><SidebarGroupLabel>总控台</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{nav.map((item, index) => {
+            const NavigationLink = item.href === "/hermes/" ? "a" : Link;
+            return <SidebarMenuItem key={item.href}><SidebarMenuButton asChild isActive={index === 0} tooltip={item.label}><NavigationLink href={item.href}><item.icon /><span>{item.label}</span></NavigationLink></SidebarMenuButton></SidebarMenuItem>;
+          })}</SidebarMenu></SidebarGroupContent></SidebarGroup>
           <SidebarGroup className="py-2"><SidebarGroupLabel>本学期课程</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{visibleCourses.map((course: any) => <SidebarMenuItem key={course.code}><SidebarMenuButton asChild tooltip={course.name}><Link href={"/courses/" + course.id}><span className="course-tile" style={{ backgroundColor: course.color }} /><span>{course.displayCode}</span></Link></SidebarMenuButton><SidebarMenuBadge>{course.count}</SidebarMenuBadge></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup>
         </SidebarContent>
         <SidebarFooter className="px-3 pb-3"><div className="sidebar-footer-plaque"><p className="truncate text-sm font-medium">{displayName}</p><p className="text-[10px] uppercase tracking-[.12em] text-sidebar-foreground/50">Private archive</p></div></SidebarFooter>
