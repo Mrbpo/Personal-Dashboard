@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {validateSubtitleBundle,subtitleMetadata,renderSubtitleVtt,type SubtitleBundle} from '../lib/recording-subtitles.ts';
+import {validateSubtitleBundle,subtitleMetadata,renderSubtitleVtt,SUBTITLE_TRANSLATION_DAILY_LIMIT,type SubtitleBundle} from '../lib/recording-subtitles.ts';
+test('subtitle translation daily request allowance is 20000, not a monetary limit',()=>{
+ assert.equal(SUBTITLE_TRANSLATION_DAILY_LIMIT,20000);
+});
 const hash='a'.repeat(64);
 function bundle():SubtitleBundle{return {schemaVersion:1,videoSha256:hash,source:{subtitleSha256:'b'.repeat(64),method:'platform-caption',model:null,
  clipStartMs:600000,clipEndMs:900000,timestampBasis:'source-absolute'},translation:{model:'gpt-5.4-mini',promptVersion:'subtitle-zh-v1'},
