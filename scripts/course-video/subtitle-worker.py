@@ -20,6 +20,8 @@ from pathlib import Path
 
 SHA = re.compile(r'^[a-f0-9]{64}$')
 ENTRY = re.compile(r'^[01]_[A-Za-z0-9]+$')
+WORD_TIMING_PROFILE = 'word-pause-v1'
+WORD_TIMING_CONFIG = {'maxCueSeconds': 7.0, 'maxCueWords': 14, 'pauseSeconds': 0.65}
 
 
 def stamp():
@@ -118,9 +120,36 @@ def update_progress(root, selected, **progress):
         atomic(root / 'subtitle-queue.json', queue, 1000)
 
 
-def cached_chunk(vtt, video_sha, start_ms, end_ms, model):
+def timing_profile():
+    profile = os.environ.get('COURSE_VIDEO_SUBTITLE_TIMING_PROFILE', 'legacy')
+    if profile not in ('legacy', WORD_TIMING_PROFILE):
+        raise ValueError('INVALID_SUBTITLE_TIMING_PROFILE')
+    return profile
+
+
+def asr_work_directory(state, video_sha, revision, profile):
+    if profile not in ('legacy', WORD_TIMING_PROFILE):
+        raise ValueError('INVALID_SUBTITLE_TIMING_PROFILE')
+    base = state / video_sha / revision
+    return base if profile == 'legacy' else base / profile
+
+
+def cached_chunk(vtt, video_sha, start_ms, end_ms, model, profile='legacy'):
     try:
         proof = read_json(vtt.with_suffix('.vtt.provenance.json'), {})
+        if proof.get('timingProfile', 'legacy') != profile:
+            return False
+        if profile == WORD_TIMING_PROFILE:
+            words_path = vtt.with_suffix('.vtt.words.json')
+            if (proof.get('timingConfig') != WORD_TIMING_CONFIG or
+                    not words_path.is_file() or proof.get('wordEvidenceSha256') != digest(words_path)):
+                return False
+            words = read_json(words_path)
+            if (words.get('timingProfile') != profile or words.get('sourceVideoSha256') != video_sha or
+                    words.get('sourceAudioSha256') != proof.get('sourceAudioSha256') or
+                    words.get('clipStartMs') != start_ms or words.get('clipEndMs') != end_ms or
+                    words.get('timestampBasis') != 'clip-relative'):
+                return False
         return (vtt.is_file() and proof.get('sourceVideoSha256') == video_sha and
                 proof.get('subtitleSha256') == digest(vtt) and proof.get('model') == model['repository'] and
                 proof.get('modelRevision') == model['revision'] and proof.get('modelSha256') == model['sha256'] and
@@ -164,6 +193,45 @@ def merge_chunks(chunks, destination, duration_ms):
         raise ValueError('NO_SPEECH_DETECTED')
     destination.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return count
+
+
+def merge_word_evidence(chunks, destination, duration_ms, video_sha, audio_sha):
+    """Keep observed word locations and cue/word bindings across chunk offsets."""
+    merged = {'schemaVersion': 1, 'timingProfile': WORD_TIMING_PROFILE,
+              'sourceVideoSha256': video_sha, 'sourceAudioSha256': audio_sha,
+              'clipStartMs': 0, 'clipEndMs': duration_ms, 'timestampBasis': 'source-absolute',
+              'chunks': [], 'words': [], 'cues': []}
+    for path, offset, end in chunks:
+        proof = read_json(path.with_suffix('.vtt.provenance.json'), {})
+        words_path = path.with_suffix('.vtt.words.json')
+        if (proof.get('timingProfile') != WORD_TIMING_PROFILE or proof.get('timingConfig') != WORD_TIMING_CONFIG or
+                proof.get('sourceVideoSha256') != video_sha or proof.get('clipStartMs') != offset or
+                proof.get('clipEndMs') != end or proof.get('timestampBasis') != 'clip-relative' or
+                proof.get('subtitleSha256') != digest(path) or
+                proof.get('wordEvidenceSha256') != digest(words_path)):
+            raise ValueError('WORD_EVIDENCE_MISMATCH')
+        evidence = read_json(words_path)
+        if (evidence.get('timingProfile') != WORD_TIMING_PROFILE or
+                evidence.get('sourceVideoSha256') != video_sha or
+                evidence.get('sourceAudioSha256') != proof.get('sourceAudioSha256') or
+                evidence.get('clipStartMs') != offset or evidence.get('clipEndMs') != end or
+                evidence.get('timestampBasis') != 'clip-relative'):
+            raise ValueError('WORD_EVIDENCE_MISMATCH')
+        word_offset = len(merged['words'])
+        for word in evidence['words']:
+            merged['words'].append({**word, 'start': word['start'] + offset / 1000,
+                                    'end': word['end'] + offset / 1000, 'chunkStartMs': offset})
+        for cue in evidence['cues']:
+            merged['cues'].append({**cue, 'start': cue['start'] + offset / 1000,
+                                   'end': cue['end'] + offset / 1000,
+                                   'wordStart': cue['wordStart'] + word_offset,
+                                   'wordEnd': cue['wordEnd'] + word_offset})
+        merged['chunks'].append({'clipStartMs': offset, 'clipEndMs': end,
+                                 'sourceAudioSha256': proof['sourceAudioSha256'],
+                                 'subtitleSha256': proof['subtitleSha256'],
+                                 'wordEvidenceSha256': proof['wordEvidenceSha256']})
+    atomic(destination, merged)
+    return digest(destination)
 
 
 class TimeBound(Exception):
@@ -293,6 +361,7 @@ def remove_derived_audio(work):
 
 
 def process_job(job, state, published, deadline, progress=lambda **_: None):
+    profile = timing_profile()
     tool = Path('/srv/study-course-video-tool')
     asr_tool = Path('/srv/study-course-asr-tool')
     model_path = Path('/srv/study-course-asr-state/models/faster-whisper-small.en')
@@ -323,7 +392,7 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
         atomic(state / 'model-proof.json', model_identity)
     progress(stage='audio', modelRevision=model['revision'])
     # Same verified model artifact used by the existing ASR sample; never download a model here.
-    work = state / job['videoSha256'] / model['revision']
+    work = asr_work_directory(state, job['videoSha256'], model['revision'], profile)
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     spec = importlib.util.spec_from_file_location('recording_r2', tool / 'r2-archive.py')
     sys.path.insert(0, str(tool))
@@ -340,7 +409,7 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
                          and abs(proof['durationMs'] - seconds * 1000) <= 1000)
     all_chunks_cached = valid_audio_proof and all(
         cached_chunk(work / f'chunk-{start}-{min(proof["durationMs"], start + 300000)}.vtt',
-                     job['videoSha256'], start, min(proof['durationMs'], start + 300000), model)
+                     job['videoSha256'], start, min(proof['durationMs'], start + 300000), model, profile)
         for start in range(0, proof['durationMs'], 300000))
     if not all_chunks_cached and not (audio.is_file() and valid_audio_proof and proof['sha256'] == digest(audio)):
         url = subprocess.check_output(store.base + ['s3', 'presign', 's3://' + store.bucket + '/' + remote['key'],
@@ -368,9 +437,9 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
         resource_reserve(state, seconds)
         end = min(duration_ms, start + 300000)
         vtt = work / f'chunk-{start}-{end}.vtt'
-        if not cached_chunk(vtt, job['videoSha256'], start, end, model):
+        if not cached_chunk(vtt, job['videoSha256'], start, end, model, profile):
             sample = Path('/srv/study-course-asr-state/sample-600-900.vtt')
-            if start == 600000 and end == 900000 and cached_chunk(sample, job['videoSha256'], start, end, model):
+            if profile == 'legacy' and start == 600000 and end == 900000 and cached_chunk(sample, job['videoSha256'], start, end, model):
                 shutil.copyfile(sample, vtt)
                 shutil.copyfile(sample.with_suffix('.vtt.provenance.json'), vtt.with_suffix('.vtt.provenance.json'))
             else:
@@ -379,19 +448,31 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
                                   '-t', str((end - start) / 1000), '-c:a', 'pcm_s16le', str(clip)], deadline, 60, env)
                 if result.returncode:
                     raise ValueError('AUDIO_CHUNK_FAILED')
+                timing_args = [] if profile == 'legacy' else ['--timing-profile', profile]
                 result = command([str(asr_tool / 'venv/bin/python'), str(asr_tool / 'transcribe.py'), str(clip),
                                   '--model-path', str(model_path), '--source-video-sha256', job['videoSha256'],
                                   '--clip-start-ms', str(start), '--clip-end-ms', str(end), '--output', str(vtt),
-                                  '--language', 'en', '--threads', '2'], deadline, 900, env)
+                                  '--language', 'en', '--threads', '2'] + timing_args, deadline, 900, env)
                 if result.returncode:
+                    if b'WORD_TIMING_REVIEW_REQUIRED' in result.stderr:
+                        raise ValueError('WORD_TIMING_REVIEW_REQUIRED')
                     if b'No speech detected; original video remains preserved' not in result.stderr:
                         raise ValueError('ASR_CHUNK_FAILED')
                     vtt.write_text('WEBVTT\n\n', encoding='utf-8')
-                    atomic(vtt.with_suffix('.vtt.provenance.json'), {'schemaVersion': 1, 'method': 'local-asr',
+                    silence_proof = {'schemaVersion': 1, 'method': 'local-asr',
                            'model': model['repository'], 'modelRevision': model['revision'], 'modelSha256': model['sha256'],
                            'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': digest(clip),
                            'subtitleSha256': digest(vtt), 'computeType': 'int8', 'language': 'en',
-                           'clipStartMs': start, 'clipEndMs': end, 'timestampBasis': 'clip-relative', 'silence': True})
+                           'clipStartMs': start, 'clipEndMs': end, 'timestampBasis': 'clip-relative', 'silence': True}
+                    if profile == WORD_TIMING_PROFILE:
+                        words_path = vtt.with_suffix('.vtt.words.json')
+                        atomic(words_path, {'schemaVersion': 1, 'timingProfile': profile,
+                               'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': digest(clip),
+                               'clipStartMs': start, 'clipEndMs': end, 'timestampBasis': 'clip-relative',
+                               'words': [], 'cues': []})
+                        silence_proof.update(timingProfile=profile, timingConfig=WORD_TIMING_CONFIG,
+                                             wordEvidenceSha256=digest(words_path))
+                    atomic(vtt.with_suffix('.vtt.provenance.json'), silence_proof)
         chunks.append((vtt, start, end))
         progress(stage='transcription', completedChunks=len(chunks), englishCoveredMs=end)
     inputs = translation_input_directory(work)
@@ -402,6 +483,10 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
                   'language': 'en', 'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': proof['sha256'],
                   'subtitleSha256': digest(english), 'clipStartMs': 0, 'clipEndMs': duration_ms,
                   'timestampBasis': 'source-absolute', 'cues': count}
+    if profile == WORD_TIMING_PROFILE:
+        provenance.update(timingProfile=profile, timingConfig=WORD_TIMING_CONFIG,
+                          wordEvidenceSha256=merge_word_evidence(chunks, english.with_suffix('.vtt.words.json'),
+                                                                duration_ms, job['videoSha256'], proof['sha256']))
     atomic(english.with_suffix('.vtt.provenance.json'), provenance)
     output = work / 'translation-output'
     output.mkdir(exist_ok=True, mode=0o750)

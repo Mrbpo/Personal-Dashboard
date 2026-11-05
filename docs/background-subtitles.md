@@ -27,4 +27,34 @@ State and chunks remain on the existing host ASR directory. Final subtitle asset
 
 ## Validation limits
 
+### Optional word/pause timing (Issue #290)
+
+`COURSE_VIDEO_SUBTITLE_TIMING_PROFILE=word-pause-v1` opts the host worker into native
+word timestamps and phrase cues, using the same pinned small.en model. The default
+remains `legacy`; merging this change does not fix or regenerate existing assets.
+The administrator release installer copies both `transcribe.py` and
+`subtitle_timing.py` into the already prepared ASR runtime. Do not enable the
+profile against an old runtime or change it during a running job.
+
+Phrase boundaries use actual word edges, pauses of at least 0.65 seconds and
+punctuation, with maximums of 7 seconds and 14 observed words. They are not
+character-proportional timestamps. Word timing is model-derived evidence, not
+human-verified alignment. Missing, overlapping or pathological alignment stops
+with `WORD_TIMING_REVIEW_REQUIRED`, preserving the source for inspection.
+
+The new profile uses a separate `word-pause-v1/` cache namespace. Chunk and merged
+`.vtt.words.json` sidecars preserve observed words, phrase bindings and source
+offsets; provenance retains the profile, fixed configuration and evidence hash.
+Legacy caches, translations and published history are retained. Chinese is
+translated only after these shorter English cues exist, keeping the original
+index-to-time binding. Do not split an old Chinese sentence proportionally over
+new timestamps or apply a global delay. Completed old jobs are not requeued by
+enabling the profile: repair selected originals explicitly after release and
+content review. Switching back to `legacy` only affects later work; it does not
+replace already published assets or restore an old queue over new progress.
+
+The bounded timing comparison is documented in
+[`subtitle-timing-20261104.md`](../reports/subtitle-timing-20261104.md). It does not
+certify Chinese translation quality or complete-course timing accuracy.
+
 The focused tests cover lease recovery/failure stop, strict chunk cache identity, and absolute-time merging with a wrong-window rejection. They do **not** prove real speech recognition or translation accuracy, live queue recovery, host service deployment, or whole-course coverage. Human review of technical terms, numbers and negation remains necessary; generated subtitles are labelled machine-generated. Deployment and live processing status must be reported separately from these code/tests.

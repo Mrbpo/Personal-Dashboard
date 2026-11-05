@@ -30,12 +30,16 @@ def main():
     code = Path(__file__).resolve().parent.parent
     host = Path('/srv/study')
     tool = Path('/srv/study-course-video-tool')
+    asr_tool = Path('/srv/study-course-asr-tool')
+    if not (asr_tool / 'venv/bin/python').is_file():
+        raise RuntimeError('Prepare the existing ASR runtime before installing recording tools')
     control = Path('/srv/study-course-video-control')
     snapshot = host / 'data/private/recordings-release' / args.sha
     snapshot.mkdir(parents=True, exist_ok=True, mode=0o700)
     tools = ('archive.py', 'interactive-entrypoint.sh', 'server-run.sh', 'server-catalog.py',
              'control-runner.py', 'subtitle-worker.py', 'export-player-catalog.py',
              'refresh-playback-credentials.py', 'background-tasks.py')
+    asr_tools = ('transcribe.py', 'subtitle_timing.py')
     units = ('course-video-control.service', 'course-video-control.path', 'course-video-daily.service',
              'course-video-daily.timer', 'course-subtitle-worker.service', 'course-subtitle-worker.path',
              'course-recording-credentials.service', 'course-recording-credentials.timer')
@@ -46,7 +50,8 @@ def main():
     inventory = snapshot / 'host-files.json'
     if not inventory.exists():
         records = []
-        for source in [tool / name for name in tools] + [Path('/etc/systemd/system') / name for name in units]:
+        for source in ([tool / name for name in tools] + [asr_tool / name for name in asr_tools] +
+                       [Path('/etc/systemd/system') / name for name in units]):
             record = {'path': str(source), 'existed': source.exists()}
             if source.exists():
                 target = snapshot / 'host-files' / str(source).lstrip('/')
@@ -69,6 +74,8 @@ def main():
     for name in tools:
         # Some historical Git blobs use Windows newlines; executable host scripts need LF.
         write(tool / name, (code / 'scripts/course-video' / name).read_text(), 0o755)
+    for name in asr_tools:
+        write(asr_tool / name, (code / 'scripts/course-video' / name).read_text(), 0o755)
     subprocess.run(['python3', str(tool / 'export-player-catalog.py'), '--destination',
                     str(host / 'recording-player/manifest.json'), '--group', '1000'], check=True)
     # Endpoint/bucket are public routing metadata; the parent key stays in its existing root-only file.

@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+from subtitle_timing import TIMING_PROFILE, MAX_CUE_SECONDS, MAX_CUE_WORDS, PAUSE_SECONDS, cues_from_segments
 
 
 def timestamp(seconds):
@@ -30,6 +31,8 @@ def main():
     parser.add_argument("--source-video-sha256", required=True, help="SHA from the verified original archive manifest")
     parser.add_argument("--clip-start-ms", type=int, default=0)
     parser.add_argument("--clip-end-ms", type=int, required=True)
+    parser.add_argument("--timing-profile", choices=['legacy', TIMING_PROFILE], default='legacy',
+                        help='Opt in to word-time/pause cues; preserve legacy until controlled rollout')
     args = parser.parse_args()
     if not args.video.is_file() or not args.model_path.is_dir() or args.threads < 1:
         parser.error("Require an existing video, local model directory and positive thread count")
@@ -47,16 +50,30 @@ def main():
         raise ValueError('Audio duration does not match source clip window')
     from faster_whisper import WhisperModel
     model = WhisperModel(str(args.model_path), device="cpu", compute_type="int8", cpu_threads=args.threads, num_workers=1, local_files_only=True)
-    segments, info = model.transcribe(str(args.video), language=args.language, vad_filter=True, beam_size=5)
+    options = {'language': args.language, 'vad_filter': True, 'beam_size': 5}
+    if args.timing_profile == TIMING_PROFILE:
+        options['word_timestamps'] = True
+    segments, info = model.transcribe(str(args.video), **options)
+    word_evidence = None
+    if args.timing_profile == TIMING_PROFILE:
+        cues, words = cues_from_segments(segments, clip_duration)
+        word_evidence = {'schemaVersion': 1, 'timingProfile': TIMING_PROFILE,
+                         'sourceVideoSha256': args.source_video_sha256,
+                         'sourceAudioSha256': file_sha256(args.video),
+                         'clipStartMs': args.clip_start_ms, 'clipEndMs': args.clip_end_ms,
+                         'timestampBasis': 'clip-relative', 'words': words, 'cues': cues}
+    else:
+        cues = ({'start': max(0, segment.start), 'end': min(clip_duration, segment.end),
+                 'text': segment.text.strip()} for segment in segments)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     part = args.output.with_suffix(args.output.suffix + ".part")
     count = 0
     with part.open("w", encoding="utf-8") as stream:
         stream.write("WEBVTT\n\n")
-        for segment in segments:
-            start, end = max(0, segment.start), min(clip_duration, segment.end)
-            if end > start and segment.text.strip():
-                stream.write(f"{timestamp(start)} --> {timestamp(end)}\n{segment.text.strip()}\n\n")
+        for cue in cues:
+            start, end = cue['start'], cue['end']
+            if end > start and cue['text'].strip():
+                stream.write(f"{timestamp(start)} --> {timestamp(end)}\n{cue['text'].strip()}\n\n")
                 count += 1
     if not count:
         raise RuntimeError("No speech detected; original video remains preserved")
@@ -67,6 +84,14 @@ def main():
                   "subtitleSha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
                   "sourceVideoSha256": args.source_video_sha256, "sourceAudioSha256": file_sha256(args.video),
                   "clipStartMs": args.clip_start_ms, "clipEndMs": args.clip_end_ms, "timestampBasis": "clip-relative"}
+    if word_evidence is not None:
+        word_path = args.output.with_suffix(args.output.suffix + '.words.json')
+        word_part = word_path.with_suffix(word_path.suffix + '.part')
+        word_part.write_text(json.dumps(word_evidence, ensure_ascii=False, indent=2), encoding='utf-8')
+        word_part.replace(word_path)
+        provenance.update(timingProfile=TIMING_PROFILE, wordEvidenceSha256=file_sha256(word_path),
+                          timingConfig={'maxCueSeconds': MAX_CUE_SECONDS, 'maxCueWords': MAX_CUE_WORDS,
+                                        'pauseSeconds': PAUSE_SECONDS})
     args.output.with_suffix(args.output.suffix + ".provenance.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     print(json.dumps({"state": "subtitles_generated", "cues": count, "language": info.language}))
 
