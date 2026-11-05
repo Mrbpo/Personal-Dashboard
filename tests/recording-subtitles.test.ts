@@ -24,3 +24,15 @@ test('rejects wrong video versions, out-of-window cues and unproven ASR sources'
  const value=bundle();value.cues[0].startMs=0;assert.throws(()=>validateSubtitleBundle(value,hash,3055),/时间轴/);
  const asr=bundle();asr.source.method='local-asr';assert.throws(()=>validateSubtitleBundle(asr,hash,3055),/ASR provenance/);
 });
+
+test('word-pause-v2 requires isolated translation identity and renders preserved cue times',()=>{
+ const value=bundle();value.source.method='local-asr';value.source.model='small.en';
+ value.source.asr={schemaVersion:1,method:'local-asr',model:'small.en',modelRevision:'a'.repeat(40),modelSha256:'b'.repeat(64),
+  sourceVideoSha256:hash,sourceAudioSha256:'c'.repeat(64),subtitleSha256:value.source.subtitleSha256,
+  clipStartMs:600000,clipEndMs:900000,timestampBasis:'source-absolute',computeType:'int8',language:'en',
+  timingProfile:'word-pause-v2',wordEvidenceSha256:'d'.repeat(64),
+  timingConfig:{maxCueSeconds:7,maxCueWords:14,pauseSeconds:0.65,minDisplaySeconds:1}};
+ assert.throws(()=>validateSubtitleBundle(value,hash,3055),/翻译版本/);
+ value.translation!.promptVersion='subtitle-zh-v2';
+ assert.match(renderSubtitleVtt(validateSubtitleBundle(value,hash,3055),'bilingual'),/00:10:00\.430 --> 00:10:02\.430/);
+});

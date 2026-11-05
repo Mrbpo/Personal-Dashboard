@@ -20,8 +20,8 @@ from pathlib import Path
 
 SHA = re.compile(r'^[a-f0-9]{64}$')
 ENTRY = re.compile(r'^[01]_[A-Za-z0-9]+$')
-WORD_TIMING_PROFILE = 'word-pause-v1'
-WORD_TIMING_CONFIG = {'maxCueSeconds': 7.0, 'maxCueWords': 14, 'pauseSeconds': 0.65}
+WORD_TIMING_PROFILE = 'word-pause-v2'
+WORD_TIMING_CONFIG = {'maxCueSeconds': 7.0, 'maxCueWords': 14, 'pauseSeconds': 0.65, 'minDisplaySeconds': 1.0}
 
 
 def stamp():
@@ -224,6 +224,8 @@ def merge_word_evidence(chunks, destination, duration_ms, video_sha, audio_sha):
         for cue in evidence['cues']:
             merged['cues'].append({**cue, 'start': cue['start'] + offset / 1000,
                                    'end': cue['end'] + offset / 1000,
+                                   'speechStart': cue['speechStart'] + offset / 1000,
+                                   'speechEnd': cue['speechEnd'] + offset / 1000,
                                    'wordStart': cue['wordStart'] + word_offset,
                                    'wordEnd': cue['wordEnd'] + word_offset})
         merged['chunks'].append({'clipStartMs': offset, 'clipEndMs': end,
@@ -506,7 +508,8 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
             '-v', '/srv/study/data:/app/data', '-v', str(inputs) + ':/input:ro', '-v', str(output) + ':/output', image,
             'node', '--experimental-strip-types', '/app/scripts/recording-subtitles.ts', '--input', '/input/source.vtt',
             '--provenance', '/input/source.vtt.provenance.json', '--output-dir', '/output', '--video-sha256', job['videoSha256'],
-            '--source-method', 'local-asr', '--duration-seconds', str(seconds), '--budget-mode', 'runtime']
+             '--source-method', 'local-asr', '--duration-seconds', str(seconds), '--budget-mode', 'runtime',
+             '--course-title', str(entry.get('title') or '')[:256]]
     for calls, usd in [('0', '0'), ('30', '1')]:
         ledger_path = output / (job['videoSha256'] + '.translation-ledger.json')
         previous_calls = len(read_json(ledger_path, {'calls': []})['calls'])

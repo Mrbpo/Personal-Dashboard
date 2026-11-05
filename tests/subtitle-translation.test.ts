@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {subtitleTranslationSchema,parseSubtitleTranslations} from '../lib/subtitle-translation.ts';
+import {subtitleTranslationSchema,parseSubtitleTranslations,isolatedSubtitleRequest} from '../lib/subtitle-translation.ts';
+
+test('isolated translation exposes only its source cue, never future completion text',()=>{
+ const request=isolatedSubtitleRequest(7,'same formula, same mass, same number','Chemistry');
+ assert.deepEqual(JSON.parse(request.input),{courseTitle:'Chemistry',cue:{index:7,en:'same formula, same mass, same number'}});
+ assert.deepEqual(request.text.format.schema.properties.translations.required,['7']);
+ assert.equal(JSON.stringify(request).includes('carbons'),false);
+ assert.equal(request.max_output_tokens,1024);
+ assert.throws(()=>parseSubtitleTranslations({translations:{8:'borrowed'}},[7]),/mismatched/);
+});
 
 test('generation requires every exact cue key and nonblank text, including sparse resumed indices',()=>{
  const schema=subtitleTranslationSchema([60,62,119]);

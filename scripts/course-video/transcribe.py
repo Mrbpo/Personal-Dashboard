@@ -5,7 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
-from subtitle_timing import TIMING_PROFILE, MAX_CUE_SECONDS, MAX_CUE_WORDS, PAUSE_SECONDS, cues_from_segments
+from subtitle_timing import TIMING_PROFILE, TIMING_CONFIG, cues_from_segments
 
 
 def timestamp(seconds):
@@ -90,8 +90,7 @@ def main():
         word_part.write_text(json.dumps(word_evidence, ensure_ascii=False, indent=2), encoding='utf-8')
         word_part.replace(word_path)
         provenance.update(timingProfile=TIMING_PROFILE, wordEvidenceSha256=file_sha256(word_path),
-                          timingConfig={'maxCueSeconds': MAX_CUE_SECONDS, 'maxCueWords': MAX_CUE_WORDS,
-                                        'pauseSeconds': PAUSE_SECONDS})
+                          timingConfig=TIMING_CONFIG)
     args.output.with_suffix(args.output.suffix + ".provenance.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     print(json.dumps({"state": "subtitles_generated", "cues": count, "language": info.language}))
 

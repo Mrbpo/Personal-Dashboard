@@ -29,6 +29,16 @@ State and chunks remain on the existing host ASR directory. Final subtitle asset
 
 ### Optional word/pause timing (Issue #290)
 
+Current candidate: `word-pause-v2` supersedes the unpublished v1 profile below.
+It uses its own cache directory, a bounded one-second display hold with separate
+observed speech bounds, and phrase-aware cuts. Chinese translation is isolated
+per cue (1024 output tokens, course-title context only); request count increases
+but existing budget limits and resumable checkpoints remain unchanged. The
+installer copies both ASR files; an approved activation must use a matching app
+image that understands `subtitle-zh-v2`. See
+[`v2 verification`](../reports/subtitle-timing-v2-20261105.md) for results and limits.
+The following v1 description is retained as history, not activation guidance.
+
 `COURSE_VIDEO_SUBTITLE_TIMING_PROFILE=word-pause-v1` opts the host worker into native
 word timestamps and phrase cues, using the same pinned small.en model. The default
 remains `legacy`; merging this change does not fix or regenerate existing assets.

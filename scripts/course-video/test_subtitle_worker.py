@@ -173,9 +173,15 @@ class SubtitleWorkerTests(unittest.TestCase):
             evidence = {'schemaVersion': 1, 'timingProfile': worker.WORD_TIMING_PROFILE,
                         'sourceVideoSha256': 'a' * 64, 'sourceAudioSha256': 'd' * 64,
                         'clipStartMs': 600000, 'clipEndMs': 900000, 'timestampBasis': 'clip-relative',
-                        'words': [{'start': 1, 'end': 2, 'word': ' Value'}],
-                        'cues': [{'start': 1, 'end': 2, 'text': 'Value', 'wordStart': 0, 'wordEnd': 1}]}
+                        'words': [{'start': 1, 'end': 1.04, 'word': ' Value'}],
+                        'cues': [{'start': 1, 'end': 2, 'speechStart': 1, 'speechEnd': 1.04,
+                                  'text': 'Value', 'wordStart': 0, 'wordEnd': 1}]}
             evidence_path.write_text(json.dumps(evidence), encoding='utf-8')
+            v1_proof = {**proof, 'timingProfile': 'word-pause-v1',
+                        'timingConfig': {'maxCueSeconds': 7, 'maxCueWords': 14, 'pauseSeconds': 0.65},
+                        'wordEvidenceSha256': worker.digest(evidence_path)}
+            proof_path.write_text(json.dumps(v1_proof), encoding='utf-8')
+            self.assertFalse(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model, worker.WORD_TIMING_PROFILE))
             proof.update(timingProfile=worker.WORD_TIMING_PROFILE, timingConfig=worker.WORD_TIMING_CONFIG,
                          wordEvidenceSha256=worker.digest(evidence_path))
             proof_path.write_text(json.dumps(proof), encoding='utf-8')
@@ -184,7 +190,9 @@ class SubtitleWorkerTests(unittest.TestCase):
             output = root / 'merged.words.json'
             worker.merge_word_evidence([(path, 600000, 900000)], output, 900000, 'a' * 64, 'e' * 64)
             merged = json.loads(output.read_text())
-            self.assertEqual((merged['words'][0]['start'], merged['words'][0]['end']), (601, 602))
+            self.assertEqual((merged['words'][0]['start'], merged['words'][0]['end']), (601, 601.04))
+            self.assertEqual((merged['cues'][0]['speechStart'], merged['cues'][0]['speechEnd']), (601, 601.04))
+            self.assertEqual(merged['cues'][0]['end'], 602)
             self.assertEqual(merged['cues'][0]['wordEnd'], 1)
             self.assertEqual(merged['chunks'][0]['wordEvidenceSha256'], proof['wordEvidenceSha256'])
             evidence['clipStartMs'] = 0

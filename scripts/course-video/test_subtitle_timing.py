@@ -28,8 +28,34 @@ class SubtitleTimingTests(unittest.TestCase):
         for cue in cues:
             self.assertLessEqual(cue['end'] - cue['start'], MAX_CUE_SECONDS)
             self.assertEqual(cue['start'], words[cue['wordStart']]['start'])
-            self.assertEqual(cue['end'], words[cue['wordEnd'] - 1]['end'])
+            self.assertEqual(cue['speechEnd'], words[cue['wordEnd'] - 1]['end'])
             self.assertEqual(cue['text'], ''.join(word['word'] for word in words[cue['wordStart']:cue['wordEnd']]).strip())
+
+    def test_forty_millisecond_speech_has_readable_hold_with_honest_speech_bounds(self):
+        cues, words = cues_from_segments([segment([(1, 1.04, ' f'), (4, 4.4, ' continues.')])], 10)
+        self.assertEqual((cues[0]['speechStart'], cues[0]['speechEnd']), (1, 1.04))
+        self.assertEqual((words[0]['start'], words[0]['end']), (1, 1.04))
+        self.assertEqual((cues[0]['start'], cues[0]['end']), (1, 2))
+
+    def test_display_hold_yields_to_following_speech_and_clip_end(self):
+        cues, _ = cues_from_segments([segment([(1, 1.04, ' f'), (1.8, 1.84, ' follows.')])], 2)
+        self.assertEqual([cue['end'] for cue in cues], [1.8, 2])
+        self.assertEqual([cue['speechEnd'] for cue in cues], [1.04, 1.84])
+
+    def test_word_limit_looks_back_to_clause_and_keeps_number_with_its_phrase(self):
+        sentence = 'Here is the diagram with its labels, and now we can calculate exactly two of three forces acting upward.'
+        observed = [(index / 3, (index + 0.8) / 3, ' ' + word)
+                    for index, word in enumerate(sentence.split())]
+        self.assertEqual(observed[13][2], ' two')
+        cues, _ = cues_from_segments([segment(observed)], 10)
+        self.assertEqual([cue['text'] for cue in cues], [
+            'Here is the diagram with its labels,', 'and now we can calculate exactly two of three forces acting upward.'])
+        self.assertEqual(' '.join(cue['text'] for cue in cues), sentence)
+
+    def test_unbreakable_overlong_expression_requires_review(self):
+        observed = [(index / 3, (index + 0.8) / 3, ' plus' if index % 2 else ' two') for index in range(18)]
+        with self.assertRaisesRegex(ValueError, 'no safe phrase boundary'):
+            cues_from_segments([segment(observed)], 10)
 
     def test_sentence_boundary_can_finish_short_clause_without_waiting_for_segment_end(self):
         cues, _ = cues_from_segments([segment([(0, .5, ' It'), (.5, 1, ' is'), (1, 1.4, ' zero.'),
