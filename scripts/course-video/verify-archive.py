@@ -8,14 +8,35 @@ from pathlib import Path
 from archive import atomic_json, verified_files
 
 
+def require_fresh_partial_download(manifest, course_id, run_started):
+    """Only a fresh, completed download subset may survive discovery exit 2."""
+    scan, archive = manifest.get('scan', {}), manifest.get('archive', {})
+    started, finished = scan.get('startedAt'), archive.get('completedAt')
+    count = archive.get('scopeEntries')
+    if (not isinstance(run_started, int) or run_started <= 0 or
+            not isinstance(started, int) or not isinstance(finished, int) or
+            not run_started <= started <= finished or
+            scan.get('courses') != [course_id] or scan.get('state') != 'incomplete' or
+            scan.get('complete') is not False or scan.get('scopeComplete') is not False or
+            scan.get('discoveryComplete') is not False or
+            archive.get('state') != 'complete' or not isinstance(count, int) or count <= 0 or
+            archive.get('counts', {}).get('archived') != count):
+        raise ValueError('PARTIAL_ARCHIVE_NOT_ELIGIBLE')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--course-id", required=True)
     parser.add_argument("--archived-subset", action="store_true", help="Check available archived entries while retaining incomplete course coverage")
+    parser.add_argument("--partial-run-start", type=int, help="Require a fresh incomplete scan with successful subset downloads")
     parser.add_argument("--archive", type=Path, default=Path("/srv/study-course-recordings"))
     args = parser.parse_args()
     root = args.archive.resolve()
     manifest = json.loads((root / "manifest.json").read_text())
+    if args.partial_run_start is not None:
+        if not args.archived_subset:
+            parser.error('--partial-run-start requires --archived-subset')
+        require_fresh_partial_download(manifest, args.course_id, args.partial_run_start)
     ledger_path = root / "reports" / "decoder-ledger.json"
     ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
     results = []
@@ -62,7 +83,9 @@ def main():
             atomic_json(ledger_path, ledger)
             results.append({"entryId": entry["entryId"], **evidence})
     output = {"courseId": args.course_id, "passed": True, "verifiedFiles": results,
-              "coverageComplete": not pending_entries, "archivedSubsetRequested": args.archived_subset,
+              "coverageComplete": not pending_entries and manifest.get('scan', {}).get('courses') == [args.course_id]
+                  and manifest.get('scan', {}).get('scopeComplete') is True,
+              "archivedSubsetRequested": args.archived_subset,
               "pendingEntryIds": pending_entries,
               "newlyDecoded": sum(not item.get("previousDecoderPassed") for item in results)}
     atomic_json(root / "reports" / ("decode-" + args.course_id + ".json"), output)
@@ -75,6 +98,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        safe = str(error) if str(error) in {"COURSE_ARCHIVE_INCOMPLETE", "ARCHIVE_FILE_MISMATCH", "MP4_HEADER_MISMATCH", "MEDIA_DURATION_MISMATCH"} else "DECODER_FAILED"
+        safe = str(error) if str(error) in {"COURSE_ARCHIVE_INCOMPLETE", "ARCHIVE_FILE_MISMATCH", "MP4_HEADER_MISMATCH", "MEDIA_DURATION_MISMATCH", "PARTIAL_ARCHIVE_NOT_ELIGIBLE"} else "DECODER_FAILED"
         print(json.dumps({"state": "course_decoder_failed", "code": safe}), flush=True)
         raise SystemExit(2)
