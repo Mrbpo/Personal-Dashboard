@@ -170,6 +170,10 @@ class TimeBound(Exception):
     pass
 
 
+class RunBound(Exception):
+    pass
+
+
 class ResourceBound(Exception):
     pass
 
@@ -178,6 +182,40 @@ class BudgetDeferred(Exception):
     def __init__(self, retry_at):
         super().__init__('SUBTITLE_BUDGET_DEFERRED')
         self.retry_at = retry_at
+
+
+def translation_exit(result, ledger, source_hash, previous_calls):
+    """Only a normal pre-request bound with new, fully applied progress may resume."""
+    if result.returncode == 0:
+        return
+    if b'SUBTITLE_RUNTIME_BUDGET_DEFERRED' in result.stderr:
+        retry_at = budget_retry_at(ledger, source_hash)
+        if retry_at is not None:
+            raise BudgetDeferred(retry_at)
+    if (b'SUBTITLE_RUN_BOUND_REACHED' in result.stderr and isinstance(ledger, dict)
+            and ledger.get('sourceHash') == source_hash and ledger.get('model') == 'gpt-5.4-mini'
+            and ledger.get('promptVersion') == 'subtitle-zh-v1' and type(previous_calls) is int
+            and previous_calls >= 0 and isinstance(ledger.get('calls'), list)
+            and len(ledger['calls']) > previous_calls):
+        def resolved(call):
+            if not isinstance(call, dict) or type(call.get('charged')) not in (int, float):
+                return False
+            if not math.isfinite(call['charged']) or call['charged'] < 0:
+                return False
+            if call.get('state') == 'settled':
+                return call.get('applied') is True
+            if call.get('state') == 'rejected' and call['charged'] == 0:
+                try:
+                    return datetime.fromisoformat(call['retryAt'].replace('Z', '+00:00')).tzinfo is not None
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    return False
+            return False
+        calls = ledger['calls']
+        if all(resolved(call) for call in calls) and all(
+                call.get('state') == 'settled' and call.get('applied') is True
+                for call in calls[previous_calls:]):
+            raise RunBound()
+    raise ValueError('TRANSLATION_STOPPED_REVIEW_LEDGER')
 
 
 def budget_retry_at(ledger, expected_source_hash=None, now=None):
@@ -385,6 +423,8 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
             '--provenance', '/input/source.vtt.provenance.json', '--output-dir', '/output', '--video-sha256', job['videoSha256'],
             '--source-method', 'local-asr', '--duration-seconds', str(seconds), '--budget-mode', 'runtime']
     for calls, usd in [('0', '0'), ('30', '1')]:
+        ledger_path = output / (job['videoSha256'] + '.translation-ledger.json')
+        previous_calls = len(read_json(ledger_path, {'calls': []})['calls'])
         progress(stage='publish_english' if calls == '0' else 'translation')
         container = 'study-subtitle-' + uuid.uuid4().hex
         command_args = base[:3] + ['--name', container] + base[3:] + ['--max-calls', calls, '--max-usd', usd]
@@ -405,12 +445,7 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
         if result.returncode:
             if calls == '0' and b'EACCES' in result.stderr:
                 raise ValueError('SUBTITLE_INPUT_UNREADABLE')
-            if b'SUBTITLE_RUNTIME_BUDGET_DEFERRED' in result.stderr:
-                ledger = read_json(output / (job['videoSha256'] + '.translation-ledger.json'), {})
-                retry_at = budget_retry_at(ledger, digest(english))
-                if retry_at is not None:
-                    raise BudgetDeferred(retry_at)
-            raise ValueError('TRANSLATION_STOPPED_REVIEW_LEDGER')
+            translation_exit(result, read_json(ledger_path, {}), digest(english), previous_calls)
 
 
 def publish_bundle(candidate, published, video_sha):
@@ -509,6 +544,9 @@ def run_job(root, job, state, published, max_seconds):
     except TimeBound:
         update_job(root, job, 'pending', 'SUBTITLE_RESOURCE_BOUND', 1000)
         return 'time'
+    except RunBound:
+        update_job(root, job, 'pending', 'SUBTITLE_RUN_BOUND', 1000)
+        return 'run-bound'
     except ResourceBound:
         # Do not create a PathExists spin while memory/disk reserve remains low.
         # The next daily/manual sync wakes the queue after its notBefore time.

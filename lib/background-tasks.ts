@@ -36,6 +36,7 @@ export function taskReason(code:string|null|undefined):string|null{
  if(!code)return null;
  if(['SUBTITLES_COMPLETED','SYNC_COMPLETED','SYNC_RUNNING','REAUTHORIZING'].includes(code))return null;
  if(code==='SUBTITLE_INPUT_RECOVERED')return '已确认未发起翻译请求，将复用英文转写续跑';
+ if(code==='SUBTITLE_RUN_BOUND')return '本次运行额度已用完，进度已保存，将继续处理剩余字幕';
  const reasons:Record<string,string>={SUBTITLE_INPUT_UNREADABLE:'英文文件无法读取，尚未进入翻译',TRANSLATION_STOPPED_REVIEW_LEDGER:'字幕发布或翻译停止，需检查已保存进度与账本',NO_SPEECH_DETECTED:'未检测到可转写语音',AUDIO_DURATION_MISMATCH:'音频时长与原片不符',SUBTITLE_RESOURCE_RESERVE:'等待内存或磁盘空间',SUBTITLE_RESOURCE_BOUND:'本次运行到时，进度已保存',SUBTITLE_BUDGET_DEFERRED:'等待运行额度恢复',SUBTITLE_JOB_FAILED:'字幕处理失败',SYNC_FAILED:'录像同步失败',AUTHORIZATION_REQUIRED:'需要重新授权',CANVAS_ACCESS_REQUIRED:'需要恢复 Canvas 授权',SUBTITLE_SOURCE_UNAVAILABLE:'原片当前不可用'};
  return reasons[code]??(code.startsWith('AI_BUDGET_DEFERRED')?'等待 AI 额度恢复':'执行失败，请检查连接与任务记录');
 }

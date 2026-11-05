@@ -56,7 +56,7 @@ for(let start=0;start<bundle.cues.length;start+=60){
  const body={model,store:false,instructions,input:JSON.stringify(selected),reasoning:{effort:'low'},max_output_tokens:8000,
   text:{format:{type:'json_schema',name:'subtitle_translation',strict:true,schema}}};
  const reservation=((Buffer.byteLength(JSON.stringify(body))+1024)*0.75+8000*4.5)/1e6;
- if(calls>=maxCalls||reserved+reservation>maxUsd)throw new Error('Run bound reached; completed chunks saved, resume with another explicit bounded run');
+ if(calls>=maxCalls||reserved+reservation>maxUsd)throw new Error('SUBTITLE_RUN_BOUND_REACHED: completed chunks saved, resume with another bounded run');
  const key=process.env.OPENAI_API_KEY;if(budgetMode==='development'&&!key)throw new Error('Configure API key in process environment; English subtitles saved without translation');
  const responseFile=resolve(root,`${videoSha}.response-${ledger.calls.length+1}.json`);
  const call:Call={state:'pending',reservation,responseFile};ledger.calls.push(call);await atomic(ledgerPath,ledger);

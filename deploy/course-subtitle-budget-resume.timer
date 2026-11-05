@@ -1,0 +1,11 @@
+[Unit]
+Description=Wake eligible course subtitles after the UTC daily quota reset
+
+[Timer]
+OnCalendar=*-*-* 00:05:00 UTC
+Persistent=true
+Unit=course-subtitle-worker.service
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
