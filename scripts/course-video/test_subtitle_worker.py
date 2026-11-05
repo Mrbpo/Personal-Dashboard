@@ -16,6 +16,13 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleWorkerTests(unittest.TestCase):
+    def test_word_timing_review_is_visible_and_does_not_auto_requeue(self):
+        with patch.object(worker, 'process_job', side_effect=ValueError('WORD_TIMING_REVIEW_REQUIRED')), \
+                patch.object(worker, 'update_job') as update:
+            outcome = worker.run_job(Path('.'), {'videoSha256': 'a' * 64}, Path('.'), Path('.'), 60)
+        self.assertEqual(outcome, 'failed')
+        self.assertEqual(update.call_args.args[2:4], ('failed', 'WORD_TIMING_REVIEW_REQUIRED'))
+
     def test_budget_wait_does_not_stall_other_ready_english_jobs_or_spin_on_global_resource_shortage(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -139,6 +146,60 @@ class SubtitleWorkerTests(unittest.TestCase):
             self.assertFalse(worker.cached_chunk(path, 'a' * 64, 0, 300000, model))
             path.write_text('changed', encoding='utf-8')
             self.assertFalse(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model))
+
+    def test_word_profile_cache_is_separate_and_requires_bound_word_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = worker.asr_work_directory(root, 'a' * 64, 'b' * 40, 'legacy')
+            word = worker.asr_work_directory(root, 'a' * 64, 'b' * 40, worker.WORD_TIMING_PROFILE)
+            self.assertEqual(legacy, root / ('a' * 64) / ('b' * 40))
+            self.assertEqual(word, legacy / worker.WORD_TIMING_PROFILE)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(worker.timing_profile(), 'legacy')
+            with patch.dict(os.environ, {'COURSE_VIDEO_SUBTITLE_TIMING_PROFILE': '../other'}):
+                with self.assertRaises(ValueError):
+                    worker.timing_profile()
+            path = root / 'sample.vtt'
+            path.write_text('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nValue\n', encoding='utf-8')
+            model = {'repository': 'pinned/model', 'revision': 'b' * 40, 'sha256': 'c' * 64}
+            proof = {'sourceVideoSha256': 'a' * 64, 'subtitleSha256': worker.digest(path),
+                     'model': model['repository'], 'modelRevision': model['revision'], 'modelSha256': model['sha256'],
+                     'language': 'en', 'computeType': 'int8', 'timestampBasis': 'clip-relative',
+                     'clipStartMs': 600000, 'clipEndMs': 900000, 'sourceAudioSha256': 'd' * 64}
+            proof_path = path.with_suffix('.vtt.provenance.json')
+            proof_path.write_text(json.dumps(proof), encoding='utf-8')
+            self.assertFalse(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model, worker.WORD_TIMING_PROFILE))
+            evidence_path = path.with_suffix('.vtt.words.json')
+            evidence = {'schemaVersion': 1, 'timingProfile': worker.WORD_TIMING_PROFILE,
+                        'sourceVideoSha256': 'a' * 64, 'sourceAudioSha256': 'd' * 64,
+                        'clipStartMs': 600000, 'clipEndMs': 900000, 'timestampBasis': 'clip-relative',
+                        'words': [{'start': 1, 'end': 1.04, 'word': ' Value'}],
+                        'cues': [{'start': 1, 'end': 2, 'speechStart': 1, 'speechEnd': 1.04,
+                                  'text': 'Value', 'wordStart': 0, 'wordEnd': 1}]}
+            evidence_path.write_text(json.dumps(evidence), encoding='utf-8')
+            v1_proof = {**proof, 'timingProfile': 'word-pause-v1',
+                        'timingConfig': {'maxCueSeconds': 7, 'maxCueWords': 14, 'pauseSeconds': 0.65},
+                        'wordEvidenceSha256': worker.digest(evidence_path)}
+            proof_path.write_text(json.dumps(v1_proof), encoding='utf-8')
+            self.assertFalse(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model, worker.WORD_TIMING_PROFILE))
+            proof.update(timingProfile=worker.WORD_TIMING_PROFILE, timingConfig=worker.WORD_TIMING_CONFIG,
+                         wordEvidenceSha256=worker.digest(evidence_path))
+            proof_path.write_text(json.dumps(proof), encoding='utf-8')
+            self.assertTrue(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model, worker.WORD_TIMING_PROFILE))
+            self.assertFalse(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model))
+            output = root / 'merged.words.json'
+            worker.merge_word_evidence([(path, 600000, 900000)], output, 900000, 'a' * 64, 'e' * 64)
+            merged = json.loads(output.read_text())
+            self.assertEqual((merged['words'][0]['start'], merged['words'][0]['end']), (601, 601.04))
+            self.assertEqual((merged['cues'][0]['speechStart'], merged['cues'][0]['speechEnd']), (601, 601.04))
+            self.assertEqual(merged['cues'][0]['end'], 602)
+            self.assertEqual(merged['cues'][0]['wordEnd'], 1)
+            self.assertEqual(merged['chunks'][0]['wordEvidenceSha256'], proof['wordEvidenceSha256'])
+            evidence['clipStartMs'] = 0
+            evidence_path.write_text(json.dumps(evidence), encoding='utf-8')
+            self.assertFalse(worker.cached_chunk(path, 'a' * 64, 600000, 900000, model, worker.WORD_TIMING_PROFILE))
+            with self.assertRaisesRegex(ValueError, 'WORD_EVIDENCE_MISMATCH'):
+                worker.merge_word_evidence([(path, 600000, 900000)], output, 900000, 'a' * 64, 'e' * 64)
 
     def test_merge_shifts_each_chunk_once_and_rejects_cross_window_timing(self):
         with tempfile.TemporaryDirectory() as directory:

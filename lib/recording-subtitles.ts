@@ -11,7 +11,7 @@ const cueSchema=z.object({startMs:z.number().int().nonnegative(),endMs:z.number(
 export const subtitleBundleSchema=z.object({schemaVersion:z.literal(1),videoSha256:hash,
  source:z.object({subtitleSha256:hash,method:z.enum(['local-asr','platform-caption']),model:z.string().nullable(),
   clipStartMs:z.number().int().nonnegative(),clipEndMs:z.number().int().positive(),timestampBasis:z.literal('source-absolute'),asr:z.unknown().optional()}),
- translation:z.object({model:z.string(),promptVersion:z.literal('subtitle-zh-v1')}).nullable(),
+  translation:z.object({model:z.string(),promptVersion:z.enum(['subtitle-zh-v1','subtitle-zh-v2'])}).nullable(),
  cues:z.array(cueSchema).min(1).max(100000)});
 export type SubtitleBundle=z.infer<typeof subtitleBundleSchema>;
 export type SubtitleMode='en'|'zh'|'bilingual';
@@ -29,6 +29,8 @@ export function validateSubtitleBundle(value:unknown,videoSha256:string,duration
  if(bundle.cues.some(c=>c.zh!==null)&&!bundle.translation)throw new Error('中文字幕缺少翻译来源');
  if(bundle.source.method==='local-asr'){
   const asr=validateASRProvenance(bundle.source.asr,{language:'en',subtitleHash:bundle.source.subtitleSha256,model:bundle.source.model??undefined});
+  if(asr.timingProfile==='word-pause-v2'&&bundle.translation&&bundle.translation.promptVersion!=='subtitle-zh-v2')
+   throw new Error('字幕翻译版本与时间配置不匹配');
   if(asr.sourceVideoSha256!==videoSha256||asr.clipStartMs!==bundle.source.clipStartMs||asr.clipEndMs!==bundle.source.clipEndMs)throw new Error('字幕ASR来源不匹配');
   validateASRAbsoluteCues(asr,bundle.cues);
  }
