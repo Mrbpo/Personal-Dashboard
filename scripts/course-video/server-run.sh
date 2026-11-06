@@ -153,7 +153,10 @@ fi
 (( download == 0 )) || args+=(--download --limit "$limit" --inventory-first --video-policy "$video_policy" --reserve-gib 15)
 (( subtitles_only == 0 )) || args+=(--subtitles-only)
 # The vault/token remains in the existing worker; fresh grant flows only on stdin.
-docker exec -i -e COURSE_VIDEO_COURSE_ID="$course_id" -e COURSE_VIDEO_TOOL_ID="$tool_id" \
+collection_started=$(date +%s)
+collection_status=0
+decoder_checked=0
+if docker exec -i -e COURSE_VIDEO_COURSE_ID="$course_id" -e COURSE_VIDEO_TOOL_ID="$tool_id" \
   -e COURSE_VIDEO_CANVAS_ORIGIN=https://q.utoronto.ca \
   study-worker-1 node --experimental-strip-types --input-type=module \
   < "$tool_root/course-video-grant.mjs" |
@@ -165,13 +168,29 @@ docker exec -i -e COURSE_VIDEO_COURSE_ID="$course_id" -e COURSE_VIDEO_TOOL_ID="$
     -v "$archive_root:/archive" -v "$state_root:/state" \
     -v "$tool_root/archive.py:/tool/archive.py:ro" \
     -v "$tool_root/interactive-entrypoint.sh:/tool/interactive-entrypoint.sh:ro" \
-    "$image" "${args[@]}"
+    "$image" "${args[@]}"; then
+  :
+else
+  collection_status=$?
+  # A failed inventory must stay incomplete, but must not strand valid downloads.
+  # The fresh manifest gate rejects stale state, auth failures and failed downloads.
+  if (( archive_r2 && collection_status == 2 )); then
+    python3 "$tool_root/verify-archive.py" --course-id "$course_id" --archived-subset \
+      --partial-run-start "$collection_started"
+    decoder_checked=1
+    printf '{"state":"partial_discovery_archive_continue","courseId":"%s"}\n' "$course_id"
+  else
+    exit "$collection_status"
+  fi
+fi
 (( discover )) || verify_remote_cache
 if (( subtitles_only )); then
   python3 "$tool_root/thin-snapshot.py" --lock-fd 9
 fi
 if (( archive_r2 )); then
-  python3 "$tool_root/verify-archive.py" --course-id "$course_id"
+  if (( ! decoder_checked )); then
+    python3 "$tool_root/verify-archive.py" --course-id "$course_id"
+  fi
   bash "$tool_root/r2-archive.sh" --course-id "$course_id" --upload --release-cache --lock-fd 9 \
     --lifecycle-evidence "$state_root/recordings-lifecycle-evidence.json"
   if [[ -n ${COURSE_VIDEO_PLAYER_CATALOG:-} ]]; then
@@ -179,3 +198,5 @@ if (( archive_r2 )); then
       --destination "$COURSE_VIDEO_PLAYER_CATALOG" --group "${COURSE_VIDEO_PLAYER_GID:-1000}"
   fi
 fi
+# Successful subset publication is not evidence of complete course discovery.
+exit "$collection_status"
