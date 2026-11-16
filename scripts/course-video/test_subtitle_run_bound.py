@@ -38,6 +38,19 @@ class SubtitleRunBoundTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'TRANSLATION_STOPPED_REVIEW_LEDGER'):
             worker.translation_exit(SimpleNamespace(returncode=1, stderr=b'unknown provider failure'), self.ledger(), 'a' * 64, 0)
 
+    def test_word_timing_uses_v2_ledger_and_keeps_unsettled_calls_stopped(self):
+        result = SimpleNamespace(returncode=1, stderr=b'SUBTITLE_RUN_BOUND_REACHED')
+        earlier = self.ledger()
+        current = {**earlier, 'promptVersion': 'subtitle-zh-v2'}
+        with self.assertRaises(worker.RunBound):
+            worker.translation_exit(result, current, 'a' * 64, 0, worker.WORD_TIMING_PROFILE)
+        pending = {**current, 'calls': [*current['calls'], {'state': 'pending'}]}
+        for profile, ledger in [('legacy', current), (worker.WORD_TIMING_PROFILE, earlier),
+                                (worker.WORD_TIMING_PROFILE, pending)]:
+            with self.subTest(profile=profile, ledger=ledger):
+                with self.assertRaisesRegex(ValueError, 'TRANSLATION_STOPPED_REVIEW_LEDGER'):
+                    worker.translation_exit(result, ledger, 'a' * 64, 0, profile)
+
     def test_normal_bound_requeues_with_progress_preserved_and_no_money_limit_change(self):
         self.assertTrue(hasattr(worker, 'RunBound'))
         job = {'videoSha256': 'a' * 64}

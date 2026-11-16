@@ -47,6 +47,8 @@ def classify_result(exit_code, events):
         return 'needs_auth', 'AUTHORIZATION_REQUIRED'
     if exit_code == 0:
         return 'completed', 'SYNC_COMPLETED'
+    if exit_code == 3:
+        return 'completed', 'SYNC_VISIBLE_ARCHIVED'
     return 'failed', 'SYNC_FAILED'
 
 
@@ -292,7 +294,7 @@ def main():
             status['counts'] = {'archivedVideos': sum(1 for e in manifest.get('entries', {}).values() for f in e.get('files', [])
                                                      if f.get('kind') == 'video' and f.get('remote', {}).get('state') == 'verified'),
                                 'pendingSubtitles': sum(j.get('state') == 'pending' for j in queue['jobs'])}
-            if status['state'] == 'completed':
+            if status['reasonCode'] == 'SYNC_COMPLETED':
                 status['lastSuccessAt'] = now()
         except (Exception, KeyboardInterrupt):
             status.update(state='failed', reasonCode='RUNNER_STOPPED')

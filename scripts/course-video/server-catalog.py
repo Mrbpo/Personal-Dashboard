@@ -36,22 +36,67 @@ def validated_catalog(path):
     return result
 
 
-def run_course(command, lock_fd):
+HISTORICAL_VISIBILITY_SECONDS = 7 * 86400
+VISIBLE_ARCHIVE_COMPLETE = 3
+
+
+def historical_archive_accounts_for_gap(report):
+    """Recognize a published subset with only older known media outside it.
+
+    A gallery count does not identify the absent items. Keep scopeComplete false
+    even when the count is consistent with previously archived older recordings.
+    """
+    scan = report["scan"] or {}
+    if scan.get("scopeComplete") is not False or scan.get("discoveryComplete") is not False:
+        return False
+    channel = report["channels"].get(f"{report['courseId']}:{report['channelId']}", {})
+    if channel.get("state") != "partial" or channel.get("method") != "kaf_native_visible_gallery_total":
+        return False
+    members = channel.get("memberEntryIds")
+    total = channel.get("totalCount")
+    started = scan.get("startedAt")
+    if (not isinstance(members, list) or not members or type(total) is not int
+            or len(set(members)) != len(members) or not len(members) < total
+            or channel.get("uniqueEntries") != len(members) or type(started) is not int):
+        return False
+    visible = set(members)
+    older = set()
+    for entry in report["entries"].values():
+        if entry.get("parentEntryId") or entry.get("channelId") != report["channelId"]:
+            continue
+        entry_id = entry.get("entryId")
+        if entry_id in visible:
+            continue
+        published = entry.get("publishedAt")
+        if (not entry_id or type(published) is not int or published <= 0
+                or published >= started - HISTORICAL_VISIBILITY_SECONDS
+                or entry.get("state") != "archived"
+                or not any(item.get("kind") == "video" and item.get("remote", {}).get("state") == "verified"
+                           for item in entry.get("files", []))):
+            return False
+        older.add(entry_id)
+    return len(older) >= total - len(visible)
+
+
+def run_course(command, lock_fd, course_id):
     child = subprocess.Popen(command, pass_fds=(lock_fd,), stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, errors='replace')
     authorization_required = False
+    subset_published = False
     for line in child.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
         try:
             event = json.loads(line)
+            subset_published |= (event.get('state') == 'partial_discovery_archive_published'
+                                 and event.get('courseId') == course_id)
             authorization_required |= event.get('state') in {'needs_reauth', 'needs_browser_verification',
                 'server_launch_rejected', 'needs_asset_browser_verification'} or (
                 event.get('state') == 'grant_failed' and event.get('code') in
                 {'CANVAS_HTTP_401', 'CANVAS_HTTP_403', 'CANVAS_TOKEN_NOT_CONFIGURED'})
         except (ValueError, AttributeError):
             pass
-    return child.wait(), authorization_required
+    return child.wait(), authorization_required, subset_published
 
 
 def main():
@@ -101,7 +146,7 @@ def main():
             print(json.dumps({"state": "catalog_course_started", "courseId": record["courseId"],
                               "channelId": record["channelId"], "downloadRequested": args.download}), flush=True)
             # argv only; a failed course does not block the remaining explicit list.
-            code, authorization_required = run_course(command, run_lock.fileno())
+            code, authorization_required, subset_published = run_course(command, run_lock.fileno(), record["courseId"])
             summary = {"courseId": record["courseId"], "channelId": record["channelId"], "exitCode": code}
             try:
                 manifest = json.loads((archive_root / "manifest.json").read_text())
@@ -126,6 +171,8 @@ def main():
                 atomic_json(archive_root / "reports" / ("course-" + record["courseId"] + "-" + run_id + ".json"), report)
                 summary["scopeComplete"] = bool(current and manifest["scan"].get("scopeComplete"))
                 summary["archive"] = report["archive"]
+                if code == 2 and subset_published and not authorization_required and current and historical_archive_accounts_for_gap(report):
+                    summary["visibilityState"] = "historical_archive_accounts_for_gap"
             except Exception:
                 summary["reportState"] = "report_failed"
                 summary["exitCode"] = 2
@@ -142,9 +189,18 @@ def main():
             # launch for every remaining course in the daily catalog.
             if args.unattended and authorization_required:
                 break
+    all_succeeded = len(results) == len(records) and all(item["exitCode"] == 0 for item in results)
+    visible_archived = len(results) == len(records) and all(
+        item["exitCode"] == 0 or (
+            item["exitCode"] == 2
+            and item.get("visibilityState") == "historical_archive_accounts_for_gap"
+            and not item.get("snapshotState")
+        ) for item in results)
     print(json.dumps({"state": "catalog_complete", "results": results,
-                      "allSucceeded": all(item["exitCode"] == 0 for item in results)}), flush=True)
-    return 0 if all(item["exitCode"] == 0 for item in results) else 2
+                      "allSucceeded": all_succeeded, "visibleArchiveComplete": visible_archived}), flush=True)
+    if all_succeeded:
+        return 0
+    return VISIBLE_ARCHIVE_COMPLETE if visible_archived else 2
 
 
 if __name__ == "__main__":
