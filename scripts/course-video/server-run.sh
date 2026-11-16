@@ -198,5 +198,8 @@ if (( archive_r2 )); then
       --destination "$COURSE_VIDEO_PLAYER_CATALOG" --group "${COURSE_VIDEO_PLAYER_GID:-1000}"
   fi
 fi
+if (( archive_r2 && collection_status == 2 )); then
+  printf '{"state":"partial_discovery_archive_published","courseId":"%s"}\n' "$course_id"
+fi
 # Successful subset publication is not evidence of complete course discovery.
 exit "$collection_status"

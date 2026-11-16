@@ -13,6 +13,10 @@ spec = importlib.util.spec_from_file_location('verify_archive', HERE / 'verify-a
 verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 
+catalog_spec = importlib.util.spec_from_file_location('server_catalog', HERE / 'server-catalog.py')
+catalog = importlib.util.module_from_spec(catalog_spec)
+catalog_spec.loader.exec_module(catalog)
+
 
 def manifest():
     return {'scan': {'startedAt': 200, 'courses': ['123'], 'state': 'incomplete',
@@ -22,6 +26,27 @@ def manifest():
 
 
 class PartialArchiveTests(unittest.TestCase):
+    def test_only_verified_old_archives_account_for_gallery_difference(self):
+        started = 2_000_000
+        archived = {'entryId': '0_old', 'channelId': '12', 'state': 'archived',
+                    'publishedAt': started - 7 * 86400 - 1,
+                    'files': [{'kind': 'video', 'remote': {'state': 'verified'}}]}
+        report = {
+            'courseId': '123', 'channelId': '12', 'scan': {'startedAt': started,
+                'scopeComplete': False, 'discoveryComplete': False},
+            'channels': {'123:12': {'state': 'partial', 'method': 'kaf_native_visible_gallery_total',
+                         'totalCount': 2, 'uniqueEntries': 1, 'memberEntryIds': ['0_recent']}},
+            'entries': {'123:0_old': archived},
+        }
+        self.assertTrue(catalog.historical_archive_accounts_for_gap(report))
+        for change in ({'publishedAt': started - 7 * 86400}, {'publishedAt': None},
+                       {'files': []}, {'channelId': '24'}, {'parentEntryId': '0_parent'}):
+            with self.subTest(change=change):
+                report['entries']['123:0_old'] = {**archived, **change}
+                self.assertFalse(catalog.historical_archive_accounts_for_gap(report))
+        report['entries']['123:0_old'] = archived
+        report['channels']['123:12']['totalCount'] = 3
+        self.assertFalse(catalog.historical_archive_accounts_for_gap(report))
     def test_current_download_subset_is_eligible_without_claiming_coverage(self):
         data = manifest()
         verify.require_fresh_partial_download(data, '123', 199)
@@ -40,7 +65,7 @@ class PartialArchiveTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'PARTIAL_ARCHIVE_NOT_ELIGIBLE'):
                     verify.require_fresh_partial_download(data, '123', 199)
 
-    @unittest.skipUnless(shutil.which('bash'), 'Bash orchestration runs on Linux')
+    @unittest.skipUnless(os.name == 'posix' and shutil.which('bash'), 'Bash orchestration runs on Linux')
     def test_real_shell_pipeline_finalizes_partial_and_preserves_failure(self):
         # Exercise the actual pipeline/finalization block without Docker, network or media.
         tail = (HERE / 'server-run.sh').read_text().split('# The vault/token remains', 1)[1]
@@ -86,6 +111,8 @@ verify_remote_cache() { echo verified >> "$TEST_LOG"; }
                 env.pop('COURSE_VIDEO_PLAYER_CATALOG', None)
                 result = subprocess.run(['bash', str(script)], env=env, text=True, capture_output=True)
                 self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
+                self.assertEqual('partial_discovery_archive_published' in result.stdout,
+                                 exit_code == 2 and expected_upload)
                 self.assertEqual('uploaded' in (log.read_text() if log.exists() else ''), expected_upload)
                 report = archive / 'reports/decode-123.json'
                 if expected_upload:

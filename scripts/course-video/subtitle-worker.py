@@ -254,7 +254,7 @@ class BudgetDeferred(Exception):
         self.retry_at = retry_at
 
 
-def translation_exit(result, ledger, source_hash, previous_calls):
+def translation_exit(result, ledger, source_hash, previous_calls, profile='legacy'):
     """Only a normal pre-request bound with new, fully applied progress may resume."""
     if result.returncode == 0:
         return
@@ -262,9 +262,11 @@ def translation_exit(result, ledger, source_hash, previous_calls):
         retry_at = budget_retry_at(ledger, source_hash)
         if retry_at is not None:
             raise BudgetDeferred(retry_at)
+    prompt_version = {'legacy': 'subtitle-zh-v1', WORD_TIMING_PROFILE: 'subtitle-zh-v2'}.get(profile)
     if (b'SUBTITLE_RUN_BOUND_REACHED' in result.stderr and isinstance(ledger, dict)
             and ledger.get('sourceHash') == source_hash and ledger.get('model') == 'gpt-5.4-mini'
-            and ledger.get('promptVersion') == 'subtitle-zh-v1' and type(previous_calls) is int
+            and prompt_version is not None and ledger.get('promptVersion') == prompt_version
+            and type(previous_calls) is int
             and previous_calls >= 0 and isinstance(ledger.get('calls'), list)
             and len(ledger['calls']) > previous_calls):
         def resolved(call):
@@ -533,7 +535,7 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
         if result.returncode:
             if calls == '0' and b'EACCES' in result.stderr:
                 raise ValueError('SUBTITLE_INPUT_UNREADABLE')
-            translation_exit(result, read_json(ledger_path, {}), digest(english), previous_calls)
+            translation_exit(result, read_json(ledger_path, {}), digest(english), previous_calls, profile)
 
 
 def publish_bundle(candidate, published, video_sha):

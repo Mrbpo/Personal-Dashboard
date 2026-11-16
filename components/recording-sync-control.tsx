@@ -108,8 +108,8 @@ export function RecordingSyncControl() {
   return <section id="authorization" aria-label="录像同步与授权" className="mb-5 scroll-mt-5 rounded-lg border bg-card p-4 md:p-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 className="font-medium">录像同步与授权</h2>
-        <p className="mt-1 text-sm text-muted-foreground" aria-live="polite">{!status?'正在读取状态…':!status.configured?'未启用后台同步':canvasAccessRequired?'Canvas 连接不可用，请先在设置更新访问令牌；Duo 授权不能修复此连接。':status.authorizationActive?'授权窗口已就绪，请在下方完成验证':status.pending?'请求已提交，等待处理':statusLabels[status.state]}</p>
-        {status?.configured && <p className="mt-1 text-xs text-muted-foreground">上次同步成功：{lastSuccess(status.lastSuccessAt)}</p>}
+        <p className="mt-1 text-sm text-muted-foreground" aria-live="polite">{!status?'正在读取状态…':!status.configured?'未启用后台同步':canvasAccessRequired?'Canvas 连接不可用，请先在设置更新访问令牌；Duo 授权不能修复此连接。':status.authorizationActive?'授权窗口已就绪，请在下方完成验证':status.pending?'请求已提交，等待处理':status.reasonCode==='SYNC_VISIBLE_ARCHIVED'?'本轮查到的录像已归档。目录差额可由一周前的旧归档解释，完整目录未确认。':statusLabels[status.state]}</p>
+        {status?.configured && <p className="mt-1 text-xs text-muted-foreground">上次完整同步：{lastSuccess(status.lastSuccessAt)}</p>}
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" variant="ghost" size="icon-sm" aria-label="刷新录像同步状态" disabled={busy || polling} onClick={()=>void refreshStatus()}><RefreshCw className={busy?'animate-spin':''}/></Button>
