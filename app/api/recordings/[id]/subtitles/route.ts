@@ -20,6 +20,7 @@ export async function GET(request:Request,{params}:{params:Promise<{id:string}>}
    return Response.json({...metadata,generation:await subtitleGenerationStatus(object.sha256,metadata.available&&!metadata.partial&&metadata.translated)},{headers});
   }
   if(!bundle)return Response.json({error:'此录像尚未生成字幕'},{status:404,headers});
+  if(mode==='zh'&&!bundle.cues.some(c=>c.zh!==null))return Response.json({error:'此录像尚无中文译文'},{status:404,headers});
   return new Response(renderSubtitleVtt(bundle,mode as SubtitleMode),{headers:{...headers,'Content-Type':'text/vtt; charset=utf-8'}});
  }catch(error){const response=apiError(error);return response.status===400?new Response(response.body,{status:503,headers:response.headers}):response;}
 }

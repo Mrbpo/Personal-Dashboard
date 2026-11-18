@@ -16,8 +16,26 @@ test('bilingual rendering keeps exact original-video timing and escapes subtitle
 });
 test('missing Chinese remains English-only; no partial translation masquerades as complete',()=>{
  const value=bundle();value.cues[0].zh=null;value.translation=null;
- assert.deepEqual(subtitleMetadata(value,3055).modes,['en']);assert.throws(()=>renderSubtitleVtt(value,'bilingual'),/尚未完整/);
+ const metadata=subtitleMetadata(value,3055);
+ assert.deepEqual(metadata.modes,['en','bilingual']);assert.equal(metadata.translated,false);assert.equal(metadata.translatedCues,0);
+ assert.equal(renderSubtitleVtt(value,'bilingual'),renderSubtitleVtt(value,'en'));
+ assert.doesNotMatch(renderSubtitleVtt(value,'zh'),/-->/);
  assert.deepEqual(subtitleMetadata(null,3055).modes,[]);
+});
+test('partial Chinese stays on each translated original cue; bilingual keeps the English gaps',()=>{
+ const value=bundle();
+ value.cues=[
+  {startMs:600000,endMs:602000,en:'English before',zh:null},
+  {startMs:603000,endMs:604250,en:'English middle',zh:'中间的真实译文'},
+  {startMs:605000,endMs:606000,en:'English after',zh:null},
+ ];
+ const metadata=subtitleMetadata(validateSubtitleBundle(value,hash,3055),3055);
+ assert.deepEqual(metadata.modes,['en','zh','bilingual']);
+ assert.deepEqual([metadata.translatedCues,metadata.totalCues,metadata.translated],[1,3,false]);
+ const bilingual=renderSubtitleVtt(value,'bilingual'),zh=renderSubtitleVtt(value,'zh');
+ assert.match(bilingual,/English before\n\n2\n/);assert.match(bilingual,/English middle\n中间的真实译文/);
+ assert.match(bilingual,/English after\n$/);assert.doesNotMatch(bilingual,/null|undefined/);
+ assert.equal(zh,'WEBVTT\n\n1\n00:10:03.000 --> 00:10:04.250\n中间的真实译文\n');
 });
 test('rejects wrong video versions, out-of-window cues and unproven ASR sources',()=>{
  assert.throws(()=>validateSubtitleBundle(bundle(),'c'.repeat(64),3055),/不匹配/);
