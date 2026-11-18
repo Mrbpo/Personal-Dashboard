@@ -1,6 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {mkdtempSync,writeFileSync,readFileSync,existsSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {pathToFileURL} from 'node:url';
 import {validateSubtitleBundle,subtitleMetadata,renderSubtitleVtt,SUBTITLE_TRANSLATION_DAILY_LIMIT,type SubtitleBundle} from '../lib/recording-subtitles.ts';
+test('translation CLI only admits requests that can finish and checkpoint before the deadline',()=>{
+ const root=mkdtempSync(join(tmpdir(),'subtitle-window-'));
+ try{
+  const base=1_800_000_000_000,video='f'.repeat(64),vtt=join(root,'input.vtt'),clock=join(root,'clock.mjs');
+  const time=(i:number)=>'00:'+String(Math.floor(i/60)).padStart(2,'0')+':'+String(i%60).padStart(2,'0')+'.000';
+  writeFileSync(vtt,'WEBVTT\n\n'+Array.from({length:61},(_,i)=>time(i)+' --> '+time(i+1)+'\nLine '+i).join('\n\n'));
+  writeFileSync(clock,`let now=${base};Date.now=()=>now;globalThis.fetch=async(_url,options)=>{
+    now+=100000;const rows=JSON.parse(JSON.parse(options.body).input);
+    return Response.json({model:'gpt-5.4-mini',status:'completed',usage:{input_tokens:1,output_tokens:1},
+      output_text:JSON.stringify({translations:Object.fromEntries(rows.map(c=>[c.index,'译文']))})});
+  };`);
+  for(const budget of [134999,135000]){
+   const out=join(root,String(budget));
+   const result=spawnSync(process.execPath,['--experimental-strip-types','--import',pathToFileURL(clock).href,
+    'scripts/recording-subtitles.ts','--input',vtt,'--output-dir',out,'--video-sha256',video,
+    '--source-method','platform-caption','--duration-seconds','61','--budget-mode','development',
+    '--max-calls','30','--max-usd','1','--request-deadline-ms',String(base+budget)],
+    {encoding:'utf8',env:{...process.env,OPENAI_API_KEY:'offline-test'}});
+   assert.notEqual(result.status,0);
+   const ledger=join(out,video+'.translation-ledger.json');
+   if(budget<135000){
+    assert.match(result.stderr,/Error: SUBTITLE_REQUEST_WINDOW_CLOSED/);assert.equal(existsSync(ledger),false);
+   }else{
+    assert.match(result.stderr,/Error: SUBTITLE_RUN_BOUND_REACHED/);
+    const calls=JSON.parse(readFileSync(ledger,'utf8')).calls;
+    assert.equal(calls.length,1);assert.equal(calls[0].state,'settled');assert.equal(calls[0].applied,true);
+    const cues=JSON.parse(readFileSync(join(out,video+'.json'),'utf8')).cues;
+    assert.equal(cues.filter((c:{zh:string|null})=>c.zh!==null).length,60);
+   }
+  }
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('subtitle translation daily request allowance is 20000, not a monetary limit',()=>{
  assert.equal(SUBTITLE_TRANSLATION_DAILY_LIMIT,20000);
 });

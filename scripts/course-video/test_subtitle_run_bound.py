@@ -13,6 +13,35 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleRunBoundTests(unittest.TestCase):
+    def test_paid_window_respects_global_and_docker_limits_and_never_force_removes_inflight_work(self):
+        for remaining_seconds, expected in [(1800,600),(260,260),(134,None)]:
+            with self.subTest(remaining_seconds=remaining_seconds), tempfile.TemporaryDirectory() as root:
+                work = Path(root)
+                (work/'translation-input').mkdir()
+                commands = []
+                def invoke(args, *unused):
+                    commands.append(args)
+                    if args[args.index('--max-calls')+1] == '0':
+                        return SimpleNamespace(returncode=0)
+                    raise worker.TimeBound()
+                with patch.object(worker,'command',side_effect=invoke), patch.object(worker.os,'geteuid',return_value=1,create=True), \
+                     patch.object(worker.time,'time',return_value=1000), patch.object(worker.time,'monotonic',return_value=50), \
+                     patch.dict(worker.os.environ,{'COURSE_VIDEO_APP_IMAGE':'test'}), patch.object(worker.subprocess,'run') as run:
+                    error = ValueError if expected else worker.TimeBound
+                    with self.assertRaises(error):
+                        worker.translate_source({'videoSha256':'a'*64},work,'legacy',{},60,work,50+remaining_seconds,lambda **kw: None)
+                    run.assert_not_called()
+                self.assertNotIn('--request-deadline-ms',commands[0])
+                if expected:
+                    self.assertEqual(commands[1][-2:],['--request-deadline-ms',str((1000+expected)*1000)])
+                else:
+                    self.assertEqual(len(commands),1)
+
+    def test_no_paid_work_before_deadline_uses_the_existing_time_bound(self):
+        result = SimpleNamespace(returncode=1, stderr=b'Error: SUBTITLE_REQUEST_WINDOW_CLOSED\n')
+        with self.assertRaises(worker.TimeBound):
+            worker.translation_exit(result, self.ledger(), 'a'*64, 0)
+
     def test_replacement_resume_is_bound_to_existing_video_source_and_original_profile(self):
         from hashlib import sha256
         video, revision = 'a'*64, 'b'*40

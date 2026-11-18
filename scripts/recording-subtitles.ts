@@ -13,6 +13,12 @@ const input=option('--input'),output=option('--output-dir'),videoSha=option('--v
 const method=option('--source-method'),duration=Number(option('--duration-seconds'));
 const maxCalls=Number(option('--max-calls')),maxUsd=Number(option('--max-usd'));
 const budgetMode=option('--budget-mode')??'runtime';
+const deadlineOption=option('--request-deadline-ms');
+const requestDeadline=deadlineOption===undefined?Infinity:Number(deadlineOption);
+if(args.includes('--request-deadline-ms')&&(!Number.isSafeInteger(requestDeadline)||requestDeadline<=0))
+ throw new Error('Invalid --request-deadline-ms');
+const providerTimeoutMs=120_000,checkpointMarginMs=15_000;
+const requestFits=()=>Date.now()+providerTimeoutMs+checkpointMarginMs<=requestDeadline;
 const model='gpt-5.4-mini';
 if(!input||!output||!videoSha||!/^[a-f0-9]{64}$/.test(videoSha)||!['local-asr','platform-caption'].includes(method??'')||
  !Number.isFinite(duration)||duration<=0||!Number.isInteger(maxCalls)||maxCalls<0||!Number.isFinite(maxUsd)||maxUsd<0||maxUsd>1||!['runtime','development'].includes(budgetMode))
@@ -52,6 +58,12 @@ if(ledger.sourceHash!==subtitleHash||ledger.model!==model||ledger.promptVersion!
 const replacementBatch=subtitleReplacementBatch(ledger,videoSha,bundle.cues.findIndex(c=>c.zh===null));
 if(maxCalls===0){console.log(JSON.stringify({state:bundle.cues.every(c=>c.zh!==null)?'bilingual-ready':'english-ready',cues:bundle.cues.length,calls:0,output:target}));process.exit(0);}
 let calls=0,reserved=0,charged=0;
+function stopAtBound(time:boolean):never{
+ if(time&&calls===0)throw new Error('SUBTITLE_REQUEST_WINDOW_CLOSED');
+ const review=ledger.calls.find(c=>c.replacementReview)?.replacementReview;
+ if(review)console.error('SUBTITLE_VALIDATED_REVIEW '+review.ordinal+' '+review.originalCallSha256);
+ throw new Error('SUBTITLE_RUN_BOUND_REACHED: completed chunks saved, resume with another bounded run');
+}
 const batchSize=replacementBatch??(isolated?1:60);
 for(let start=0;start<bundle.cues.length;start+=batchSize){
  const selected=bundle.cues.slice(start,start+batchSize).map((cue,index)=>({index:start+index,en:cue.en})).filter(item=>bundle.cues[item.index].zh===null);
@@ -61,22 +73,24 @@ for(let start=0;start<bundle.cues.length;start+=batchSize){
  const body=isolated?isolatedSubtitleRequest(selected[0].index,selected[0].en,option('--course-title')??''):{model,store:false,instructions,input:JSON.stringify(selected),reasoning:{effort:'low'},max_output_tokens:8000,
   text:{format:{type:'json_schema',name:'subtitle_translation',strict:true,schema}}};
  const reservation=((Buffer.byteLength(JSON.stringify(body))+1024)*0.75+body.max_output_tokens*4.5)/1e6;
- if(calls>=maxCalls||reserved+reservation>maxUsd){
-  const review=ledger.calls.find(c=>c.replacementReview)?.replacementReview;
-  if(review)console.error('SUBTITLE_VALIDATED_REVIEW '+review.ordinal+' '+review.originalCallSha256);
-  throw new Error('SUBTITLE_RUN_BOUND_REACHED: completed chunks saved, resume with another bounded run');
- }
+ if(calls>=maxCalls||reserved+reservation>maxUsd)stopAtBound(false);
+ if(!requestFits())stopAtBound(true);
  const key=process.env.OPENAI_API_KEY;if(budgetMode==='development'&&!key)throw new Error('Configure API key in process environment; English subtitles saved without translation');
+ const runtimeBudget=budgetMode==='runtime'?await import('../lib/ai-budget.ts'):null;
  const responseFile=resolve(root,`${videoSha}.response-${ledger.calls.length+1}.json`);
  const call:Call={state:'pending',reservation,responseFile};ledger.calls.push(call);await atomic(ledgerPath,ledger);
+ if(!requestFits()){
+  // Imports or disk I/O consumed the margin. No request or runtime reservation has been made.
+  ledger.calls.pop();await atomic(ledgerPath,ledger);stopAtBound(true);
+ }
  calls++;reserved+=reservation;
- const runtimeBudget=budgetMode==='runtime'?await import('../lib/ai-budget.ts'):null;
+ const signal=AbortSignal.timeout(providerTimeoutMs);
  let response:Response;
  try{
   response=runtimeBudget?
-   await runtimeBudget.paidOpenAI('responses',body,AbortSignal.timeout(120000),{kind:'recording-subtitle-translation',dailyLimit:SUBTITLE_TRANSLATION_DAILY_LIMIT}):
+   await runtimeBudget.paidOpenAI('responses',body,signal,{kind:'recording-subtitle-translation',dailyLimit:SUBTITLE_TRANSLATION_DAILY_LIMIT}):
    await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},
-    body:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
+    body:JSON.stringify(body),signal});
  }catch(error){
   if(runtimeBudget&&error instanceof runtimeBudget.AiBudgetDeferredError){
    call.state='rejected';call.charged=0;call.retryAt=error.retryAt.toISOString();await atomic(ledgerPath,ledger);

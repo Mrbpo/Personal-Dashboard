@@ -318,6 +318,8 @@ def translation_exit(result, ledger, source_hash, previous_calls, profile='legac
     """Only a normal pre-request bound with new, fully applied progress may resume."""
     if result.returncode == 0:
         return
+    if b'Error: SUBTITLE_REQUEST_WINDOW_CLOSED' in result.stderr.splitlines():
+        raise TimeBound()
     if b'SUBTITLE_RUNTIME_BUDGET_DEFERRED' in result.stderr:
         retry_at = budget_retry_at(ledger, source_hash)
         if retry_at is not None:
@@ -644,10 +646,19 @@ def translate_source(job, work, profile, entry, seconds, published, deadline, pr
         progress(stage='publish_english' if calls == '0' else 'translation')
         container = 'study-subtitle-' + uuid.uuid4().hex
         command_args = base[:3] + ['--name', container] + base[3:] + ['--max-calls', calls, '--max-usd', usd]
+        if calls != '0':
+            # Host and container share the real-time clock. Startup time counts against this deadline.
+            window = remaining(deadline, 600)
+            if window < 135:  # Two-minute provider timeout plus the translator's checkpoint margin.
+                raise TimeBound()
+            command_args.extend(['--request-deadline-ms', str(int((time.time() + window) * 1000))])
         try:
             result = command(command_args, deadline, 600, clean_env())
         except TimeBound:
-            # Only this invocation's generated container name; never stop the application's real worker.
+            if calls != '0':
+                # Docker may still be finishing a request. Its --rm cleanup runs on exit.
+                # Do not kill it or schedule a competing paid attempt.
+                raise ValueError('TRANSLATION_STOPPED_REVIEW_LEDGER')
             subprocess.run(['docker', 'rm', '-f', container], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=20, env=clean_env())
             raise
