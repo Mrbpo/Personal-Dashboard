@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from subtitle_timing import cues_from_segments, MAX_CUE_SECONDS
 
@@ -67,6 +68,48 @@ class SubtitleTimingTests(unittest.TestCase):
         self.assertEqual(cues[0]['text'], 'Value, x')
         self.assertEqual(words[1]['start'], words[1]['end'])
         self.assertEqual((cues[0]['start'], cues[0]['end']), (0, 1))
+
+    def test_corroborated_isolated_point_uses_observed_audio_window_times(self):
+        original = segment([(1, 1.4, ' End.'), (5, 5, ' Okay,'), (8, 8.4, ' Next.')])
+        islands = Mock(return_value=[(4.8, 5.3)])
+        decode = Mock(return_value=segment([(.06, .42, ' okay.')]).words)
+        cues, words = cues_from_segments([original], 12, speech_islands=islands, decode_island=decode)
+        islands.assert_called_once_with(4, 6)
+        decode.assert_called_once_with(4.8, 5.3)
+        self.assertAlmostEqual(cues[1]['speechStart'], 4.86)
+        self.assertAlmostEqual(cues[1]['speechEnd'], 5.22)
+        self.assertEqual(cues[1]['text'], 'Okay,')
+        self.assertAlmostEqual(cues[1]['end'] - cues[1]['start'], 1)
+        self.assertEqual(words[1]['realignment']['originalStart'], 5)
+        self.assertEqual(words[1]['realignment']['originalEnd'], 5)
+        self.assertEqual(words[1]['realignment']['observedWord'], ' okay.')
+
+    def test_zero_point_requires_one_nearby_speech_island_within_neighbors(self):
+        original = segment([(3.5, 4.3, ' End.'), (5, 5, ' Okay.'), (5.7, 6.4, ' Next.')])
+        for regions in [[], [(4.2, 5.1)], [(4.5, 4.7)], [(4.7, 4.92), (5.04, 5.3)]]:
+            islands, decode = Mock(return_value=regions), Mock()
+            with self.subTest(regions=regions), self.assertRaisesRegex(ValueError, 'absent speech'):
+                cues_from_segments([original], 10, speech_islands=islands, decode_island=decode)
+            islands.assert_called_once_with(4.3, 5.7)
+            decode.assert_not_called()
+
+    def test_isolated_point_requires_unique_positive_confident_matching_interval(self):
+        original = segment([(3.5, 3.9, ' End.'), (5, 5, ' Okay.'), (6.1, 6.4, ' Next.')])
+        weak = segment([(.2, .4, ' okay')]).words
+        weak[0].probability = .3
+        for candidates in [weak, [], segment([(.2, .2, ' okay')]).words, segment([(.2, .4, ' maybe')]).words,
+                           segment([(.1, .22, ' okay'), (.28, .45, ' okay')]).words,
+                           segment([(.22, .6, ' okay')]).words, segment([(0, .04, ' okay')]).words]:
+            with self.subTest(candidates=candidates), self.assertRaisesRegex(ValueError, 'unconfirmed isolated point'):
+                cues_from_segments([original], 10, speech_islands=lambda *_: [(4.8, 5.3)],
+                                   decode_island=lambda *_: candidates)
+
+    def test_normal_cues_and_attached_zero_duration_punctuation_do_not_trigger_redecode(self):
+        decode = Mock(side_effect=AssertionError('unexpected ASR re-decode'))
+        source = segment([(0, .5, ' Yes'), (.5, .5, ','), (.6, 1, ' indeed.')])
+        self.assertEqual(cues_from_segments([source], 10, speech_islands=decode, decode_island=decode),
+                         cues_from_segments([source], 10))
+        decode.assert_not_called()
 
     def test_pathological_word_alignment_requires_review_instead_of_truncation(self):
         cases = [segment([(1, 100, ' stretched')]), segment([(1, 2, ' kept')], 'missing content'),
