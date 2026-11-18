@@ -16,6 +16,20 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleWorkerTests(unittest.TestCase):
+    def test_native_audio_proof_requires_every_channel_and_full_duration(self):
+        def stats(peaks, occupancy, frames=48000):
+            lines = [f'[astats@raw @ 0] Peak level dB: {level}' for level in peaks]
+            lines += [f'[astats@raw @ 0] Number of samples: {frames}']
+            lines += [f'[astats@occupancy @ 0] RMS level dB: {level}' for level in occupancy]
+            return worker.quiet_audio_measurements('\n'.join(lines), 2, 16000, 3000)
+        self.assertEqual(stats(['-inf']*2, ['-inf']*2)['reasonCode'], 'SUBTITLE_SOURCE_SILENT')
+        self.assertEqual(stats([-68,-68], [-40,-40])['reasonCode'], 'SUBTITLE_SOURCE_NEAR_SILENT')
+        self.assertIsNone(stats([-74,-74], [0,0]))  # Continuous quiet speech remains reviewable.
+        self.assertIsNone(stats(['-inf',-15], ['-inf',-4]))
+        self.assertIsNone(stats([-15,-15], [-4,-4]))  # Opposing stereo signals can cancel in the ASR downmix.
+        self.assertIsNone(stats(['-inf']*2, ['-inf']*2, 4000))
+        self.assertIsNone(stats(['-inf'], ['-inf']))
+
     def test_word_timing_review_is_visible_and_does_not_auto_requeue(self):
         with patch.object(worker, 'process_job', side_effect=ValueError('WORD_TIMING_REVIEW_REQUIRED')), \
                 patch.object(worker, 'update_job') as update:

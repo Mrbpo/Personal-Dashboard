@@ -195,6 +195,63 @@ def merge_chunks(chunks, destination, duration_ms):
     return count
 
 
+class VerifiedQuietAudio(Exception):
+    """A full native-channel pass produced an auditable outcome without caption cues."""
+
+
+def quiet_audio_measurements(log, channels, rate, duration_ms):
+    """Inspect native channels separately; a mono downmix could cancel a lecturer's voice."""
+    levels = {}
+    for label, field in [('raw', 'Peak'), ('occupancy', 'RMS')]:
+        pattern = rf'\[astats@{label} @ [^\]]+\] {field} level dB:\s*(-inf|-?\d+(?:\.\d+)?)\s*$'
+        values = [float(x) for x in re.findall(pattern, log, re.M)]
+        if len(values) != channels:
+            return None
+        levels[label] = values
+    samples = re.findall(r'\[astats@raw @ [^\]]+\] Number of samples:\s*(\d+)\s*$', log, re.M)
+    if len(samples) != 1 or not rate or abs(int(samples[0]) * 1000 / rate - duration_ms) > 1000 or not int(samples[0]):
+        return None
+    # RMS of a binary nonzero mask gives the nonzero fraction as 10^(dB/10).
+    fractions = [10 ** (db / 10) for db in levels['occupancy']]
+    if all(db == -math.inf for db in levels['raw']) and not any(fractions):
+        reason = 'SUBTITLE_SOURCE_SILENT'
+    elif max(levels['raw']) <= -55 and max(fractions) <= 0.001 and max(fractions) * int(samples[0]) / rate <= 2.0:
+        reason = 'SUBTITLE_SOURCE_NEAR_SILENT'
+    else:
+        return None
+    return {'reasonCode': reason, 'channels': channels, 'sampleRate': rate, 'samplesPerChannel': int(samples[0]),
+            'peakDbfs': [None if db == -math.inf else db for db in levels['raw']], 'nonzeroFractions': fractions}
+
+
+def measure_quiet_track(input_name, channels, rate, duration_ms, deadline):
+    filters = ('astats@raw=measure_perchannel=Peak_level:measure_overall=Number_of_samples,'
+               r'aeval=exprs=not(eq(val(ch)\,0)):c=same,astats@occupancy=measure_perchannel=RMS_level:measure_overall=none')
+    scan = command(['ffmpeg', '-hide_banner', '-nostdin', '-nostats', '-xerror', '-i', input_name, '-map', '0:a:0',
+                    '-af', filters, '-f', 'null', '-'], deadline, 360)
+    if scan.returncode:
+        return None
+    return quiet_audio_measurements(scan.stderr.decode('utf-8', 'replace'), channels, rate, duration_ms)
+
+
+def verify_quiet_source(store, remote, audio, duration_ms, deadline):
+    # If the existing mono file already contains continuous sound, it can't establish a quiet terminal outcome.
+    if audio.is_file() and measure_quiet_track(str(audio), 1, 16000, duration_ms, deadline) is None:
+        return None
+    url = subprocess.check_output(store.base + ['s3', 'presign', 's3://' + store.bucket + '/' + remote['key'],
+                                               '--expires-in', '3600'], timeout=30, stderr=subprocess.DEVNULL, text=True).strip()
+    probe = command(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries',
+                     'stream=channels,sample_rate', '-of', 'json', url], deadline, 45)
+    if probe.returncode:
+        return None
+    streams = json.loads(probe.stdout).get('streams', [])
+    if len(streams) != 1:
+        return None  # Additional audio programs need explicit review.
+    channels, rate = int(streams[0].get('channels', 0)), int(streams[0].get('sample_rate', 0))
+    if not 1 <= channels <= 32 or not rate:
+        return None
+    return measure_quiet_track(url, channels, rate, duration_ms, deadline)
+
+
 def merge_word_evidence(chunks, destination, duration_ms, video_sha, audio_sha):
     """Keep observed word locations and cue/word bindings across chunk offsets."""
     merged = {'schemaVersion': 1, 'timingProfile': WORD_TIMING_PROFILE,
@@ -481,7 +538,21 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
         progress(stage='transcription', completedChunks=len(chunks), englishCoveredMs=end)
     inputs = translation_input_directory(work)
     english = inputs / 'source.vtt'
-    count = merge_chunks(chunks, english, duration_ms)
+    try:
+        count = merge_chunks(chunks, english, duration_ms)
+    except ValueError as error:
+        if str(error) != 'NO_SPEECH_DETECTED':
+            raise
+        try:
+            check = verify_quiet_source(store, remote, audio, duration_ms, deadline)
+        except (TimeBound, subprocess.SubprocessError, OSError, ValueError):
+            check = None  # Missing source evidence keeps the initial ASR outcome in review.
+        if check is None:
+            raise
+        atomic(work / 'source-quiet-audio.json', {'schemaVersion': 1, 'method': 'native-channel-full-length-v1',
+               'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': proof['sha256'],
+               'modelRevision': model['revision'], 'emptyChunks': len(chunks), 'checkedAt': stamp(), **check})
+        raise VerifiedQuietAudio(check['reasonCode']) from error
     provenance = {'schemaVersion': 1, 'method': 'local-asr', 'model': model['repository'],
                   'modelRevision': model['revision'], 'modelSha256': model['sha256'], 'computeType': 'int8',
                   'language': 'en', 'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': proof['sha256'],
@@ -637,6 +708,9 @@ def run_job(root, job, state, published, max_seconds):
     except RunBound:
         update_job(root, job, 'pending', 'SUBTITLE_RUN_BOUND', 1000)
         return 'run-bound'
+    except VerifiedQuietAudio as error:
+        update_job(root, job, 'no_speech', str(error), 1000)
+        return 'no-speech'
     except ResourceBound:
         # Do not create a PathExists spin while memory/disk reserve remains low.
         # The next daily/manual sync wakes the queue after its notBefore time.

@@ -14,6 +14,8 @@ from pathlib import Path
 
 AUTH_STATES = {'needs_reauth', 'needs_browser_verification', 'server_launch_rejected',
                'needs_asset_browser_verification'}
+# Advance only with an installed, audio-verified change to word-timestamp recovery.
+TIMING_RECOVERY_REVISION = 'bounded-source-realignment-1'
 
 
 def now():
@@ -95,6 +97,7 @@ def subtitle_jobs(manifest, previous, subtitles=None, clock=None):
     jobs = {item['videoSha256']: item for item in previous.get('jobs', [])
             if isinstance(item, dict) and re.fullmatch(r'[a-f0-9]{64}', str(item.get('videoSha256', '')))}
     clock = clock or datetime.now(timezone.utc)
+    resumed = set()
     for row in jobs.values():
         if row.get('state') == 'running':
             try:
@@ -131,7 +134,23 @@ def subtitle_jobs(manifest, previous, subtitles=None, clock=None):
                     row['state'] = 'completed'
                 elif subtitles is not None and row.get('state') == 'completed':
                     row['state'] = 'pending'
-    return {'schemaVersion': 1, 'jobs': list(jobs.values())}
+                if (row.get('courseId'), row.get('entryId')) != (entry['courseId'], entry['entryId']):
+                    continue
+                if (row.get('state') == 'failed' and row.get('reasonCode') == 'WORD_TIMING_REVIEW_REQUIRED'
+                        and row.get('timingRevision') != TIMING_RECOVERY_REVISION):
+                    row.setdefault('timingRecoveryHistory', []).append({
+                        'previousRevision': row.get('timingRevision'), 'reasonCode': row['reasonCode'],
+                        'failedAt': row.get('updatedAt'), 'attempts': row.get('attempts', 0),
+                        'resumedAt': clock.isoformat(), 'revision': TIMING_RECOVERY_REVISION,
+                    })
+                    row.update(state='pending', reasonCode='TIMING_RECOVERY_QUEUED', notBefore=None)
+                    resumed.add(digest)
+                if row.get('state') == 'pending':
+                    row['timingRevision'] = TIMING_RECOVERY_REVISION
+    # Keep existing requests first, then recover the most recently archived lessons first.
+    restored = sorted((jobs[key] for key in resumed),
+                      key=lambda row: (row.get('createdAt', ''), row['videoSha256']), reverse=True)
+    return {'schemaVersion': 1, 'jobs': [row for key, row in jobs.items() if key not in resumed] + restored}
 
 
 def read_json(path, default):
@@ -139,6 +158,22 @@ def read_json(path, default):
         return json.loads(path.read_text())
     except (FileNotFoundError, ValueError):
         return default
+
+
+def reconcile_subtitles(root, manifest, subtitles, group):
+    import fcntl
+    # This lock is held only while updating the queue, never during transcription.
+    with (root / 'subtitle-queue.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = root / 'subtitle-queue.json'
+        previous = json.loads(path.read_text()) if path.exists() else {'jobs': []}
+        if not isinstance(previous.get('jobs'), list) or not isinstance(manifest.get('entries'), dict):
+            raise ValueError('INVALID_SUBTITLE_INVENTORY')
+        queue = subtitle_jobs(manifest, previous, subtitles)
+        publish(path, queue, group)
+        if any(row['state'] == 'pending' for row in queue['jobs']):
+            (root / 'subtitle-pending').touch(mode=0o600)
+        return queue
 
 
 def request_subtitle(root, manifest, subtitles, request, group, clock=None):
@@ -164,6 +199,8 @@ def request_subtitle(root, manifest, subtitles, request, group, clock=None):
             job = next((row for row in queue['jobs'] if row['videoSha256'] == digest), None)
             if selected['state'] == 'completed':
                 result.update(state='completed', reasonCode='SUBTITLES_COMPLETED')
+            elif job is not None and job.get('state') == 'no_speech':
+                result.update(state='no_speech', reasonCode=job.get('reasonCode'))
             elif job is not None and job.get('state') == 'failed':
                 result.update(state='failed', reasonCode='SUBTITLE_REVIEW_REQUIRED')
             elif job is not None and job.get('state') == 'running':
@@ -200,13 +237,19 @@ def main():
     parser.add_argument('--action', choices=('sync', 'reauthorize'))
     parser.add_argument('--request', action='store_true')
     parser.add_argument('--subtitle-request', action='store_true')
+    parser.add_argument('--reconcile-subtitles', action='store_true',
+                        help='Resume eligible jobs from the verified local archive without fetching courses')
     args = parser.parse_args()
-    if sum((bool(args.action), args.request, args.subtitle_request)) != 1:
+    if sum((bool(args.action), args.request, args.subtitle_request, args.reconcile_subtitles)) != 1:
         parser.error('Choose one fixed action or --request')
     root = Path(os.environ.get('COURSE_VIDEO_CONTROL_DIR', '/srv/study-course-video-control'))
     tool = Path('/srv/study-course-video-tool')
     archive = Path('/srv/study-course-recordings')
     group = int(os.environ.get('COURSE_VIDEO_WEB_GID', '1000'))
+    if args.reconcile_subtitles:
+        subtitles = Path(os.environ.get('COURSE_VIDEO_SUBTITLE_DIR', '/srv/study/data/recording-subtitles'))
+        reconcile_subtitles(root, json.loads((archive / 'manifest.json').read_text()), subtitles, group)
+        return 0
     root.mkdir(mode=0o750, parents=True, exist_ok=True)
     if args.subtitle_request:
         try:
@@ -283,14 +326,7 @@ def main():
             status['state'], status['reasonCode'] = classify_result(exit_code, events)
             manifest = read_json(archive / 'manifest.json', {})
             subtitles = Path(os.environ.get('COURSE_VIDEO_SUBTITLE_DIR', '/srv/study/data/recording-subtitles'))
-            # The subtitle worker holds this lock only while claiming/updating,
-            # not during ASR or translation. Never overwrite its current lease.
-            with (root / 'subtitle-queue.lock').open('a') as queue_lock:
-                fcntl.flock(queue_lock, fcntl.LOCK_EX)
-                queue = subtitle_jobs(manifest, read_json(root / 'subtitle-queue.json', {}), subtitles)
-                publish(root / 'subtitle-queue.json', queue, group)
-                if any(job.get('state') == 'pending' for job in queue['jobs']):
-                    (root / 'subtitle-pending').touch(mode=0o600)
+            queue = reconcile_subtitles(root, manifest, subtitles, group)
             status['counts'] = {'archivedVideos': sum(1 for e in manifest.get('entries', {}).values() for f in e.get('files', [])
                                                      if f.get('kind') == 'video' and f.get('remote', {}).get('state') == 'verified'),
                                 'pendingSubtitles': sum(j.get('state') == 'pending' for j in queue['jobs'])}
