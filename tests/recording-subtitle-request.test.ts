@@ -32,6 +32,10 @@ test('automatic backlog may be prioritized, while active, manually queued, faile
   assert.equal((await state({state:'pending',requestedAt:new Date(now).toISOString()})).canRequest,false);
   assert.equal((await state({state:'running',leaseExpiresAt:new Date(now+100000).toISOString()})).state,'running');
   assert.equal((await state({state:'failed',reasonCode:'TRANSLATION_STOPPED_REVIEW_LEDGER'})).canRequest,false);
+  const quiet=await state({state:'no_speech',reasonCode:'SUBTITLE_SOURCE_SILENT'});
+  assert.equal(quiet.state,'no_speech');
+  assert.equal(quiet.canRequest,false);
+  assert.equal((await subtitleGenerationStatus(sha,true,now)).state,'completed');
   assert.equal((await state({state:'pending',notBefore:new Date(now+100000).toISOString()})).state,'deferred');
   assert.equal((await state({state:'pending',notBefore:new Date(now+100000).toISOString(),reasonCode:'SUBTITLE_RESOURCE_RESERVE'})).canRequest,true);
   assert.equal((await state({state:'pending',notBefore:new Date(now+100000).toISOString(),reasonCode:'SUBTITLE_BUDGET_DEFERRED'})).canRequest,false);

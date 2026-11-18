@@ -16,6 +16,47 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleWorkerTests(unittest.TestCase):
+    def test_new_english_keeps_prior_full_bilingual_subtitles_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            published = Path(directory)
+            sha = 'c' * 64
+            target = published / (sha + '.json')
+            candidate = published / 'candidate.json'
+            source = {'clipStartMs': 0, 'clipEndMs': 10000}
+            old = {'videoSha256': sha, 'source': source, 'cues': [{'en': 'original', 'zh': '原文'}]}
+            target.write_text(json.dumps(old))
+            candidate.write_text(json.dumps({**old, 'cues': [{'en': 'realigned', 'zh': None}]}))
+            worker.publish_bundle(candidate, published, sha)
+            self.assertEqual(json.loads(target.read_text()), old)
+
+    def test_completed_translation_batch_gives_the_next_lecture_a_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = {'state': 'running', 'videoSha256': 'a' * 64, 'progress': {'translated': 30}}
+            second = {'state': 'pending', 'videoSha256': 'b' * 64}
+            path = root / 'subtitle-queue.json'
+            path.write_text(json.dumps({'jobs': [first, second]}))
+            with patch.object(worker, 'queue_lock', side_effect=lambda *_: nullcontext()):
+                worker.update_job(root, first, 'pending', 'SUBTITLE_RUN_BOUND', None)
+            waiting, yielded = json.loads(path.read_text())['jobs']
+            self.assertEqual(waiting, second)
+            self.assertEqual(yielded['progress'], first['progress'])
+            self.assertEqual(yielded['state'], 'pending')
+
+    def test_native_audio_proof_requires_every_channel_and_full_duration(self):
+        def stats(peaks, occupancy, frames=48000):
+            lines = [f'[astats@raw @ 0] Peak level dB: {level}' for level in peaks]
+            lines += [f'[astats@raw @ 0] Number of samples: {frames}']
+            lines += [f'[astats@occupancy @ 0] RMS level dB: {level}' for level in occupancy]
+            return worker.quiet_audio_measurements('\n'.join(lines), 2, 16000, 3000)
+        self.assertEqual(stats(['-inf']*2, ['-inf']*2)['reasonCode'], 'SUBTITLE_SOURCE_SILENT')
+        self.assertEqual(stats([-68,-68], [-40,-40])['reasonCode'], 'SUBTITLE_SOURCE_NEAR_SILENT')
+        self.assertIsNone(stats([-74,-74], [0,0]))  # Continuous quiet speech remains reviewable.
+        self.assertIsNone(stats(['-inf',-15], ['-inf',-4]))
+        self.assertIsNone(stats([-15,-15], [-4,-4]))  # Opposing stereo signals can cancel in the ASR downmix.
+        self.assertIsNone(stats(['-inf']*2, ['-inf']*2, 4000))
+        self.assertIsNone(stats(['-inf'], ['-inf']))
+
     def test_word_timing_review_is_visible_and_does_not_auto_requeue(self):
         with patch.object(worker, 'process_job', side_effect=ValueError('WORD_TIMING_REVIEW_REQUIRED')), \
                 patch.object(worker, 'update_job') as update:

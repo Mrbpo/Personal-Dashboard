@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +13,35 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleRunBoundTests(unittest.TestCase):
+    def test_replacement_resume_is_bound_to_existing_video_source_and_original_profile(self):
+        from hashlib import sha256
+        video, revision = 'a'*64, 'b'*40
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
+            work = worker.asr_work_directory(state, video, revision, 'legacy')
+            inp, out = work/'translation-input', work/'translation-output'
+            inp.mkdir(parents=True)
+            out.mkdir()
+            english = inp/'source.vtt'
+            english.write_bytes(b'WEBVTT')
+            source = sha256(english.read_bytes()).hexdigest()
+            grant = {'timingProfile':'legacy','modelRevision':revision,'sourceHash':source,
+                     'ordinal':1,'originalLedgerSha256':'c'*64}
+            job = {'videoSha256':video, 'translationRecovery':grant}
+            english.with_suffix('.vtt.provenance.json').write_text(json.dumps({'modelRevision':revision,
+                'sourceVideoSha256': video,'subtitleSha256':source}))
+            (out/(video+'.translation-ledger.json')).write_text(json.dumps({'sourceHash':source,
+                'promptVersion':'subtitle-zh-v1','calls':[{'replacementReview':{**grant,'videoSha256':video}}]}))
+            self.assertEqual(worker.reviewed_translation_source(job,state),(work,'legacy'))
+            for changes in [{'timingProfile':'word-pause-v2'},{'ordinal':2},{'sourceHash':'d'*64},
+                            {'originalLedgerSha256':'e'*64}]:
+                with self.assertRaisesRegex(ValueError,'REVIEWED_SUBTITLE_SOURCE_CHANGED'):
+                    worker.reviewed_translation_source({**job,'translationRecovery':{**grant,**changes}},state)
+            english.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError,'REVIEWED_SUBTITLE_SOURCE_CHANGED'):
+                worker.reviewed_translation_source(job,state)
+            self.assertIsNone(worker.reviewed_translation_source({'videoSha256':video},state))
+
     def ledger(self):
         return {'sourceHash': 'a' * 64, 'model': 'gpt-5.4-mini', 'promptVersion': 'subtitle-zh-v1',
                 'calls': [{'state': 'settled', 'applied': True, 'charged': 0.01}]}
@@ -62,6 +93,21 @@ class SubtitleRunBoundTests(unittest.TestCase):
         text = script.read_text()
         self.assertIn('SUBTITLE_RUN_BOUND_REACHED', text)
         self.assertIn('maxUsd>1', text)
+
+    def test_reviewed_old_call_needs_runtime_validation_and_new_applied_work(self):
+        ledger = self.ledger()
+        identity = 'c' * 64
+        ledger['calls'].insert(0, {'state': 'pending', 'replacementReview': {
+            'sourceHash': ledger['sourceHash'], 'ordinal': 1, 'originalCallSha256': identity}})
+        result = SimpleNamespace(returncode=1, stderr=b'SUBTITLE_RUN_BOUND_REACHED')
+        with self.assertRaises(ValueError):
+            worker.translation_exit(result, ledger, ledger['sourceHash'], 1)
+        result.stderr += ('\nSUBTITLE_VALIDATED_REVIEW 1 ' + identity + '\n').encode()
+        with self.assertRaises(worker.RunBound):
+            worker.translation_exit(result, ledger, ledger['sourceHash'], 1)
+        ledger['calls'].append({'state':'pending'})
+        with self.assertRaises(ValueError):
+            worker.translation_exit(result, ledger, ledger['sourceHash'], 1)
 
     def test_quota_reset_timer_only_targets_the_existing_bounded_worker(self):
         timer = Path(__file__).parents[2] / 'deploy/course-subtitle-budget-resume.timer'

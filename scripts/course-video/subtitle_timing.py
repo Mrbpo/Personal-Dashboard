@@ -95,54 +95,153 @@ POINT_TOLERANCE = .12
 LEXICAL_WORD = re.compile(r"\w+(?:['’\-]\w+)*")
 
 
-def _realign_isolated_points(words, clip_duration, speech_islands, decode_island):
-    """Corroborate an isolated point with a timed re-decode of the same audio."""
+def _realign_point(word, previous_end, next_start, speech_islands, decode_island):
+    anchor = word['start']
+    term = LEXICAL_WORD.findall(word['word'].casefold())
+    window_start = max(previous_end, anchor - 1.0)
+    window_end = min(next_start, anchor + 1.0)
+    islands = [(start, end) for start, end in speech_islands(window_start, window_end)
+               if window_start <= start < end <= window_end
+               and max(start-anchor, anchor-end, 0) <= POINT_TOLERANCE]
+    if len(islands) != 1:
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: ambiguous or absent speech at isolated point')
+    island_start, island_end = islands[0]
+    candidates = []
+    for candidate in decode_island(island_start, island_end):
+        if LEXICAL_WORD.findall(candidate.word.casefold()) != term:
+            continue
+        candidates.append(candidate)
+    if len(candidates) != 1:
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
+    matched = candidates[0]
+    start, end = island_start + matched.start, island_start + matched.end
+    if (not (island_start <= start < end <= island_end + 1e-6)
+            or max(start-anchor, anchor-end, 0) > POINT_TOLERANCE
+            or not isinstance(matched.probability, (int, float))
+            or not .5 <= matched.probability <= 1):
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
+    # This nested record stays clip-relative when the worker merges chunks.
+    word['realignment'] = {'method': 'local-vad-word-realignment-v1', 'timestampBasis': 'clip-relative',
+                           'originalStart': anchor, 'originalEnd': anchor,
+                           'windowStart': window_start, 'windowEnd': window_end,
+                           'speechIslandStart': island_start, 'speechIslandEnd': island_end,
+                           'observedWord': matched.word, 'probability': matched.probability}
+    word['start'], word['end'] = start, min(end, island_end)
+
+
+def _realign_isolated_points(words, clip_duration, speech_islands, decode_island, decode_context):
+    """Try the speech island first. Use an anchored context only on a failed point."""
     attempts = 0
+    pending = []
     previous_end = original_previous_end = 0.0
     for index, word in enumerate(words):
         anchor = word['start']
         original_end = word['end']
-        next_start = words[index+1]['start'] if index+1 < len(words) else clip_duration
+        next_start = words[index + 1]['start'] if index + 1 < len(words) else clip_duration
         if (original_end == anchor and anchor - original_previous_end >= PAUSE_SECONDS
                 and next_start - anchor >= PAUSE_SECONDS):
-            term = LEXICAL_WORD.findall(word['word'].casefold())
-            if len(term) != 1 or attempts >= 6:
+            if len(LEXICAL_WORD.findall(word['word'].casefold())) != 1 or attempts >= 6:
                 raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
             attempts += 1
-            window_start = max(previous_end, anchor - 1.0)
-            window_end = min(next_start, anchor + 1.0)
-            islands = [(start, end) for start, end in speech_islands(window_start, window_end)
-                       if window_start <= start < end <= window_end
-                       and max(start-anchor, anchor-end, 0) <= POINT_TOLERANCE]
-            if len(islands) != 1:
-                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: ambiguous or absent speech at isolated point')
-            island_start, island_end = islands[0]
-            candidates = []
-            for candidate in decode_island(island_start, island_end):
-                if LEXICAL_WORD.findall(candidate.word.casefold()) != term:
-                    continue
-                candidates.append(candidate)
-            if len(candidates) != 1:
-                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
-            matched = candidates[0]
-            start, end = island_start + matched.start, island_start + matched.end
-            if (not (island_start <= start < end <= island_end + 1e-6)
-                    or max(start-anchor, anchor-end, 0) > POINT_TOLERANCE
-                    or not isinstance(matched.probability, (int, float))
-                    or not .5 <= matched.probability <= 1):
-                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
-            # This nested record stays clip-relative when the worker merges chunks.
-            word['realignment'] = {'method': 'local-vad-word-realignment-v1', 'timestampBasis': 'clip-relative',
-                                   'originalStart': anchor, 'originalEnd': anchor,
-                                   'windowStart': window_start, 'windowEnd': window_end,
-                                   'speechIslandStart': island_start, 'speechIslandEnd': island_end,
-                                   'observedWord': matched.word, 'probability': matched.probability}
-            word['start'], word['end'] = start, min(end, island_end)
+            try:
+                _realign_point(word, previous_end, next_start, speech_islands, decode_island)
+            except ValueError as error:
+                if (decode_context is None or not str(error).startswith('WORD_TIMING_REVIEW_REQUIRED:')
+                        or index == 0 or index + 1 == len(words) or len(pending) >= 3):
+                    raise
+                pending.append(index)
         previous_end = max(previous_end, word['end'])
         original_previous_end = max(original_previous_end, original_end)
+    # A corroborated transcript may contain additional words. Right-to-left
+    # replacement keeps the indices of earlier pending points valid.
+    for index in reversed(pending):
+        left, right = index - 1, index + 1
+        _restore_context(words, left, right, words[left]['start'], words[right]['end'], clip_duration, decode_context)
 
 
-def cues_from_segments(segments, clip_duration, *, speech_islands=None, decode_island=None):
+def _term(word):
+    return word.strip().casefold().strip('.,;:!?"“”')
+
+
+def _anchored_observations(observed, offset, left, right):
+    """Find the two surrounding time-and-text anchors exactly once."""
+    # Snap only floating point arithmetic noise, well below one PCM sample.
+    rows = [{'word': w.word, 'start': round(offset + w.start, 6), 'end': round(offset + w.end, 6),
+             'probability': w.probability} for w in observed]
+
+    def anchor_index(anchor):
+        matches = [i for i, w in enumerate(rows)
+                   if _term(w['word']) == _term(anchor['word'])
+                   and abs(w['end'] - anchor['end']) <= .4
+                   and abs(w['start'] - anchor['start']) <= .4]
+        if len(matches) != 1:
+            raise ValueError('WORD_TIMING_REVIEW_REQUIRED: ambiguous extended-word anchor')
+        return matches[0]
+    first, last = anchor_index(left), anchor_index(right)
+    if last <= first:
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: reversed extended-word anchors')
+    return rows[first:last + 1]
+
+
+def _realign_extended_words(words, clip_duration, decode_context):
+    """Recover a locally collapsed phrase using corroborated source observations."""
+    for attempt in range(4):
+        bad = next((i for i, word in enumerate(words) if word['end'] - word['start'] > MAX_CUE_SECONDS), None)
+        if bad is None:
+            return
+        if decode_context is None or attempt == 3:
+            raise ValueError('WORD_TIMING_REVIEW_REQUIRED: invalid word interval')
+        left, right = bad - 1, bad + 1
+        while left >= 0 and words[left]['start'] == words[left]['end']:
+            left -= 1
+        while right < len(words) and words[right]['start'] == words[right]['end']:
+            right += 1
+        start, end = words[bad]['start'], words[bad]['end']
+        if (left < 0 or right >= len(words) or end - start > 22 or
+                start - words[left]['end'] > 1 or words[right]['start'] - end > 1):
+            raise ValueError('WORD_TIMING_REVIEW_REQUIRED: extended word lacks neighboring anchors')
+        _restore_context(words, left, right, start, end, clip_duration, decode_context)
+
+
+def _restore_context(words, left, right, start, end, clip_duration, decode_context):
+    if end - start > 22 or any(words[i]['start'] >= words[i]['end'] for i in (left, right)):
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: ambiguous source context')
+    originals = words[left:right + 1]
+    windows = [(max(0, start - pad), min(clip_duration, end + pad)) for pad in (2, 3)]
+    if windows[0] == windows[1]:
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: insufficient audio context')
+    passes = [_anchored_observations(decode_context(a, b), a, originals[0], originals[-1])
+              for a, b in windows]
+    primary, confirm = passes
+    terms = [_term(w['word']) for w in primary]
+    retained = iter(terms)  # First-pass words must still occur in the same order.
+    if (terms != [_term(w['word']) for w in confirm] or
+            not all(_term(w['word']) in retained for w in originals)):
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: contextual words disagree')
+    lower = max((w['end'] for w in words[:left]), default=0.)
+    upper = words[right + 1]['start'] if right + 1 < len(words) else clip_duration
+    for rows in passes:
+        last = lower
+        for w in rows:
+            if not (last <= w['start'] < w['end'] <= upper and
+                    w['end'] - w['start'] <= MAX_CUE_SECONDS and
+                    isinstance(w['probability'], (float, int)) and .3 <= w['probability'] <= 1):
+                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unsupported contextual interval')
+            last = w['end']
+        if sum(w['probability'] for w in rows) / len(rows) < .75:
+            raise ValueError('WORD_TIMING_REVIEW_REQUIRED: low-confidence contextual speech')
+    if any(abs(a[k] - b[k]) > .35 for a, b in zip(primary, confirm) for k in ('start', 'end')):
+        raise ValueError('WORD_TIMING_REVIEW_REQUIRED: contextual timestamps disagree')
+    for w in primary:
+        w['segmentIndex'] = None  # This word is from a local re-decode.
+    primary[0]['realignment'] = {
+        'method': 'two-context-word-realignment-v1', 'timestampBasis': 'clip-relative',
+        'windows': windows, 'wordCount': len(primary), 'originalWords': originals, 'confirmingWords': confirm,
+    }
+    words[left:right + 1] = primary
+
+
+def cues_from_segments(segments, clip_duration, *, speech_islands=None, decode_island=None, decode_context=None):
     """Return (cues, words), preserving lexical order or requiring review.
 
     `segments` are faster-whisper segments with word_timestamps enabled. Evidence
@@ -165,13 +264,14 @@ def cues_from_segments(segments, clip_duration, *, speech_islands=None, decode_i
             if (not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or
                     not math.isfinite(start) or not math.isfinite(end) or
                     start < 0 or end < start or end > clip_duration or start < previous_start or
-                    end - start > MAX_CUE_SECONDS or not isinstance(word.word, str) or not word.word.strip()):
+                    not isinstance(word.word, str) or not word.word.strip()):
                 raise ValueError('WORD_TIMING_REVIEW_REQUIRED: invalid word interval')
             words.append({'start': start, 'end': end, 'word': word.word,
                           'probability': getattr(word, 'probability', None), 'segmentIndex': segment_index})
             previous_start = start
+    _realign_extended_words(words, clip_duration, decode_context)
     if speech_islands is not None and decode_island is not None:
-        _realign_isolated_points(words, clip_duration, speech_islands, decode_island)
+        _realign_isolated_points(words, clip_duration, speech_islands, decode_island, decode_context)
     cues = []
     for first, last in _cue_ranges(words, clip_duration):
         phrase = words[first:last]

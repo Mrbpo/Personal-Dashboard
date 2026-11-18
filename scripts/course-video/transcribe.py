@@ -83,7 +83,8 @@ def main():
                                         word_timestamps=True, condition_on_previous_text=False,
                                         vad_filter=False)
             return (word for segment in retry for word in segment.words or ())
-        cues, words = cues_from_segments(segments, clip_duration, speech_islands=speech_islands, decode_island=decode_island)
+        cues, words = cues_from_segments(segments, clip_duration, speech_islands=speech_islands,
+                                        decode_island=decode_island, decode_context=decode_island)
         word_evidence = {'schemaVersion': 1, 'timingProfile': TIMING_PROFILE,
                          'sourceVideoSha256': args.source_video_sha256,
                          'sourceAudioSha256': file_sha256(args.video),

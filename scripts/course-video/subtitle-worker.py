@@ -106,6 +106,9 @@ def update_job(root, selected, state, reason, group, wake=True, not_before=None)
             if row.get('videoSha256') == selected['videoSha256']:
                 row.update(state=state, reasonCode=reason, updatedAt=stamp(), leaseExpiresAt=None)
                 row['notBefore'] = not_before or (None if wake else (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat())
+        if state == 'pending' and reason == 'SUBTITLE_RUN_BOUND':
+            # English is available; give other lectures a turn before the next translation batch.
+            queue['jobs'].sort(key=lambda row: row.get('videoSha256') == selected['videoSha256'])
         atomic(root / 'subtitle-queue.json', queue, group)
         if wake and any(row.get('state') == 'pending' for row in queue['jobs']):
             (root / 'subtitle-pending').touch(mode=0o600)
@@ -193,6 +196,63 @@ def merge_chunks(chunks, destination, duration_ms):
         raise ValueError('NO_SPEECH_DETECTED')
     destination.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return count
+
+
+class VerifiedQuietAudio(Exception):
+    """A full native-channel pass produced an auditable outcome without caption cues."""
+
+
+def quiet_audio_measurements(log, channels, rate, duration_ms):
+    """Inspect native channels separately; a mono downmix could cancel a lecturer's voice."""
+    levels = {}
+    for label, field in [('raw', 'Peak'), ('occupancy', 'RMS')]:
+        pattern = rf'\[astats@{label} @ [^\]]+\] {field} level dB:\s*(-inf|-?\d+(?:\.\d+)?)\s*$'
+        values = [float(x) for x in re.findall(pattern, log, re.M)]
+        if len(values) != channels:
+            return None
+        levels[label] = values
+    samples = re.findall(r'\[astats@raw @ [^\]]+\] Number of samples:\s*(\d+)\s*$', log, re.M)
+    if len(samples) != 1 or not rate or abs(int(samples[0]) * 1000 / rate - duration_ms) > 1000 or not int(samples[0]):
+        return None
+    # RMS of a binary nonzero mask gives the nonzero fraction as 10^(dB/10).
+    fractions = [10 ** (db / 10) for db in levels['occupancy']]
+    if all(db == -math.inf for db in levels['raw']) and not any(fractions):
+        reason = 'SUBTITLE_SOURCE_SILENT'
+    elif max(levels['raw']) <= -55 and max(fractions) <= 0.001 and max(fractions) * int(samples[0]) / rate <= 2.0:
+        reason = 'SUBTITLE_SOURCE_NEAR_SILENT'
+    else:
+        return None
+    return {'reasonCode': reason, 'channels': channels, 'sampleRate': rate, 'samplesPerChannel': int(samples[0]),
+            'peakDbfs': [None if db == -math.inf else db for db in levels['raw']], 'nonzeroFractions': fractions}
+
+
+def measure_quiet_track(input_name, channels, rate, duration_ms, deadline):
+    filters = ('astats@raw=measure_perchannel=Peak_level:measure_overall=Number_of_samples,'
+               r'aeval=exprs=not(eq(val(ch)\,0)):c=same,astats@occupancy=measure_perchannel=RMS_level:measure_overall=none')
+    scan = command(['ffmpeg', '-hide_banner', '-nostdin', '-nostats', '-xerror', '-i', input_name, '-map', '0:a:0',
+                    '-af', filters, '-f', 'null', '-'], deadline, 360)
+    if scan.returncode:
+        return None
+    return quiet_audio_measurements(scan.stderr.decode('utf-8', 'replace'), channels, rate, duration_ms)
+
+
+def verify_quiet_source(store, remote, audio, duration_ms, deadline):
+    # If the existing mono file already contains continuous sound, it can't establish a quiet terminal outcome.
+    if audio.is_file() and measure_quiet_track(str(audio), 1, 16000, duration_ms, deadline) is None:
+        return None
+    url = subprocess.check_output(store.base + ['s3', 'presign', 's3://' + store.bucket + '/' + remote['key'],
+                                               '--expires-in', '3600'], timeout=30, stderr=subprocess.DEVNULL, text=True).strip()
+    probe = command(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries',
+                     'stream=channels,sample_rate', '-of', 'json', url], deadline, 45)
+    if probe.returncode:
+        return None
+    streams = json.loads(probe.stdout).get('streams', [])
+    if len(streams) != 1:
+        return None  # Additional audio programs need explicit review.
+    channels, rate = int(streams[0].get('channels', 0)), int(streams[0].get('sample_rate', 0))
+    if not 1 <= channels <= 32 or not rate:
+        return None
+    return measure_quiet_track(url, channels, rate, duration_ms, deadline)
 
 
 def merge_word_evidence(chunks, destination, duration_ms, video_sha, audio_sha):
@@ -283,7 +343,17 @@ def translation_exit(result, ledger, source_hash, previous_calls, profile='legac
                     return False
             return False
         calls = ledger['calls']
-        if all(resolved(call) for call in calls) and all(
+        def previously_reviewed(index, call):
+            if index >= previous_calls or not isinstance(call, dict) or call.get('state') != 'pending':
+                return False
+            review = call.get('replacementReview') or {}
+            identity = review.get('originalCallSha256')
+            if (review.get('ordinal') != index + 1 or review.get('sourceHash') != source_hash
+                    or not SHA.fullmatch(str(identity or ''))):
+                return False
+            marker = ('SUBTITLE_VALIDATED_REVIEW %d %s' % (index + 1, identity)).encode()
+            return marker in result.stderr.splitlines()
+        if all(resolved(call) or previously_reviewed(i, call) for i, call in enumerate(calls)) and all(
                 call.get('state') == 'settled' and call.get('applied') is True
                 for call in calls[previous_calls:]):
             raise RunBound()
@@ -364,6 +434,37 @@ def remove_derived_audio(work):
             path.unlink()
 
 
+def reviewed_translation_source(job, state):
+    grant = job.get('translationRecovery')
+    if grant is None:
+        return None
+    if not isinstance(grant, dict):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    profile, revision = grant.get('timingProfile'), grant.get('modelRevision')
+    if (profile not in ('legacy', WORD_TIMING_PROFILE) or not re.fullmatch('[a-f0-9]{40}', str(revision))
+            or not SHA.fullmatch(str(grant.get('sourceHash', ''))) or not SHA.fullmatch(str(job['videoSha256']))):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    sha = job['videoSha256']
+    work = asr_work_directory(state, sha, revision, profile)
+    english = work / 'translation-input' / 'source.vtt'
+    proof = read_json(english.with_suffix('.vtt.provenance.json'), {})
+    ledger = read_json(work / 'translation-output' / (sha + '.translation-ledger.json'), {})
+    ordinal = grant.get('ordinal')
+    calls = ledger.get('calls', [])
+    if type(ordinal) is not int or not 0 < ordinal <= len(calls):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    review = calls[ordinal-1].get('replacementReview') or {}
+    if (not english.is_file() or digest(english) != grant['sourceHash'] or proof.get('subtitleSha256') != grant['sourceHash']
+            or proof.get('sourceVideoSha256') != sha or proof.get('modelRevision') != revision
+            or proof.get('timingProfile', 'legacy') != profile or ledger.get('sourceHash') != grant['sourceHash']
+            or ledger.get('promptVersion') != ('subtitle-zh-v1' if profile == 'legacy' else 'subtitle-zh-v2')
+            or review.get('videoSha256') != sha or review.get('sourceHash') != grant['sourceHash']
+            or review.get('ordinal') != ordinal or not SHA.fullmatch(str(grant.get('originalLedgerSha256', '')))
+            or review.get('originalLedgerSha256') != grant['originalLedgerSha256']):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    return work, profile
+
+
 def process_job(job, state, published, deadline, progress=lambda **_: None):
     profile = timing_profile()
     tool = Path('/srv/study-course-video-tool')
@@ -382,6 +483,10 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
     if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= 21600:
         raise ValueError('INVALID_SOURCE_DURATION')
     resource_reserve(state, seconds)
+    reviewed = reviewed_translation_source(job, state)
+    if reviewed is not None:
+        work, profile = reviewed
+        return translate_source(job, work, profile, entry, seconds, published, deadline, progress)
     progress(stage='audio', durationMs=round(seconds * 1000))
     receipt = read_json(model_path / 'download-manifest.json')
     model_file = next(row for row in receipt['files'] if row['name'] == 'model.bin')
@@ -481,7 +586,22 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
         progress(stage='transcription', completedChunks=len(chunks), englishCoveredMs=end)
     inputs = translation_input_directory(work)
     english = inputs / 'source.vtt'
-    count = merge_chunks(chunks, english, duration_ms)
+    try:
+        count = merge_chunks(chunks, english, duration_ms)
+    except ValueError as error:
+        # Older website builds display unrecognised queue states as due work.
+        if str(error) != 'NO_SPEECH_DETECTED' or os.environ.get('COURSE_VIDEO_VERIFIED_QUIET_OUTCOME') != '1':
+            raise
+        try:
+            check = verify_quiet_source(store, remote, audio, duration_ms, deadline)
+        except (TimeBound, subprocess.SubprocessError, OSError, ValueError):
+            check = None  # Missing source evidence keeps the initial ASR outcome in review.
+        if check is None:
+            raise
+        atomic(work / 'source-quiet-audio.json', {'schemaVersion': 1, 'method': 'native-channel-full-length-v1',
+               'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': proof['sha256'],
+               'modelRevision': model['revision'], 'emptyChunks': len(chunks), 'checkedAt': stamp(), **check})
+        raise VerifiedQuietAudio(check['reasonCode']) from error
     provenance = {'schemaVersion': 1, 'method': 'local-asr', 'model': model['repository'],
                   'modelRevision': model['revision'], 'modelSha256': model['sha256'], 'computeType': 'int8',
                   'language': 'en', 'sourceVideoSha256': job['videoSha256'], 'sourceAudioSha256': proof['sha256'],
@@ -492,6 +612,12 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
                           wordEvidenceSha256=merge_word_evidence(chunks, english.with_suffix('.vtt.words.json'),
                                                                 duration_ms, job['videoSha256'], proof['sha256']))
     atomic(english.with_suffix('.vtt.provenance.json'), provenance)
+    translate_source(job, work, profile, entry, seconds, published, deadline, progress)
+
+
+def translate_source(job, work, profile, entry, seconds, published, deadline, progress):
+    inputs = work / 'translation-input'
+    english = inputs / 'source.vtt'
     output = work / 'translation-output'
     output.mkdir(exist_ok=True, mode=0o750)
     if os.geteuid() == 0:
@@ -546,6 +672,16 @@ def publish_bundle(candidate, published, video_sha):
     published.chmod(0o750)
     target = published / (video_sha + '.json')
     if target.is_file() and target.read_bytes() != candidate.read_bytes():
+        current = read_json(target)
+        current_source = current.get('source', {})
+        incoming_source = bundle.get('source', {})
+        # A replacement translation grows in its private checkpoint. Keep serving
+        # the previous full bilingual track until its replacement is also bilingual.
+        if (current.get('videoSha256') == video_sha and current_source.get('clipStartMs') == 0
+                and current_source.get('clipEndMs', -1) >= incoming_source.get('clipEndMs', 0)
+                and current.get('cues') and all(c.get('zh') for c in current['cues'])
+                and not all(c.get('zh') for c in bundle['cues'])):
+            return
         history = published / 'history'
         history.mkdir(exist_ok=True, mode=0o700)
         old = history / (video_sha + '-' + digest(target) + '.json')
@@ -637,6 +773,9 @@ def run_job(root, job, state, published, max_seconds):
     except RunBound:
         update_job(root, job, 'pending', 'SUBTITLE_RUN_BOUND', 1000)
         return 'run-bound'
+    except VerifiedQuietAudio as error:
+        update_job(root, job, 'no_speech', str(error), 1000)
+        return 'no-speech'
     except ResourceBound:
         # Do not create a PathExists spin while memory/disk reserve remains low.
         # The next daily/manual sync wakes the queue after its notBefore time.

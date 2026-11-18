@@ -111,6 +111,55 @@ class SubtitleTimingTests(unittest.TestCase):
                          cues_from_segments([source], 10))
         decode.assert_not_called()
 
+    def test_collapsed_phrase_requires_agreeing_source_words_and_times(self):
+        source = segment([(2, 2.5, ' Prior.'), (3.6, 4, ' Left'), (4, 13.1, ' named'),
+                          (13.1, 13.1, ' note'), (13.1, 13.5, ' right.'), (14, 14.4, ' Next.')])
+        decoded = [(3.6, 4, ' Left'), (4, 4.4, ' named'), (5.1, 5.4, ' verified'),
+                   (12.4, 12.9, ' note'), (13.1, 13.5, ' right.')]
+        def context(start, end):
+            return segment([(a-start, b-start, term) for a,b,term in decoded]).words
+        calls = Mock(side_effect=context)
+        cues, words = cues_from_segments([source], 20, decode_context=calls)
+        self.assertEqual(calls.call_count, 2)
+        self.assertEqual([w['word'] for w in words], [' Prior.'] + [r[2] for r in decoded] + [' Next.'])
+        proof = words[1]['realignment']
+        self.assertEqual(proof['originalWords'][1]['end'], 13.1)
+        self.assertEqual(proof['confirmingWords'][2]['start'], 5.1)
+        self.assertTrue(all(c['end'] - c['start'] <= MAX_CUE_SECONDS for c in cues))
+        for fault in ('missing original word', 'changed term', 'ambiguous anchor', 'weak word', 'time drift'):
+            def inconsistent(start, end):
+                rows = context(start, end)
+                if fault == 'missing original word':
+                    rows.pop(1)  # Both re-decodes omit a first-pass word.
+                elif start == 1:  # Only the wider context disagrees.
+                    if fault == 'changed term':
+                        rows[2].word = ' changed'
+                    elif fault == 'ambiguous anchor':
+                        rows.insert(0, rows[0])
+                    elif fault == 'weak word':
+                        rows[2].probability = .1
+                    else:
+                        rows[2].start += .5
+                        rows[2].end += .5
+                return rows
+            with self.subTest(fault=fault), self.assertRaisesRegex(ValueError, 'WORD_TIMING_REVIEW_REQUIRED'):
+                cues_from_segments([source], 20, decode_context=inconsistent)
+
+    def test_context_recovers_delayed_point_without_assigning_it_to_silence(self):
+        source = segment([(3, 3.4, ' End.'), (4.5, 4.5, ' Yes.'), (6.5, 7, ' Next.')])
+        def context(start, end):
+            return segment([(3-start, 3.4-start, ' End.'), (6-start, 6.4-start, ' Yes.'),
+                            (6.5-start, 7-start, ' Next.')]).words
+        calls = Mock(side_effect=context)
+        _, words = cues_from_segments([source], 15, speech_islands=lambda *_: [], decode_island=Mock(),
+                                      decode_context=calls)
+        self.assertEqual(calls.call_count, 2)
+        self.assertEqual((words[1]['start'], words[1]['end']), (6, 6.4))
+        self.assertEqual(words[0]['realignment']['originalWords'][1]['start'], 4.5)
+        with self.assertRaisesRegex(ValueError, 'ambiguous extended-word anchor'):
+            cues_from_segments([source], 15, speech_islands=lambda *_: [], decode_island=Mock(),
+                               decode_context=lambda *_: [])
+
     def test_pathological_word_alignment_requires_review_instead_of_truncation(self):
         cases = [segment([(1, 100, ' stretched')]), segment([(1, 2, ' kept')], 'missing content'),
                  segment([(2, 3, ' backwards'), (1, 2, ' order')]),

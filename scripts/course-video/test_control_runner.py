@@ -59,6 +59,8 @@ class ControlRunnerTest(unittest.TestCase):
             self.assertEqual(queue['jobs'][0]['attempts'], 3)
             self.assertEqual(submit({'state': 'running', 'leaseExpiresAt': (clock + timedelta(minutes=20)).isoformat()})['state'], 'running')
             self.assertEqual(submit({'state': 'failed', 'reasonCode': 'REVIEW_LEDGER'})['reasonCode'], 'SUBTITLE_REVIEW_REQUIRED')
+            quiet = submit({'state': 'no_speech', 'reasonCode': 'SUBTITLE_SOURCE_SILENT'})
+            self.assertEqual((quiet['state'], quiet['reasonCode']), ('no_speech', 'SUBTITLE_SOURCE_SILENT'))
             before = (clock + timedelta(hours=3)).isoformat()
             self.assertEqual(submit({'state': 'pending', 'notBefore': before})['state'], 'deferred')
             self.assertEqual(runner.read_json(root / 'subtitle-queue.json', {})['jobs'][0]['notBefore'], before)
@@ -115,6 +117,29 @@ class ControlRunnerTest(unittest.TestCase):
             bundle['source']['clipStartMs'] = 0
             path.write_text(json.dumps(bundle))
             self.assertEqual(runner.subtitle_jobs(manifest, {}, Path(directory))['jobs'][0]['state'], 'completed')
+
+    def test_timing_recovery_requires_verified_original_and_runs_once_per_revision(self):
+        sha = 'b' * 64
+        remote = {'method': 'full_get_sha256', 'state': 'verified', 'sha256': sha, 'bytes': 100}
+        video = {'kind': 'video', 'sha256': sha, 'bytes': 100, 'remote': remote}
+        entry = {'state': 'archived', 'courseId': '123', 'entryId': '0_a', 'files': [video]}
+        manifest = {'entries': {'a': entry}}
+        row = dict(courseId='123', entryId='0_a', videoSha256=sha, state='failed',
+                   reasonCode='TRANSLATION_STOPPED_REVIEW_LEDGER', attempts=4, progress={'chunk': 3})
+        queue = {'jobs': [row]}
+        runner.subtitle_jobs(manifest, queue)
+        self.assertEqual(row['state'], 'failed')
+        row['reasonCode'] = 'WORD_TIMING_REVIEW_REQUIRED'
+        remote['bytes'] = 99
+        runner.subtitle_jobs(manifest, queue)
+        self.assertEqual(row['state'], 'failed')
+        remote['bytes'] = 100
+        runner.subtitle_jobs(manifest, queue)
+        self.assertEqual((row['state'], row['attempts'], row['progress']), ('pending', 4, {'chunk': 3}))
+        row.update(state='failed', reasonCode='WORD_TIMING_REVIEW_REQUIRED')
+        runner.subtitle_jobs(manifest, queue)
+        self.assertEqual(row['state'], 'failed')
+        self.assertEqual(len(row['timingRecoveryHistory']), 1)
 
     def test_expired_or_unknown_running_lease_is_requeued_without_losing_checkpoint(self):
         clock = datetime(2026, 10, 26, tzinfo=timezone.utc)
