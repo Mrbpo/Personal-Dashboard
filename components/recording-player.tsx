@@ -14,7 +14,7 @@ type Playback = {time:number; rate:number; playing:boolean};
 type SubtitleMode = 'bilingual'|'en'|'zh'|'off';
 
 type SubtitleInfo = {available:boolean;modes:Exclude<SubtitleMode,'off'>[];partial?:boolean;clipStartMs?:number;clipEndMs?:number;
-  sourceMethod?:'local-asr'|'platform-caption';translated?:boolean;generation?:SubtitleGeneration};
+  sourceMethod?:'local-asr'|'platform-caption';translated?:boolean;translatedCues:number;totalCues:number;generation?:SubtitleGeneration};
 const initialPlayback = ():Playback => ({time:0, rate:1, playing:false});
 const fieldClass = 'w-full rounded-md border border-input bg-background px-3 py-2 text-sm';
 
@@ -62,6 +62,7 @@ export function RecordingPlayer() {
   const playback=useRef<Playback>(initialPlayback());
   const pending=useRef<Playback|null>(null);
   const subtitleRequest=useRef(0);
+  const loadedSubtitle=useRef('');
   const subtitleQueue=useRef<Promise<void>>(Promise.resolve());
   useEffect(()=>{
     try{const saved=localStorage.getItem('recording-secondary-layout-v1');if(saved&&saved.length<512)secondaryPlacement.current=secondaryLayout(JSON.parse(saved));}catch{/* Storage may be unavailable. */}
@@ -243,21 +244,33 @@ export function RecordingPlayer() {
     if(!viewId || !subtitleBase)return;
     const controller=new AbortController();
     let timer:ReturnType<typeof setTimeout>|undefined;
-    const stopAt=Date.now()+15*60*1000;
+    let loading=false;
     setSubtitleMetadata(current=>current?.viewId===viewId?current:{viewId,info:null,status:'loading'});
     async function loadMetadata() {
+      if(loading||document.hidden||controller.signal.aborted)return;
+      if(timer)clearTimeout(timer);
+      loading=true;
       try {
         const response=await fetch(subtitleBase,{cache:'no-store',signal:controller.signal});
         if(!response.ok)throw new Error('字幕信息暂不可用');
         const info=await response.json() as SubtitleInfo;
         if(!controller.signal.aborted){
           setSubtitleMetadata(current=>current?.viewId===viewId&&JSON.stringify(current.info)===JSON.stringify(info)&&current.status==='ready'?current:{viewId,info,status:'ready'});
-          if(Date.now()<stopAt&&(info.generation?.state==='running'||info.generation?.state==='queued'&&info.generation.requested))timer=setTimeout(()=>void loadMetadata(),5000);
+          const state=info.generation?.state;
+          if(state==='running'||state==='queued'||state==='deferred')
+            timer=setTimeout(()=>void loadMetadata(),state==='running'?10000:30000);
         }
-      } catch {if(!controller.signal.aborted)setSubtitleMetadata({viewId,info:null,status:'error'});}
+      } catch {
+        if(!controller.signal.aborted){
+          setSubtitleMetadata(current=>current?.viewId===viewId&&current.info?current:{viewId,info:null,status:'error'});
+          timer=setTimeout(()=>void loadMetadata(),30000);
+        }
+      } finally {loading=false;}
     }
+    const onVisibility=()=>{if(!document.hidden)void loadMetadata();};
+    document.addEventListener('visibilitychange',onVisibility);
     void loadMetadata();
-    return ()=>{controller.abort();if(timer)clearTimeout(timer);};
+    return ()=>{controller.abort();if(timer)clearTimeout(timer);document.removeEventListener('visibilitychange',onVisibility);};
   },[viewId,subtitleBase,reload,subtitleRefresh]);
 
   async function generateSubtitles(){
@@ -282,7 +295,8 @@ export function RecordingPlayer() {
     const active=()=>!disposed && !controller.signal.aborted && player.current===instance &&
       !instance?.isDestroy && subtitleRequest.current===request;
     setSubtitleError(false);
-    if(instance)instance.subtitle.show=false;
+    const track=JSON.stringify([playerRevision,subtitleBase,subtitleMode]);
+    if(instance&&(loadedSubtitle.current!==track||!subtitleInfo?.available))instance.subtitle.show=false;
     if(instance && subtitleMode!=='off' && subtitleInfo?.available && subtitleInfo.modes.includes(subtitleMode)) {
       async function applySubtitle() {
         let inputUrl:string|undefined;
@@ -298,7 +312,7 @@ export function RecordingPlayer() {
           const job=subtitleQueue.current.catch(()=>undefined).then(async()=>{
             if(!active() || !instance)return;
             const result=await instance.subtitle.switch(url,{type:'vtt',escape:true});
-            if(active())instance.subtitle.show=true;
+            if(active()){loadedSubtitle.current=track;instance.subtitle.show=true;}
             else if(result?.startsWith('blob:'))URL.revokeObjectURL(result);
           });
           subtitleQueue.current=job;
@@ -309,7 +323,7 @@ export function RecordingPlayer() {
       void applySubtitle();
     }
     return ()=>{disposed=true;controller.abort();};
-  },[subtitleBase,subtitleInfo,subtitleMode,playerRevision]);
+  },[subtitleBase,subtitleInfo,subtitleMode,playerRevision,subtitleRefresh]);
 
   function choose(item:Recording) {
     if(item.id===selection?.recordingId || !item.views.length)return;
@@ -408,6 +422,7 @@ export function RecordingPlayer() {
           {(subtitleState?.status==='error' || subtitleError) && <p>字幕暂时无法读取，可重新加载重试；视频仍可播放。</p>}
           {subtitleState?.status==='ready' && !subtitleInfo?.available && <p>这段录像暂未生成字幕。</p>}
           {subtitleInfo?.available && <>
+            {!subtitleInfo.translated&&<p>中文已翻译 {subtitleInfo.translatedCues} / {subtitleInfo.totalCues} 段{subtitleMode==='bilingual'?'，其余段落播放英文。':'。'}</p>}
             <p>{subtitleInfo.sourceMethod==='local-asr'?'英文字幕为自动转写。':'原字幕来自课程平台。'}{subtitleInfo.translated?'中文为机器翻译。':''}请结合原声核对。</p>
             {subtitleInfo.partial && <p>当前字幕仅覆盖 {subtitleTime(subtitleInfo.clipStartMs??0)}–{subtitleTime(subtitleInfo.clipEndMs??0)}，其余时段暂无字幕。</p>}
             {subtitleMode!=='off' && !subtitleInfo.modes.includes(subtitleMode) && <p>当前语言暂无字幕，请选择已有语言。</p>}
