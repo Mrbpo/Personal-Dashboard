@@ -91,7 +91,58 @@ def _cue_ranges(words, clip_duration):
         first = last
 
 
-def cues_from_segments(segments, clip_duration):
+POINT_TOLERANCE = .12
+LEXICAL_WORD = re.compile(r"\w+(?:['’\-]\w+)*")
+
+
+def _realign_isolated_points(words, clip_duration, speech_islands, decode_island):
+    """Corroborate an isolated point with a timed re-decode of the same audio."""
+    attempts = 0
+    previous_end = original_previous_end = 0.0
+    for index, word in enumerate(words):
+        anchor = word['start']
+        original_end = word['end']
+        next_start = words[index+1]['start'] if index+1 < len(words) else clip_duration
+        if (original_end == anchor and anchor - original_previous_end >= PAUSE_SECONDS
+                and next_start - anchor >= PAUSE_SECONDS):
+            term = LEXICAL_WORD.findall(word['word'].casefold())
+            if len(term) != 1 or attempts >= 6:
+                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
+            attempts += 1
+            window_start = max(previous_end, anchor - 1.0)
+            window_end = min(next_start, anchor + 1.0)
+            islands = [(start, end) for start, end in speech_islands(window_start, window_end)
+                       if window_start <= start < end <= window_end
+                       and max(start-anchor, anchor-end, 0) <= POINT_TOLERANCE]
+            if len(islands) != 1:
+                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: ambiguous or absent speech at isolated point')
+            island_start, island_end = islands[0]
+            candidates = []
+            for candidate in decode_island(island_start, island_end):
+                if LEXICAL_WORD.findall(candidate.word.casefold()) != term:
+                    continue
+                candidates.append(candidate)
+            if len(candidates) != 1:
+                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
+            matched = candidates[0]
+            start, end = island_start + matched.start, island_start + matched.end
+            if (not (island_start <= start < end <= island_end + 1e-6)
+                    or max(start-anchor, anchor-end, 0) > POINT_TOLERANCE
+                    or not isinstance(matched.probability, (int, float))
+                    or not .5 <= matched.probability <= 1):
+                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unconfirmed isolated point')
+            # This nested record stays clip-relative when the worker merges chunks.
+            word['realignment'] = {'method': 'local-vad-word-realignment-v1', 'timestampBasis': 'clip-relative',
+                                   'originalStart': anchor, 'originalEnd': anchor,
+                                   'windowStart': window_start, 'windowEnd': window_end,
+                                   'speechIslandStart': island_start, 'speechIslandEnd': island_end,
+                                   'observedWord': matched.word, 'probability': matched.probability}
+            word['start'], word['end'] = start, min(end, island_end)
+        previous_end = max(previous_end, word['end'])
+        original_previous_end = max(original_previous_end, original_end)
+
+
+def cues_from_segments(segments, clip_duration, *, speech_islands=None, decode_island=None):
     """Return (cues, words), preserving lexical order or requiring review.
 
     `segments` are faster-whisper segments with word_timestamps enabled. Evidence
@@ -119,6 +170,8 @@ def cues_from_segments(segments, clip_duration):
             words.append({'start': start, 'end': end, 'word': word.word,
                           'probability': getattr(word, 'probability', None), 'segmentIndex': segment_index})
             previous_start = start
+    if speech_islands is not None and decode_island is not None:
+        _realign_isolated_points(words, clip_duration, speech_islands, decode_island)
     cues = []
     for first, last in _cue_ranges(words, clip_duration):
         phrase = words[first:last]

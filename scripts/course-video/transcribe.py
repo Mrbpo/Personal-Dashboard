@@ -56,7 +56,34 @@ def main():
     segments, info = model.transcribe(str(args.video), **options)
     word_evidence = None
     if args.timing_profile == TIMING_PROFILE:
-        cues, words = cues_from_segments(segments, clip_duration)
+        samples = None
+        def excerpt(start, end):
+            # Decode the input lazily: normal five-minute chunks need no replay.
+            nonlocal samples
+            from faster_whisper.audio import decode_audio
+            if samples is None:
+                samples = decode_audio(str(args.video), sampling_rate=16000)
+            left, right = round(start * 16000), round(end * 16000)
+            if not 0 <= left < right <= len(samples):
+                raise ValueError('WORD_TIMING_REVIEW_REQUIRED: point window outside audio')
+            return samples[left:right]
+
+        def speech_islands(start, end):
+            from faster_whisper.vad import VadOptions, get_speech_timestamps
+            audio = excerpt(start, end)
+            options = VadOptions(min_silence_duration_ms=200, speech_pad_ms=80, min_speech_duration_ms=80)
+            for region in get_speech_timestamps(audio, options):
+                if not 0 <= region['start'] < region['end'] <= len(audio):
+                    raise ValueError('WORD_TIMING_REVIEW_REQUIRED: speech island outside audio')
+                yield (start if region['start'] == 0 else (round(start*16000)+region['start'])/16000,
+                       end if region['end'] == len(audio) else (round(start*16000)+region['end'])/16000)
+
+        def decode_island(start, end):
+            retry, _ = model.transcribe(excerpt(start, end), language=info.language, beam_size=5,
+                                        word_timestamps=True, condition_on_previous_text=False,
+                                        vad_filter=False)
+            return (word for segment in retry for word in segment.words or ())
+        cues, words = cues_from_segments(segments, clip_duration, speech_islands=speech_islands, decode_island=decode_island)
         word_evidence = {'schemaVersion': 1, 'timingProfile': TIMING_PROFILE,
                          'sourceVideoSha256': args.source_video_sha256,
                          'sourceAudioSha256': file_sha256(args.video),
