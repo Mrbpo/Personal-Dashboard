@@ -38,19 +38,25 @@ export function validateSubtitleBundle(value:unknown,videoSha256:string,duration
 }
 
 export function subtitleMetadata(bundle:SubtitleBundle|null,durationSeconds:number|null){
- if(!bundle)return {available:false,modes:[],partial:false,clipStartMs:null,clipEndMs:null,sourceMethod:null,translated:false};
- const translated=bundle.cues.every(c=>c.zh!==null);
- return {available:true,modes:translated?['en','zh','bilingual']:['en'],
+ if(!bundle)return {available:false,modes:[],partial:false,clipStartMs:null,clipEndMs:null,sourceMethod:null,translated:false,translatedCues:0,totalCues:0};
+ const totalCues=bundle.cues.length,translatedCues=bundle.cues.filter(c=>c.zh!==null).length;
+ return {available:true,modes:translatedCues?['en','zh','bilingual']:['en','bilingual'],translatedCues,totalCues,
   partial:bundle.source.clipStartMs>0||durationSeconds===null||bundle.source.clipEndMs<durationSeconds*1000-1000,
-  clipStartMs:bundle.source.clipStartMs,clipEndMs:bundle.source.clipEndMs,sourceMethod:bundle.source.method,translated};
+  clipStartMs:bundle.source.clipStartMs,clipEndMs:bundle.source.clipEndMs,sourceMethod:bundle.source.method,translated:translatedCues===totalCues};
 }
 
 function timestamp(ms:number){return `${String(Math.floor(ms/3600000)).padStart(2,'0')}:${String(Math.floor(ms/60000)%60).padStart(2,'0')}:${String(Math.floor(ms/1000)%60).padStart(2,'0')}.${String(ms%1000).padStart(3,'0')}`;}
 function escapeVtt(text:string){return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\r\n?/g,'\n').replace(/\n{2,}/g,'\n');}
 export function renderSubtitleVtt(bundle:SubtitleBundle,mode:SubtitleMode){
- if(mode!=='en'&&bundle.cues.some(c=>!c.zh))throw new Error('中文字幕尚未完整生成');
- return 'WEBVTT\n\n'+bundle.cues.map((cue,index)=>`${index+1}\n${timestamp(cue.startMs)} --> ${timestamp(cue.endMs)}\n`+
-  (mode==='en'?escapeVtt(cue.en):mode==='zh'?escapeVtt(cue.zh!):`${escapeVtt(cue.en)}\n${escapeVtt(cue.zh!)}`)).join('\n\n')+'\n';
+ const blocks:string[]=[];
+ for(const cue of bundle.cues){
+  if(mode==='zh'&&cue.zh===null)continue;
+  const lines:string[]=[];
+  if(mode!=='zh')lines.push(escapeVtt(cue.en));
+  if(mode!=='en'&&cue.zh!==null)lines.push(escapeVtt(cue.zh));
+  blocks.push(`${blocks.length+1}\n${timestamp(cue.startMs)} --> ${timestamp(cue.endMs)}\n${lines.join('\n')}`);
+ }
+ return 'WEBVTT\n\n'+blocks.join('\n\n')+'\n';
 }
 
 export async function readRecordingSubtitles(object:RecordingObject){
