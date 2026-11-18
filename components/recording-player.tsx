@@ -5,13 +5,14 @@ import type Artplayer from 'artplayer';
 import {Play, RefreshCw, Video} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 import type {Recording, RecordingCatalog} from '@/lib/recording-catalog';
+import type {SubtitleGeneration} from '@/lib/recording-subtitle-request';
 import {attachSecondaryLayout,defaultSecondaryLayout,secondaryLayout,type SecondaryLayout} from '@/lib/recording-secondary-layout';
 import {RecordingStudyGuide} from '@/components/recording-study-guide';
 import './recording-player-layout.css';
 
 type Playback = {time:number; rate:number; playing:boolean};
 type SubtitleMode = 'bilingual'|'en'|'zh'|'off';
-type SubtitleGeneration={configured:boolean;state:'idle'|'queued'|'running'|'deferred'|'failed'|'completed';requested:boolean;canRequest:boolean;retryAt:string|null;reasonCode:string|null};
+
 type SubtitleInfo = {available:boolean;modes:Exclude<SubtitleMode,'off'>[];partial?:boolean;clipStartMs?:number;clipEndMs?:number;
   sourceMethod?:'local-asr'|'platform-caption';translated?:boolean;generation?:SubtitleGeneration};
 const initialPlayback = ():Playback => ({time:0, rate:1, playing:false});
@@ -374,7 +375,7 @@ export function RecordingPlayer() {
             <option value="zh" disabled={!subtitleInfo?.modes.includes('zh')}>中文</option>
             <option value="off">关闭</option>
           </select></label>
-          {subtitleState?.status==='ready'&&!subtitleComplete&&<Button type="button" variant="outline" size="sm"
+          {subtitleState?.status==='ready'&&!subtitleComplete&&generation?.state!=='no_speech'&&<Button type="button" variant="outline" size="sm"
             disabled={!generation?.canRequest||subtitleSubmit.viewId===viewId&&subtitleSubmit.busy} onClick={()=>void generateSubtitles()}
             title={generation?.state==='queued'&&generation.canRequest?'已在自动队列，点击优先处理这段录像':undefined}>
             {subtitleSubmit.viewId===viewId&&subtitleSubmit.busy?'正在提交…':generation?.state==='running'?'字幕生成中…':generation?.state==='queued'&&generation.requested?'字幕已排队':generation?.state==='deferred'?(generation.canRequest?'重新尝试生成':'字幕等待资源／额度'):generation?.state==='failed'?'字幕待检查':!generation?.configured?'字幕后台未启用':subtitleInfo?.available?'补全字幕':'生成字幕'}
@@ -398,7 +399,8 @@ export function RecordingPlayer() {
         {mediaError && <p role="alert" className="mt-3 text-sm text-destructive">无法播放：链接可能已过期、网络暂时不可用，或浏览器不支持原片格式。请点击“重新加载”重试。</p>}
         <div className="mt-3 text-xs leading-5 text-muted-foreground" aria-live="polite">
           {subtitleSubmit.viewId===viewId&&subtitleSubmit.error&&<p role="alert">{subtitleSubmit.error}</p>}
-          {generation?.state==='failed'&&<p>字幕任务需检查上次失败记录，暂不自动重试；已有字幕和视频保留。</p>}
+          {generation?.state==='no_speech'&&<p>{generation.reasonCode==='SUBTITLE_SOURCE_SILENT'?'原片音轨全程静音，无可转写字幕。':'原片音轨几乎无声，未检测到可转写语音。'}</p>}
+          {generation?.state==='failed'&&<p>{generation.reasonCode==='NO_SPEECH_DETECTED'?'未识别到可转写语音，原音轨待核查。':'字幕任务需检查上次失败记录，暂不自动重试；已有字幕和视频保留。'}</p>}
           {generation?.state==='deferred'&&<p>字幕任务等待资源或运行额度恢复，进度已保存。</p>}
           {generation?.state==='queued'&&generation.requested&&<p>已优先排队，将在当前转写任务完成后处理。</p>}
           {subtitleState?.status==='ready'&&!subtitleComplete&&<button type="button" className="underline" onClick={()=>setSubtitleRefresh(value=>value+1)}>刷新字幕状态</button>}

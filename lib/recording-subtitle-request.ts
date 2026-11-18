@@ -2,7 +2,7 @@ import {readFile,open,link,unlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 
-type JobState='idle'|'queued'|'running'|'deferred'|'failed'|'completed';
+type JobState='idle'|'queued'|'running'|'deferred'|'failed'|'no_speech'|'completed';
 export type SubtitleGeneration={configured:boolean;state:JobState;requested:boolean;canRequest:boolean;retryAt:string|null;reasonCode:string|null};
 const instant=(value:unknown)=>typeof value==='string'&&/(?:Z|[+-]\d{2}:\d{2})$/.test(value)&&Number.isFinite(Date.parse(value))?value:null;
 const digest=(value:string)=>/^[a-f0-9]{64}$/.test(value);
@@ -23,6 +23,7 @@ export async function subtitleGenerationStatus(videoSha256:string,complete=false
  const row=record(jobs.find(item=>record(item).videoSha256===videoSha256));
  const retryAt=instant(row.notBefore),lease=instant(row.leaseExpiresAt);
  const reasonCode=typeof row.reasonCode==='string'&&/^[A-Z_]{1,80}$/.test(row.reasonCode)?row.reasonCode:null;
+ if(row.state==='no_speech')return {...base,state:'no_speech',canRequest:false,reasonCode};
  if(row.state==='failed')return {...base,state:'failed',canRequest:false,reasonCode};
  if(row.state==='running'&&lease&&Date.parse(lease)>now)return {...base,state:'running',canRequest:false,requested:!!instant(row.requestedAt)};
  if(retryAt&&Date.parse(retryAt)>now)return {...base,state:'deferred',canRequest:reasonCode==='SUBTITLE_RESOURCE_RESERVE',retryAt,reasonCode};

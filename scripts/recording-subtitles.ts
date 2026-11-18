@@ -6,6 +6,7 @@ import {parseSubtitles} from '../lib/kernel/recording-transcript.ts';
 import {validateASRProvenance,validateASRAbsoluteCues} from '../lib/kernel/recording-asr-provenance.ts';
 import {validateSubtitleBundle,type SubtitleBundle,SUBTITLE_TRANSLATION_DAILY_LIMIT} from '../lib/recording-subtitles.ts';
 import {subtitleTranslationSchema,parseSubtitleTranslations,isolatedSubtitleRequest,ISOLATED_SUBTITLE_PROMPT} from '../lib/subtitle-translation.ts';
+import {subtitleReplacementBatch,type SubtitleCall} from '../lib/subtitle-ledger-recovery.ts';
 
 const args=process.argv.slice(2),option=(name:string)=>{const index=args.indexOf(name);return index<0?undefined:args[index+1];};
 const input=option('--input'),output=option('--output-dir'),videoSha=option('--video-sha256');
@@ -44,14 +45,14 @@ try{
  bundle=previous;
 }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
 validateSubtitleBundle(bundle,videoSha,duration);await atomic(target,bundle);
-type Call={state:'pending'|'settled'|'rejected';reservation:number;charged?:number;responseFile:string;applied?:boolean;retryAt?:string};
+type Call=SubtitleCall;
 let ledger:{sourceHash:string;model:string;promptVersion:string;calls:Call[]}={sourceHash:subtitleHash,model,promptVersion,calls:[]};
 try{ledger=JSON.parse(await readFile(ledgerPath,'utf8'));}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
 if(ledger.sourceHash!==subtitleHash||ledger.model!==model||ledger.promptVersion!==promptVersion)throw new Error('Translation ledger identity differs');
-if(ledger.calls.some(call=>call.state==='pending'||(call.state==='settled'&&!call.applied&&bundle.cues.some(c=>c.zh===null))))throw new Error('Unresolved request/result: inspect saved response/ledger before resuming; no automatic retry');
+const replacementBatch=subtitleReplacementBatch(ledger,videoSha,bundle.cues.findIndex(c=>c.zh===null));
 if(maxCalls===0){console.log(JSON.stringify({state:bundle.cues.every(c=>c.zh!==null)?'bilingual-ready':'english-ready',cues:bundle.cues.length,calls:0,output:target}));process.exit(0);}
 let calls=0,reserved=0,charged=0;
-const batchSize=isolated?1:60;
+const batchSize=replacementBatch??(isolated?1:60);
 for(let start=0;start<bundle.cues.length;start+=batchSize){
  const selected=bundle.cues.slice(start,start+batchSize).map((cue,index)=>({index:start+index,en:cue.en})).filter(item=>bundle.cues[item.index].zh===null);
  if(!selected.length)continue;
@@ -60,7 +61,11 @@ for(let start=0;start<bundle.cues.length;start+=batchSize){
  const body=isolated?isolatedSubtitleRequest(selected[0].index,selected[0].en,option('--course-title')??''):{model,store:false,instructions,input:JSON.stringify(selected),reasoning:{effort:'low'},max_output_tokens:8000,
   text:{format:{type:'json_schema',name:'subtitle_translation',strict:true,schema}}};
  const reservation=((Buffer.byteLength(JSON.stringify(body))+1024)*0.75+body.max_output_tokens*4.5)/1e6;
- if(calls>=maxCalls||reserved+reservation>maxUsd)throw new Error('SUBTITLE_RUN_BOUND_REACHED: completed chunks saved, resume with another bounded run');
+ if(calls>=maxCalls||reserved+reservation>maxUsd){
+  const review=ledger.calls.find(c=>c.replacementReview)?.replacementReview;
+  if(review)console.error('SUBTITLE_VALIDATED_REVIEW '+review.ordinal+' '+review.originalCallSha256);
+  throw new Error('SUBTITLE_RUN_BOUND_REACHED: completed chunks saved, resume with another bounded run');
+ }
  const key=process.env.OPENAI_API_KEY;if(budgetMode==='development'&&!key)throw new Error('Configure API key in process environment; English subtitles saved without translation');
  const responseFile=resolve(root,`${videoSha}.response-${ledger.calls.length+1}.json`);
  const call:Call={state:'pending',reservation,responseFile};ledger.calls.push(call);await atomic(ledgerPath,ledger);
