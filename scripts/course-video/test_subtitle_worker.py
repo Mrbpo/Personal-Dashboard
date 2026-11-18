@@ -16,6 +16,33 @@ spec.loader.exec_module(worker)
 
 
 class SubtitleWorkerTests(unittest.TestCase):
+    def test_new_english_keeps_prior_full_bilingual_subtitles_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            published = Path(directory)
+            sha = 'c' * 64
+            target = published / (sha + '.json')
+            candidate = published / 'candidate.json'
+            source = {'clipStartMs': 0, 'clipEndMs': 10000}
+            old = {'videoSha256': sha, 'source': source, 'cues': [{'en': 'original', 'zh': '原文'}]}
+            target.write_text(json.dumps(old))
+            candidate.write_text(json.dumps({**old, 'cues': [{'en': 'realigned', 'zh': None}]}))
+            worker.publish_bundle(candidate, published, sha)
+            self.assertEqual(json.loads(target.read_text()), old)
+
+    def test_completed_translation_batch_gives_the_next_lecture_a_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = {'state': 'running', 'videoSha256': 'a' * 64, 'progress': {'translated': 30}}
+            second = {'state': 'pending', 'videoSha256': 'b' * 64}
+            path = root / 'subtitle-queue.json'
+            path.write_text(json.dumps({'jobs': [first, second]}))
+            with patch.object(worker, 'queue_lock', side_effect=lambda *_: nullcontext()):
+                worker.update_job(root, first, 'pending', 'SUBTITLE_RUN_BOUND', None)
+            waiting, yielded = json.loads(path.read_text())['jobs']
+            self.assertEqual(waiting, second)
+            self.assertEqual(yielded['progress'], first['progress'])
+            self.assertEqual(yielded['state'], 'pending')
+
     def test_native_audio_proof_requires_every_channel_and_full_duration(self):
         def stats(peaks, occupancy, frames=48000):
             lines = [f'[astats@raw @ 0] Peak level dB: {level}' for level in peaks]

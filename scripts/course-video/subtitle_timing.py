@@ -148,8 +148,10 @@ def _term(word):
 
 def _anchored_observations(observed, offset, left, right):
     """Find the two surrounding time-and-text anchors exactly once."""
+    # Snap only floating point arithmetic noise, well below one PCM sample.
     rows = [{'word': w.word, 'start': round(offset + w.start, 6), 'end': round(offset + w.end, 6),
              'probability': w.probability} for w in observed]
+
     def anchor_index(anchor):
         matches = [i for i, w in enumerate(rows)
                    if _term(w['word']) == _term(anchor['word'])
@@ -167,12 +169,12 @@ def _anchored_observations(observed, offset, left, right):
 def _realign_extended_words(words, clip_duration, decode_context):
     """Recover a locally collapsed phrase using corroborated source observations."""
     for attempt in range(4):
-        bad = next((i for i,w in enumerate(words) if w['end'] - w['start'] > MAX_CUE_SECONDS), None)
+        bad = next((i for i, word in enumerate(words) if word['end'] - word['start'] > MAX_CUE_SECONDS), None)
         if bad is None:
             return
         if decode_context is None or attempt == 3:
             raise ValueError('WORD_TIMING_REVIEW_REQUIRED: invalid word interval')
-        left, right = bad-1, bad+1
+        left, right = bad - 1, bad + 1
         while left >= 0 and words[left]['start'] == words[left]['end']:
             left -= 1
         while right < len(words) and words[right]['start'] == words[right]['end']:
@@ -181,38 +183,39 @@ def _realign_extended_words(words, clip_duration, decode_context):
         if (left < 0 or right >= len(words) or end - start > 22 or
                 start - words[left]['end'] > 1 or words[right]['start'] - end > 1):
             raise ValueError('WORD_TIMING_REVIEW_REQUIRED: extended word lacks neighboring anchors')
-        originals = words[left:right+1]
-        windows = [(max(0, start-pad), min(clip_duration, end+pad)) for pad in (2, 3)]
+        originals = words[left:right + 1]
+        windows = [(max(0, start - pad), min(clip_duration, end + pad)) for pad in (2, 3)]
         if windows[0] == windows[1]:
             raise ValueError('WORD_TIMING_REVIEW_REQUIRED: insufficient audio context')
         passes = [_anchored_observations(decode_context(a, b), a, originals[0], originals[-1])
-                  for a,b in windows]
+                  for a, b in windows]
         primary, confirm = passes
         terms = [_term(w['word']) for w in primary]
-        retained = iter(terms)
+        retained = iter(terms)  # First-pass words must still occur in the same order.
         if (terms != [_term(w['word']) for w in confirm] or
                 not all(_term(w['word']) in retained for w in originals)):
             raise ValueError('WORD_TIMING_REVIEW_REQUIRED: contextual words disagree')
         lower = max((w['end'] for w in words[:left]), default=0.)
-        upper = words[right+1]['start'] if right+1 < len(words) else clip_duration
+        upper = words[right + 1]['start'] if right + 1 < len(words) else clip_duration
         for rows in passes:
             last = lower
             for w in rows:
                 if not (last <= w['start'] < w['end'] <= upper and
                         w['end'] - w['start'] <= MAX_CUE_SECONDS and
-                        isinstance(w['probability'], (float,int)) and .3 <= w['probability'] <= 1):
+                        isinstance(w['probability'], (float, int)) and .3 <= w['probability'] <= 1):
                     raise ValueError('WORD_TIMING_REVIEW_REQUIRED: unsupported contextual interval')
                 last = w['end']
             if sum(w['probability'] for w in rows) / len(rows) < .75:
                 raise ValueError('WORD_TIMING_REVIEW_REQUIRED: low-confidence contextual speech')
-        if any(abs(a[k] - b[k]) > .35 for a,b in zip(primary,confirm) for k in ('start','end')):
+        if any(abs(a[k] - b[k]) > .35 for a, b in zip(primary, confirm) for k in ('start', 'end')):
             raise ValueError('WORD_TIMING_REVIEW_REQUIRED: contextual timestamps disagree')
         for w in primary:
             w['segmentIndex'] = None  # This word is from a local re-decode.
-        primary[0]['realignment'] = {'method':'two-context-word-realignment-v1',
-                                     'timestampBasis':'clip-relative','windows':windows,
-                                     'wordCount':len(primary),'originalWords':originals,'confirmingWords':confirm}
-        words[left:right+1] = primary
+        primary[0]['realignment'] = {
+            'method': 'two-context-word-realignment-v1', 'timestampBasis': 'clip-relative',
+            'windows': windows, 'wordCount': len(primary), 'originalWords': originals, 'confirmingWords': confirm,
+        }
+        words[left:right + 1] = primary
 
 
 def cues_from_segments(segments, clip_duration, *, speech_islands=None, decode_island=None, decode_context=None):

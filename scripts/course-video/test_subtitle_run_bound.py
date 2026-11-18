@@ -63,6 +63,21 @@ class SubtitleRunBoundTests(unittest.TestCase):
         self.assertIn('SUBTITLE_RUN_BOUND_REACHED', text)
         self.assertIn('maxUsd>1', text)
 
+    def test_reviewed_old_call_needs_runtime_validation_and_new_applied_work(self):
+        ledger = self.ledger()
+        identity = 'c' * 64
+        ledger['calls'].insert(0, {'state': 'pending', 'replacementReview': {
+            'sourceHash': ledger['sourceHash'], 'ordinal': 1, 'originalCallSha256': identity}})
+        result = SimpleNamespace(returncode=1, stderr=b'SUBTITLE_RUN_BOUND_REACHED')
+        with self.assertRaises(ValueError):
+            worker.translation_exit(result, ledger, ledger['sourceHash'], 1)
+        result.stderr += ('\nSUBTITLE_VALIDATED_REVIEW 1 ' + identity + '\n').encode()
+        with self.assertRaises(worker.RunBound):
+            worker.translation_exit(result, ledger, ledger['sourceHash'], 1)
+        ledger['calls'].append({'state':'pending'})
+        with self.assertRaises(ValueError):
+            worker.translation_exit(result, ledger, ledger['sourceHash'], 1)
+
     def test_quota_reset_timer_only_targets_the_existing_bounded_worker(self):
         timer = Path(__file__).parents[2] / 'deploy/course-subtitle-budget-resume.timer'
         self.assertTrue(timer.exists(), 'quota reset must have an actual future wake source')

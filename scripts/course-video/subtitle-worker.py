@@ -106,6 +106,9 @@ def update_job(root, selected, state, reason, group, wake=True, not_before=None)
             if row.get('videoSha256') == selected['videoSha256']:
                 row.update(state=state, reasonCode=reason, updatedAt=stamp(), leaseExpiresAt=None)
                 row['notBefore'] = not_before or (None if wake else (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat())
+        if state == 'pending' and reason == 'SUBTITLE_RUN_BOUND':
+            # English is available; give other lectures a turn before the next translation batch.
+            queue['jobs'].sort(key=lambda row: row.get('videoSha256') == selected['videoSha256'])
         atomic(root / 'subtitle-queue.json', queue, group)
         if wake and any(row.get('state') == 'pending' for row in queue['jobs']):
             (root / 'subtitle-pending').touch(mode=0o600)
@@ -340,7 +343,17 @@ def translation_exit(result, ledger, source_hash, previous_calls, profile='legac
                     return False
             return False
         calls = ledger['calls']
-        if all(resolved(call) for call in calls) and all(
+        def previously_reviewed(index, call):
+            if index >= previous_calls or not isinstance(call, dict) or call.get('state') != 'pending':
+                return False
+            review = call.get('replacementReview') or {}
+            identity = review.get('originalCallSha256')
+            if (review.get('ordinal') != index + 1 or review.get('sourceHash') != source_hash
+                    or not SHA.fullmatch(str(identity or ''))):
+                return False
+            marker = ('SUBTITLE_VALIDATED_REVIEW %d %s' % (index + 1, identity)).encode()
+            return marker in result.stderr.splitlines()
+        if all(resolved(call) or previously_reviewed(i, call) for i, call in enumerate(calls)) and all(
                 call.get('state') == 'settled' and call.get('applied') is True
                 for call in calls[previous_calls:]):
             raise RunBound()
@@ -541,7 +554,8 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
     try:
         count = merge_chunks(chunks, english, duration_ms)
     except ValueError as error:
-        if str(error) != 'NO_SPEECH_DETECTED':
+        # Older website builds display unrecognised queue states as due work.
+        if str(error) != 'NO_SPEECH_DETECTED' or os.environ.get('COURSE_VIDEO_VERIFIED_QUIET_OUTCOME') != '1':
             raise
         try:
             check = verify_quiet_source(store, remote, audio, duration_ms, deadline)
@@ -617,6 +631,16 @@ def publish_bundle(candidate, published, video_sha):
     published.chmod(0o750)
     target = published / (video_sha + '.json')
     if target.is_file() and target.read_bytes() != candidate.read_bytes():
+        current = read_json(target)
+        current_source = current.get('source', {})
+        incoming_source = bundle.get('source', {})
+        # A replacement translation grows in its private checkpoint. Keep serving
+        # the previous full bilingual track until its replacement is also bilingual.
+        if (current.get('videoSha256') == video_sha and current_source.get('clipStartMs') == 0
+                and current_source.get('clipEndMs', -1) >= incoming_source.get('clipEndMs', 0)
+                and current.get('cues') and all(c.get('zh') for c in current['cues'])
+                and not all(c.get('zh') for c in bundle['cues'])):
+            return
         history = published / 'history'
         history.mkdir(exist_ok=True, mode=0o700)
         old = history / (video_sha + '-' + digest(target) + '.json')
