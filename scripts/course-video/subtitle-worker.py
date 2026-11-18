@@ -434,6 +434,37 @@ def remove_derived_audio(work):
             path.unlink()
 
 
+def reviewed_translation_source(job, state):
+    grant = job.get('translationRecovery')
+    if grant is None:
+        return None
+    if not isinstance(grant, dict):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    profile, revision = grant.get('timingProfile'), grant.get('modelRevision')
+    if (profile not in ('legacy', WORD_TIMING_PROFILE) or not re.fullmatch('[a-f0-9]{40}', str(revision))
+            or not SHA.fullmatch(str(grant.get('sourceHash', ''))) or not SHA.fullmatch(str(job['videoSha256']))):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    sha = job['videoSha256']
+    work = asr_work_directory(state, sha, revision, profile)
+    english = work / 'translation-input' / 'source.vtt'
+    proof = read_json(english.with_suffix('.vtt.provenance.json'), {})
+    ledger = read_json(work / 'translation-output' / (sha + '.translation-ledger.json'), {})
+    ordinal = grant.get('ordinal')
+    calls = ledger.get('calls', [])
+    if type(ordinal) is not int or not 0 < ordinal <= len(calls):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    review = calls[ordinal-1].get('replacementReview') or {}
+    if (not english.is_file() or digest(english) != grant['sourceHash'] or proof.get('subtitleSha256') != grant['sourceHash']
+            or proof.get('sourceVideoSha256') != sha or proof.get('modelRevision') != revision
+            or proof.get('timingProfile', 'legacy') != profile or ledger.get('sourceHash') != grant['sourceHash']
+            or ledger.get('promptVersion') != ('subtitle-zh-v1' if profile == 'legacy' else 'subtitle-zh-v2')
+            or review.get('videoSha256') != sha or review.get('sourceHash') != grant['sourceHash']
+            or review.get('ordinal') != ordinal or not SHA.fullmatch(str(grant.get('originalLedgerSha256', '')))
+            or review.get('originalLedgerSha256') != grant['originalLedgerSha256']):
+        raise ValueError('REVIEWED_SUBTITLE_SOURCE_CHANGED')
+    return work, profile
+
+
 def process_job(job, state, published, deadline, progress=lambda **_: None):
     profile = timing_profile()
     tool = Path('/srv/study-course-video-tool')
@@ -452,6 +483,10 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
     if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= 21600:
         raise ValueError('INVALID_SOURCE_DURATION')
     resource_reserve(state, seconds)
+    reviewed = reviewed_translation_source(job, state)
+    if reviewed is not None:
+        work, profile = reviewed
+        return translate_source(job, work, profile, entry, seconds, published, deadline, progress)
     progress(stage='audio', durationMs=round(seconds * 1000))
     receipt = read_json(model_path / 'download-manifest.json')
     model_file = next(row for row in receipt['files'] if row['name'] == 'model.bin')
@@ -577,6 +612,12 @@ def process_job(job, state, published, deadline, progress=lambda **_: None):
                           wordEvidenceSha256=merge_word_evidence(chunks, english.with_suffix('.vtt.words.json'),
                                                                 duration_ms, job['videoSha256'], proof['sha256']))
     atomic(english.with_suffix('.vtt.provenance.json'), provenance)
+    translate_source(job, work, profile, entry, seconds, published, deadline, progress)
+
+
+def translate_source(job, work, profile, entry, seconds, published, deadline, progress):
+    inputs = work / 'translation-input'
+    english = inputs / 'source.vtt'
     output = work / 'translation-output'
     output.mkdir(exist_ok=True, mode=0o750)
     if os.geteuid() == 0:

@@ -16,6 +16,9 @@ test('missing original receipt and residual reservation survive one opt-in repla
   assert.throws(()=>subtitleReplacementBatch(ledger,video,5)); // One ambiguous replacement halts.
   ledger.calls[1]={state:'settled',charged:0.002,applied:true,responseFile:'2',reservation:0.006};
   assert.equal(subtitleReplacementBatch(ledger,video,6),1); // Other untouched cues can follow.
+  assert.throws(()=>subtitleReplacementBatch(ledger,video,5));
+  ledger.calls[1]={state:'rejected',charged:0,responseFile:'2',reservation:0.006};
+  assert.throws(()=>subtitleReplacementBatch(ledger,video,5));
 });
 test('known zero pre-request budget rejections leave first missing cue bound',()=>{
   const ledger=make(); ledger.calls.push({state:'rejected',charged:0,retryAt:'2099-01-01T00:00:00Z'});

@@ -37,8 +37,12 @@ export function subtitleReplacementBatch(ledger:Ledger,video:string,firstMissing
       throw new Error('Unresolved request/result: inspect saved response/ledger before resuming; no automatic retry');
     }
   }
-  if(review && ledger.calls.slice(review.ordinal).every(call=>call.state==='rejected'&&call.charged===0&&call.retryAt)
-    && firstMissing!==review.firstMissing)throw new Error('The reviewed subtitle selection changed');
+  if(review){
+    const nextAttempt=ledger.calls.slice(review.ordinal).find(call=>!(call.state==='rejected'&&call.charged===0&&call.retryAt));
+    if(!nextAttempt && firstMissing!==review.firstMissing)throw new Error('The reviewed subtitle selection changed');
+    if(nextAttempt && (nextAttempt.state!=='settled'||nextAttempt.applied!==true||firstMissing===review.firstMissing))
+      throw new Error('The single authorized replacement did not complete; no further replacement');
+  }
   return review?.batchSize??null;
 }
 
