@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh lecture handouts as transcripts become available
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=10min
+Unit=course-recording-handouts.service
+
+[Install]
+WantedBy=timers.target
