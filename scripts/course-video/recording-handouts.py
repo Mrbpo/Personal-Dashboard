@@ -277,9 +277,16 @@ def main():
         backoff = STATE / 'retry.json'
         retry = json.loads(backoff.read_bytes()) if backoff.exists() else {}
         counts = collections.Counter()
-        for entry, item in choose_sources(manifest):
+        selected = choose_sources(manifest)
+        owners = collections.defaultdict(set)
+        for entry, item in selected:
+            owners[item['sha256']].add(entry['courseId'])
+        for entry, item in selected:
             sha = item['sha256']
             if args.source_sha and args.source_sha != sha:
+                continue
+            if len(owners[sha]) > 1:
+                counts['ambiguous_course'] += 1
                 continue
             if not args.source_sha and retry.get(sha, 0) > time.time():
                 continue
@@ -305,4 +312,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
