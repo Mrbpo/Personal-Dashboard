@@ -10,7 +10,14 @@ test('groups parent/child views without guessing visuals or leaking object keys'
  const result=buildRecordingCatalog({entries:{a:entry(),b:entry('0_child','0_parent')}},target,new Map([['123','Math']]));
  assert.equal(result.catalog.recordings.length,1);assert.equal(result.objects.size,2);
  assert.deepEqual(result.catalog.recordings[0].views.map(v=>v.label),['主视角','其他视角']);
+ assert.equal(result.catalog.recordings[0].guideViewId,result.catalog.recordings[0].views[0].id);
  assert.equal(result.catalog.courses[0].name,'Math');assert.equal(JSON.stringify(result.catalog).includes('course-recordings/'),false);
+});
+test('both angles share the explicit screen handout and camera-only recordings have none',()=>{
+ const parent={...entry(),track:'camera'},screen={...entry('0_screen','0_parent'),track:'screen'};
+ const lesson=buildRecordingCatalog({entries:{parent,screen}},target).catalog.recordings[0];
+ assert.equal(lesson.guideViewId,lesson.views.find(view=>view.label==='屏幕')?.id);
+ assert.equal(buildRecordingCatalog({entries:{parent}},target).catalog.recordings[0].guideViewId,null);
 });
 test('rejects mismatched, foreign, traversal and unavailable objects without reviving history',()=>{
  const variants=[entry(),entry(),entry(),entry(),entry()];

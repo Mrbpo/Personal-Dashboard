@@ -1,0 +1,17 @@
+[Unit]
+Description=Archive lecture slides and synchronized transcripts
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/srv/study/backup-s3.env
+StateDirectory=study-recording-handouts
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /srv/study-course-video-tool/recording-handouts.py --max-jobs 3
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=125%
+MemoryMax=1536M
+TimeoutStartSec=90min
+UMask=0027

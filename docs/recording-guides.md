@@ -1,4 +1,12 @@
-# Reviewed recording learning guides
+# Recording handouts
+
+The recording player offers an HTML handout and downloadable PDF for each completed source. Both contain the official course name, lecture title, original publication time in America/Toronto, source slide captures and the corresponding timed transcript. Existing Chinese translations are included. No model is invoked. The screen view and its paired camera view share the screen handout.
+
+The host worker needs FFmpeg, Python 3 with boto3, Pillow and WeasyPrint, and CJK fonts. Install the handout service and timer from deploy, and enable course-recording-handouts.timer. It processes at most three eligible recordings per pass and checks again ten minutes after completion. English must cover the original clip. Completing the translation publishes a new bilingual version. Source media without a verified R2 archive is skipped. Source publication times that are absent stay unknown.
+
+The private R2 prefix is course-recording-guides/, followed by the course ID and name, UTC publication timestamp and original video hash. Each version contains guide.html, guide.pdf and manifest.json. Contents are read back and verified before advancing current.json. The authenticated site serves verified versions from the persistent recording-guides cache. A subsequent worker pass restores missing cached assets from R2. The worker retains versioned outputs and does not modify the recording, subtitles or historical guides.
+
+## Historical reviewed samples
 
 The existing recording page exposes a learning-guide entry only when the selected original has a reviewed asset manifest. This release serves existing assets; it does not enable an automatic generation engine or paid requests.
 
