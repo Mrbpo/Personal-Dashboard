@@ -12,7 +12,7 @@ const entrySchema=z.object({courseId:z.string().regex(/^[1-9][0-9]*$/),entryId,p
  durationSeconds:z.number().nonnegative().nullish(),publishedAt:z.number().nonnegative().nullish(),files:z.array(z.unknown())});
 const manifestSchema=z.object({entries:z.record(z.unknown())});
 export type RecordingView={id:string;label:string;mime:string;bytes:number};
-export type Recording={id:string;courseId:string;title:string;durationSeconds:number|null;publishedAt:number|null;views:RecordingView[]};
+export type Recording={id:string;courseId:string;title:string;durationSeconds:number|null;publishedAt:number|null;views:RecordingView[];guideViewId:string|null};
 export type RecordingCatalog={courses:{id:string;name:string}[];recordings:Recording[];unavailableEntries:number};
 export type RecordingObject={id:string;key:string;etag:string;sha256:string;bytes:number;mime:string;durationSeconds:number|null};
 export type RecordingTarget={bucket:string;endpointHost:string};
@@ -48,8 +48,9 @@ export function buildRecordingCatalog(manifest:unknown,target:RecordingTarget,co
  for(const [id,list] of groups){
   list.sort((a,b)=>Number(b.parent)-Number(a.parent)||a.entry.entryId.localeCompare(b.entry.entryId));
   const entry=list[0].entry;
+  const guideSource=list.find(item=>item.entry.track==='screen')??list.find(item=>item.parent&&item.entry.track!=='camera');
   recordings.push({id,courseId:entry.courseId,title:entry.title||entry.entryId,durationSeconds:entry.durationSeconds??null,
-   publishedAt:entry.publishedAt??null,views:list.map((item,index)=>({...item.view,
+   publishedAt:entry.publishedAt??null,guideViewId:guideSource?.view.id??null,views:list.map((item,index)=>({...item.view,
     label:list.filter(other=>other.view.label===item.view.label).length>1?`${item.view.label} ${index+1}`:item.view.label}))});
  }
  recordings.sort((a,b)=>(b.publishedAt??0)-(a.publishedAt??0)||a.id.localeCompare(b.id));
