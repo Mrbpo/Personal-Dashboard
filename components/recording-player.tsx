@@ -428,7 +428,7 @@ export function RecordingPlayer() {
             {subtitleMode!=='off' && !subtitleInfo.modes.includes(subtitleMode) && <p>当前语言暂无字幕，请选择已有语言。</p>}
           </>}
         </div>
-        <RecordingStudyGuide key={view.id} viewId={view.id}/>
+        <RecordingStudyGuide key={recording.id} viewId={recording.guideViewId}/>
       </> : <div className="flex min-h-72 flex-col items-center justify-center gap-3 text-muted-foreground"><Video className="size-9"/><p>{loading?'正在读取课程录像…':'在左侧选择一场录像开始播放。'}</p></div>}
     </section>
   </div>;
