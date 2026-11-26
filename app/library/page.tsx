@@ -3,4 +3,10 @@ import {LibraryCenter} from '@/components/library-center';
 import {requireOwnerPage} from '@/lib/authz';
 import {listCourseSettings} from '@/lib/repository';
 export const dynamic='force-dynamic';
-export default async function Page(){const {authorized}=await requireOwnerPage('/library');return <PageFrame eyebrow="PRIVATE LIBRARY" title="课程资料库">{authorized?<LibraryCenter courses={(await listCourseSettings()).filter(c=>c.enabled).map(c=>({id:c.id,code:c.code}))}/>:<a href="/login">请先登录</a>}</PageFrame>;}
+export default async function Page(){
+ const {authorized}=await requireOwnerPage('/library');
+ return <PageFrame eyebrow="PRIVATE LIBRARY" title="课程资料库">{authorized?<>
+   <a className="mb-4 inline-block underline" href="/files">浏览文件树</a>
+   <LibraryCenter courses={(await listCourseSettings()).filter(c=>c.enabled).map(c=>({id:c.id,code:c.code}))}/>
+ </>:<a href="/login">请先登录</a>}</PageFrame>;
+}

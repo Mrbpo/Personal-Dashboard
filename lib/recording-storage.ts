@@ -41,7 +41,7 @@ export function recordingPlaybackTtl(durationSeconds:number|null,expiration?:Dat
  return seconds;
 }
 
-export async function recordingPlaybackUrl(object:RecordingObject){
+export async function recordingPlaybackUrl(object:RecordingObject,download=false){
  const config=recordingStorageConfig();
  const client=new S3Client({region:'auto',endpoint:config.endpoint,forcePathStyle:true,credentials:config.credentials,
   maxAttempts:1,requestHandler:{requestTimeout:15000,connectionTimeout:5000}});
@@ -51,6 +51,6 @@ export async function recordingPlaybackUrl(object:RecordingObject){
   // HEAD may consume time; cap the grant again immediately before signing.
   const expiresIn=recordingPlaybackTtl(object.durationSeconds,'expiration' in config.credentials?config.credentials.expiration:undefined);
   return await getSignedUrl(client,new GetObjectCommand({Bucket:config.bucket,Key:object.key,
-   ResponseContentType:object.mime,ResponseContentDisposition:'inline',ResponseCacheControl:'private, no-store'}),{expiresIn});
+   ResponseContentType:object.mime,ResponseContentDisposition:download?'attachment; filename="recording-'+object.id.slice(0,12)+(object.mime==='video/webm'?'.webm"':'.mp4"'):'inline',ResponseCacheControl:'private, no-store'}),{expiresIn});
  }finally{client.destroy();}
 }

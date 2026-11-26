@@ -21,7 +21,9 @@ export async function GET(request:Request,{params}:{params:Promise<{id:string}>}
   }
   if(!bundle)return Response.json({error:'此录像尚未生成字幕'},{status:404,headers});
   if(mode==='zh'&&!bundle.cues.some(c=>c.zh!==null))return Response.json({error:'此录像尚无中文译文'},{status:404,headers});
-  return new Response(renderSubtitleVtt(bundle,mode as SubtitleMode),{headers:{...headers,'Content-Type':'text/vtt; charset=utf-8'}});
+  const attachment=new URL(request.url).searchParams.get('download')==='1';
+  return new Response(renderSubtitleVtt(bundle,mode as SubtitleMode),{headers:{...headers,'Content-Type':'text/vtt; charset=utf-8',
+   ...(attachment?{'Content-Disposition':'attachment; filename="subtitles-'+mode+'.vtt"'}:{})}});
  }catch(error){const response=apiError(error);return response.status===400?new Response(response.body,{status:503,headers:response.headers}):response;}
 }
 

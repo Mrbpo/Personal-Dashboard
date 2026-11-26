@@ -13,7 +13,7 @@ export async function GET(request:Request,{params}:{params:Promise<{id:string}>}
   const object=objects.get(id);
   if(!object)return Response.json({error:'录像不存在或尚未完成私有归档'},{status:404});
   // Redirect preserves Range. Video bytes stream straight from private R2, not this server.
-  const url=await recordingPlaybackUrl(object);
+  const url=await recordingPlaybackUrl(object,new URL(request.url).searchParams.get('download')==='1');
   return new Response(null,{status:307,headers:{Location:url,'Cache-Control':'private, no-store','Referrer-Policy':'no-referrer'}});
  }catch(error){
   const response=apiError(error);
