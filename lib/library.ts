@@ -32,7 +32,7 @@ export function canonicalDocumentMime(name:string,mime:string,bytes:Uint8Array){
   if(mime&&mime!=='application/octet-stream')return mime;
   return ({txt:'text/plain',md:'text/markdown',csv:'text/csv',tsv:'text/tab-separated-values',meg:'text/plain',fa:'text/plain',fas:'text/plain',fasta:'text/plain',doc:'application/msword',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'} as Record<string,string>)[ext||'']||mime||'application/octet-stream';
 }
-export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='',originalName?:string) {
+export async function saveDocument(owner:string,course:string,origin:string,key:string,name:string,mime:string,bytes:Uint8Array,folderPath='',originalName?:string,transfer?:'index'|'store') {
   if(!bytes.length||bytes.length>MAX_LIBRARY_BYTES)throw new Error('资料须非空且单份不超过 50 MB');
   const sourceName=documentSourceName(name,originalName);
   // Same filenames in different courses are distinct sources.
@@ -40,9 +40,24 @@ export async function saveDocument(owner:string,course:string,origin:string,key:
   mime=canonicalDocumentMime(name,mime,bytes);
   const hash=await saveBlob(bytes),id=digest([owner,origin,key,hash].join('\0'));
   folderPath=normalizeFolderPath(folderPath||({canvas:'Canvas',piazza:'Piazza',mail:'邮件',gmail:'邮件',upload:'上传'} as Record<string,string>)[origin]||'其他来源');
+  if(transfer){
+    await db.prepare(`INSERT INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,original_name,mime,hash,size,created_at,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET deleted=0, folder_path=excluded.folder_path`)
+      .bind(id,owner,course,origin,key,folderPath,name.slice(0,200),sourceName?.originalName??null,mime,hash,bytes.length,new Date().toISOString(),transfer==='store'?'stored':'pending').run();
+    return id;
+  }
   await db.prepare(`INSERT OR IGNORE INTO library_documents (id,owner_id,course_id,origin,origin_key,folder_path,name,original_name,mime,hash,size,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,owner,course,origin,key,folderPath,name.slice(0,200),sourceName?.originalName??null,mime,hash,bytes.length,new Date().toISOString()).run();
   await db.prepare('UPDATE library_documents SET folder_path=? WHERE id=? AND owner_id=?').bind(folderPath,id,owner).run();
   return id;
+}
+export async function listFileCourseIds(owner:string){
+  const rows=await db.prepare('SELECT DISTINCT course_id FROM library_documents WHERE owner_id=? AND deleted=0').bind(owner).all<{course_id:string}>();
+  return rows.results.map(row=>row.course_id);
+}
+export async function listFileDocuments(owner:string,course:string){
+  const rows=await db.prepare('SELECT id,name,original_name,origin,origin_key,folder_path,size FROM library_documents WHERE owner_id=? AND course_id=? AND deleted=0')
+    .bind(owner,course).all<Pick<DocumentRow,'id'|'name'|'original_name'|'origin'|'origin_key'|'folder_path'|'size'>>();
+  return rows.results.map(row=>({...row,folder_path:inferredFolder(row)}));
 }
 export async function listDocuments(owner:string) {
  const documents=(await db.prepare('SELECT * FROM library_documents WHERE owner_id=? AND deleted=0 ORDER BY created_at DESC').bind(owner).all<DocumentRow>()).results;
